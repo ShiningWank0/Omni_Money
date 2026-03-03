@@ -163,22 +163,24 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 	}
 
 	id, _ := result.LastInsertId()
-	resp := &models.TransactionResponse{
-		ID:       id,
-		FundItem: req.Account,
-		Account:  req.Account,
-		Date:     date.Format("2006-01-02"),
-		Item:     req.Item,
-		Type:     req.Type,
-		Amount:   req.Amount,
-		Balance:  newBalance,
-		Memo:     req.Memo,
-	}
-	if req.Time != "" {
-		resp.Date = date.Format("2006-01-02 15:04:05")
+
+	// バックデート時の整合性を保つため、口座全体の残高を再計算する
+	if err := recalculateBalance(req.Account); err != nil {
+		return nil, fmt.Errorf("残高再計算エラー: %w", err)
 	}
 
-	return resp, nil
+	// 更新後の値を取得して返却
+	var inserted models.Transaction
+	var dateStr string
+	err = db.QueryRow(
+		"SELECT id, account, date, item, type, amount, balance, memo FROM transactions WHERE id = ?", id,
+	).Scan(&inserted.ID, &inserted.Account, &dateStr, &inserted.Item, &inserted.Type, &inserted.Amount, &inserted.Balance, &inserted.Memo)
+	if err != nil {
+		return nil, fmt.Errorf("追加後データ取得エラー: %w", err)
+	}
+	inserted.Date = parseDate(dateStr)
+	resp := inserted.ToResponse()
+	return &resp, nil
 }
 
 // UpdateTransaction は既存の取引を更新する
@@ -509,6 +511,8 @@ func recalculateBalance(account string) error {
 	return nil
 }
 
+// parseDate は複数の受け入れ可能なフォーマットを許容し、
+// どれにも一致しない場合は現在時刻を返す。
 func parseDate(dateStr string) time.Time {
 	formats := []string{
 		"2006-01-02 15:04:05",

@@ -11,7 +11,8 @@ omni_money
 
 # Frontend
 frontend/node_modules/
-frontend/dist/
+frontend/dist/*
+!frontend/dist/.keep
 
 # Go
 vendor/

@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"omni_money/backend/core"
+	"omni_money/backend/middleware"
 	"omni_money/backend/models"
 )
 
@@ -29,6 +32,11 @@ func NewRouter() http.Handler {
 	mux.HandleFunc("/api/credit_card_settings", handleCreditCardSettings)
 	mux.HandleFunc("/api/backup_csv", handleBackupCSV)
 	mux.HandleFunc("/api/import_csv", handleImportCSV)
+
+	// AI専用エンドポイント（書き込み専用）
+	apiToken := os.Getenv("AI_API_TOKEN")
+	mux.Handle("/api/v1/ai/transactions",
+		middleware.AIWriteOnlyMiddleware(apiToken, http.HandlerFunc(handleAITransactions)))
 
 	return mux
 }
@@ -183,9 +191,7 @@ func handleBackupCSV(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf("attachment; filename=transactions_backup_%s.csv",
-			strings.ReplaceAll(strings.ReplaceAll(
-				strings.Split(fmt.Sprintf("%v", strings.ReplaceAll(fmt.Sprintf("%v", []byte{}), " ", "")), "")[0],
-				"[", ""), "]", "")))
+			time.Now().Format("20060102_150405")))
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(csvContent))
 }
@@ -219,6 +225,30 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 		"imported_count": count,
 		"mode":           body.Mode,
 	}, http.StatusOK)
+}
+
+func handleAITransactions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req models.TransactionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := core.AddTransaction(req)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	jsonResponse(w, map[string]interface{}{
+		"message":     "取引が正常に追加されました (AI API)",
+		"transaction": resp,
+	}, http.StatusCreated)
 }
 
 // --- ヘルパー ---
