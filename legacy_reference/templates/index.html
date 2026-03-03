@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Server Money</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <!-- Google Material IconsのCDNをheadに追加 -->
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div id="app">
+        <!-- ヘッダーエリア -->
+        <div class="card header">
+            <div class="header-top">
+                <div class="header-left">
+                    <div class="hamburger-menu" :class="{ 'menu-open': showMenu }" @click="toggleMenu">
+                        <span class="material-icons">menu</span>
+                    </div>
+                    <div class="project-selector" @click.stop="toggleAccountDropdown">
+                        <span class="chevron-anim">
+                          <transition name="chevron-down">
+                            <span v-if="showAccountDropdown" key="down">▼</span>
+                            <span v-else key="up">▶</span>
+                          </transition>
+                        </span>
+                        <span v-text="selectedFundItemDisplay"></span>
+                        <div v-if="showAccountDropdown" class="account-dropdown" @click.stop>
+                            <!-- 全選択/全解除ボタン -->
+                            <div class="fund-item-header">
+                                <button @click="toggleAllFundItems" class="toggle-all-btn" v-text="selectedFundItems.length === actualFundItems.length ? '全解除' : '全選択'">
+                                </button>
+                            </div>
+                            <!-- チェックボックス付き資金項目リスト -->
+                            <div class="fund-item-list">
+                                <label v-for="fundItemName in actualFundItems" :key="fundItemName" class="fund-item-checkbox">
+                                    <input 
+                                        type="checkbox" 
+                                        :checked="isFundItemSelected(fundItemName)"
+                                        @change="toggleFundItem(fundItemName)"
+                                    >
+                                    <span class="checkmark"></span>
+                                    <span class="fund-item-name" v-text="fundItemName"></span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="header-add-btn">
+                    <button class="add-btn" @click="showAddModal" title="新しい取引を追加">+</button>
+                </div>
+            </div>
+            <div class="header-search">
+                <div class="search-container">
+                    <input type="text" class="search-box" placeholder="資金使用項目に対する検索が可能" v-model="searchQuery" @input="onSearchInput">
+                    <span class="search-icon">🔍</span>
+                </div>
+                <button class="add-btn add-btn-desktop" @click="showAddModal" title="新しい取引を追加">+</button>
+            </div>
+        </div>
+
+        <!-- メニューのドロワー -->
+        <div v-if="showMenu" class="side-menu-overlay" @click.self="toggleMenu">
+            <div class="side-menu">
+                <button class="menu-btn" @click="backupToCSV">CSVバックアップ</button>
+                <button class="menu-btn" @click="showImportCSVModalMethod">CSVインポート</button>
+                <button class="menu-btn" @click="downloadLog">ログファイルダウンロード</button>
+                <button class="menu-btn" @click="showGraphModal">残高推移グラフ表示</button>
+                <button class="menu-btn" @click="openRatioModal">収支比率グラフ</button>
+                <button class="menu-btn" @click="openItemizedModal">項目別収支グラフ</button>
+                <button class="menu-btn" @click="openCreditCardSettings">クレジットカード設定</button>
+                <button class="menu-btn logout-btn" @click="logout">ログアウト</button>
+            </div>
+        </div>
+
+        <!-- 残高表示と取引履歴を統合したカード -->
+        <div class="card content-card"> 
+            <!-- 現在の残高エリア -->
+            <div class="balance-section"> <!-- balance-areaからbalance-sectionに変更し、スティッキー関連のスタイルはCSSで調整 -->
+                <div class="balance-label">現在の残高</div>
+                <div class="balance-amount">{% raw %}{{ formatCurrency(currentBalance) }}{% endraw %}</div>
+            </div>
+
+            <!-- 取引履歴テーブル -->
+            <div class="transaction-section"> <!-- transaction-areaからtransaction-sectionに変更 -->
+                <table class="transaction-table">
+                    <thead>
+                        <tr>
+                            <th @click="toggleDateSort" style="cursor: pointer;">日付 <span v-if="dateSortOrder === 'asc'">▲</span><span v-if="dateSortOrder === 'desc'">▼</span></th>
+                            <th v-if="shouldShowFundItemColumn">資金項目</th>
+                            <th>項目</th>
+                            <th>金額</th>
+                            <th>残高</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="transaction in sortedTransactions" :key="transaction.id" @click="onEditTransaction(transaction)">
+                            <td v-text="formatDateTime(transaction.date)"></td>
+                            <td v-if="shouldShowFundItemColumn" v-text="transaction.fundItem || transaction.account"></td>
+                            <td v-text="transaction.item"></td>
+                            <td :class="getAmountCellClass(transaction.type)" v-text="formatAmount(transaction.amount, transaction.type)"></td>
+                            <td v-text="transaction.balance === null ? '-' : formatCurrency(transaction.balance)"></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 新規取引追加モーダル -->
+        <div v-if="showAddTransactionModal" class="modal-overlay" @click="hideAddModal">
+            <div class="modal-content transaction-modal" @click.stop>
+                <!-- タイトル部分 -->
+                <h3 v-if="isEditMode">取引を編集</h3>
+                <h3 v-else>新しい取引を追加</h3>
+
+                <form @submit.prevent="addOrUpdateTransaction">
+                    <div class="form-container">
+                        <div class="form-row">
+                            <label>日付:</label>
+                            <input type="date" v-model="newTransaction.date" required>
+                        </div>
+                        <div class="form-row">
+                            <label>時刻 (任意):</label>
+                            <input type="time" v-model="newTransaction.time">
+                        </div>
+                        <div class="form-row">
+                            <label>資金項目:</label>
+                            <div class="funditem-input-group" @click.stop>
+                                <input type="text" 
+                                       v-model="newTransaction.fundItem" 
+                                       placeholder="資金項目名を入力または選択" 
+                                       required 
+                                       @click="onFundItemInputClick"
+                                       @focus="showFundItemDropdown = true">
+                                <button type="button" class="dropdown-toggle-btn" @click="toggleFundItemDropdown">▼</button>
+                                <div v-if="showFundItemDropdown" class="funditem-dropdown">
+                                    <ul>
+                                        <li v-for="item in fundItemNames.filter(name => name !== 'すべて')" 
+                                            :key="item" 
+                                            @click="selectFundItemInModal(item)"
+                                            :class="{ 'selected': item === newTransaction.fundItem }">
+                                            <span v-text="item"></span>
+                                        </li>
+                                    </ul>
+                                </div>
+                            </div>
+                            <small v-if="isNewFundItem(newTransaction.fundItem)" class="new-account-notice">{% raw %}新しい資金項目「{{ newTransaction.fundItem }}」が作成されます{% endraw %}</small>
+                        </div>
+                        <div class="form-row">
+                            <label>種類:</label>
+                            <div class="radio-group">
+                                <label><input type="radio" v-model="newTransaction.type" value="income"> 収入</label>
+                                <label><input type="radio" v-model="newTransaction.type" value="expense"> 支出</label>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <label>項目:</label>
+                            <div class="item-input-group">
+                                <input type="text" v-model="newTransaction.item" placeholder="例: 給与、食費、交通費" required list="item-list">
+                                <datalist id="item-list">
+                                    <option v-for="item in itemNames" :key="item" :value="item">
+                                </datalist>
+                            </div>
+                            <small v-if="isNewItem(newTransaction.item)" class="new-account-notice">{% raw %}新しい項目「{{ newTransaction.item }}」が作成されます{% endraw %}</small>
+                        </div>
+                        <div class="form-row">
+                            <label>金額:</label>
+                            <input type="text" v-model="newTransaction.amount" placeholder="円" required 
+                                   :class="getAmountInputClass(newTransaction.type)"
+                                   @input="onAmountInput"
+                                   @keydown="onAmountKeydown"
+                                   @paste="onAmountPaste"
+                                   inputmode="numeric"
+                                   autocomplete="off">
+                        </div>
+                    </div>
+                    <div class="modal-buttons" style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <button v-if="isEditMode" type="button" class="delete-btn" @click="onDeleteTransaction">削除</button>
+                        </div>
+                        <div style="display: flex; gap: 8px;">
+                            <button type="button" class="cancel-btn" @click="hideAddModal">キャンセル</button>
+                            <button type="submit" class="ok-btn" v-text="isEditMode ? '更新' : 'OK'"></button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- 残高推移グラフモーダル -->
+        <div v-if="showGraph" class="modal-overlay" @click="hideGraphModal">
+            <div class="modal-content graph-modal-content graph-modal-xlarge" @click.stop>
+                <h3 style="margin: 8px 0 12px 0; font-size: 1.3em;">残高推移グラフ</h3>
+                <div class="graph-filter-row" style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+                  <label style="white-space: nowrap; font-size: 0.95em;">資金項目：</label>
+                  <div class="multi-select-wrapper" style="position: relative;" data-graph-fund-items>
+                    <button @click="toggleGraphFundItemDropdown" class="multi-select-button" style="padding: 4px 8px; border: 1px solid #ccc; background: white; cursor: pointer;">
+                      <span v-text="getGraphFundItemDisplayText()"></span> ▼
+                    </button>
+                    <div v-if="showGraphFundItemDropdown" class="multi-select-dropdown" style="position: absolute; top: 100%; left: 0; right: 0; background: white; border: 1px solid #ccc; max-height: 200px; overflow-y: auto; z-index: 2000;">
+                      <div style="padding: 4px;">
+                        <button @click="toggleAllGraphFundItems" class="toggle-all-btn" style="width: 100%; margin-bottom: 4px; padding: 2px;" v-text="selectedFundItems.length === actualFundItems.length ? '全解除' : '全選択'">
+                        </button>
+                      </div>
+                      <label v-for="item in actualFundItems" :key="item" style="display: block; padding: 2px 8px; cursor: pointer;">
+                        <input 
+                          type="checkbox" 
+                          :checked="selectedFundItems.includes(item)"
+                          @change="toggleGraphFundItem(item)"
+                          style="margin-right: 4px;"
+                        >
+                        <span v-text="item"></span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+                <div class="graph-filter-row" style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+                  <label style="white-space: nowrap; font-size: 0.95em;">表示単位：</label>
+                  <select v-model="graphDisplayUnit" @change="renderBalanceChart" style="padding: 4px 8px; z-index: 100; position: relative;">
+                    <option value="day">日</option>
+                    <option value="month">月</option>
+                    <option value="year">年</option>
+                  </select>
+                </div>
+                <div class="graph-scroll-wrapper">
+                  <canvas id="balanceChart"></canvas>
+                </div>
+                <button class="cancel-btn" @click="hideGraphModal" style="margin-top: 8px; padding: 6px 16px;">閉じる</button>
+            </div>
+        </div>
+
+        <!-- 収支比率グラフモーダル -->
+        <div v-if="showRatioModal" class="modal-overlay" @click="hideRatioModal">
+            <div class="modal-content graph-modal-content graph-modal-xlarge" @click.stop>
+                <h3 style="margin: 8px 0 12px 0; font-size: 1.3em;">収支比率グラフ</h3>
+                <div class="graph-filter-row" style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+                  <label style="white-space: nowrap; font-size: 0.95em;">資金項目：</label>
+                  <div class="multi-select-wrapper" style="position: relative;" data-ratio-fund-items>
+                    <button @click="toggleRatioFundItemDropdown" class="multi-select-button" style="padding: 4px 8px; border: 1px solid #ccc; background: white; cursor: pointer;">
+                      <span v-text="getRatioFundItemDisplayText()"></span> ▼
+                    </button>
+                    <div v-if="showRatioFundItemDropdown" class="multi-select-dropdown" style="position: absolute; top: 100%; left: 0; right: 0; background: white; border: 1px solid #ccc; max-height: 200px; overflow-y: auto; z-index: 2000;">
+                      <div style="padding: 4px;">
+                        <button @click="toggleAllRatioFundItems" class="toggle-all-btn" style="width: 100%; margin-bottom: 4px; padding: 2px;" v-text="selectedFundItems.length === actualFundItems.length ? '全解除' : '全選択'">
+                        </button>
+                      </div>
+                      <label v-for="item in actualFundItems" :key="item" style="display: block; padding: 2px 8px; cursor: pointer;">
+                        <input 
+                          type="checkbox" 
+                          :checked="selectedFundItems.includes(item)"
+                          @change="toggleRatioFundItem(item)"
+                          style="margin-right: 4px;"
+                        >
+                        <span v-text="item"></span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+                <div class="graph-filter-row" style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; justify-content: center;">
+                  <label style="white-space: nowrap; font-size: 0.95em;">表示期間：</label>
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <button v-if="ratioDisplayUnit !== 'all'" @click="navigateRatioPeriod(-1)" :disabled="!canNavigateRatioPeriod(-1)" style="padding: 4px 8px; border: 1px solid #ccc; background: white; cursor: pointer;" :style="{ opacity: canNavigateRatioPeriod(-1) ? 1 : 0.5 }">◀</button>
+                    <select v-model="ratioDisplayUnit" @change="onRatioDisplayUnitChange" :key="`ratio-${selectUpdateKey}`" style="padding: 4px 8px; z-index: 100; position: relative;">
+                      <option v-for="option in ratioDisplayOptions" :key="option.value" :value="option.value" v-text="option.text"></option>
+                    </select>
+                    <button v-if="ratioDisplayUnit !== 'all'" @click="navigateRatioPeriod(1)" :disabled="!canNavigateRatioPeriod(1)" style="padding: 4px 8px; border: 1px solid #ccc; background: white; cursor: pointer;" :style="{ opacity: canNavigateRatioPeriod(1) ? 1 : 0.5 }">▶</button>
+                  </div>
+                </div>
+                <div v-if="ratioCurrentPeriodDisplay" style="text-align: center; margin-bottom: 12px; font-size: 1.1em; font-weight: bold; color: #333;">
+                  {{ ratioCurrentPeriodDisplay }}
+                </div>
+                <div class="graph-scroll-wrapper">
+                  <canvas id="ratioChart"></canvas>
+                </div>
+                <button class="cancel-btn" @click="hideRatioModal" style="margin-top: 8px; padding: 6px 16px;">閉じる</button>
+            </div>
+        </div>
+        <!-- 項目別収支グラフモーダル -->
+        <div v-if="showItemizedModal" class="modal-overlay" @click="hideItemizedModal">
+            <div class="modal-content graph-modal-content graph-modal-xlarge" @click.stop>
+                <h3 style="margin: 8px 0 12px 0; font-size: 1.3em;">項目別収支グラフ</h3>
+                <div class="graph-filter-row" style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+                  <label style="white-space: nowrap; font-size: 0.95em;">資金項目：</label>
+                  <div class="multi-select-wrapper" style="position: relative;" data-itemized-fund-items>
+                    <button @click="toggleItemizedFundItemDropdown" class="multi-select-button" style="padding: 4px 8px; border: 1px solid #ccc; background: white; cursor: pointer;">
+                      <span v-text="getItemizedFundItemDisplayText()"></span> ▼
+                    </button>
+                    <div v-if="showItemizedFundItemDropdown" class="multi-select-dropdown" style="position: absolute; top: 100%; left: 0; right: 0; background: white; border: 1px solid #ccc; max-height: 200px; overflow-y: auto; z-index: 2000;">
+                      <div style="padding: 4px;">
+                        <button @click="toggleAllItemizedFundItems" class="toggle-all-btn" style="width: 100%; margin-bottom: 4px; padding: 2px;" v-text="selectedFundItems.length === actualFundItems.length ? '全解除' : '全選択'">
+                        </button>
+                      </div>
+                      <label v-for="item in actualFundItems" :key="item" style="display: block; padding: 2px 8px; cursor: pointer;">
+                        <input 
+                          type="checkbox" 
+                          :checked="selectedFundItems.includes(item)"
+                          @change="toggleItemizedFundItem(item)"
+                          style="margin-right: 4px;"
+                        >
+                        <span v-text="item"></span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+                <div class="graph-filter-row" style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; justify-content: center;">
+                  <label style="white-space: nowrap; font-size: 0.95em;">表示期間：</label>
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <button v-if="itemizedDisplayUnit !== 'all'" @click="navigateItemizedPeriod(-1)" :disabled="!canNavigateItemizedPeriod(-1)" style="padding: 4px 8px; border: 1px solid #ccc; background: white; cursor: pointer;" :style="{ opacity: canNavigateItemizedPeriod(-1) ? 1 : 0.5 }">◀</button>
+                    <select v-model="itemizedDisplayUnit" @change="onItemizedDisplayUnitChange" :key="`itemized-${selectUpdateKey}`" style="padding: 4px 8px; z-index: 100; position: relative;">
+                      <option v-for="option in itemizedDisplayOptions" :key="option.value" :value="option.value" v-text="option.text"></option>
+                    </select>
+                    <button v-if="itemizedDisplayUnit !== 'all'" @click="navigateItemizedPeriod(1)" :disabled="!canNavigateItemizedPeriod(1)" style="padding: 4px 8px; border: 1px solid #ccc; background: white; cursor: pointer;" :style="{ opacity: canNavigateItemizedPeriod(1) ? 1 : 0.5 }">▶</button>
+                  </div>
+                </div>
+                <div v-if="itemizedCurrentPeriodDisplay" style="text-align: center; margin-bottom: 12px; font-size: 1.1em; font-weight: bold; color: #333;">
+                  {{ itemizedCurrentPeriodDisplay }}
+                </div>
+                <div class="graph-scroll-wrapper">
+                  <div style="display: flex; gap: 20px; justify-content: center; align-items: flex-start; width: 100%; padding: 20px; box-sizing: border-box;">
+                      <div style="display: flex; flex-direction: column; align-items: center;">
+                          <h4 style="text-align: center; margin: 0 0 10px 0; font-size: 1.1em;">収入項目別</h4>
+                          <canvas id="incomeItemChart" style="display: block;"></canvas>
+                      </div>
+                      <div style="display: flex; flex-direction: column; align-items: center;">
+                          <h4 style="text-align: center; margin: 0 0 10px 0; font-size: 1.1em;">支出項目別</h4>
+                          <canvas id="expenseItemChart" style="display: block;"></canvas>
+                      </div>
+                  </div>
+                </div>
+                <button class="cancel-btn" @click="hideItemizedModal" style="margin-top: 8px; padding: 6px 16px;">閉じる</button>
+            </div>
+        </div>
+
+        <!-- CSVインポートモーダル -->
+        <div v-if="showImportCSVModal" class="modal-overlay" @click="hideImportCSVModal">
+            <div class="modal-content graph-modal-content graph-modal-xlarge csv-import-modal" @click.stop>
+                <h3 style="margin: 8px 0 12px 0; font-size: 1.3em;">CSVインポート</h3>
+                
+                <!-- ファイル選択セクション -->
+                <div class="graph-filter-row">
+                    <label>CSVファイル：</label>
+                    <div style="flex: 1; min-width: 200px;">
+                        <input 
+                            type="file" 
+                            accept=".csv" 
+                            ref="csvFileInput"
+                            @change="onCSVFileSelected"
+                        >
+                        <div v-if="csvFile" class="file-info">
+                            選択ファイル: <span v-text="csvFile.name"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- インポートモード選択 -->
+                <div class="graph-filter-row">
+                    <label>インポートモード：</label>
+                    <div style="display: flex; gap: 16px; flex-wrap: wrap;">
+                        <label style="display: flex; align-items: center; cursor: pointer; font-size: 0.9em;">
+                            <input 
+                                type="radio" 
+                                v-model="csvImportMode" 
+                                value="append"
+                            >
+                            <span>追加 (既存データを保持)</span>
+                        </label>
+                        <label style="display: flex; align-items: center; cursor: pointer; font-size: 0.9em;">
+                            <input 
+                                type="radio" 
+                                v-model="csvImportMode" 
+                                value="replace"
+                            >
+                            <span>置換 (既存データを削除)</span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- CSV形式の説明 -->
+                <div class="format-info">
+                    <div style="font-weight: bold; margin-bottom: 8px; font-size: 0.95em; color: #333;">CSVファイル形式</div>
+                    <div>
+                        <div style="margin-bottom: 4px;"><strong>必須ヘッダー:</strong> account, date, item, type, amount</div>
+                        <div style="margin-left: 12px;">
+                            <div>• <strong>account:</strong> 資金項目名</div>
+                            <div>• <strong>date:</strong> 取引日 (YYYY-MM-DD または YYYY-MM-DD HH:MM:SS)</div>
+                            <div>• <strong>item:</strong> 取引項目名</div>
+                            <div>• <strong>type:</strong> income (収入) または expense (支出)</div>
+                            <div>• <strong>amount:</strong> 金額 (正の数値)</div>
+                            <div>• <strong>balance:</strong> 残高 (オプション、自動計算されます)</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- プログレスバー -->
+                <div v-if="csvImporting" style="margin-bottom: 12px;">
+                    <div class="progress-bar">
+                        <div style="width: 100%; height: 100%; background: linear-gradient(90deg, #007bff, #0056b3); animation: progress-animation 1.5s infinite;"></div>
+                    </div>
+                    <div style="text-align: center; margin-top: 8px; font-size: 0.9em; color: #666; font-weight: 500;">
+                        CSVファイルをインポート中...
+                    </div>
+                </div>
+
+                <!-- ステータスメッセージエリア -->
+                <div class="status-area">
+                    <!-- エラーメッセージ -->
+                    <div v-if="csvImportError" class="status-message status-error" v-text="csvImportError">
+                    </div>
+
+                    <!-- 成功メッセージ -->
+                    <div v-if="csvImportSuccess" class="status-message status-success" v-text="csvImportSuccess">
+                    </div>
+                </div>
+
+                <!-- ボタン -->
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
+                    <button 
+                        class="cancel-btn" 
+                        @click="hideImportCSVModal" 
+                        :disabled="csvImporting"
+                        style="padding: 6px 16px;"
+                    >
+                        キャンセル
+                    </button>
+                    <button 
+                        class="ok-btn" 
+                        @click="importCSVFile" 
+                        :disabled="!csvFile || csvImporting"
+                        :style="{ opacity: (!csvFile || csvImporting) ? 0.5 : 1 }"
+                        style="padding: 6px 20px;"
+                        v-text="csvImporting ? 'インポート中...' : 'インポート実行'"
+                    >
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- クレジットカード設定モーダル -->
+        <div v-if="showCreditCardModal" class="modal-overlay" @click="hideCreditCardSettings">
+            <div class="modal-content graph-modal-content graph-modal-xlarge" @click.stop>
+                <h3 style="margin: 8px 0 12px 0; font-size: 1.3em;">クレジットカード設定</h3>
+                
+                <div style="margin-bottom: 20px; padding: 12px; background: #e3f2fd; border-radius: 4px; border-left: 4px solid #2196F3;">
+                    <p style="margin: 0; font-size: 0.9em; color: #1565C0;">
+                        <strong>設定の効果：</strong><br>
+                        • クレジットカードとして設定した項目は残高計算から除外されます<br>
+                        • 取引履歴では残高表示が「-」になります<br>
+                        • 2重会計を防ぎ、正確な残高管理が可能です
+                    </p>
+                </div>
+                
+                <div class="graph-filter-row" style="margin-bottom: 20px; display: flex; align-items: center; gap: 8px;">
+                    <label style="white-space: nowrap; font-size: 0.95em; font-weight: bold;">クレジットカード項目：</label>
+                    <div class="multi-select-wrapper" style="position: relative;" data-credit-card-items>
+                        <button @click="toggleCreditCardDropdown" class="multi-select-button" style="padding: 8px 12px; border: 1px solid #ccc; background: white; cursor: pointer; min-width: 200px; text-align: left;">
+                            <span v-text="getCreditCardDisplayText()"></span> ▼
+                        </button>
+                        <div v-if="showCreditCardDropdown" class="multi-select-dropdown" style="position: absolute; top: 100%; left: 0; right: 0; background: white; border: 1px solid #ccc; max-height: 300px; overflow-y: auto; z-index: 2000;">
+                            <div style="padding: 8px;">
+                                <div style="margin-bottom: 8px; font-size: 0.9em; color: #666; border-bottom: 1px solid #eee; padding-bottom: 4px;">
+                                    利用可能な資金項目から選択してください
+                                </div>
+                                <label v-for="item in fundItemNames.filter(name => name !== 'すべて')" :key="item" style="display: block; padding: 4px 8px; cursor: pointer; border-radius: 2px;" :style="{ backgroundColor: selectedCreditCardItems.includes(item) ? '#f0f8ff' : 'transparent' }">
+                                    <input type="checkbox" :checked="selectedCreditCardItems.includes(item)" @change="toggleCreditCardItem(item)" style="margin-right: 8px;">
+                                    <span v-text="item" style="font-size: 0.95em;"></span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="display: flex; justify-content: center; gap: 12px; margin: 20px 0;">
+                    <button @click="saveCreditCardSettings" class="menu-btn" style="padding: 8px 20px; background: #4CAF50; color: white; font-weight: bold;">設定を保存</button>
+                    <button @click="resetCreditCardSettings" class="menu-btn" style="padding: 8px 20px; background: #f44336; color: white;">設定をクリア</button>
+                </div>
+                
+                <div v-if="creditCardSettingsMessage" style="margin: 16px 0; padding: 12px; border-radius: 4px; text-align: center; font-weight: bold;" :style="{ 
+                    backgroundColor: creditCardSettingsMessage.includes('成功') ? '#d4edda' : '#f8d7da', 
+                    color: creditCardSettingsMessage.includes('成功') ? '#155724' : '#721c24',
+                    border: creditCardSettingsMessage.includes('成功') ? '1px solid #c3e6cb' : '1px solid #f5c6cb'
+                }">
+                    {{ creditCardSettingsMessage }}
+                </div>
+                
+                <button class="cancel-btn" @click="hideCreditCardSettings" style="margin-top: 16px; padding: 6px 16px;">閉じる</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

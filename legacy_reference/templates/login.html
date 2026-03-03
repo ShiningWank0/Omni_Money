@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Server Money - ログイン</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <style>
+        /* Server Money ログイン画面スタイル */
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            box-sizing: border-box;
+        }
+
+        .login-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+            max-width: 400px;
+            padding: 2rem;
+        }
+
+        .login-card {
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            backdrop-filter: blur(10px);
+            padding: 3rem 2.5rem;
+            width: 100%;
+            box-sizing: border-box;
+            animation: slideUp 0.6s ease-out;
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .login-header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .app-title {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #333;
+            margin: 0 0 0.5rem 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .app-subtitle {
+            font-size: 0.9rem;
+            color: #666;
+            margin: 0;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .form-label {
+            display: block;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 0.5rem;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            border: 2px solid rgba(102, 126, 234, 0.2);
+            border-radius: 10px;
+            font-size: 1rem;
+            background: rgba(255, 255, 255, 0.8);
+            transition: all 0.3s ease;
+            box-sizing: border-box;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: #667eea;
+            background: rgba(255, 255, 255, 0.95);
+            box-shadow: 0 0 20px rgba(102, 126, 234, 0.2);
+        }
+
+        .login-button {
+            width: 100%;
+            padding: 0.75rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            border-radius: 10px;
+            color: white;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 1rem;
+        }
+
+        .login-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.3);
+        }
+
+        .login-button:active {
+            transform: translateY(0);
+        }
+
+        .login-button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .error-message {
+            background: rgba(255, 69, 58, 0.1);
+            border: 1px solid rgba(255, 69, 58, 0.3);
+            color: #d70015;
+            padding: 0.75rem 1rem;
+            border-radius: 10px;
+            margin-bottom: 1rem;
+            font-size: 0.9rem;
+            display: none;
+            animation: shake 0.5s ease-in-out;
+        }
+
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-5px); }
+            75% { transform: translateX(5px); }
+        }
+
+        .loading-spinner {
+            display: none;
+            margin-right: 0.5rem;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top: 2px solid white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .attempts-warning {
+            background: rgba(255, 149, 0, 0.1);
+            border: 1px solid rgba(255, 149, 0, 0.3);
+            color: #bf5700;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            font-size: 0.85rem;
+            text-align: center;
+            display: none;
+        }
+
+        /* レスポンシブデザイン */
+        @media (max-width: 480px) {
+            .login-container {
+                padding: 1rem;
+            }
+            
+            .login-card {
+                padding: 2rem 1.5rem;
+            }
+            
+            .app-title {
+                font-size: 1.5rem;
+            }
+        }
+
+        /* ダークモード対応 */
+        @media (prefers-color-scheme: dark) {
+            .login-card {
+                background: rgba(30, 30, 30, 0.9);
+            }
+            
+            .app-title {
+                color: #fff;
+            }
+            
+            .form-label {
+                color: #ddd;
+            }
+            
+            .form-input {
+                background: rgba(50, 50, 50, 0.8);
+                border-color: rgba(102, 126, 234, 0.3);
+                color: #fff;
+            }
+            
+            .form-input:focus {
+                background: rgba(50, 50, 50, 0.95);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-card">
+            <div class="login-header">
+                <h1 class="app-title">Server Money</h1>
+                <p class="app-subtitle">安全なログインでアクセス</p>
+            </div>
+            
+            <form id="loginForm">
+                <div class="error-message" id="errorMessage"></div>
+                <div class="attempts-warning" id="attemptsWarning"></div>
+                
+                <div class="form-group">
+                    <label for="username" class="form-label">ログインID</label>
+                    <input type="text" id="username" name="username" class="form-input" required autocomplete="username">
+                </div>
+                
+                <div class="form-group">
+                    <label for="password" class="form-label">パスワード</label>
+                    <input type="password" id="password" name="password" class="form-input" required autocomplete="current-password">
+                </div>
+                
+                <button type="submit" id="loginButton" class="login-button">
+                    <span class="loading-spinner" id="loadingSpinner"></span>
+                    <span id="loginButtonText">ログイン</span>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        // ログインフォームの処理
+        document.addEventListener('DOMContentLoaded', function() {
+            const form = document.getElementById('loginForm');
+            const errorMessage = document.getElementById('errorMessage');
+            const attemptsWarning = document.getElementById('attemptsWarning');
+            const loginButton = document.getElementById('loginButton');
+            const loadingSpinner = document.getElementById('loadingSpinner');
+            const loginButtonText = document.getElementById('loginButtonText');
+            
+            // ログ送信関数
+            async function logMessage(level, message, component = 'login') {
+                try {
+                    await fetch('/api/log', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            level: level,
+                            message: message,
+                            component: component
+                        })
+                    });
+                } catch (error) {
+                    // ログ送信に失敗した場合は無視（無限ループを防ぐため）
+                }
+            }
+            
+            function showError(message) {
+                errorMessage.textContent = message;
+                errorMessage.style.display = 'block';
+                // エラーメッセージを自動で隠す
+                setTimeout(() => {
+                    errorMessage.style.display = 'none';
+                }, 5000);
+            }
+            
+            function showAttemptsWarning(remainingAttempts) {
+                if (remainingAttempts > 0) {
+                    attemptsWarning.textContent = `残り${remainingAttempts}回の試行で一時的にロックされます`;
+                    attemptsWarning.style.display = 'block';
+                }
+            }
+            
+            function setLoading(loading) {
+                loginButton.disabled = loading;
+                if (loading) {
+                    loadingSpinner.style.display = 'inline-block';
+                    loginButtonText.textContent = 'ログイン中...';
+                } else {
+                    loadingSpinner.style.display = 'none';
+                    loginButtonText.textContent = 'ログイン';
+                }
+            }
+            
+            form.addEventListener('submit', async function(e) {
+                e.preventDefault();
+                
+                const username = document.getElementById('username').value.trim();
+                const password = document.getElementById('password').value;
+                
+                if (!username || !password) {
+                    showError('ユーザー名とパスワードを入力してください');
+                    return;
+                }
+                
+                setLoading(true);
+                errorMessage.style.display = 'none';
+                attemptsWarning.style.display = 'none';
+                
+                try {
+                    const response = await fetch('/api/login', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            username: username,
+                            password: password
+                        })
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok && data.success) {
+                        // ログイン成功
+                        logMessage('info', 'ユーザーがログインしました');
+                        loginButtonText.textContent = 'ログイン成功！';
+                        setTimeout(() => {
+                            window.location.href = data.redirect || '/';
+                        }, 500);
+                    } else {
+                        // ログイン失敗
+                        showError(data.error || 'ログインに失敗しました');
+                        
+                        if (data.remaining_attempts !== undefined) {
+                            showAttemptsWarning(data.remaining_attempts);
+                        }
+                        
+                        // パスワードフィールドをクリア
+                        document.getElementById('password').value = '';
+                        document.getElementById('password').focus();
+                    }
+                } catch (error) {
+                    logMessage('error', 'Login error: ' + error.toString());
+                    showError('ネットワークエラーが発生しました。再度お試しください。');
+                } finally {
+                    setLoading(false);
+                }
+            });
+            
+            // エンターキーでのフォーム送信
+            document.getElementById('username').addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    document.getElementById('password').focus();
+                }
+            });
+        });
+    </script>
+</body>
+</html>

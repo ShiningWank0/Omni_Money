@@ -1,0 +1,32 @@
+# 環境変数ファイル（認証情報を含む）
+.env
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+uv.lock
+.DS_Store
+.python-version
+
+# Database files
+instance/
+*.db
+
+# Backup files
+backups/
+
+# ログファイル
+logs/*.log
+
+# IDE設定
+.vscode/
+.idea/
+*.swp
+*.swo
