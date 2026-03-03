@@ -511,6 +511,8 @@ func recalculateBalance(account string) error {
 	return nil
 }
 
+// parseDate は複数の受け入れ可能なフォーマットを許容し、
+// どれにも一致しない場合は現在時刻を返す。
 func parseDate(dateStr string) time.Time {
 	formats := []string{
 		"2006-01-02 15:04:05",
