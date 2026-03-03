@@ -16,6 +16,12 @@ func AIWriteOnlyMiddleware(apiToken string, next http.Handler) http.Handler {
 			return
 		}
 
+		// トークン未設定の場合は拒否
+		if apiToken == "" {
+			http.Error(w, `{"error":"AI用APIトークンが設定されていません"}`, http.StatusUnauthorized)
+			return
+		}
+
 		// トークン検証
 		token := r.Header.Get("Authorization")
 		expectedToken := "Bearer " + apiToken
