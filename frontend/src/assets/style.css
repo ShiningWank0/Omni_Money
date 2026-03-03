@@ -1,0 +1,1469 @@
+/* Server Money アプリケーション スタイルシート */
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    height: 100vh; /* 画面の高さを固定 */
+    display: flex;
+    justify-content: center;
+    align-items: flex-start; /* 上寄せに変更 */
+    padding-top: 1rem; /* パディングを削減 */
+    padding-bottom: 1rem; /* パディングを削減 */
+    box-sizing: border-box;
+    overflow: hidden; /* 縦スクロールを完全に防ぐ */
+}
+
+#app {
+    display: flex;
+    flex-direction: column;
+    width: 95%; /* ビューポートに対する幅をさらに拡大 */
+    max-width: 1800px; /* 最大幅を大幅に拡大 */
+    height: calc(100vh - 2rem); /* 画面高さからpadding分を引く */
+    max-height: calc(100vh - 2rem);
+    overflow: hidden; /* アプリ全体のスクロールを防ぐ */
+}
+
+.card {
+    background: rgba(255, 255, 255, 0.9);
+    border-radius: 20px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+    backdrop-filter: blur(10px);
+    padding: 1.5rem; /* パディングを削減 */
+    margin-bottom: 1rem; /* マージンを削減 */
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.card:last-child {
+    margin-bottom: 0;
+}
+
+/* ヘッダーエリア */
+.header {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    position: relative; /* Ensure stacking context */
+    z-index: 20;      /* Higher than content-card */
+    flex-shrink: 0; /* ヘッダーのサイズを固定 */
+}
+
+.header-top {
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+}
+
+.header-search {
+    width: 100%;
+}
+
+.header-add-btn {
+    display: none; /* デスクトップでは非表示 */
+}
+
+/* デスクトップ用のレイアウト */
+@media (min-width: 769px) {
+    .header {
+        flex-direction: row; /* デスクトップでは横並び */
+        justify-content: flex-start;
+        align-items: center;
+        gap: 2rem;
+    }
+    .header-top {
+        justify-content: flex-start;
+    }
+    .header-left {
+        width: 100%;
+    }
+    
+    .header-search {
+        flex: 0 0 auto;
+        width: auto !important;
+        max-width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 0.15rem; /* 検索欄と+ボタンの間はそのまま */
+        margin-left: auto;
+        justify-content: flex-end;
+        padding-right: 0; /* カード右端の隙間を削除 */
+    }
+    
+    .header-search .search-container {
+        position: relative;
+        width: auto !important;
+        min-width: 300px;
+        max-width: 400px;
+    }
+    
+    .add-btn-desktop {
+        display: flex !important;
+        margin-right: 0;
+    }
+    
+    .header-add-btn {
+        display: none; /* デスクトップでは非表示 */
+    }
+}
+
+.header-left {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    height: 48px;
+    width: 100%;
+}
+
+.hamburger-menu {
+    cursor: pointer;
+    font-size: 2rem;
+    color: #333;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    width: 48px;
+    min-width: 40px;
+    margin-right: 0;
+    padding: 0;
+    box-sizing: border-box;
+    border-radius: 8px;
+    background: none;
+    border: none;
+    transition: background 0.15s;
+    position: relative;
+}
+
+.hamburger-menu:hover {
+    background: #f0f0f0;
+}
+
+/* 通常時: 縦三本線 */
+.vertical-menu-icon {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    height: 100%;
+    width: 24px;
+    gap: 6px;
+    transition: opacity 0.2s;
+}
+
+.vertical-menu-icon span {
+    display: block;
+    width: 5px;
+    height: 22px;
+    background: #333;
+    border-radius: 3px;
+    transition: background 0.2s, opacity 0.2s;
+}
+
+.hamburger-menu:hover .vertical-menu-icon span {
+    background: #666;
+}
+
+/* サイドメニュー表示時: 横三本線（長い棒）を横並びで表示 */
+.hamburger-menu.menu-open .vertical-menu-icon {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.hamburger-menu.menu-open .horizontal-menu-icon {
+    display: flex;
+}
+
+.horizontal-menu-icon {
+    display: none;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 40px;
+    height: 100%;
+    position: absolute;
+    left: 0;
+    top: 0;
+}
+
+.horizontal-menu-icon span {
+    display: block;
+    width: 22px;
+    height: 5px;
+    background: #333;
+    border-radius: 3px;
+    transition: background 0.2s;
+}
+
+.hamburger-menu.menu-open .horizontal-menu-icon span {
+    background: #666;
+}
+
+.project-selector {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-left: 0;
+    padding-left: 0;
+    justify-content: flex-start;
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.hamburger-menu {
+    cursor: pointer;
+    font-size: 1.7rem;
+    color: #333;
+    display: flex;
+    align-items: center;
+    height: 40px;
+    width: 40px;
+    justify-content: center;
+    margin-right: 0.5rem;
+    /* 高さをproject-selectorと揃える */
+    box-sizing: border-box;
+}
+
+.project-selector {
+    font-size: 1rem;
+    cursor: pointer;
+    position: relative; /* ドロップダウンの位置決めの基準とする */
+    display: flex; /* 追加: アイコンとテキストを横並びにする */
+    align-items: center; /* 追加: 垂直方向中央揃え */
+    gap: 0.25rem; /* 追加: アイコンとテキストの間のスペース */
+}
+
+.project-selector span { /* span要素に直接スタイルを適用 */
+    color: #333;
+    font-size: 1rem; /* project-selectorから移動、または明示 */
+    white-space: nowrap; /* 追加: テキストが折り返さないようにする */
+}
+
+.account-dropdown {
+    position: absolute; /* fixedからabsoluteに戻す */
+    top: 100%; /* parent要素の真下に表示 */
+    left: 0; /* parent要素の左端に合わせる */
+    background-color: white;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    z-index: 9999; /* 最高レベルのz-index */
+    min-width: 180px; /* ドロップダウンの最小幅を少し大きく */
+    max-height: 200px; /* 最大高さを制限 */
+    overflow-y: auto; /* 縦スクロールを有効にする */
+}
+
+.account-dropdown ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.account-dropdown li {
+    padding: 0.75rem 1rem; /* パディングを調整してクリック領域を拡大 */
+    cursor: pointer;
+    font-size: 1rem; /* フォントサイズを現在選択中の項目に合わせる */
+    color: #333; /* 念のため再度確認 */
+}
+
+.account-dropdown li:hover {
+    background-color: #f5f5f5;
+}
+
+/* ドロップダウンのスクロールバーをスタイル */
+.account-dropdown::-webkit-scrollbar {
+    width: 6px;
+}
+
+.account-dropdown::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 3px;
+}
+
+.account-dropdown::-webkit-scrollbar-thumb {
+    background: #c1c1c1;
+    border-radius: 3px;
+}
+
+.account-dropdown::-webkit-scrollbar-thumb:hover {
+    background: #a8a8a8;
+}
+
+.header-search {
+    width: 100%;
+}
+
+.header-search .search-container {
+    position: relative;
+    width: 100%;
+    max-width: 400px; /* デスクトップでの最大幅を制限 */
+}
+
+.search-container {
+    position: relative;
+    min-width: 200px; 
+}
+
+.search-box {
+    width: 100%;
+    padding: 0.5rem 2.5rem 0.5rem 1rem;
+    border: 1px solid #ddd;
+    border-radius: 20px;
+    font-size: 0.9rem;
+    outline: none;
+    box-sizing: border-box;
+}
+
+.search-box::placeholder {
+    color: #999;
+}
+
+.search-box:focus {
+    border-color: #667eea;
+    box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
+}
+
+.search-icon {
+    position: absolute;
+    right: 0.8rem;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #666;
+    pointer-events: none;
+}
+
+/* 残高表示と取引履歴を統合したカード */
+.content-card {
+    display: flex;
+    flex-direction: column;
+    position: relative; /* Ensure stacking context */
+    z-index: 10;      /* Lower than header */
+    flex: 1; /* 残りの高さを全て使用 */
+    overflow: hidden; /* カード内のスクロールを制御 */
+    min-height: 0; /* flexboxでの縮小を許可 */
+}
+
+/* 残高セクション */
+.balance-section {
+    text-align: center;
+    padding-bottom: 1rem; /* パディング削減 */
+    border-bottom: 1px solid #eee;
+    margin-bottom: 1rem; /* マージン削減 */
+    flex-shrink: 0; /* 縮小しないよう固定 */
+}
+
+.balance-label {
+    font-size: 1.3rem; /* ラベルも少し大きく */
+    color: #666;
+    margin-bottom: 0.5rem;
+}
+
+.balance-amount {
+    font-size: 3.2rem; /* 金額をさらに大きく */
+    color: #333;
+    font-weight: bold;
+}
+
+/* 取引履歴セクション */
+.transaction-section {
+    overflow-y: auto;
+    flex: 1; /* 残りの高さを全て使用 */
+    min-height: 0; /* flexboxでの縮小を許可 */
+}
+
+.transaction-table {
+    width: 100%;
+    border-collapse: collapse;
+    /* margin-topは削除、balance-sectionのmargin-bottomで調整 */
+}
+
+.transaction-table thead th {
+    position: sticky;
+    top: 0;
+    background-color: rgba(255, 255, 255, 0.95); /* 背景が透けないように */
+    padding: 1rem;
+    text-align: left;
+    font-weight: bold;
+    color: #333;
+    border-bottom: 2px solid #dee2e6;
+    z-index: 5; /* 他の要素より手前に */
+}
+
+.transaction-table td {
+    padding: 1rem;
+    border-bottom: 1px solid #dee2e6;
+}
+
+/* ストライプ行（交互の背景色） */
+.transaction-table tbody tr:nth-child(even) {
+    background-color: #f8f9fa;
+}
+
+.transaction-table tbody tr:nth-child(odd) {
+    background-color: #ffffff;
+}
+
+/* 金額セルの条件付きハイライト */
+.income-cell {
+    background-color: #e6ffed !important;
+    color: #155724;
+}
+
+.expense-cell {
+    background-color: #ffe6e6 !important;
+    color: #721c24;
+}
+
+/* 新規追加ボタン */
+.add-btn {
+    background: rgba(255, 255, 255, 0.9);
+    color: #667eea;
+    border: 1px solid #ddd;
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    font-size: 1.2rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    backdrop-filter: blur(10px);
+    flex-shrink: 0;
+}
+
+.add-btn-desktop {
+    display: none; /* デフォルトでは非表示、デスクトップで上書き */
+}
+
+.add-btn:hover {
+    background: rgba(255, 255, 255, 1);
+    border-color: #667eea;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    transform: translateY(-1px);
+}
+
+.add-btn:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* モーダル関連のスタイル */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+.modal-content {
+    overflow: visible;
+    background: white;
+    border-radius: 15px;
+    padding: 1.5rem;
+    width: 95%;
+    max-width: 600px;
+    height: auto;
+    max-height: calc(100vh - 4rem);
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    /* allow dropdown to overflow */
+}
+
+/* 取引追加モーダル専用のレスポンシブレイアウト */
+.modal-content.transaction-modal {
+    height: calc(100vh - 4rem);
+    max-height: calc(100vh - 4rem);
+    overflow: hidden;
+}
+
+.modal-content.transaction-modal h3 {
+    flex-shrink: 0;
+    margin: 0 0 1rem 0;
+}
+
+.modal-content.transaction-modal form {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.modal-content.transaction-modal .form-container {
+    flex: 1;
+    overflow-y: auto;
+    padding-right: 0.5rem;
+    margin-right: -0.5rem;
+}
+
+/* スクロールバーのスタイリング（Webkit系ブラウザ） */
+.modal-content.transaction-modal .form-container::-webkit-scrollbar {
+    width: 6px;
+}
+
+.modal-content.transaction-modal .form-container::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 3px;
+}
+
+.modal-content.transaction-modal .form-container::-webkit-scrollbar-thumb {
+    background: #c1c1c1;
+    border-radius: 3px;
+}
+
+.modal-content.transaction-modal .form-container::-webkit-scrollbar-thumb:hover {
+    background: #a8a8a8;
+}
+
+.modal-content.transaction-modal .modal-buttons {
+    flex-shrink: 0;
+    margin-top: 1rem;
+}
+
+.modal-content h3 {
+    margin-top: 0;
+    margin-bottom: 1.5rem;
+    color: #333;
+    text-align: center;
+}
+
+.form-row {
+    margin-bottom: 1rem;
+}
+
+/* 取引モーダル内のフォーム行のレスポンシブ調整 */
+.transaction-modal .form-row {
+    margin-bottom: 0.8rem;
+}
+
+.transaction-modal .form-row:last-child {
+    margin-bottom: 0;
+}
+
+.form-row label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 500;
+    color: #333;
+}
+
+.form-row input,
+.form-row select {
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    font-size: 1rem;
+    box-sizing: border-box;
+}
+
+.form-row input:focus,
+.form-row select:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
+}
+
+/* 口座入力グループのスタイル */
+.account-input-group {
+    width: 100%;
+    position: relative;
+}
+
+/* 項目入力グループのスタイル */
+.item-input-group {
+    width: 100%;
+    position: relative;
+}
+
+/* 新しい口座の通知スタイル */
+.new-account-notice {
+    color: #0066cc;
+    font-size: 0.9rem;
+    margin-top: 0.25rem;
+    display: block;
+    font-style: italic;
+}
+
+/* 金額入力フィールドの色分け */
+.amount-input-income {
+    border-color: #28a745 !important;
+    background-color: #f8fff9 !important;
+}
+
+.amount-input-income:focus {
+    border-color: #28a745 !important;
+    box-shadow: 0 0 0 2px rgba(40, 167, 69, 0.2) !important;
+}
+
+.amount-input-expense {
+    border-color: #dc3545 !important;
+    background-color: #fff8f8 !important;
+}
+
+.amount-input-expense:focus {
+    border-color: #dc3545 !important;
+    box-shadow: 0 0 0 2px rgba(220, 53, 69, 0.2) !important;
+}
+
+.radio-group {
+    display: flex;
+    gap: 1rem;
+}
+
+.radio-group label {
+    display: flex;
+    align-items: center;
+    margin-bottom: 0;
+    font-weight: normal;
+    cursor: pointer;
+}
+
+.radio-group input[type="radio"] {
+    width: auto;
+    margin-right: 0.5rem;
+}
+
+.modal-buttons {
+    display: flex;
+    gap: 1rem;
+    justify-content: flex-end;
+    margin-top: 2rem;
+}
+
+.cancel-btn,
+.ok-btn {
+    padding: 0.75rem 1.5rem;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.cancel-btn {
+    background: #f5f5f5;
+    color: #333;
+}
+
+.cancel-btn:hover {
+    background: #e0e0e0;
+}
+
+.ok-btn {
+    background: #667eea;
+    color: white;
+}
+
+.ok-btn:hover {
+    background: #5a6fd8;
+}
+
+/* 削除ボタン（delete-btn）をキャンセル・OKボタンと同じデザイン・サイズで、色だけ赤に */
+.delete-btn {
+    padding: 0.75rem 1.5rem;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    cursor: pointer;
+    background: #ff4d4f;
+    color: #fff;
+    transition: background-color 0.2s;
+    margin-right: 0; /* flex配置なので不要だが念のため */
+}
+
+.delete-btn:hover {
+    background: #d9363e;
+}
+
+/* 資金項目ドロップダウンのスタイル */
+.funditem-input-group {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.funditem-input-group input {
+    flex: 1;
+    padding: 0.75rem;
+    border: 2px solid #ddd;
+    border-radius: 8px;
+    font-size: 1rem;
+    transition: border-color 0.3s ease;
+}
+
+.funditem-input-group input:focus {
+    outline: none;
+    border-color: #667eea;
+}
+
+.dropdown-toggle-btn {
+    position: absolute;
+    right: 8px;
+    background: none;
+    border: none;
+    font-size: 12px;
+    color: #666;
+    cursor: pointer;
+    padding: 4px;
+    transition: color 0.3s ease;
+}
+
+.dropdown-toggle-btn:hover {
+    color: #667eea;
+}
+
+.funditem-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: white;
+    border: 2px solid #ddd;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 1000;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.funditem-dropdown ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.funditem-dropdown li {
+    padding: 0.75rem;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.funditem-dropdown li:last-child {
+    border-bottom: none;
+}
+
+.funditem-dropdown li:hover {
+    background-color: #f8f9fa;
+}
+
+.funditem-dropdown li.selected {
+    background-color: #667eea;
+    color: white;
+}
+
+.funditem-dropdown li.selected:hover {
+    background-color: #5a6fd8;
+}
+
+/* サイドメニューのオーバーレイ */
+.side-menu-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0,0,0,0.2);
+    z-index: 2000;
+    display: flex;
+    align-items: stretch;
+}
+
+/* サイドメニュー本体 */
+.side-menu {
+    width: 260px;
+    background: #fff;
+    height: 100vh;
+    box-shadow: 2px 0 16px rgba(0,0,0,0.15);
+    padding: 2rem 1rem 2rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.2rem;
+    animation: slideInLeft 0.2s;
+    box-sizing: border-box;
+    overflow-y: auto;
+}
+
+@keyframes slideInLeft {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(0); }
+}
+
+.menu-btn {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    border: none;
+    border-radius: 8px;
+    font-size: 1.1rem;
+    background: #f5f5f5;
+    color: #333;
+    cursor: pointer;
+    margin-bottom: 0;
+    transition: background 0.2s;
+}
+.menu-btn:hover {
+    background: #e0e0e0;
+}
+
+/* ログアウトボタンのスタイル */
+.logout-btn {
+    background: linear-gradient(135deg, #f44336 0%, #d32f2f 100%) !important;
+    color: white !important;
+    margin-top: auto; /* メニューの最下部に配置 */
+}
+
+.logout-btn:hover {
+    background: linear-gradient(135deg, #d32f2f 0%, #c62828 100%) !important;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(244, 67, 54, 0.3);
+}
+
+/* 縦三本線メニューアイコン */
+.vertical-menu-icon {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    height: 100%;
+    width: 24px;
+    gap: 6px;
+}
+
+.vertical-menu-icon span {
+    display: block;
+    width: 5px;
+    height: 22px;
+    background: #333;
+    border-radius: 3px;
+    transition: background 0.2s;
+}
+
+.hamburger-menu:hover .vertical-menu-icon span {
+    background: #666;
+}
+
+/* 通常時: Material Iconsのmenu（横三本線） */
+.hamburger-menu .material-icons {
+    font-size: 2.2rem;
+    color: #333;
+    line-height: 1;
+    transition: transform 0.25s cubic-bezier(0.4,0,0.2,1);
+}
+/* サイドメニュー表示時: 90度回転 */
+.hamburger-menu.menu-open .material-icons {
+    transform: rotate(90deg);
+}
+
+/* chevron（三角）アイコンのアニメーション */
+.chevron {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    border-right: 0.22em solid #333;
+    border-bottom: 0.22em solid #333;
+    transform: rotate(45deg); /* ▶（右向き） */
+    transition: transform 0.25s cubic-bezier(0.4,0,0.2,1);
+}
+/* サイドメニュー表示時: 90度回転 */
+.hamburger-menu.menu-open .material-icons {
+    transform: rotate(90deg);
+}
+
+/* chevron（三角）アイコンのアニメーション */
+.chevron {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    border-right: 0.22em solid #333;
+    border-bottom: 0.22em solid #333;
+    transform: rotate(45deg); /* ▶（右向き） */
+    transition: transform 0.25s cubic-bezier(0.4,0,0.2,1);
+}
+/* サイドメニュー表示時: 90度回転 */
+.hamburger-menu.menu-open .material-icons {
+    transform: rotate(90deg);
+}
+
+/* chevron（三角）アイコンのアニメーション */
+.chevron {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    border-right: 0.22em solid #333;
+    border-bottom: 0.22em solid #333;
+    transform: rotate(45deg); /* ▶（右向き） */
+    transition: transform 0.25s cubic-bezier(0.4,0,0.2,1);
+}
+/* サイドメニュー表示時: 90度回転 */
+.hamburger-menu.menu-open .material-icons {
+    transform: rotate(90deg);
+}
+
+/* chevron（三角）アイコンのアニメーション */
+.chevron {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    border-right: 0.22em solid #333;
+    border-bottom: 0.22em solid #333;
+    transform: rotate(45deg); /* ▶（右向き） */
+    transition: transform 0.25s cubic-bezier(0.4,0,0.2,1);
+}
+/* サイドメニュー表示時: 90度回転 */
+.hamburger-menu.menu-open .material-icons {
+    transform: rotate(90deg);
+}
+
+/* chevron-anim（三角Unicode用アニメーション） */
+.chevron-anim {
+    display: inline-block;
+    transition: none;
+}
+.chevron-anim > span {
+    display: inline-block;
+    font-size: 1.1em;
+    line-height: 1;
+    vertical-align: middle;
+    transition: none;
+}
+
+/* ▼に切り替わるときのアニメーション */
+.chevron-anim .chevron-down-enter-active {
+    animation: chevron-down-anim 0.35s ease-in-out;
+}
+@keyframes chevron-down-anim {
+    0% {
+        transform: rotate(0deg) scale(1);
+        opacity: 0.7;
+    }
+    60% {
+        transform: rotate(60deg) scale(1.1);
+        opacity: 1;
+    }
+    100% {
+        transform: rotate(0deg) scale(1);
+        opacity: 1;
+    }
+}
+
+/* ▶に戻るときのアニメーション */
+.chevron-anim .chevron-up-leave-active {
+    animation: chevron-up-anim 0.28s ease-in-out;
+}
+@keyframes chevron-up-anim {
+    0% {
+        transform: rotate(0deg) scale(1);
+        opacity: 1;
+    }
+    100% {
+        transform: rotate(-60deg) scale(0.95);
+        opacity: 0.7;
+    }
+}
+
+/* レスポンシブ対応 */
+@media (max-width: 768px) {
+    body {
+        padding-top: 0.5rem; /* モバイルではさらにパディング削減 */
+        padding-bottom: 0.5rem;
+    }
+    #app {
+        width: 98%;
+        max-width: none; /* モバイルではmax-widthを解除して画面幅に追従 */
+        height: calc(100vh - 1rem); /* モバイル用の高さ調整 */
+        max-height: calc(100vh - 1rem);
+    }
+    .card {
+        padding: 1rem; /* モバイルでのカードパディングをさらに削減 */
+        margin-bottom: 0.5rem; /* モバイルでのカードマージンをさらに削減 */
+    }
+    
+    .header {
+        gap: 0.8rem; /* 縦積み時の要素間のスペースを削減 */
+    }
+
+    .header-top {
+        justify-content: space-between; /* 左右の要素を両端に配置 */
+    }
+
+    .header-add-btn {
+        display: block; /* モバイルでは表示 */
+    }
+    
+    .add-btn-desktop {
+        display: none !important; /* モバイルでは確実に非表示 */
+    }
+
+    .header-search .search-container {
+        width: 100%;
+        max-width: none; /* モバイルでは最大幅制限を解除 */
+    }
+    
+    .balance-section {
+        padding-bottom: 0.8rem; /* モバイルでさらにパディング削減 */
+        margin-bottom: 0.8rem;
+    }
+    
+    .balance-label {
+        font-size: 1rem; /* モバイルでのラベルサイズ調整 */
+    }
+    .balance-amount {
+        font-size: 2rem; /* モバイルでの金額サイズを少し削減 */
+    }
+    .transaction-table th,
+    .transaction-table td {
+        padding: 0.5rem 0.3rem; /* テーブルセルのパディングをさらに削減 */
+        font-size: 0.8rem; /* テーブルフォントを小さく */
+        white-space: nowrap; /* セル内テキストの改行を防ぐ */
+    }
+
+    /* モバイル用取引モーダルの調整 */
+    .modal-content.transaction-modal {
+        width: 98%;
+        max-width: none;
+        height: calc(100vh - 2rem);
+        max-height: calc(100vh - 2rem);
+        padding: 1rem;
+    }
+
+    .transaction-modal .form-row {
+        margin-bottom: 0.6rem;
+    }
+
+    .transaction-modal .form-row label {
+        margin-bottom: 0.3rem;
+        font-size: 0.9rem;
+    }
+
+    .transaction-modal .form-row input,
+    .transaction-modal .form-row select {
+        padding: 0.6rem;
+        font-size: 0.9rem;
+    }
+
+    .transaction-modal .modal-buttons {
+        margin-top: 0.8rem;
+    }
+
+    .transaction-modal .cancel-btn,
+    .transaction-modal .ok-btn,
+    .transaction-modal .delete-btn {
+        padding: 0.6rem 1.2rem;
+        font-size: 0.9rem;
+    }
+}
+
+/* 非常に小さい画面用の調整 */
+@media (max-width: 480px) {
+    body {
+        padding-top: 0.25rem;
+        padding-bottom: 0.25rem;
+    }
+    #app {
+        height: calc(100vh - 0.5rem);
+        max-height: calc(100vh - 0.5rem);
+    }
+    .card {
+        padding: 0.8rem;
+        margin-bottom: 0.3rem;
+    }
+    .header {
+        gap: 0.5rem;
+    }
+    .balance-section {
+        padding-bottom: 0.5rem;
+        margin-bottom: 0.5rem;
+    }
+    .balance-amount {
+        font-size: 1.8rem;
+    }
+    .transaction-table th,
+    .transaction-table td {
+        padding: 0.4rem 0.2rem;
+        font-size: 0.75rem;
+    }
+
+    /* 非常に小さい画面用取引モーダルの調整 */
+    .modal-content.transaction-modal {
+        width: 100%;
+        height: calc(100vh - 1rem);
+        max-height: calc(100vh - 1rem);
+        padding: 0.8rem;
+        border-radius: 10px;
+    }
+
+    .transaction-modal h3 {
+        font-size: 1.1rem;
+        margin-bottom: 0.8rem;
+    }
+
+    .transaction-modal .form-row {
+        margin-bottom: 0.5rem;
+    }
+
+    .transaction-modal .form-row label {
+        margin-bottom: 0.2rem;
+        font-size: 0.85rem;
+    }
+
+    .transaction-modal .form-row input,
+    .transaction-modal .form-row select {
+        padding: 0.5rem;
+        font-size: 0.85rem;
+    }
+
+    .transaction-modal .radio-group label {
+        font-size: 0.85rem;
+    }
+
+    .transaction-modal .new-account-notice {
+        font-size: 0.8rem;
+    }
+
+    .transaction-modal .modal-buttons {
+        margin-top: 0.6rem;
+        gap: 0.5rem;
+    }
+
+    .transaction-modal .cancel-btn,
+    .transaction-modal .ok-btn,
+    .transaction-modal .delete-btn {
+        padding: 0.5rem 1rem;
+        font-size: 0.85rem;
+    }
+}
+
+/* グラフフィルタ用 select の調整 */
+.graph-filter-row select {
+    padding: 4px 8px;
+    min-width: 150px;
+    position: relative;
+    z-index: 1010;
+}
+
+/* チェックボックス付き資金項目選択のスタイル */
+.fund-item-header {
+    padding: 8px;
+    border-bottom: 1px solid #eee;
+    background-color: #f8f9fa;
+}
+
+.toggle-all-btn {
+    background: #007bff;
+    color: white;
+    border: none;
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: background-color 0.2s;
+}
+
+.toggle-all-btn:hover {
+    background: #0056b3;
+}
+
+.fund-item-list {
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+
+.fund-item-checkbox {
+    display: flex;
+    align-items: center;
+    padding: 6px 12px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+    font-size: 0.9rem;
+}
+
+.fund-item-checkbox:hover {
+    background-color: #f0f0f0;
+}
+
+.fund-item-checkbox input[type="checkbox"] {
+    display: none; /* 標準のチェックボックスを非表示にしてカスタムのみ表示 */
+}
+
+.fund-item-name {
+    flex: 1;
+    user-select: none;
+}
+
+/* カスタムチェックボックススタイル */
+.checkmark {
+    position: relative;
+    width: 16px;
+    height: 16px;
+    margin-right: 8px;
+    border: 2px solid #ddd;
+    border-radius: 3px;
+    background-color: white;
+    transition: all 0.2s;
+}
+
+.fund-item-checkbox input[type="checkbox"]:checked + .checkmark {
+    background-color: #007bff;
+    border-color: #007bff;
+}
+
+.fund-item-checkbox input[type="checkbox"]:checked + .checkmark::after {
+    content: '✓';
+    position: absolute;
+    top: -1px;
+    left: 1px;
+    color: white;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+/* 複数選択ドロップダウンのスタイル */
+.multi-select-wrapper {
+    position: relative;
+    min-width: 150px;
+}
+
+.multi-select-button {
+    width: 100%;
+    text-align: left;
+    background: white;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 4px 8px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: border-color 0.2s;
+}
+
+.multi-select-button:hover {
+    border-color: #007bff;
+}
+
+.multi-select-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: white;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    z-index: 1000;
+    margin-top: 2px;
+}
+
+/* グラフモーダル専用のオーバーレイ設定 */
+.modal-overlay {
+    padding: 0.5vh 0.25vw; /* 最小限のパディング */
+}
+.graph-modal-content {
+    max-width: 99.5vw;
+    width: 100vw;
+    min-width: 320px;
+    box-sizing: border-box;
+    margin: 0; /* マージンを削除 */
+}
+.graph-modal-xlarge {
+    max-width: 99.5vw;
+    width: 100vw;
+    min-width: 320px;
+    min-height: 500px;
+    height: 98vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    margin: 0; /* マージンを削除 */
+    padding: 8px 0 4px 0; /* パディングを最小限に */
+}
+.graph-filter-row {
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.graph-scroll-wrapper {
+    width: 100%;
+    max-width: calc(99.5vw - 15px); /* 99.5vw-20pxから99.5vw-15pxに変更 */
+    height: 92vh;
+    max-height: calc(98vh - 70px); /* マージンを調整 */
+    min-height: 350px;
+    overflow-x: auto;
+    overflow-y: auto;
+    background: #f8fafc;
+    border-radius: 8px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+#balanceChart {
+    display: block;
+    width: 100% !important;
+    height: 100% !important;
+    min-width: 800px; /* 600pxから800pxに拡大 */
+    min-height: 300px;
+    max-width: 3000px; /* 2400pxから3000pxに拡大 */
+    max-height: 2000px; /* 1800pxから2000pxに拡大 */
+    margin: 0 auto;
+}
+@media (max-width: 1200px) {
+    .graph-modal-xlarge { max-width: 99.5vw; height: 96vh; }
+    .graph-scroll-wrapper { max-width: calc(99.5vw - 15px); height: 88vh; max-height: calc(96vh - 70px); }
+}
+@media (max-width: 1000px) {
+    .graph-modal-xlarge { max-width: 100vw; height: 95vh; }
+    .graph-scroll-wrapper { max-width: calc(100vw - 15px); height: 85vh; max-height: calc(95vh - 70px); }
+}
+@media (max-width: 900px) {
+    .graph-modal-content, .graph-modal-xlarge { width: 100vw; max-width: 100vw; height: 92vh;}
+    .graph-scroll-wrapper { max-width: calc(100vw - 15px); height: 75vh; min-height: 200px; max-height: calc(92vh - 70px);}
+    #balanceChart { height: 100% !important; }
+}
+@media (max-width: 600px) {
+    .graph-modal-content, .graph-modal-xlarge { width: 100vw; max-width: 100vw; height: 88vh;}
+    .graph-scroll-wrapper { max-width: calc(100vw - 10px); height: 65vh; min-height: 150px; max-height: calc(88vh - 60px);}
+    #balanceChart { height: 100% !important; }
+}
+
+/* CSVインポート用プログレスバーアニメーション */
+@keyframes progress-animation {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+/* CSVインポートモーダル専用スタイル */
+.csv-import-modal .graph-filter-row {
+    margin-bottom: 12px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.csv-import-modal .graph-filter-row label {
+    white-space: nowrap;
+    font-size: 0.95em;
+    font-weight: bold;
+    color: #333;
+    margin-top: 2px;
+}
+
+.csv-import-modal input[type="file"] {
+    width: 100%;
+    padding: 4px 8px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.9em;
+    background: white;
+}
+
+.csv-import-modal input[type="radio"] {
+    margin-right: 6px;
+}
+
+.csv-import-modal .file-info {
+    margin-top: 4px;
+    font-size: 0.85em;
+    color: #666;
+}
+
+.csv-import-modal .format-info {
+    margin-bottom: 12px;
+    padding: 12px;
+    background: rgba(245, 245, 245, 0.8);
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+    font-size: 0.85em;
+    color: #555;
+    line-height: 1.4;
+}
+
+.csv-import-modal .status-area {
+    min-height: 40px;
+    margin-bottom: 12px;
+}
+
+.csv-import-modal .status-message {
+    padding: 10px 12px;
+    border-radius: 6px;
+    font-size: 0.9em;
+}
+
+.csv-import-modal .status-error {
+    background: rgba(248, 215, 218, 0.9);
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+}
+
+.csv-import-modal .status-success {
+    background: rgba(212, 237, 218, 0.9);
+    color: #155724;
+    border: 1px solid #c3e6cb;
+}
+
+.csv-import-modal .progress-bar {
+    width: 100%;
+    height: 6px;
+    background: rgba(240, 240, 240, 0.8);
+    border-radius: 3px;
+    overflow: hidden;
+    border: 1px solid #e0e0e0;
+}
+
+/* レスポンシブ対応 */
+@media (max-width: 768px) {
+    .csv-import-modal .graph-filter-row {
+        flex-direction: column;
+        gap: 6px;
+    }
+    
+    .csv-import-modal .graph-filter-row label {
+        white-space: normal;
+        font-size: 0.9em;
+        margin-bottom: 4px;
+    }
+    
+    .csv-import-modal .format-info {
+        padding: 10px;
+        font-size: 0.8em;
+    }
+    
+    .csv-import-modal input[type="file"] {
+        font-size: 0.85em;
+    }
+}
+
+@media (max-width: 480px) {
+    .csv-import-modal .graph-filter-row {
+        gap: 4px;
+    }
+    
+    .csv-import-modal .format-info {
+        padding: 8px;
+        margin-bottom: 10px;
+    }
+    
+    .csv-import-modal .status-area {
+        min-height: 35px;
+        margin-bottom: 10px;
+    }
+}
