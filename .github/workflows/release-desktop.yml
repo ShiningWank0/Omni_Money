@@ -78,7 +78,12 @@ jobs:
         if: steps.check_release.outputs.exists == 'false'
         shell: bash
         run: |
+          TAGS=""
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            TAGS="-tags webkit2_41"
+          fi
           wails build -platform ${{ matrix.platform }} \
+            $TAGS \
             -ldflags "-X main.version=${{ env.APP_VERSION }}"
 
       # macOSの場合: .appバンドルをzip圧縮
