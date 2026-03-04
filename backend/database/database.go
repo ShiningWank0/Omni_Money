@@ -1,0 +1,276 @@
+// Package database はSQLite接続、初期化、スナップショット機能を提供する
+package database
+
+import (
+	"database/sql"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+)
+
+var (
+	db     *sql.DB
+	dbPath string
+	mu     sync.RWMutex
+)
+
+// InitDB はSQLiteデータベースを初期化する。
+// wails build でバインディング生成時にも呼ばれるため、sync.Once は使わない。
+// 既に接続がある場合はまず閉じてから再接続する。
+func InitDB(path string) error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	// 既存の接続があればまず閉じる
+	if db != nil {
+		db.Close()
+		db = nil
+	}
+
+	if path == "" {
+		path = "omni_money.db"
+	}
+	dbPath = path
+
+	// データベースディレクトリが存在しない場合は作成
+	dir := filepath.Dir(path)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("データベースディレクトリ作成エラー: %w", err)
+		}
+	}
+
+	var err error
+	db, err = sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON")
+	if err != nil {
+		return fmt.Errorf("データベース接続エラー: %w", err)
+	}
+
+	// 接続テスト
+	if err := db.Ping(); err != nil {
+		return fmt.Errorf("データベースping失敗: %w", err)
+	}
+
+	// テーブル作成
+	if err := createTables(); err != nil {
+		return fmt.Errorf("テーブル作成エラー: %w", err)
+	}
+
+	log.Printf("データベース初期化完了: %s", path)
+	return nil
+}
+
+// GetDB はデータベース接続を返す
+func GetDB() *sql.DB {
+	mu.RLock()
+	defer mu.RUnlock()
+	return db
+}
+
+// CloseDB はデータベース接続を閉じる
+func CloseDB() {
+	mu.Lock()
+	defer mu.Unlock()
+	if db != nil {
+		db.Close()
+		db = nil
+		log.Println("データベース接続を閉じました")
+	}
+}
+
+// createTables はデータベーステーブルを作成する
+func createTables() error {
+	statements := []string{
+		// 取引テーブル
+		`CREATE TABLE IF NOT EXISTS transactions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account TEXT NOT NULL,
+			date DATETIME NOT NULL,
+			item TEXT NOT NULL,
+			type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
+			amount INTEGER NOT NULL,
+			balance INTEGER NOT NULL DEFAULT 0,
+			memo TEXT DEFAULT ''
+		)`,
+		// 取引紐付けテーブル
+		`CREATE TABLE IF NOT EXISTS transaction_links (
+			parent_id INTEGER NOT NULL,
+			child_id INTEGER NOT NULL,
+			PRIMARY KEY (parent_id, child_id),
+			FOREIGN KEY (parent_id) REFERENCES transactions(id) ON DELETE CASCADE,
+			FOREIGN KEY (child_id) REFERENCES transactions(id) ON DELETE CASCADE
+		)`,
+		// 設定テーブル
+		`CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL DEFAULT ''
+		)`,
+		// インデックス
+		`CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account)`,
+		`CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date)`,
+		`CREATE INDEX IF NOT EXISTS idx_transactions_item ON transactions(item)`,
+	}
+
+	for _, stmt := range statements {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("SQL実行エラー (%s): %w", stmt[:50], err)
+		}
+	}
+
+	return nil
+}
+
+// --- スナップショット機能 (Agent.md §6.2) ---
+
+// CreateSnapshot は現在のDBファイルのスナップショットを作成する。
+// snapshotDir にタイムスタンプ付きのコピーを保存する。
+func CreateSnapshot(snapshotDir string) (string, error) {
+	mu.RLock()
+	currentPath := dbPath
+	mu.RUnlock()
+
+	if currentPath == "" {
+		return "", fmt.Errorf("データベースが初期化されていません")
+	}
+
+	if snapshotDir == "" {
+		snapshotDir = "snapshots"
+	}
+
+	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+		return "", fmt.Errorf("スナップショットディレクトリ作成エラー: %w", err)
+	}
+
+	timestamp := time.Now().Format("20060102_150405")
+	snapshotPath := filepath.Join(snapshotDir, fmt.Sprintf("omni_money_%s.db", timestamp))
+
+	// ファイルコピー
+	if err := copyFile(currentPath, snapshotPath); err != nil {
+		return "", fmt.Errorf("スナップショット作成エラー: %w", err)
+	}
+
+	log.Printf("スナップショット作成完了: %s", snapshotPath)
+	return snapshotPath, nil
+}
+
+// ListSnapshots は利用可能なスナップショットのリストを返す
+func ListSnapshots(snapshotDir string) ([]string, error) {
+	if snapshotDir == "" {
+		snapshotDir = "snapshots"
+	}
+
+	entries, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, fmt.Errorf("スナップショット一覧取得エラー: %w", err)
+	}
+
+	var snapshots []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".db") {
+			snapshots = append(snapshots, entry.Name())
+		}
+	}
+	sort.Strings(snapshots)
+	return snapshots, nil
+}
+
+// RestoreSnapshot はスナップショットからDBを復元する
+func RestoreSnapshot(snapshotDir, snapshotName string) error {
+	if snapshotDir == "" {
+		snapshotDir = "snapshots"
+	}
+
+	snapshotPath := filepath.Join(snapshotDir, snapshotName)
+	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
+		return fmt.Errorf("スナップショットが見つかりません: %s", snapshotName)
+	}
+
+	mu.Lock()
+	currentPath := dbPath
+	// DBを一旦閉じる
+	if db != nil {
+		db.Close()
+		db = nil
+	}
+	mu.Unlock()
+
+	// スナップショットで上書き
+	if err := copyFile(snapshotPath, currentPath); err != nil {
+		// 復元失敗時も再接続を試みる
+		InitDB(currentPath)
+		return fmt.Errorf("スナップショット復元エラー: %w", err)
+	}
+
+	// 再接続
+	if err := InitDB(currentPath); err != nil {
+		return fmt.Errorf("復元後のDB再接続エラー: %w", err)
+	}
+
+	log.Printf("スナップショット復元完了: %s", snapshotName)
+	return nil
+}
+
+// CleanOldSnapshots は古いスナップショットを削除する（世代管理）
+func CleanOldSnapshots(snapshotDir string, keepDays int) error {
+	if snapshotDir == "" {
+		snapshotDir = "snapshots"
+	}
+	if keepDays <= 0 {
+		keepDays = 30
+	}
+
+	entries, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("スナップショット一覧取得エラー: %w", err)
+	}
+
+	cutoff := time.Now().AddDate(0, 0, -keepDays)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".db") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			os.Remove(filepath.Join(snapshotDir, entry.Name()))
+			log.Printf("古いスナップショットを削除: %s", entry.Name())
+		}
+	}
+	return nil
+}
+
+// copyFile はファイルをコピーする
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
+}
