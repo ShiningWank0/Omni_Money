@@ -10,7 +10,50 @@ permissions:
   packages: write
 
 jobs:
-  build-and-push:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version and repository
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "REPO_LC=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (single platform)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: ${{ matrix.platform }}
+          tags: ghcr.io/${{ env.REPO_LC }}:${{ env.APP_VERSION }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          build-args: VERSION=${{ env.APP_VERSION }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+  manifest:
+    needs: build
     runs-on: ubuntu-latest
 
     steps:
@@ -23,46 +66,26 @@ jobs:
           echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
           echo "REPO_LC=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
-      - name: Check if image already exists
-        id: check_image
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          IMAGE="ghcr.io/${{ env.REPO_LC }}"
-          TAG="${{ env.APP_VERSION }}"
-          if docker manifest inspect "${IMAGE}:${TAG}" > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Set up QEMU (マルチアーキテクチャ対応)
-        if: steps.check_image.outputs.exists == 'false'
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        if: steps.check_image.outputs.exists == 'false'
-        uses: docker/setup-buildx-action@v3
-
       - name: Login to GitHub Container Registry
-        if: steps.check_image.outputs.exists == 'false'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
-        if: steps.check_image.outputs.exists == 'false'
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/${{ env.REPO_LC }}:${{ env.APP_VERSION }}
-            ghcr.io/${{ env.REPO_LC }}:latest
-          build-args: |
-            VERSION=${{ env.APP_VERSION }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create and push multi-arch manifest
+        run: |
+          IMAGE="ghcr.io/${{ env.REPO_LC }}"
+          VERSION="${{ env.APP_VERSION }}"
+
+          # バージョンタグのマニフェスト作成
+          docker manifest create "${IMAGE}:${VERSION}" \
+            "${IMAGE}:${VERSION}-amd64" \
+            "${IMAGE}:${VERSION}-arm64"
+          docker manifest push "${IMAGE}:${VERSION}"
+
+          # latestタグのマニフェスト作成
+          docker manifest create "${IMAGE}:latest" \
+            "${IMAGE}:${VERSION}-amd64" \
+            "${IMAGE}:${VERSION}-arm64"
+          docker manifest push "${IMAGE}:latest"

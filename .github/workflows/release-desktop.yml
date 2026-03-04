@@ -86,11 +86,12 @@ jobs:
             $TAGS \
             -ldflags "-X main.version=${{ env.APP_VERSION }}"
 
-      # macOSの場合: .appバンドルをzip圧縮
+      # macOSの場合: ad-hoc署名 + zip圧縮
       - name: Package macOS app
         if: runner.os == 'macOS' && steps.check_release.outputs.exists == 'false'
         run: |
           cd build/bin
+          codesign --force --deep -s - "Omni Money.app"
           zip -r ../../${{ matrix.artifact_name }}-v${{ env.APP_VERSION }}.zip "Omni Money.app"
 
       # Linuxの場合: バイナリをtar.gz圧縮
