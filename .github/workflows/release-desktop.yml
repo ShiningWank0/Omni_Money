@@ -14,8 +14,11 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            platform: darwin/universal
-            artifact_name: omni-money-macos
+            platform: darwin/arm64
+            artifact_name: omni-money-macos-arm64
+          - os: macos-latest
+            platform: darwin/amd64
+            artifact_name: omni-money-macos-amd64
           - os: windows-latest
             platform: windows/amd64
             artifact_name: omni-money-windows
@@ -68,8 +71,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 
-      # macOS: Xcode CLT は actions/setup-go で自動設定済み
-
       - name: Install Wails CLI
         if: steps.check_release.outputs.exists == 'false'
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
@@ -86,13 +87,13 @@ jobs:
             $TAGS \
             -ldflags "-X main.version=${{ env.APP_VERSION }}"
 
-      # macOSの場合: ad-hoc署名 + zip圧縮
+      # macOSの場合: ad-hoc署名 + dittoでシンボリックリンク保持ZIP
       - name: Package macOS app
         if: runner.os == 'macOS' && steps.check_release.outputs.exists == 'false'
         run: |
           cd build/bin
           codesign --force --deep -s - "Omni Money.app"
-          zip -r ../../${{ matrix.artifact_name }}-v${{ env.APP_VERSION }}.zip "Omni Money.app"
+          ditto -c -k --sequesterRsrc --keepParent "Omni Money.app" "../../${{ matrix.artifact_name }}-v${{ env.APP_VERSION }}.zip"
 
       # Linuxの場合: バイナリをtar.gz圧縮
       - name: Package Linux app
@@ -157,9 +158,16 @@ jobs:
             ## Omni Money v${{ env.APP_VERSION }}
 
             ### ダウンロード
-            - **macOS**: `omni-money-macos-v${{ env.APP_VERSION }}.zip`
+            - **macOS (Apple Silicon)**: `omni-money-macos-arm64-v${{ env.APP_VERSION }}.zip`
+            - **macOS (Intel)**: `omni-money-macos-amd64-v${{ env.APP_VERSION }}.zip`
             - **Windows**: `omni-money-windows-v${{ env.APP_VERSION }}.zip`
             - **Linux**: `omni-money-linux-v${{ env.APP_VERSION }}.tar.gz`
+
+            ### macOS で初回起動する場合
+            zipを解凍後、ターミナルで以下を実行してから起動してください：
+            ```bash
+            xattr -cr "Omni Money.app"
+            ```
 
             ### Docker
             ```bash
