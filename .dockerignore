@@ -1,0 +1,35 @@
+# ビルド成果物
+build/
+*.app
+*.exe
+
+# 開発用ファイル
+.git
+.github
+.gitignore
+*.md
+!README.md
+
+# ランタイムデータ
+*.db
+snapshots/
+
+# IDE
+.vscode/
+.idea/
+
+# Node.js（frontend stageで独自にinstallする）
+frontend/node_modules/
+frontend/dist/
+
+# Go ビルドキャッシュ
+vendor/
+
+# OS関連
+.DS_Store
+Thumbs.db
+
+# Wails関連（サーバーモードでは不要）
+wails.json
+main.go
+app.go

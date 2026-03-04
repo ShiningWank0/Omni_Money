@@ -11,6 +11,9 @@ import (
 	"omni_money/backend/database"
 )
 
+// version はCI/CDビルド時に -ldflags で埋め込まれる（§8.3準拠）
+var version = "dev"
+
 func main() {
 	// データベースの初期化
 	dbPath := os.Getenv("DB_PATH")
@@ -36,7 +39,7 @@ func main() {
 	}
 
 	addr := host + ":" + port
-	log.Printf("Omni Money サーバーモード起動: %s", addr)
+	log.Printf("Omni Money v%s サーバーモード起動: %s", version, addr)
 	if err := http.ListenAndServe(addr, router); err != nil {
 		log.Fatalf("サーバー停止: %v", err)
 	}
