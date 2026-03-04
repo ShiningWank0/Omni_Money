@@ -112,6 +112,86 @@ AIエージェントが外部から記帳を自動化するためのAPI（例: `
 
 * **厳格な権限管理**: AI用の静的な認証鍵（トークン）を発行し、この認証鍵を用いた接続では「新規追加（POST）」のみを許可する。既存データの「読み込み・変更・削除」が要求された場合は、中間処理（ミドルウェア）で即座に遮断（HTTP 403）すること。
 
+### 6.4. セキュリティ・認証基盤（サーバーモード外部公開対応）
+
+本アプリケーションは将来的に独自ドメインを取得し、自宅サーバーから外部ネットワーク（インターネット）へ公開することを前提とする。そのため、サーバーモード（Docker / Headless）において以下のセキュリティ機能を `backend/middleware/` に実装すること。デスクトップアプリモード（Wails）ではこれらの機能は不要であり、サーバーモードのみに適用すること。
+
+#### 6.4.1. ユーザー認証とセッション管理
+
+旧アプリ（`legacy_reference/auth.py`）の認証機能を移植・強化し、サーバーモードの全APIエンドポイント（AI用APIを除く）に認証を必須とする。
+
+* **認証方式**: セッションベース認証を基本とする。Cookieにセッション識別子を格納し、サーバー側でセッション状態を管理する。
+* **パスワード**: bcryptハッシュにより保管すること。平文での保存は絶対に行わない。パスワードの初期設定は環境変数 `AUTH_PASSWORD_HASH` で bcrypt ハッシュ値を渡す形とする。
+* **ログイン試行制限**: 同一IPアドレスからのログイン試行を制限する。5回連続失敗で15分間のロックアウトを実施すること（旧アプリの `check_login_attempts` / `record_login_attempt` の移植）。
+* **セッション有効期限**: セッションにはサーバー側で有効期限を設定する（既定: 24時間）。期限切れのセッションは自動で無効化すること。環境変数 `SESSION_MAX_AGE_HOURS` で調整可能とする。
+* **認証不要の例外パス**:
+  - `POST /api/auth/login` — ログイン処理自体
+  - `GET /api/auth/status` — 認証状態の確認
+  - `POST /api/v1/ai/transactions` — AI用APIは独自のトークン認証で保護されているため、セッション認証の対象外とする
+  - `GET /` および静的ファイル（`/assets/*` 等） — フロントエンドの配信
+
+* **実装の技術的詳細**:
+  - `backend/middleware/session.go` にセッション管理ミドルウェアを実装する。
+  - セッション格納先はインメモリの `sync.Map` を使用する（SQLiteへの永続化は不要）。
+  - セッション識別子は `crypto/rand` で生成した32バイト以上のランダム値を16進数文字列に変換して使用する。
+  - Cookie属性: `HttpOnly: true`, `SameSite: Strict`, `Secure: true`（HTTPS環境下）, `Path: /`。
+  - `backend/middleware/auth_session.go` にログイン試行制限ロジックを実装する。
+  - `backend/api/auth_routes.go` にログイン・ログアウト・認証状態確認のルートを実装する。
+  - フロントエンド側に `frontend/src/views/LoginView.vue` ログイン画面を追加し、未認証時にリダイレクトする処理を `frontend/src/utils/api.js` に追加する。ログイン画面のCSSは既存の `style.css` のモーダルデザインに準拠すること。
+
+#### 6.4.2. HTTPS / TLS およびリバースプロキシ対応
+
+外部公開時はリバースプロキシ（Nginx, Caddy等）の背後で動作し、TLS終端はリバースプロキシ側で行うことを前提とする。
+
+* **リバースプロキシ信頼ヘッダー**: `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Real-IP` ヘッダーを信頼して処理する。ただし、リバースプロキシからのリクエストであることを確認するため、信頼するプロキシIPアドレスを環境変数 `TRUSTED_PROXIES`（カンマ区切り、例: `127.0.0.1,::1,192.168.1.0/24`）で指定可能とする。
+* **HTTPS強制リダイレクト**: 環境変数 `FORCE_HTTPS=true` が設定されている場合、`X-Forwarded-Proto` が `http` のリクエストを `https` にリダイレクト（HTTP 301）する。
+* **Go側でのTLS直接終端**: リバースプロキシなしで直接TLSを終端する場合に備え、環境変数 `TLS_CERT_FILE` と `TLS_KEY_FILE` が指定されていれば `http.ListenAndServeTLS` で起動する機能を `server.go` に追加する。
+* **実装の技術的詳細**:
+  - `backend/middleware/proxy.go` にリバースプロキシ信頼ヘッダー処理とHTTPSリダイレクトミドルウェアを実装する。
+  - `server.go` の起動処理で TLS_CERT_FILE / TLS_KEY_FILE の有無を確認し、存在すれば `ListenAndServeTLS` を使用する分岐を追加する。
+
+#### 6.4.3. レート制限（Rate Limiting）
+
+外部公開時のブルートフォース攻撃やDoS攻撃を緩和するため、APIエンドポイントにレート制限を実装する。
+
+* **全体レート制限**: 同一IPアドレスからのリクエストを1分間あたり最大120回に制限する。超過した場合は HTTP 429（Too Many Requests）を返す。
+* **ログインエンドポイント強化**: `POST /api/auth/login` は1分間あたり最大10回に制限する。
+* **AI APIレート制限**: `/api/v1/ai/transactions` は1分間あたり最大30回に制限する。
+* **実装の技術的詳細**:
+  - `backend/middleware/ratelimit.go` にトークンバケットアルゴリズムまたはスライディングウィンドウ方式のレート制限ミドルウェアを実装する。
+  - IPアドレスごとにリクエスト数をインメモリで管理し、古いエントリは自動でGC（ガベージコレクション）する。
+  - `golang.org/x/time/rate` パッケージの `rate.Limiter` を活用してもよい。
+  - レスポンスヘッダーに `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` を含める。
+
+#### 6.4.4. セキュリティヘッダーとCORS
+
+* **セキュリティヘッダー**: 全レスポンスに以下のHTTPヘッダーを付与するミドルウェアを `backend/middleware/security.go` に実装する。
+  - `X-Content-Type-Options: nosniff`
+  - `X-Frame-Options: DENY`
+  - `X-XSS-Protection: 1; mode=block`
+  - `Referrer-Policy: strict-origin-when-cross-origin`
+  - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:`
+* **CORS（オリジン間リソース共有）**: サーバーモードでは同一オリジンからのアクセスが基本となるが、開発時やリバースプロキシ経由での別ドメインからのアクセスに対応するため、環境変数 `CORS_ALLOWED_ORIGINS`（カンマ区切り、例: `https://money.example.com,http://localhost:5173`）で許可オリジンを設定可能とする。未設定時は同一オリジンのみ許可とすること。ワイルドカード `*` は認証付きAPIでは使用禁止とする。
+
+#### 6.4.5. サーバーモード起動時の環境変数一覧
+
+以下の環境変数でサーバーモードの動作を制御できるようにすること。
+
+| 環境変数 | 必須 | 既定値 | 説明 |
+|---------|------|--------|------|
+| `DB_PATH` | 任意 | `omni_money.db` | SQLiteデータベースファイルのパス |
+| `HOST_IP` | 任意 | `0.0.0.0` | 待受アドレス |
+| `PORT` | 任意 | `4000` | 待受ポート |
+| `AUTH_PASSWORD_HASH` | サーバーモード時必須 | なし | ログインパスワードのbcryptハッシュ |
+| `SESSION_MAX_AGE_HOURS` | 任意 | `24` | セッション有効期間（時間） |
+| `AI_API_TOKEN` | 任意 | なし | AI用APIの認証トークン |
+| `TRUSTED_PROXIES` | 任意 | なし | 信頼するプロキシIP（カンマ区切り） |
+| `FORCE_HTTPS` | 任意 | `false` | HTTPSリダイレクトの有効化 |
+| `TLS_CERT_FILE` | 任意 | なし | TLS証明書ファイルパス |
+| `TLS_KEY_FILE` | 任意 | なし | TLS秘密鍵ファイルパス |
+| `CORS_ALLOWED_ORIGINS` | 任意 | なし | 許可オリジン（カンマ区切り） |
+
+
 ## 7. データベース設計（SQLite）
 
 既存の構成を拡張し、以下の構造体（テーブル）を実装すること。
@@ -185,4 +265,5 @@ AIエージェントが外部から記帳を自動化するためのAPI（例: `
 * **ステップ6**: AI用API、自動状態保存機能などの付加機能の実装。
 * **ステップ7**: サーバー単独稼働用のコンテナ定義（`Dockerfile`）の作成およびサーバーモード起動処理（`server.go`）の整備。
 * **ステップ8**: GitHub Actionsを用いた自動構築（CI/CD）定義ファイルの作成。
+* **ステップ9**: セキュリティ・認証基盤の実装。§6.4 に基づき、セッション認証、レート制限、セキュリティヘッダー、リバースプロキシ対応を `backend/middleware/` に実装し、`server.go` およびフロントエンドに統合する。
 
