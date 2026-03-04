@@ -73,19 +73,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Create and push multi-arch manifest
         run: |
           IMAGE="ghcr.io/${{ env.REPO_LC }}"
           VERSION="${{ env.APP_VERSION }}"
 
-          # バージョンタグのマニフェスト作成
-          docker manifest create "${IMAGE}:${VERSION}" \
+          # buildx imagetools はOCI image index（Buildxが生成する形式）を正しく処理できる
+          docker buildx imagetools create -t "${IMAGE}:${VERSION}" \
             "${IMAGE}:${VERSION}-amd64" \
             "${IMAGE}:${VERSION}-arm64"
-          docker manifest push "${IMAGE}:${VERSION}"
 
-          # latestタグのマニフェスト作成
-          docker manifest create "${IMAGE}:latest" \
+          docker buildx imagetools create -t "${IMAGE}:latest" \
             "${IMAGE}:${VERSION}-amd64" \
             "${IMAGE}:${VERSION}-arm64"
-          docker manifest push "${IMAGE}:latest"
