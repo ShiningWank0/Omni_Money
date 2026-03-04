@@ -6,6 +6,8 @@ export function AddTransaction(arg1:models.TransactionRequest):Promise<models.Tr
 
 export function BackupToCSV():Promise<string>;
 
+export function CreateSnapshot():Promise<string>;
+
 export function DeleteTransaction(arg1:number):Promise<void>;
 
 export function GetAccounts():Promise<Array<string>>;
@@ -23,6 +25,10 @@ export function GetTransactions(arg1:string,arg2:string):Promise<Array<models.Tr
 export function Greet(arg1:string):Promise<string>;
 
 export function ImportCSV(arg1:string,arg2:string):Promise<number>;
+
+export function ListSnapshots():Promise<Array<string>>;
+
+export function RestoreSnapshot(arg1:string):Promise<void>;
 
 export function SaveCreditCardSettings(arg1:Array<string>):Promise<void>;
 

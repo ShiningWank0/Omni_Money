@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"omni_money/backend/core"
+	"omni_money/backend/database"
 	"omni_money/backend/models"
 )
 
@@ -93,6 +94,23 @@ func (a *App) BackupToCSV() (string, error) {
 // ImportCSV はCSVファイルからデータをインポートする
 func (a *App) ImportCSV(content string, mode string) (int, error) {
 	return core.ImportCSV(content, mode)
+}
+
+// --- スナップショット関連 ---
+
+// CreateSnapshot はデータベースのスナップショットを作成する
+func (a *App) CreateSnapshot() (string, error) {
+	return database.CreateSnapshot("")
+}
+
+// ListSnapshots はスナップショットの一覧を返す
+func (a *App) ListSnapshots() ([]string, error) {
+	return database.ListSnapshots("")
+}
+
+// RestoreSnapshot はスナップショットからデータベースを復元する
+func (a *App) RestoreSnapshot(name string) error {
+	return database.RestoreSnapshot("", name)
 }
 
 // Greet は挨拶を返す（テスト用）
