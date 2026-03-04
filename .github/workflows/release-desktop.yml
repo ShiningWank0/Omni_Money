@@ -87,12 +87,12 @@ jobs:
             $TAGS \
             -ldflags "-X main.version=${{ env.APP_VERSION }}"
 
-      # macOSの場合: ad-hoc署名 → 検証 → dittoでバンドル構造保持ZIP
+      # macOSの場合: ad-hoc署名(hardened runtime + entitlements) → 検証 → dittoでバンドル構造保持ZIP
       - name: Package macOS app
         if: runner.os == 'macOS' && steps.check_release.outputs.exists == 'false'
         run: |
           cd build/bin
-          codesign --force --deep -s - "Omni Money.app"
+          codesign --force --deep --options runtime --entitlements ../../build/darwin/entitlements.plist -s - "Omni Money.app"
           codesign --verify --strict "Omni Money.app"
           ditto -c -k --sequesterRsrc --keepParent "Omni Money.app" "../../${{ matrix.artifact_name }}-v${{ env.APP_VERSION }}.zip"
 
