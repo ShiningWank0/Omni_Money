@@ -61,12 +61,12 @@ jobs:
         with:
           node-version: '20'
 
-      # Linux: WebKitGTK 依存パッケージ
+      # Linux: WebKitGTK 依存パッケージ（Ubuntu 24.04+ は 4.1）
       - name: Install Linux dependencies
         if: runner.os == 'Linux' && steps.check_release.outputs.exists == 'false'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 
       # macOS: Xcode CLT は actions/setup-go で自動設定済み
 
