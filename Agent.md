@@ -58,6 +58,7 @@
 ├── legacy_reference/      # 【参照専用】旧アプリのソースコード（ここから既存の仕様を解析する）
 ├── build/                 # Wails用のアイコン等 構築用資材
 ├── Dockerfile             # サーバーモード用のコンテナ定義
+├── VERSION                # アプリバージョン（セマンティックバージョニング、CI/CDトリガー）
 ├── main.go                # Wailsアプリ用の起動地点
 ├── server.go              # サーバーモード（Docker）用の起動地点
 ├── wails.json             # Wails設定ファイル
@@ -112,6 +113,86 @@ AIエージェントが外部から記帳を自動化するためのAPI（例: `
 
 * **厳格な権限管理**: AI用の静的な認証鍵（トークン）を発行し、この認証鍵を用いた接続では「新規追加（POST）」のみを許可する。既存データの「読み込み・変更・削除」が要求された場合は、中間処理（ミドルウェア）で即座に遮断（HTTP 403）すること。
 
+### 6.4. セキュリティ・認証基盤（サーバーモード外部公開対応）
+
+本アプリケーションは将来的に独自ドメインを取得し、自宅サーバーから外部ネットワーク（インターネット）へ公開することを前提とする。そのため、サーバーモード（Docker / Headless）において以下のセキュリティ機能を `backend/middleware/` に実装すること。デスクトップアプリモード（Wails）ではこれらの機能は不要であり、サーバーモードのみに適用すること。
+
+#### 6.4.1. ユーザー認証とセッション管理
+
+旧アプリ（`legacy_reference/auth.py`）の認証機能を移植・強化し、サーバーモードの全APIエンドポイント（AI用APIを除く）に認証を必須とする。
+
+* **認証方式**: セッションベース認証を基本とする。Cookieにセッション識別子を格納し、サーバー側でセッション状態を管理する。
+* **パスワード**: bcryptハッシュにより保管すること。平文での保存は絶対に行わない。パスワードの初期設定は環境変数 `AUTH_PASSWORD_HASH` で bcrypt ハッシュ値を渡す形とする。
+* **ログイン試行制限**: 同一IPアドレスからのログイン試行を制限する。5回連続失敗で15分間のロックアウトを実施すること（旧アプリの `check_login_attempts` / `record_login_attempt` の移植）。
+* **セッション有効期限**: セッションにはサーバー側で有効期限を設定する（既定: 24時間）。期限切れのセッションは自動で無効化すること。環境変数 `SESSION_MAX_AGE_HOURS` で調整可能とする。
+* **認証不要の例外パス**:
+  - `POST /api/auth/login` — ログイン処理自体
+  - `GET /api/auth/status` — 認証状態の確認
+  - `POST /api/v1/ai/transactions` — AI用APIは独自のトークン認証で保護されているため、セッション認証の対象外とする
+  - `GET /` および静的ファイル（`/assets/*` 等） — フロントエンドの配信
+
+* **実装の技術的詳細**:
+  - `backend/middleware/session.go` にセッション管理ミドルウェアを実装する。
+  - セッション格納先はインメモリの `sync.Map` を使用する（SQLiteへの永続化は不要）。
+  - セッション識別子は `crypto/rand` で生成した32バイト以上のランダム値を16進数文字列に変換して使用する。
+  - Cookie属性: `HttpOnly: true`, `SameSite: Strict`, `Secure: true`（HTTPS環境下）, `Path: /`。
+  - `backend/middleware/auth_session.go` にログイン試行制限ロジックを実装する。
+  - `backend/api/auth_routes.go` にログイン・ログアウト・認証状態確認のルートを実装する。
+  - フロントエンド側に `frontend/src/views/LoginView.vue` ログイン画面を追加し、未認証時にリダイレクトする処理を `frontend/src/utils/api.js` に追加する。ログイン画面のCSSは既存の `style.css` のモーダルデザインに準拠すること。
+
+#### 6.4.2. HTTPS / TLS およびリバースプロキシ対応
+
+外部公開時はリバースプロキシ（Nginx, Caddy等）の背後で動作し、TLS終端はリバースプロキシ側で行うことを前提とする。
+
+* **リバースプロキシ信頼ヘッダー**: `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Real-IP` ヘッダーを信頼して処理する。ただし、リバースプロキシからのリクエストであることを確認するため、信頼するプロキシIPアドレスを環境変数 `TRUSTED_PROXIES`（カンマ区切り、例: `127.0.0.1,::1,192.168.1.0/24`）で指定可能とする。
+* **HTTPS強制リダイレクト**: 環境変数 `FORCE_HTTPS=true` が設定されている場合、`X-Forwarded-Proto` が `http` のリクエストを `https` にリダイレクト（HTTP 301）する。
+* **Go側でのTLS直接終端**: リバースプロキシなしで直接TLSを終端する場合に備え、環境変数 `TLS_CERT_FILE` と `TLS_KEY_FILE` が指定されていれば `http.ListenAndServeTLS` で起動する機能を `server.go` に追加する。
+* **実装の技術的詳細**:
+  - `backend/middleware/proxy.go` にリバースプロキシ信頼ヘッダー処理とHTTPSリダイレクトミドルウェアを実装する。
+  - `server.go` の起動処理で TLS_CERT_FILE / TLS_KEY_FILE の有無を確認し、存在すれば `ListenAndServeTLS` を使用する分岐を追加する。
+
+#### 6.4.3. レート制限（Rate Limiting）
+
+外部公開時のブルートフォース攻撃やDoS攻撃を緩和するため、APIエンドポイントにレート制限を実装する。
+
+* **全体レート制限**: 同一IPアドレスからのリクエストを1分間あたり最大120回に制限する。超過した場合は HTTP 429（Too Many Requests）を返す。
+* **ログインエンドポイント強化**: `POST /api/auth/login` は1分間あたり最大10回に制限する。
+* **AI APIレート制限**: `/api/v1/ai/transactions` は1分間あたり最大30回に制限する。
+* **実装の技術的詳細**:
+  - `backend/middleware/ratelimit.go` にトークンバケットアルゴリズムまたはスライディングウィンドウ方式のレート制限ミドルウェアを実装する。
+  - IPアドレスごとにリクエスト数をインメモリで管理し、古いエントリは自動でGC（ガベージコレクション）する。
+  - `golang.org/x/time/rate` パッケージの `rate.Limiter` を活用してもよい。
+  - レスポンスヘッダーに `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` を含める。
+
+#### 6.4.4. セキュリティヘッダーとCORS
+
+* **セキュリティヘッダー**: 全レスポンスに以下のHTTPヘッダーを付与するミドルウェアを `backend/middleware/security.go` に実装する。
+  - `X-Content-Type-Options: nosniff`
+  - `X-Frame-Options: DENY`
+  - `X-XSS-Protection: 1; mode=block`
+  - `Referrer-Policy: strict-origin-when-cross-origin`
+  - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:`
+* **CORS（オリジン間リソース共有）**: サーバーモードでは同一オリジンからのアクセスが基本となるが、開発時やリバースプロキシ経由での別ドメインからのアクセスに対応するため、環境変数 `CORS_ALLOWED_ORIGINS`（カンマ区切り、例: `https://money.example.com,http://localhost:5173`）で許可オリジンを設定可能とする。未設定時は同一オリジンのみ許可とすること。ワイルドカード `*` は認証付きAPIでは使用禁止とする。
+
+#### 6.4.5. サーバーモード起動時の環境変数一覧
+
+以下の環境変数でサーバーモードの動作を制御できるようにすること。
+
+| 環境変数 | 必須 | 既定値 | 説明 |
+|---------|------|--------|------|
+| `DB_PATH` | 任意 | `omni_money.db` | SQLiteデータベースファイルのパス |
+| `HOST_IP` | 任意 | `0.0.0.0` | 待受アドレス |
+| `PORT` | 任意 | `4000` | 待受ポート |
+| `AUTH_PASSWORD_HASH` | サーバーモード時必須 | なし | ログインパスワードのbcryptハッシュ |
+| `SESSION_MAX_AGE_HOURS` | 任意 | `24` | セッション有効期間（時間） |
+| `AI_API_TOKEN` | 任意 | なし | AI用APIの認証トークン |
+| `TRUSTED_PROXIES` | 任意 | なし | 信頼するプロキシIP（カンマ区切り） |
+| `FORCE_HTTPS` | 任意 | `false` | HTTPSリダイレクトの有効化 |
+| `TLS_CERT_FILE` | 任意 | なし | TLS証明書ファイルパス |
+| `TLS_KEY_FILE` | 任意 | なし | TLS秘密鍵ファイルパス |
+| `CORS_ALLOWED_ORIGINS` | 任意 | なし | 許可オリジン（カンマ区切り） |
+
+
 ## 7. データベース設計（SQLite）
 
 既存の構成を拡張し、以下の構造体（テーブル）を実装すること。
@@ -139,14 +220,69 @@ AIエージェントが外部から記帳を自動化するためのAPI（例: `
 
 ## 8. 自動構築（CI/CD）の要件
 
-`.github/workflows` に以下の定義を作成すること。
+**重要方針**: アプリケーション（デスクトップ版・Docker版）の正式なビルドは **GitHub Actions のみ** で行う。開発者のローカル環境での `wails build` はあくまで動作確認用であり、配布用のビルドは全て CI/CD 経由で実行すること。
 
-* **デスクトップ用構築（Desktop Build / Wails）**
-* コードの変更が主軸（`main` ブランチ）に反映された際、macOS, Windows, Linux 向けの実行可能ファイルをWails CLIを用いて自動構築し、GitHubの公開領域（GitHub Releases）に発行すること。
+### 8.1. バージョン管理とリリーストリガー
 
+リポジトリのルートに `VERSION` ファイルを配置し、セマンティックバージョニング（`MAJOR.MINOR.PATCH`）で管理する。
 
-* **コンテナ用構築（Docker Build）**
-* 同時に、サーバーモード用の `Dockerfile` を用いてコンテナイメージを構築し、GitHubのコンテナ登録所（GitHub Container Registry / `ghcr.io`）に登録すること。
+* **`VERSION` ファイルの形式**: ファイルには `0.1.0` のようなバージョン文字列のみを1行で記載する。改行以外の余分な文字は含めない。
+* **初期値**: `0.1.0` から開始する。
+* **更新規則**:
+  - `PATCH`（例: 0.1.0 → 0.1.1）: バグ修正、軽微な改修
+  - `MINOR`（例: 0.1.1 → 0.2.0）: 機能追加、画面変更
+  - `MAJOR`（例: 0.2.0 → 1.0.0）: 破壊的変更、大規模刷新
+* **CI/CDトリガー条件**: GitHub Actionsのワークフローは `main` ブランチへのプッシュ時に `VERSION` ファイルが変更されている場合にのみ起動する。これにより、ドキュメントのみの変更やリファクタリングではビルドが走らない。
+
+### 8.2. GitHub Actions ワークフロー構成
+
+`.github/workflows/` に以下の2つのワークフロー定義ファイルを作成すること。
+
+#### 8.2.1. デスクトップ用構築（`release-desktop.yml`）
+
+* **トリガー**: `main` ブランチへの `push` イベントで、`paths` フィルターにより `VERSION` ファイルが変更された場合のみ実行する。
+  ```yaml
+  on:
+    push:
+      branches: [main]
+      paths: ['VERSION']
+  ```
+* **バージョン読み取り**: ワークフロー冒頭で `VERSION` ファイルの内容を読み取り、環境変数 `APP_VERSION` に格納する。
+  ```yaml
+  - name: Read version
+    run: echo "APP_VERSION=$(cat VERSION)" >> $GITHUB_ENV
+  ```
+* **ビルドマトリクス**: macOS（`macos-latest`）、Windows（`windows-latest`）、Linux（`ubuntu-latest`）の3プラットフォームで並列ビルドする。各プラットフォームで `wails build` を実行し、成果物を生成する。
+* **Wails CLIの導入**: 各プラットフォームのランナー上で `go install github.com/wailsapp/wails/v2/cmd/wails@latest` を実行してWails CLIを導入する。
+* **バージョンの埋め込み**: ビルド時に `-ldflags "-X main.version=${{ env.APP_VERSION }}"` を用いてバイナリにバージョン情報を埋め込む。
+* **GitHub Releasesへの発行**: ビルド完了後、`softprops/action-gh-release` アクション等を用いて `v${{ env.APP_VERSION }}` タグのGitHub Releaseを作成し、各プラットフォームの実行可能ファイルをアップロードする。
+* **重複リリース防止**: 同一バージョンのReleaseが既に存在する場合はスキップする。
+
+#### 8.2.2. コンテナ用構築（`release-docker.yml`）
+
+* **トリガー**: デスクトップ用と同一（`main` ブランチの `VERSION` 変更時）。`release-desktop.yml` と同時に実行されるか、`needs` で依存関係を設定してもよい。
+* **Dockerイメージの構築**: サーバーモード用の `Dockerfile` を用いてコンテナイメージを構築する。ビルド引数でバージョンを渡す。
+  ```yaml
+  - name: Build and push Docker image
+    uses: docker/build-push-action@v5
+    with:
+      push: true
+      tags: |
+        ghcr.io/${{ github.repository }}:${{ env.APP_VERSION }}
+        ghcr.io/${{ github.repository }}:latest
+      build-args: |
+        VERSION=${{ env.APP_VERSION }}
+  ```
+* **登録先**: GitHub Container Registry（`ghcr.io`）にプッシュする。イメージタグはバージョン番号付き（`ghcr.io/shiningwank0/omni_money:0.1.0`）と `latest` の両方を付与する。
+* **マルチアーキテクチャ**: `docker/setup-buildx-action` と `--platform linux/amd64,linux/arm64` で AMD64 / ARM64 の両方のイメージを構築する。
+
+### 8.3. バージョンのアプリへの埋め込み
+
+`VERSION` ファイルの値を実行時に参照できるようにするため、以下の仕組みを実装すること。
+
+* **Go側**: `main.go` にパッケージ変数 `var version = "dev"` を定義する。CI/CDでのビルド時に `-ldflags` でこの変数を上書きする。ローカル開発時は `"dev"` のまま動作する。
+* **フロントエンド側**: ビルド時に `VITE_APP_VERSION` 環境変数として渡し、Vue.jsから `import.meta.env.VITE_APP_VERSION` で参照可能にする。画面のフッターやバージョン情報画面で表示する。
+* **Docker**: `Dockerfile` 内で `ARG VERSION=dev` を定義し、 ビルド時の `--build-arg` で渡す。環境変数として実行時にも参照可能にする。
 
 
 ## 9. 開発端末の導入済み環境について
@@ -185,4 +321,5 @@ AIエージェントが外部から記帳を自動化するためのAPI（例: `
 * **ステップ6**: AI用API、自動状態保存機能などの付加機能の実装。
 * **ステップ7**: サーバー単独稼働用のコンテナ定義（`Dockerfile`）の作成およびサーバーモード起動処理（`server.go`）の整備。
 * **ステップ8**: GitHub Actionsを用いた自動構築（CI/CD）定義ファイルの作成。
+* **ステップ9**: セキュリティ・認証基盤の実装。§6.4 に基づき、セッション認証、レート制限、セキュリティヘッダー、リバースプロキシ対応を `backend/middleware/` に実装し、`server.go` およびフロントエンドに統合する。
 
