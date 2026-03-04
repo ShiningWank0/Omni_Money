@@ -14,6 +14,9 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// version はCI/CDビルド時に -ldflags で埋め込まれる（§8.3準拠）
+var version = "dev"
+
 func main() {
 	// データベースの初期化
 	if err := database.InitDB(""); err != nil {
