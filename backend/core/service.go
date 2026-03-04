@@ -37,45 +37,26 @@ func GetAccounts() ([]string, error) {
 // GetItems は項目名のリストを返す
 func GetItems(account string) ([]string, error) {
 	db := database.GetDB()
-	var rows interface{ Scan(...interface{}) error }
-	var err error
-	var sqlRows interface {
-		Next() bool
-		Scan(...interface{}) error
-		Close() error
-	}
 
+	var query string
+	var args []interface{}
 	if account != "" {
-		sqlRows2, err2 := db.Query(
-			"SELECT DISTINCT item FROM transactions WHERE account = ? ORDER BY item", account)
-		if err2 != nil {
-			return nil, fmt.Errorf("項目リスト取得エラー: %w", err2)
-		}
-		defer sqlRows2.Close()
-		_ = rows
-		_ = err
-
-		var items []string
-		for sqlRows2.Next() {
-			var item string
-			if err := sqlRows2.Scan(&item); err != nil {
-				return nil, fmt.Errorf("項目スキャンエラー: %w", err)
-			}
-			items = append(items, item)
-		}
-		return items, nil
+		query = "SELECT DISTINCT item FROM transactions WHERE account = ? ORDER BY item"
+		args = []interface{}{account}
+	} else {
+		query = "SELECT DISTINCT item FROM transactions ORDER BY item"
 	}
 
-	sqlRows, err = db.Query("SELECT DISTINCT item FROM transactions ORDER BY item")
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("項目リスト取得エラー: %w", err)
 	}
-	defer sqlRows.Close()
+	defer rows.Close()
 
 	var items []string
-	for sqlRows.Next() {
+	for rows.Next() {
 		var item string
-		if err := sqlRows.Scan(&item); err != nil {
+		if err := rows.Scan(&item); err != nil {
 			return nil, fmt.Errorf("項目スキャンエラー: %w", err)
 		}
 		items = append(items, item)
@@ -124,6 +105,8 @@ func GetTransactions(account string, search string) ([]models.TransactionRespons
 }
 
 // AddTransaction は新しい取引を追加する
+// INSERT後にrecalculateBalanceで口座全体の残高を再計算するため、
+// INSERT時のbalanceは仮値（0）で挿入する。
 func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse, error) {
 	db := database.GetDB()
 
@@ -136,27 +119,10 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 		return nil, err
 	}
 
-	// 指定された口座の最新残高を取得
-	var currentBalance int64
-	err = db.QueryRow(
-		"SELECT balance FROM transactions WHERE account = ? ORDER BY date DESC, id DESC LIMIT 1",
-		req.Account,
-	).Scan(&currentBalance)
-	if err != nil {
-		currentBalance = 0 // 初回取引の場合
-	}
-
-	// 新しい残高を計算
-	newBalance := currentBalance
-	if req.Type == "income" {
-		newBalance += req.Amount
-	} else {
-		newBalance -= req.Amount
-	}
-
+	// INSERT（balanceは仮値0。直後にrecalculateBalanceで正しい値に上書きされる）
 	result, err := db.Exec(
-		"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		req.Account, date, req.Item, req.Type, req.Amount, newBalance, req.Memo,
+		"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, ?)",
+		req.Account, date, req.Item, req.Type, req.Amount, req.Memo,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("取引追加エラー: %w", err)
@@ -164,12 +130,12 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 
 	id, _ := result.LastInsertId()
 
-	// バックデート時の整合性を保つため、口座全体の残高を再計算する
+	// バックデート挿入も含め、口座全体の残高を時系列順に再計算
 	if err := recalculateBalance(req.Account); err != nil {
 		return nil, fmt.Errorf("残高再計算エラー: %w", err)
 	}
 
-	// 更新後の値を取得して返却
+	// 再計算後の正しい値を取得して返却
 	var inserted models.Transaction
 	var dateStr string
 	err = db.QueryRow(
@@ -404,7 +370,9 @@ func BackupToCSV() (string, error) {
 	return builder.String(), nil
 }
 
-// ImportCSV はCSVコンテンツからデータをインポートする
+// ImportCSV はCSVコンテンツからデータをインポートする。
+// replaceモードでは既存データのDELETEとINSERTをトランザクションで包み、
+// 途中失敗時にデータが消失しないようにする。
 func ImportCSV(content string, mode string) (int, error) {
 	db := database.GetDB()
 
@@ -427,12 +395,26 @@ func ImportCSV(content string, mode string) (int, error) {
 		}
 	}
 
-	// replaceモード
+	// トランザクション開始
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("トランザクション開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+
+	// replaceモード: トランザクション内でDELETE
 	if mode == "replace" {
-		if _, err := db.Exec("DELETE FROM transactions"); err != nil {
+		if _, err := tx.Exec("DELETE FROM transactions"); err != nil {
 			return 0, fmt.Errorf("既存データ削除エラー: %w", err)
 		}
 	}
+
+	stmt, err := tx.Prepare(
+		"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, ?)")
+	if err != nil {
+		return 0, fmt.Errorf("プリペアドステートメントエラー: %w", err)
+	}
+	defer stmt.Close()
 
 	imported := 0
 	for {
@@ -441,7 +423,7 @@ func ImportCSV(content string, mode string) (int, error) {
 			break
 		}
 		if err != nil {
-			return imported, fmt.Errorf("CSV行読み取りエラー: %w", err)
+			return 0, fmt.Errorf("CSV行読み取りエラー (行%d): %w", imported+2, err)
 		}
 
 		account := strings.TrimSpace(record[headerMap["account"]])
@@ -460,20 +442,23 @@ func ImportCSV(content string, mode string) (int, error) {
 
 		date := parseDate(dateStr)
 
-		_, err = db.Exec(
-			"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, ?)",
-			account, date, item, txType, amount, memo,
-		)
+		_, err = stmt.Exec(account, date, item, txType, amount, memo)
 		if err != nil {
-			return imported, fmt.Errorf("CSVインポートエラー: %w", err)
+			return 0, fmt.Errorf("CSVインポートエラー (行%d): %w", imported+2, err)
 		}
 		imported++
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("インポートコミットエラー: %w", err)
 	}
 
 	// 全口座の残高を再計算
 	accounts, _ := GetAccounts()
 	for _, acc := range accounts {
-		recalculateBalance(acc)
+		if err := recalculateBalance(acc); err != nil {
+			return imported, fmt.Errorf("残高再計算エラー (%s): %w", acc, err)
+		}
 	}
 
 	return imported, nil
@@ -481,8 +466,12 @@ func ImportCSV(content string, mode string) (int, error) {
 
 // --- ヘルパー関数 ---
 
+// recalculateBalance は口座内の全取引を時系列順に辿り、残高を再計算する。
+// 複数のUPDATEをSQLトランザクションで包み、途中失敗時のデータ不整合を防止する。
 func recalculateBalance(account string) error {
 	db := database.GetDB()
+
+	// 時系列順で取引データを取得
 	rows, err := db.Query(
 		"SELECT id, type, amount FROM transactions WHERE account = ? ORDER BY date, id",
 		account,
@@ -492,7 +481,14 @@ func recalculateBalance(account string) error {
 	}
 	defer rows.Close()
 
+	// メモリに読み込んでからトランザクション内で一括更新
+	type balanceUpdate struct {
+		id      int64
+		balance int64
+	}
+	var updates []balanceUpdate
 	var runningBalance int64
+
 	for rows.Next() {
 		var id, amount int64
 		var txType string
@@ -504,9 +500,34 @@ func recalculateBalance(account string) error {
 		} else {
 			runningBalance -= amount
 		}
-		if _, err := db.Exec("UPDATE transactions SET balance = ? WHERE id = ?", runningBalance, id); err != nil {
-			return fmt.Errorf("残高更新エラー: %w", err)
+		updates = append(updates, balanceUpdate{id: id, balance: runningBalance})
+	}
+	rows.Close() // 明示的に閉じてからトランザクションを開始
+
+	if len(updates) == 0 {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("トランザクション開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare("UPDATE transactions SET balance = ? WHERE id = ?")
+	if err != nil {
+		return fmt.Errorf("プリペアドステートメントエラー: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, u := range updates {
+		if _, err := stmt.Exec(u.balance, u.id); err != nil {
+			return fmt.Errorf("残高更新エラー (id=%d): %w", u.id, err)
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("トランザクションコミットエラー: %w", err)
 	}
 	return nil
 }

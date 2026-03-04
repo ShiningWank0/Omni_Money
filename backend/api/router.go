@@ -22,23 +22,51 @@ func NewRouter() http.Handler {
 	// 静的ファイル配信（フロントエンドのビルド成果物）
 	mux.Handle("/", http.FileServer(http.Dir("frontend/dist")))
 
-	// API エンドポイント
-	mux.HandleFunc("/api/accounts", handleAccounts)
-	mux.HandleFunc("/api/items", handleItems)
+	// API エンドポイント（メソッド制約付き）
+	mux.HandleFunc("/api/accounts", methodGuard(http.MethodGet, handleAccounts))
+	mux.HandleFunc("/api/items", methodGuard(http.MethodGet, handleItems))
 	mux.HandleFunc("/api/transactions", handleTransactions)
 	mux.HandleFunc("/api/transactions/", handleTransactionByID)
-	mux.HandleFunc("/api/balance_history", handleBalanceHistory)
-	mux.HandleFunc("/api/balance_history_filtered", handleBalanceHistoryFiltered)
+	mux.HandleFunc("/api/balance_history", methodGuard(http.MethodGet, handleBalanceHistory))
+	mux.HandleFunc("/api/balance_history_filtered", methodGuard(http.MethodGet, handleBalanceHistoryFiltered))
 	mux.HandleFunc("/api/credit_card_settings", handleCreditCardSettings)
-	mux.HandleFunc("/api/backup_csv", handleBackupCSV)
-	mux.HandleFunc("/api/import_csv", handleImportCSV)
+	mux.HandleFunc("/api/backup_csv", methodGuard(http.MethodGet, handleBackupCSV))
+	mux.HandleFunc("/api/import_csv", methodGuard(http.MethodPost, handleImportCSV))
 
 	// AI専用エンドポイント（書き込み専用）
 	apiToken := os.Getenv("AI_API_TOKEN")
 	mux.Handle("/api/v1/ai/transactions",
 		middleware.AIWriteOnlyMiddleware(apiToken, http.HandlerFunc(handleAITransactions)))
 
-	return mux
+	// CORSミドルウェアで包む
+	return corsMiddleware(mux)
+}
+
+// corsMiddleware はサーバーモードでブラウザからのクロスオリジンアクセスを許可する
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// methodGuard は特定のHTTPメソッドのみ許可するラッパー
+func methodGuard(method string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != method {
+			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		handler(w, r)
+	}
 }
 
 func handleAccounts(w http.ResponseWriter, r *http.Request) {
@@ -197,11 +225,6 @@ func handleBackupCSV(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleImportCSV(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	var body struct {
 		Content string `json:"content"`
 		Mode    string `json:"mode"`
