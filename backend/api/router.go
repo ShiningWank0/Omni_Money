@@ -56,7 +56,8 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin != "" && isOriginAllowed(origin, r.Host, allowedOrigins) {
+		originAllowed := origin != "" && isOriginAllowed(origin, r.Host, allowedOrigins)
+		if originAllowed {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
@@ -64,7 +65,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 
 		if r.Method == http.MethodOptions {
-			if origin != "" && !isOriginAllowed(origin, r.Host, allowedOrigins) {
+			if origin != "" && !originAllowed {
 				w.WriteHeader(http.StatusForbidden)
 				return
 			}
