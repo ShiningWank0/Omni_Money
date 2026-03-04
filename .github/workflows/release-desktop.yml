@@ -14,11 +14,8 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            platform: darwin/arm64
-            artifact_name: omni-money-macos-arm64
-          - os: macos-latest
-            platform: darwin/amd64
-            artifact_name: omni-money-macos-amd64
+            platform: darwin/universal
+            artifact_name: omni-money-macos
           - os: windows-latest
             platform: windows/amd64
             artifact_name: omni-money-windows
@@ -87,12 +84,12 @@ jobs:
             $TAGS \
             -ldflags "-X main.version=${{ env.APP_VERSION }}"
 
-      # macOSの場合: ad-hoc署名(hardened runtime + entitlements) → 検証 → dittoでバンドル構造保持ZIP
+      # macOSの場合: ad-hoc署名 + dittoでバンドル構造保持ZIP
       - name: Package macOS app
         if: runner.os == 'macOS' && steps.check_release.outputs.exists == 'false'
         run: |
           cd build/bin
-          codesign --force --deep --options runtime --entitlements ../../build/darwin/entitlements.plist -s - "Omni Money.app"
+          codesign --force --deep -s - "Omni Money.app"
           codesign --verify --strict "Omni Money.app"
           ditto -c -k --sequesterRsrc --keepParent "Omni Money.app" "../../${{ matrix.artifact_name }}-v${{ env.APP_VERSION }}.zip"
 
@@ -159,22 +156,16 @@ jobs:
             ## Omni Money v${{ env.APP_VERSION }}
 
             ### ダウンロード
-            - **macOS (Apple Silicon)**: `omni-money-macos-arm64-v${{ env.APP_VERSION }}.zip`
-            - **macOS (Intel)**: `omni-money-macos-amd64-v${{ env.APP_VERSION }}.zip`
+            - **macOS (Apple Silicon / Intel)**: `omni-money-macos-v${{ env.APP_VERSION }}.zip`
             - **Windows**: `omni-money-windows-v${{ env.APP_VERSION }}.zip`
             - **Linux**: `omni-money-linux-v${{ env.APP_VERSION }}.tar.gz`
 
             ### macOS で初回起動する場合
-            Apple Developer ID 署名なしのため、初回起動時にGatekeeperにブロックされます。
-            以下のいずれかの方法で起動してください：
-
-            **方法1: ターミナルでquarantine属性を除去（推奨）**
+            zipを解凍後、ターミナルで以下を実行してから起動してください：
             ```bash
             xattr -cr "Omni Money.app"
             ```
-
-            **方法2: 右クリック → 開く**
-            Finderで「Omni Money.app」を右クリック（またはControlキー+クリック）→「開く」を選択してください。
+            または、右クリック →「開く」→「システム設定 > プライバシーとセキュリティ > このまま開く」でも起動できます。
 
             ### Docker
             ```bash
