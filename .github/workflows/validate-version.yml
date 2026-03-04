@@ -1,0 +1,54 @@
+name: Validate VERSION
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['VERSION']
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate version is not downgraded
+        run: |
+          # PR側のバージョンを読み取り
+          NEW_VERSION=$(cat VERSION | tr -d '[:space:]')
+          echo "PR version: $NEW_VERSION"
+
+          # mainブランチからVERSIONを取得
+          OLD_VERSION=$(git show origin/main:VERSION 2>/dev/null | tr -d '[:space:]' || echo "0.0.0")
+          echo "Main version: $OLD_VERSION"
+
+          # セマンティックバージョンの各部分を分割して数値比較する関数
+          version_to_num() {
+            local ver="$1"
+            local major minor patch
+            IFS='.' read -r major minor patch <<< "$ver"
+            # 先頭の非数字（v接頭辞等）を除去
+            major="${major#v}"
+            # 数値化（空なら0）
+            major=$((${major:-0}))
+            minor=$((${minor:-0}))
+            patch=$((${patch:-0}))
+            echo $(( major * 1000000 + minor * 1000 + patch ))
+          }
+
+          OLD_NUM=$(version_to_num "$OLD_VERSION")
+          NEW_NUM=$(version_to_num "$NEW_VERSION")
+
+          echo "Old numeric: $OLD_NUM"
+          echo "New numeric: $NEW_NUM"
+
+          if [ "$NEW_NUM" -le "$OLD_NUM" ]; then
+            echo "::error::バージョンが後退しています！ $OLD_VERSION → $NEW_VERSION"
+            echo "::error::VERSIONは現在の $OLD_VERSION より大きい値にしてください。"
+            exit 1
+          fi
+
+          echo "✅ バージョンチェック通過: $OLD_VERSION → $NEW_VERSION"
