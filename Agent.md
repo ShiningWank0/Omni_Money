@@ -58,6 +58,7 @@
 ├── legacy_reference/      # 【参照専用】旧アプリのソースコード（ここから既存の仕様を解析する）
 ├── build/                 # Wails用のアイコン等 構築用資材
 ├── Dockerfile             # サーバーモード用のコンテナ定義
+├── VERSION                # アプリバージョン（セマンティックバージョニング、CI/CDトリガー）
 ├── main.go                # Wailsアプリ用の起動地点
 ├── server.go              # サーバーモード（Docker）用の起動地点
 ├── wails.json             # Wails設定ファイル
@@ -219,14 +220,69 @@ AIエージェントが外部から記帳を自動化するためのAPI（例: `
 
 ## 8. 自動構築（CI/CD）の要件
 
-`.github/workflows` に以下の定義を作成すること。
+**重要方針**: アプリケーション（デスクトップ版・Docker版）の正式なビルドは **GitHub Actions のみ** で行う。開発者のローカル環境での `wails build` はあくまで動作確認用であり、配布用のビルドは全て CI/CD 経由で実行すること。
 
-* **デスクトップ用構築（Desktop Build / Wails）**
-* コードの変更が主軸（`main` ブランチ）に反映された際、macOS, Windows, Linux 向けの実行可能ファイルをWails CLIを用いて自動構築し、GitHubの公開領域（GitHub Releases）に発行すること。
+### 8.1. バージョン管理とリリーストリガー
 
+リポジトリのルートに `VERSION` ファイルを配置し、セマンティックバージョニング（`MAJOR.MINOR.PATCH`）で管理する。
 
-* **コンテナ用構築（Docker Build）**
-* 同時に、サーバーモード用の `Dockerfile` を用いてコンテナイメージを構築し、GitHubのコンテナ登録所（GitHub Container Registry / `ghcr.io`）に登録すること。
+* **`VERSION` ファイルの形式**: ファイルには `0.1.0` のようなバージョン文字列のみを1行で記載する。改行以外の余分な文字は含めない。
+* **初期値**: `0.1.0` から開始する。
+* **更新規則**:
+  - `PATCH`（例: 0.1.0 → 0.1.1）: バグ修正、軽微な改修
+  - `MINOR`（例: 0.1.1 → 0.2.0）: 機能追加、画面変更
+  - `MAJOR`（例: 0.2.0 → 1.0.0）: 破壊的変更、大規模刷新
+* **CI/CDトリガー条件**: GitHub Actionsのワークフローは `main` ブランチへのプッシュ時に `VERSION` ファイルが変更されている場合にのみ起動する。これにより、ドキュメントのみの変更やリファクタリングではビルドが走らない。
+
+### 8.2. GitHub Actions ワークフロー構成
+
+`.github/workflows/` に以下の2つのワークフロー定義ファイルを作成すること。
+
+#### 8.2.1. デスクトップ用構築（`release-desktop.yml`）
+
+* **トリガー**: `main` ブランチへの `push` イベントで、`paths` フィルターにより `VERSION` ファイルが変更された場合のみ実行する。
+  ```yaml
+  on:
+    push:
+      branches: [main]
+      paths: ['VERSION']
+  ```
+* **バージョン読み取り**: ワークフロー冒頭で `VERSION` ファイルの内容を読み取り、環境変数 `APP_VERSION` に格納する。
+  ```yaml
+  - name: Read version
+    run: echo "APP_VERSION=$(cat VERSION)" >> $GITHUB_ENV
+  ```
+* **ビルドマトリクス**: macOS（`macos-latest`）、Windows（`windows-latest`）、Linux（`ubuntu-latest`）の3プラットフォームで並列ビルドする。各プラットフォームで `wails build` を実行し、成果物を生成する。
+* **Wails CLIの導入**: 各プラットフォームのランナー上で `go install github.com/wailsapp/wails/v2/cmd/wails@latest` を実行してWails CLIを導入する。
+* **バージョンの埋め込み**: ビルド時に `-ldflags "-X main.version=${{ env.APP_VERSION }}"` を用いてバイナリにバージョン情報を埋め込む。
+* **GitHub Releasesへの発行**: ビルド完了後、`softprops/action-gh-release` アクション等を用いて `v${{ env.APP_VERSION }}` タグのGitHub Releaseを作成し、各プラットフォームの実行可能ファイルをアップロードする。
+* **重複リリース防止**: 同一バージョンのReleaseが既に存在する場合はスキップする。
+
+#### 8.2.2. コンテナ用構築（`release-docker.yml`）
+
+* **トリガー**: デスクトップ用と同一（`main` ブランチの `VERSION` 変更時）。`release-desktop.yml` と同時に実行されるか、`needs` で依存関係を設定してもよい。
+* **Dockerイメージの構築**: サーバーモード用の `Dockerfile` を用いてコンテナイメージを構築する。ビルド引数でバージョンを渡す。
+  ```yaml
+  - name: Build and push Docker image
+    uses: docker/build-push-action@v5
+    with:
+      push: true
+      tags: |
+        ghcr.io/${{ github.repository }}:${{ env.APP_VERSION }}
+        ghcr.io/${{ github.repository }}:latest
+      build-args: |
+        VERSION=${{ env.APP_VERSION }}
+  ```
+* **登録先**: GitHub Container Registry（`ghcr.io`）にプッシュする。イメージタグはバージョン番号付き（`ghcr.io/shiningwank0/omni_money:0.1.0`）と `latest` の両方を付与する。
+* **マルチアーキテクチャ**: `docker/setup-buildx-action` と `--platform linux/amd64,linux/arm64` で AMD64 / ARM64 の両方のイメージを構築する。
+
+### 8.3. バージョンのアプリへの埋め込み
+
+`VERSION` ファイルの値を実行時に参照できるようにするため、以下の仕組みを実装すること。
+
+* **Go側**: `main.go` にパッケージ変数 `var version = "dev"` を定義する。CI/CDでのビルド時に `-ldflags` でこの変数を上書きする。ローカル開発時は `"dev"` のまま動作する。
+* **フロントエンド側**: ビルド時に `VITE_APP_VERSION` 環境変数として渡し、Vue.jsから `import.meta.env.VITE_APP_VERSION` で参照可能にする。画面のフッターやバージョン情報画面で表示する。
+* **Docker**: `Dockerfile` 内で `ARG VERSION=dev` を定義し、 ビルド時の `--build-arg` で渡す。環境変数として実行時にも参照可能にする。
 
 
 ## 9. 開発端末の導入済み環境について
