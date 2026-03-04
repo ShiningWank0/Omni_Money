@@ -90,24 +90,23 @@
 	C423.578,226.938,423.313,233.531,423.063,239.844z"/>
 
 <!-- ============================================ -->
-<!-- STEMS connecting knobs to clasp frame (gold) -->
+<!-- CROSSING ARMS connecting knobs (gold X)      -->
 <!-- ============================================ -->
-<!-- Left stem: from left knob down to clasp frame -->
-<path fill="#C4993A" d="M221.953,60.813c-8,0-14.5,2-14.5,2
-	c-3.5,4-7,12-10,20c-3,8-5.5,16.5-7.5,22.5c-1,3-1.5,5.5-1.5,7
-	c0,2,4,3,12,3c6,0,13.5-0.5,21.5-0.5c8,0,15.5,0.5,21.5,0.5c8,0,12-1,12-3
-	c0-1.5-0.5-4-1.5-7c-2-6-4.5-14.5-7.5-22.5c-3-8-6.5-16-10-20
-	C236.453,62.813,229.953,60.813,221.953,60.813z"/>
-<!-- Right stem: from right knob down to clasp frame -->
-<path fill="#C4993A" d="M290.031,60.813c-8,0-14.5,2-14.5,2
-	c-3.5,4-7,12-10,20c-3,8-5.5,16.5-7.5,22.5c-1,3-1.5,5.5-1.5,7
-	c0,2,4,3,12,3c6,0,13.5-0.5,21.5-0.5c8,0,15.5,0.5,21.5,0.5c8,0,12-1,12-3
-	c0-1.5-0.5-4-1.5-7c-2-6-4.5-14.5-7.5-22.5c-3-8-6.5-16-10-20
-	C304.531,62.813,298.031,60.813,290.031,60.813z"/>
+<!-- Back arm: right knob to left clasp -->
+<path fill="#C4993A" d="M283,60 L297,60 L229,115 L215,115 Z"/>
+<!-- Front arm: left knob to right clasp -->
+<path fill="#C4993A" d="M215,60 L229,60 L297,115 L283,115 Z"/>
+<!-- Joint rivet at crossing point -->
+<circle fill="#DBA63E" cx="256" cy="87" r="7"/>
+<circle fill="#FFFFFF" cx="254" cy="85" r="2.5" opacity="0.4"/>
 
 <!-- Left hinge (small loop on left side of clasp) -->
 <ellipse fill="#C4993A" cx="90" cy="237" rx="10" ry="14"/>
 <ellipse fill="#DBA63E" cx="90" cy="235" rx="6" ry="10"/>
+
+<!-- Right hinge (small loop on right side of clasp) -->
+<ellipse fill="#C4993A" cx="422" cy="237" rx="10" ry="14"/>
+<ellipse fill="#DBA63E" cx="422" cy="235" rx="6" ry="10"/>
 
 <!-- ======================== -->
 <!-- CLASP KNOBS (gold balls) -->
@@ -121,7 +120,7 @@
 <!-- Right knob -->
 <circle fill="#9B7B2F" cx="290.031" cy="43.438" r="17.375"/>
 <circle fill="#C4993A" cx="290.031" cy="43.438" r="14.5"/>
-<circle fill="#DEBB55" cx="287" cy="40" r="8" opacity="0.4"/>
-<circle fill="#FFFFFF" cx="283.5" cy="36.5" r="3.5" opacity="0.7"/>
+<circle fill="#DEBB55" cx="293" cy="40" r="8" opacity="0.4"/>
+<circle fill="#FFFFFF" cx="296.5" cy="36.5" r="3.5" opacity="0.7"/>
 
 </svg>
