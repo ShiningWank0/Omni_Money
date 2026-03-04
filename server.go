@@ -11,6 +11,9 @@ import (
 	"omni_money/backend/database"
 )
 
+// version はCI/CDビルド時に -ldflags で埋め込まれる（§8.3準拠）
+var version = "dev"
+
 func main() {
 	// データベースの初期化
 	dbPath := os.Getenv("DB_PATH")
