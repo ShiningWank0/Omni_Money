@@ -10,6 +10,10 @@ export function BackupToCSV() {
   return window['go']['main']['App']['BackupToCSV']();
 }
 
+export function CreateSnapshot() {
+  return window['go']['main']['App']['CreateSnapshot']();
+}
+
 export function DeleteTransaction(arg1) {
   return window['go']['main']['App']['DeleteTransaction'](arg1);
 }
@@ -44,6 +48,14 @@ export function Greet(arg1) {
 
 export function ImportCSV(arg1, arg2) {
   return window['go']['main']['App']['ImportCSV'](arg1, arg2);
+}
+
+export function ListSnapshots() {
+  return window['go']['main']['App']['ListSnapshots']();
+}
+
+export function RestoreSnapshot(arg1) {
+  return window['go']['main']['App']['RestoreSnapshot'](arg1);
 }
 
 export function SaveCreditCardSettings(arg1) {

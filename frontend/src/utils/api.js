@@ -179,3 +179,48 @@ export async function importCSV(content, mode = 'append') {
   const data = await res.json()
   return data.imported_count
 }
+
+/**
+ * スナップショットを作成
+ * @returns {Promise<string>} - 作成されたスナップショットのパス
+ */
+export async function createSnapshot() {
+  if (isWails) {
+    return await window.go.main.App.CreateSnapshot()
+  }
+  const res = await fetch('/api/snapshots', { method: 'POST' })
+  const data = await res.json()
+  if (data.error) throw new Error(data.error)
+  return data.path
+}
+
+/**
+ * スナップショット一覧を取得
+ * @returns {Promise<string[]>}
+ */
+export async function listSnapshots() {
+  if (isWails) {
+    return await window.go.main.App.ListSnapshots()
+  }
+  const res = await fetch('/api/snapshots')
+  return await res.json()
+}
+
+/**
+ * スナップショットから復元
+ * @param {string} name - スナップショットファイル名
+ * @returns {Promise<void>}
+ */
+export async function restoreSnapshot(name) {
+  if (isWails) {
+    return await window.go.main.App.RestoreSnapshot(name)
+  }
+  const res = await fetch(`/api/snapshots/restore`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name })
+  })
+  const data = await res.json()
+  if (data.error) throw new Error(data.error)
+}
+

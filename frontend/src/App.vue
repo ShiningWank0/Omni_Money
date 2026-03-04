@@ -53,6 +53,7 @@
         <button class="menu-btn" @click="showImportCSVModalMethod">CSVインポート</button>
         <button class="menu-btn" @click="openCreditCardSettings">クレジットカード設定</button>
         <button class="menu-btn" @click="showGraphModal">残高推移グラフ表示</button>
+        <button class="menu-btn" @click="openSnapshotManager">スナップショット管理</button>
       </div>
     </div>
 
@@ -118,6 +119,20 @@
       @save="handleSaveCreditCardSettings"
       @close="hideCreditCardSettings"
     />
+
+    <!-- 残高推移グラフモーダル -->
+    <BalanceChart
+      v-if="showGraph"
+      :balance-history="balanceHistoryData"
+      :credit-card-items="store.creditCardItems"
+      @close="showGraph = false"
+    />
+
+    <!-- スナップショット管理モーダル -->
+    <SnapshotManager
+      v-if="showSnapshotModal"
+      @close="showSnapshotModal = false"
+    />
   </div>
 </template>
 
@@ -127,12 +142,15 @@ import { useAppStore } from './store/index'
 import TransactionModal from './components/TransactionModal.vue'
 import CSVImportModal from './components/CSVImportModal.vue'
 import CreditCardSettingsModal from './components/CreditCardSettingsModal.vue'
+import BalanceChart from './components/BalanceChart.vue'
+import SnapshotManager from './components/SnapshotManager.vue'
 import {
   addTransaction,
   updateTransaction,
   deleteTransaction as apiDeleteTransaction,
   backupToCSV as apiBackupToCSV,
-  saveCreditCardSettings as apiSaveCreditCardSettings
+  saveCreditCardSettings as apiSaveCreditCardSettings,
+  getBalanceHistoryFiltered
 } from './utils/api'
 
 const store = useAppStore()
@@ -144,10 +162,12 @@ const showAddTransactionModal = ref(false)
 const showImportCSVModal = ref(false)
 const showCreditCardModal = ref(false)
 const showGraph = ref(false)
+const showSnapshotModal = ref(false)
 const isEditMode = ref(false)
 const editingTransaction = ref(null)
 const dateSortOrder = ref('desc')
 const selectedCreditCardItems = ref([])
+const balanceHistoryData = ref(null)
 
 // 日付でソートされた取引リスト
 const sortedTransactions = computed(() => {
@@ -324,9 +344,25 @@ async function handleSaveCreditCardSettings(items) {
 }
 
 // グラフモーダル
-function showGraphModal() {
+async function showGraphModal() {
   showMenu.value = false
-  showGraph.value = true
+  try {
+    // クレジットカード除外済みの残高推移を取得
+    const selectedAccounts = store.selectedFundItems.length > 0
+      ? store.selectedFundItems
+      : store.actualFundItems
+    balanceHistoryData.value = await getBalanceHistoryFiltered(selectedAccounts)
+    showGraph.value = true
+  } catch (e) {
+    console.error('残高推移取得エラー:', e)
+    alert('残高推移データの取得に失敗しました')
+  }
+}
+
+// スナップショット管理
+function openSnapshotManager() {
+  showMenu.value = false
+  showSnapshotModal.value = true
 }
 
 // グローバルクリックでドロップダウンを閉じる

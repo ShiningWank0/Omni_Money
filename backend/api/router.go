@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"omni_money/backend/core"
+	"omni_money/backend/database"
 	"omni_money/backend/middleware"
 	"omni_money/backend/models"
 )
@@ -33,6 +34,8 @@ func NewRouter() http.Handler {
 	mux.HandleFunc("/api/credit_card_settings", handleCreditCardSettings)
 	mux.HandleFunc("/api/backup_csv", methodGuard(http.MethodGet, handleBackupCSV))
 	mux.HandleFunc("/api/import_csv", methodGuard(http.MethodPost, handleImportCSV))
+	mux.HandleFunc("/api/snapshots", handleSnapshots)
+	mux.HandleFunc("/api/snapshots/restore", methodGuard(http.MethodPost, handleSnapshotRestore))
 
 	// AI専用エンドポイント（書き込み専用）
 	apiToken := os.Getenv("AI_API_TOKEN")
@@ -304,6 +307,51 @@ func handleAITransactions(w http.ResponseWriter, r *http.Request) {
 		"message":     "取引が正常に追加されました (AI API)",
 		"transaction": resp,
 	}, http.StatusCreated)
+}
+
+func handleSnapshots(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		snapshots, err := database.ListSnapshots("")
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if snapshots == nil {
+			snapshots = []string{}
+		}
+		jsonResponse(w, snapshots, http.StatusOK)
+
+	case http.MethodPost:
+		path, err := database.CreateSnapshot("")
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]string{"path": path, "message": "スナップショットを作成しました"}, http.StatusCreated)
+
+	default:
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
+		return
+	}
+	if body.Name == "" {
+		jsonError(w, "スナップショット名が必要です", http.StatusBadRequest)
+		return
+	}
+	if err := database.RestoreSnapshot("", body.Name); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]string{"message": "スナップショットから復元しました"}, http.StatusOK)
 }
 
 // --- ヘルパー ---
