@@ -17,17 +17,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Read version
+      - name: Read version and repository
         run: |
           VERSION=$(cat VERSION | tr -d '[:space:]')
           echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "REPO_LC=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       - name: Check if image already exists
         id: check_image
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          IMAGE="ghcr.io/${{ github.repository }}"
+          IMAGE="ghcr.io/${{ env.REPO_LC }}"
           TAG="${{ env.APP_VERSION }}"
           if docker manifest inspect "${IMAGE}:${TAG}" > /dev/null 2>&1; then
             echo "exists=true" >> $GITHUB_OUTPUT
@@ -59,8 +60,8 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ github.repository }}:${{ env.APP_VERSION }}
-            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ env.REPO_LC }}:${{ env.APP_VERSION }}
+            ghcr.io/${{ env.REPO_LC }}:latest
           build-args: |
             VERSION=${{ env.APP_VERSION }}
           cache-from: type=gha
