@@ -36,6 +36,10 @@ RUN CGO_ENABLED=1 go build \
 # ===== Stage 3: 軽量ランタイム =====
 FROM alpine:3.21
 
+# バージョン情報を実行時環境変数として参照可能にする（§8.3準拠）
+ARG VERSION=dev
+ENV VERSION=${VERSION}
+
 # タイムゾーンとCA証明書
 RUN apk add --no-cache ca-certificates tzdata
 
