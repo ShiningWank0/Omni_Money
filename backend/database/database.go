@@ -253,38 +253,46 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	return nil
 }
 
-// CleanOldSnapshots は古いスナップショットを削除する（世代管理）
-func CleanOldSnapshots(snapshotDir string, keepDays int) error {
+// CleanOldSnapshots は古いスナップショットを削除する（世代管理: 最新N件を残す）
+func CleanOldSnapshots(snapshotDir string, maxKeep int) error {
 	if snapshotDir == "" {
 		snapshotDir = "snapshots"
 	}
-	if keepDays <= 0 {
-		keepDays = 30
+	if maxKeep <= 0 {
+		maxKeep = 30
 	}
 
-	entries, err := os.ReadDir(snapshotDir)
+	snapshots, err := ListSnapshots(snapshotDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("スナップショット一覧取得エラー: %w", err)
+		return err
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -keepDays)
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".db") {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().Before(cutoff) {
-			os.Remove(filepath.Join(snapshotDir, entry.Name()))
-			log.Printf("古いスナップショットを削除: %s", entry.Name())
-		}
+	// snapshotsは名前でソート済み（古い順）
+	if len(snapshots) <= maxKeep {
+		return nil
+	}
+
+	// 古いものから削除
+	toDelete := snapshots[:len(snapshots)-maxKeep]
+	for _, name := range toDelete {
+		os.Remove(filepath.Join(snapshotDir, name))
+		log.Printf("古いスナップショットを削除: %s", name)
 	}
 	return nil
+}
+
+// AutoSnapshot は操作ごとに自動スナップショットを作成し、30世代を維持する
+func AutoSnapshot() {
+	go func() {
+		_, err := CreateSnapshot("")
+		if err != nil {
+			log.Printf("自動スナップショット作成エラー: %v", err)
+			return
+		}
+		if err := CleanOldSnapshots("", 30); err != nil {
+			log.Printf("スナップショットクリーンアップエラー: %v", err)
+		}
+	}()
 }
 
 // copyFile はファイルをコピーする

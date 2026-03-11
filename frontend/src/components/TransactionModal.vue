@@ -350,6 +350,7 @@ onMounted(async () => {
   flex-direction: column;
   gap: 6px;
   width: 100%;
+  box-sizing: border-box;
 }
 .selected-tags {
   display: flex;
@@ -442,6 +443,7 @@ onMounted(async () => {
   justify-content: center;
   gap: 8px;
   background: rgba(102, 126, 234, 0.03);
+  box-sizing: border-box;
 }
 .image-upload-area:hover {
   border-color: rgba(102, 126, 234, 0.7);

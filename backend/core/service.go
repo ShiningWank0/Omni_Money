@@ -98,7 +98,9 @@ func GetTransactions(account string, search string) ([]models.TransactionRespons
 			return nil, fmt.Errorf("取引スキャンエラー: %w", err)
 		}
 		t.Date = parseDate(dateStr)
-		transactions = append(transactions, t.ToResponse())
+		resp := t.ToResponse()
+		resp.Tags, _ = GetTransactionTags(int64(t.ID))
+		transactions = append(transactions, resp)
 	}
 
 	if transactions == nil {
@@ -167,6 +169,7 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 	inserted.Date = parseDate(dateStr)
 	resp := inserted.ToResponse()
 	resp.Tags, _ = GetTransactionTags(id)
+	database.AutoSnapshot()
 	return &resp, nil
 }
 
@@ -199,6 +202,14 @@ func UpdateTransaction(id int64, req models.TransactionRequest) (*models.Transac
 		return nil, fmt.Errorf("取引更新エラー: %w", err)
 	}
 
+	// タグの更新: 既存のタグを削除して再挿入
+	db.Exec("DELETE FROM transaction_tags WHERE transaction_id = ?", id)
+	if len(req.Tags) > 0 {
+		for _, tagID := range req.Tags {
+			db.Exec("INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)", id, tagID)
+		}
+	}
+
 	// 関連口座の残高を再計算
 	accounts := []string{req.Account}
 	if oldAccount != req.Account {
@@ -221,6 +232,8 @@ func UpdateTransaction(id int64, req models.TransactionRequest) (*models.Transac
 	}
 	t.Date = parseDate(dateStr)
 	resp := t.ToResponse()
+	resp.Tags, _ = GetTransactionTags(int64(t.ID))
+	database.AutoSnapshot()
 	return &resp, nil
 }
 
@@ -238,7 +251,11 @@ func DeleteTransaction(id int64) error {
 		return fmt.Errorf("取引削除エラー: %w", err)
 	}
 
-	return recalculateBalance(account)
+	err = recalculateBalance(account)
+	if err == nil {
+		database.AutoSnapshot()
+	}
+	return err
 }
 
 // GetBalanceHistory は残高推移データを返す
