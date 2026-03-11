@@ -300,17 +300,24 @@ async function backupToCSV() {
   showMenu.value = false
   try {
     const csvContent = await apiBackupToCSV()
-    // ダウンロード
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    if (!csvContent) {
+      alert('バックアップデータが空です')
+      return
+    }
+    // BOMを付与してExcel互換にし、ダウンロード
+    const bom = '\uFEFF'
+    const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
     a.download = `transactions_backup_${new Date().toISOString().slice(0, 10)}.csv`
+    document.body.appendChild(a)
     a.click()
+    document.body.removeChild(a)
     URL.revokeObjectURL(url)
   } catch (e) {
     console.error('CSVバックアップエラー:', e)
-    alert('CSVバックアップに失敗しました')
+    alert('CSVバックアップに失敗しました: ' + (e.message || e))
   }
 }
 
