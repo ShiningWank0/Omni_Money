@@ -91,6 +91,11 @@ func (a *App) BackupToCSV() (string, error) {
 	return core.BackupToCSV()
 }
 
+// BackupToCSVFile はCSVバックアップファイルをダウンロードフォルダに保存する
+func (a *App) BackupToCSVFile() (string, error) {
+	return core.BackupToCSVFile()
+}
+
 // ImportCSV はCSVファイルからデータをインポートする
 func (a *App) ImportCSV(content string, mode string) (int, error) {
 	return core.ImportCSV(content, mode)

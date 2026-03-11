@@ -162,6 +162,18 @@ func createTables() error {
 
 // --- スナップショット機能 (Agent.md §6.2) ---
 
+// getSnapshotDir はDBパスと同じディレクトリ配下の snapshots/ を返す。
+// ユーザーが保存場所を意識しなくて済むようにアプリデータ内に格納する。
+func getSnapshotDir() string {
+	mu.RLock()
+	p := dbPath
+	mu.RUnlock()
+	if p == "" {
+		return "snapshots"
+	}
+	return filepath.Join(filepath.Dir(p), "snapshots")
+}
+
 // CreateSnapshot は現在のDBファイルのスナップショットを作成する。
 // snapshotDir にタイムスタンプ付きのコピーを保存する。
 func CreateSnapshot(snapshotDir string) (string, error) {
@@ -174,7 +186,7 @@ func CreateSnapshot(snapshotDir string) (string, error) {
 	}
 
 	if snapshotDir == "" {
-		snapshotDir = "snapshots"
+		snapshotDir = getSnapshotDir()
 	}
 
 	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
@@ -196,7 +208,7 @@ func CreateSnapshot(snapshotDir string) (string, error) {
 // ListSnapshots は利用可能なスナップショットのリストを返す
 func ListSnapshots(snapshotDir string) ([]string, error) {
 	if snapshotDir == "" {
-		snapshotDir = "snapshots"
+		snapshotDir = getSnapshotDir()
 	}
 
 	entries, err := os.ReadDir(snapshotDir)
@@ -220,7 +232,7 @@ func ListSnapshots(snapshotDir string) ([]string, error) {
 // RestoreSnapshot はスナップショットからDBを復元する
 func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if snapshotDir == "" {
-		snapshotDir = "snapshots"
+		snapshotDir = getSnapshotDir()
 	}
 
 	snapshotPath := filepath.Join(snapshotDir, snapshotName)
@@ -256,7 +268,7 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 // CleanOldSnapshots は古いスナップショットを削除する（世代管理: 最新N件を残す）
 func CleanOldSnapshots(snapshotDir string, maxKeep int) error {
 	if snapshotDir == "" {
-		snapshotDir = "snapshots"
+		snapshotDir = getSnapshotDir()
 	}
 	if maxKeep <= 0 {
 		maxKeep = 30

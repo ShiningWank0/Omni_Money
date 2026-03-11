@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -366,6 +368,7 @@ func SaveCreditCardSettings(items []string) error {
 	if err != nil {
 		return fmt.Errorf("クレジットカード設定保存エラー: %w", err)
 	}
+	database.AutoSnapshot()
 	return nil
 }
 
@@ -406,6 +409,42 @@ func BackupToCSV() (string, error) {
 	writer.Flush()
 
 	return builder.String(), nil
+}
+
+// BackupToCSVFile はCSVバックアップファイルをユーザーのダウンロードフォルダに保存する
+func BackupToCSVFile() (string, error) {
+	csvContent, err := BackupToCSV()
+	if err != nil {
+		return "", err
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("ホームディレクトリ取得エラー: %w", err)
+	}
+
+	var downloadsDir string
+	switch runtime.GOOS {
+	case "windows":
+		downloadsDir = filepath.Join(homeDir, "Downloads")
+	default:
+		downloadsDir = filepath.Join(homeDir, "Downloads")
+	}
+
+	if err := os.MkdirAll(downloadsDir, 0755); err != nil {
+		return "", fmt.Errorf("ダウンロードフォルダ作成エラー: %w", err)
+	}
+
+	filename := fmt.Sprintf("transactions_backup_%s.csv", time.Now().Format("2006-01-02"))
+	filePath := filepath.Join(downloadsDir, filename)
+
+	// BOMを付与してExcel互換にする
+	bom := "\xEF\xBB\xBF"
+	if err := os.WriteFile(filePath, []byte(bom+csvContent), 0644); err != nil {
+		return "", fmt.Errorf("CSVファイル書き出しエラー: %w", err)
+	}
+
+	return filePath, nil
 }
 
 // ImportCSV はCSVコンテンツからデータをインポートする。
@@ -499,6 +538,7 @@ func ImportCSV(content string, mode string) (int, error) {
 		}
 	}
 
+	database.AutoSnapshot()
 	return imported, nil
 }
 
@@ -720,12 +760,14 @@ func AddTransactionImage(transactionID int64, img models.TransactionImageRequest
 		return nil, err
 	}
 
-	return &models.TransactionImageResponse{
+	resp := &models.TransactionImageResponse{
 		ID:        id,
 		Filename:  img.Filename,
 		MimeType:  img.MimeType,
 		CreatedAt: createdAt,
-	}, nil
+	}
+	database.AutoSnapshot()
+	return resp, nil
 }
 
 // GetTransactionImages は取引の画像一覧を返す
@@ -766,6 +808,9 @@ func GetTransactionImages(transactionID int64) ([]models.TransactionImageRespons
 func DeleteTransactionImage(imageID int64) error {
 	db := database.GetDB()
 	_, err := db.Exec("DELETE FROM transaction_images WHERE id = ?", imageID)
+	if err == nil {
+		database.AutoSnapshot()
+	}
 	return err
 }
 
@@ -814,12 +859,14 @@ func CreateTag(name string, parentID *int64) (*models.Tag, error) {
 	}
 
 	id, _ := result.LastInsertId()
-	return &models.Tag{
+	tag := &models.Tag{
 		ID:       id,
 		Name:     name,
 		ParentID: parentID,
 		Level:    level,
-	}, nil
+	}
+	database.AutoSnapshot()
+	return tag, nil
 }
 
 // GetTags はタグ一覧をツリー構造で返す
@@ -889,6 +936,9 @@ func populateChildren(tag *models.Tag, tagMap map[int64]*models.Tag, allTags []m
 func UpdateTag(id int64, name string) error {
 	db := database.GetDB()
 	_, err := db.Exec("UPDATE tags SET name = ? WHERE id = ?", name, id)
+	if err == nil {
+		database.AutoSnapshot()
+	}
 	return err
 }
 
@@ -896,6 +946,9 @@ func UpdateTag(id int64, name string) error {
 func DeleteTag(id int64) error {
 	db := database.GetDB()
 	_, err := db.Exec("DELETE FROM tags WHERE id = ?", id)
+	if err == nil {
+		database.AutoSnapshot()
+	}
 	return err
 }
 
@@ -942,6 +995,7 @@ func AddTransactionTags(transactionID int64, tagIDs []int64) error {
 			return fmt.Errorf("タグ追加エラー: %w", err)
 		}
 	}
+	database.AutoSnapshot()
 	return nil
 }
 
@@ -952,6 +1006,9 @@ func RemoveTransactionTag(transactionID, tagID int64) error {
 		"DELETE FROM transaction_tags WHERE transaction_id = ? AND tag_id = ?",
 		transactionID, tagID,
 	)
+	if err == nil {
+		database.AutoSnapshot()
+	}
 	return err
 }
 

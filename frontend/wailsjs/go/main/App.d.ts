@@ -10,6 +10,8 @@ export function AddTransactionTags(arg1:number,arg2:Array<number>):Promise<void>
 
 export function BackupToCSV():Promise<string>;
 
+export function BackupToCSVFile():Promise<string>;
+
 export function CreateSnapshot():Promise<string>;
 
 export function CreateTag(arg1:string,arg2:any):Promise<models.Tag>;

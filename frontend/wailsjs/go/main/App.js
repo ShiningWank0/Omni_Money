@@ -18,6 +18,10 @@ export function BackupToCSV() {
   return window['go']['main']['App']['BackupToCSV']();
 }
 
+export function BackupToCSVFile() {
+  return window['go']['main']['App']['BackupToCSVFile']();
+}
+
 export function CreateSnapshot() {
   return window['go']['main']['App']['CreateSnapshot']();
 }

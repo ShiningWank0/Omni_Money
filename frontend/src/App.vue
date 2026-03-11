@@ -157,7 +157,7 @@ import {
   addTransaction,
   updateTransaction,
   deleteTransaction as apiDeleteTransaction,
-  backupToCSV as apiBackupToCSV,
+  backupToCSVFile as apiBackupToCSVFile,
   saveCreditCardSettings as apiSaveCreditCardSettings,
   getBalanceHistoryFiltered
 } from './utils/api'
@@ -299,22 +299,12 @@ async function handleDeleteTransaction() {
 async function backupToCSV() {
   showMenu.value = false
   try {
-    const csvContent = await apiBackupToCSV()
-    if (!csvContent) {
+    const filePath = await apiBackupToCSVFile()
+    if (!filePath) {
       alert('バックアップデータが空です')
       return
     }
-    // BOMを付与してExcel互換にし、ダウンロード
-    const bom = '\uFEFF'
-    const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `transactions_backup_${new Date().toISOString().slice(0, 10)}.csv`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
+    alert(`CSVバックアップを保存しました:\n${filePath}`)
   } catch (e) {
     console.error('CSVバックアップエラー:', e)
     alert('CSVバックアップに失敗しました: ' + (e.message || e))
