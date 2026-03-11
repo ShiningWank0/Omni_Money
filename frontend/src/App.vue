@@ -141,6 +141,13 @@
       v-if="showSnapshotModal"
       @close="showSnapshotModal = false"
     />
+
+    <!-- トースト通知 -->
+    <Transition name="toast-fade">
+      <div v-if="toast.visible" class="toast" :class="toast.type">
+        {{ toast.message }}
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -178,6 +185,17 @@ const editingTransaction = ref(null)
 const dateSortOrder = ref('desc')
 const selectedCreditCardItems = ref([])
 const balanceHistoryData = ref(null)
+
+// トースト通知
+const toast = ref({ visible: false, message: '', type: 'success' })
+let toastTimer = null
+function showToast(message, type = 'success', duration = 3000) {
+  clearTimeout(toastTimer)
+  toast.value = { visible: true, message, type }
+  toastTimer = setTimeout(() => {
+    toast.value.visible = false
+  }, duration)
+}
 
 // 日付でソートされた取引リスト
 const sortedTransactions = computed(() => {
@@ -301,13 +319,13 @@ async function backupToCSV() {
   try {
     const filePath = await apiBackupToCSVFile()
     if (!filePath) {
-      alert('バックアップデータが空です')
+      showToast('バックアップデータが空です', 'error')
       return
     }
-    alert(`CSVバックアップを保存しました:\n${filePath}`)
+    showToast('CSVバックアップを保存しました ✓')
   } catch (e) {
     console.error('CSVバックアップエラー:', e)
-    alert('CSVバックアップに失敗しました: ' + (e.message || e))
+    showToast('CSVバックアップに失敗しました', 'error')
   }
 }
 

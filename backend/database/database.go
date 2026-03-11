@@ -179,10 +179,18 @@ func getSnapshotDir() string {
 func CreateSnapshot(snapshotDir string) (string, error) {
 	mu.RLock()
 	currentPath := dbPath
+	currentDB := db
 	mu.RUnlock()
 
 	if currentPath == "" {
 		return "", fmt.Errorf("データベースが初期化されていません")
+	}
+
+	// WALの内容をメインDBファイルにフラッシュしてからコピーする
+	if currentDB != nil {
+		if _, err := currentDB.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			log.Printf("WALチェックポイント警告: %v", err)
+		}
 	}
 
 	if snapshotDir == "" {
@@ -255,6 +263,10 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 		InitDB(currentPath)
 		return fmt.Errorf("スナップショット復元エラー: %w", err)
 	}
+
+	// 旧セッションのWAL/SHMファイルを削除（残っていると復元データが壊れる）
+	os.Remove(currentPath + "-wal")
+	os.Remove(currentPath + "-shm")
 
 	// 再接続
 	if err := InitDB(currentPath); err != nil {
