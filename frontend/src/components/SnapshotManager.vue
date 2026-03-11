@@ -39,7 +39,7 @@ import {
   restoreSnapshot as apiRestoreSnapshot
 } from '../utils/api'
 
-defineEmits(['close'])
+const emit = defineEmits(['close', 'restored'])
 
 const snapshots = ref([])
 const isRestoring = ref(false)
@@ -76,11 +76,12 @@ async function restoreSnapshot(name) {
   message.value = ''
   try {
     await apiRestoreSnapshot(name)
-    message.value = 'スナップショットから復元しました。ページを再読み込みします...'
+    message.value = 'スナップショットから復元しました'
     messageType.value = 'success'
+    emit('restored')
     setTimeout(() => {
-      window.location.reload()
-    }, 1500)
+      emit('close')
+    }, 1000)
   } catch (e) {
     message.value = '復元に失敗しました: ' + e.message
     messageType.value = 'error'
