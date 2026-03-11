@@ -181,7 +181,8 @@ onMounted(() => {
 }
 
 .dropdown-item {
-  display: flex;
+  display: flex !important;
+  flex-direction: row !important;
   align-items: center;
   gap: 8px;
   padding: 8px;
@@ -190,16 +191,19 @@ onMounted(() => {
   transition: background 0.2s;
 }
 
+.dropdown-item input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+  flex-shrink: 0;
+  margin: 0;
+}
+
 .dropdown-item:hover {
   background: #f8f9fa;
 }
 
 .dropdown-item.selected {
   background: rgba(102, 126, 234, 0.08);
-}
-
-.dropdown-item input {
-  margin: 0;
 }
 
 .action-buttons {
