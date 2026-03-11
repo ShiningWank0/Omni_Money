@@ -39,7 +39,7 @@
       </div>
       <div class="header-search">
         <div class="search-container">
-          <input type="text" class="search-box" placeholder="資金使用項目に対する検索が可能" v-model="store.searchQuery" @input="onSearchInput">
+          <input type="text" class="search-box" placeholder="項目名・メモで検索" v-model="store.searchQuery" @input="onSearchInput">
           <span class="search-icon">🔍</span>
         </div>
         <button class="add-btn add-btn-desktop" @click="showAddModal" title="新しい取引を追加">+</button>
@@ -53,6 +53,7 @@
         <button class="menu-btn" @click="showImportCSVModalMethod">CSVインポート</button>
         <button class="menu-btn" @click="openCreditCardSettings">クレジットカード設定</button>
         <button class="menu-btn" @click="showGraphModal">残高推移グラフ表示</button>
+        <button class="menu-btn" @click="openTagChart">タグ別分析</button>
         <button class="menu-btn" @click="openSnapshotManager">スナップショット管理</button>
       </div>
     </div>
@@ -128,6 +129,13 @@
       @close="showGraph = false"
     />
 
+    <!-- タグ別分析円グラフ (Agent.md §6.6) -->
+    <TagPieChart
+      v-if="showTagChart"
+      :credit-card-items="store.creditCardItems"
+      @close="showTagChart = false"
+    />
+
     <!-- スナップショット管理モーダル -->
     <SnapshotManager
       v-if="showSnapshotModal"
@@ -144,6 +152,7 @@ import CSVImportModal from './components/CSVImportModal.vue'
 import CreditCardSettingsModal from './components/CreditCardSettingsModal.vue'
 import BalanceChart from './components/BalanceChart.vue'
 import SnapshotManager from './components/SnapshotManager.vue'
+import TagPieChart from './components/TagPieChart.vue'
 import {
   addTransaction,
   updateTransaction,
@@ -163,6 +172,7 @@ const showImportCSVModal = ref(false)
 const showCreditCardModal = ref(false)
 const showGraph = ref(false)
 const showSnapshotModal = ref(false)
+const showTagChart = ref(false)
 const isEditMode = ref(false)
 const editingTransaction = ref(null)
 const dateSortOrder = ref('desc')
@@ -357,6 +367,12 @@ async function showGraphModal() {
     console.error('残高推移取得エラー:', e)
     alert('残高推移データの取得に失敗しました')
   }
+}
+
+// タグ別分析
+function openTagChart() {
+  showMenu.value = false
+  showTagChart.value = true
 }
 
 // スナップショット管理

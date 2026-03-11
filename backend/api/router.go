@@ -37,10 +37,21 @@ func NewRouter() http.Handler {
 	mux.HandleFunc("/api/snapshots", handleSnapshots)
 	mux.HandleFunc("/api/snapshots/restore", methodGuard(http.MethodPost, handleSnapshotRestore))
 
-	// AI専用エンドポイント（書き込み専用）
+	// 画像API（Agent.md §6.5）
+	mux.HandleFunc("/api/transaction_images/", handleTransactionImages)
+
+	// タグAPI（Agent.md §6.6）
+	mux.HandleFunc("/api/tags", handleTags)
+	mux.HandleFunc("/api/tags/", handleTagByID)
+	mux.HandleFunc("/api/tags/summary", handleTagSummary)
+	mux.HandleFunc("/api/transaction_tags/", handleTransactionTagsAPI)
+
+	// AI専用エンドポイント（Agent.md §6.3: POST のみ許可）
 	apiToken := os.Getenv("AI_API_TOKEN")
-	mux.Handle("/api/v1/ai/transactions",
-		middleware.AIWriteOnlyMiddleware(apiToken, http.HandlerFunc(handleAITransactions)))
+	aiMux := http.NewServeMux()
+	aiMux.HandleFunc("/api/v1/ai/transactions", handleAITransactions)
+	aiMux.HandleFunc("/api/v1/ai/analysis", handleAIAnalysis)
+	mux.Handle("/api/v1/ai/", middleware.AIAPIMiddleware(apiToken, aiMux))
 
 	// CORSミドルウェアで包む
 	return corsMiddleware(mux)
@@ -364,4 +375,230 @@ func jsonResponse(w http.ResponseWriter, data interface{}, status int) {
 
 func jsonError(w http.ResponseWriter, message string, status int) {
 	jsonResponse(w, map[string]string{"error": message}, status)
+}
+
+// --- 画像API ハンドラー (Agent.md §6.5) ---
+
+func handleTransactionImages(w http.ResponseWriter, r *http.Request) {
+	// /api/transaction_images/{txId} or /api/transaction_images/{txId}/{imgId}
+	path := strings.TrimPrefix(r.URL.Path, "/api/transaction_images/")
+	parts := strings.SplitN(path, "/", 2)
+
+	txID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		jsonError(w, "無効な取引IDです", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		images, err := core.GetTransactionImages(txID)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, images, http.StatusOK)
+
+	case http.MethodPost:
+		var img models.TransactionImageRequest
+		if err := json.NewDecoder(r.Body).Decode(&img); err != nil {
+			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
+			return
+		}
+		resp, err := core.AddTransactionImage(txID, img)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, resp, http.StatusCreated)
+
+	case http.MethodDelete:
+		if len(parts) < 2 {
+			jsonError(w, "画像IDが必要です", http.StatusBadRequest)
+			return
+		}
+		imgID, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			jsonError(w, "無効な画像IDです", http.StatusBadRequest)
+			return
+		}
+		if err := core.DeleteTransactionImage(imgID); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]string{"message": "画像を削除しました"}, http.StatusOK)
+
+	default:
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// --- タグAPI ハンドラー (Agent.md §6.6) ---
+
+func handleTags(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		tags, err := core.GetTags()
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, tags, http.StatusOK)
+
+	case http.MethodPost:
+		var body struct {
+			Name     string `json:"name"`
+			ParentID *int64 `json:"parent_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
+			return
+		}
+		tag, err := core.CreateTag(body.Name, body.ParentID)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, tag, http.StatusCreated)
+
+	default:
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleTagByID(w http.ResponseWriter, r *http.Request) {
+	// /api/tags/summary は別ハンドラーで処理
+	path := strings.TrimPrefix(r.URL.Path, "/api/tags/")
+	if path == "summary" {
+		handleTagSummary(w, r)
+		return
+	}
+
+	id, err := strconv.ParseInt(path, 10, 64)
+	if err != nil {
+		jsonError(w, "無効なタグIDです", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
+			return
+		}
+		if err := core.UpdateTag(id, body.Name); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]string{"message": "タグを更新しました"}, http.StatusOK)
+
+	case http.MethodDelete:
+		if err := core.DeleteTag(id); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]string{"message": "タグを削除しました"}, http.StatusOK)
+
+	default:
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleTagSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	txType := r.URL.Query().Get("type")
+	startDate := r.URL.Query().Get("start_date")
+	endDate := r.URL.Query().Get("end_date")
+
+	summaries, err := core.GetTagSummary(txType, startDate, endDate)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, summaries, http.StatusOK)
+}
+
+func handleTransactionTagsAPI(w http.ResponseWriter, r *http.Request) {
+	// /api/transaction_tags/{txId} or /api/transaction_tags/{txId}/{tagId}
+	path := strings.TrimPrefix(r.URL.Path, "/api/transaction_tags/")
+	parts := strings.SplitN(path, "/", 2)
+
+	txID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		jsonError(w, "無効な取引IDです", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		tags, err := core.GetTransactionTags(txID)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, tags, http.StatusOK)
+
+	case http.MethodPost:
+		var body struct {
+			TagIDs []int64 `json:"tag_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
+			return
+		}
+		if err := core.AddTransactionTags(txID, body.TagIDs); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, map[string]string{"message": "タグを追加しました"}, http.StatusOK)
+
+	case http.MethodDelete:
+		if len(parts) < 2 {
+			jsonError(w, "タグIDが必要です", http.StatusBadRequest)
+			return
+		}
+		tagID, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			jsonError(w, "無効なタグIDです", http.StatusBadRequest)
+			return
+		}
+		if err := core.RemoveTransactionTag(txID, tagID); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]string{"message": "タグを削除しました"}, http.StatusOK)
+
+	default:
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// --- AI分析API ハンドラー (Agent.md §6.3) ---
+
+func handleAIAnalysis(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req models.AnalysisRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := core.AnalyzeTransactions(req)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, resp, http.StatusOK)
 }

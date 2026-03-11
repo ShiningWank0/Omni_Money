@@ -108,6 +108,33 @@ func createTables() error {
 			FOREIGN KEY (parent_id) REFERENCES transactions(id) ON DELETE CASCADE,
 			FOREIGN KEY (child_id) REFERENCES transactions(id) ON DELETE CASCADE
 		)`,
+		// 取引画像テーブル（Agent.md §6.5）
+		`CREATE TABLE IF NOT EXISTS transaction_images (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			transaction_id INTEGER NOT NULL,
+			filename TEXT NOT NULL,
+			data BLOB NOT NULL,
+			mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+		)`,
+		// タグテーブル（Agent.md §6.6: 3階層タグシステム）
+		`CREATE TABLE IF NOT EXISTS tags (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			parent_id INTEGER DEFAULT NULL,
+			level INTEGER NOT NULL DEFAULT 1 CHECK(level IN (1, 2, 3)),
+			FOREIGN KEY (parent_id) REFERENCES tags(id) ON DELETE CASCADE,
+			UNIQUE(name, parent_id)
+		)`,
+		// 取引タグ紐付けテーブル
+		`CREATE TABLE IF NOT EXISTS transaction_tags (
+			transaction_id INTEGER NOT NULL,
+			tag_id INTEGER NOT NULL,
+			PRIMARY KEY (transaction_id, tag_id),
+			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE,
+			FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+		)`,
 		// 設定テーブル
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
@@ -117,6 +144,11 @@ func createTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account)`,
 		`CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date)`,
 		`CREATE INDEX IF NOT EXISTS idx_transactions_item ON transactions(item)`,
+		`CREATE INDEX IF NOT EXISTS idx_transactions_memo ON transactions(memo)`,
+		`CREATE INDEX IF NOT EXISTS idx_transaction_images_txid ON transaction_images(transaction_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_txid ON transaction_tags(transaction_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_tagid ON transaction_tags(tag_id)`,
 	}
 
 	for _, stmt := range statements {

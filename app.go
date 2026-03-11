@@ -117,3 +117,62 @@ func (a *App) RestoreSnapshot(name string) error {
 func (a *App) Greet(name string) string {
 	return fmt.Sprintf("Hello %s, Omni Moneyへようこそ!", name)
 }
+
+// --- 画像関連 (Agent.md §6.5) ---
+
+// AddTransactionImage は取引に画像を追加する
+func (a *App) AddTransactionImage(transactionID int64, img models.TransactionImageRequest) (*models.TransactionImageResponse, error) {
+	return core.AddTransactionImage(transactionID, img)
+}
+
+// GetTransactionImages は取引の画像一覧を返す
+func (a *App) GetTransactionImages(transactionID int64) ([]models.TransactionImageResponse, error) {
+	return core.GetTransactionImages(transactionID)
+}
+
+// DeleteTransactionImage は取引から画像を削除する
+func (a *App) DeleteTransactionImage(imageID int64) error {
+	return core.DeleteTransactionImage(imageID)
+}
+
+// --- タグ関連 (Agent.md §6.6) ---
+
+// CreateTag は新しいタグを作成する
+func (a *App) CreateTag(name string, parentID *int64) (*models.Tag, error) {
+	return core.CreateTag(name, parentID)
+}
+
+// GetTags はタグ一覧をツリー構造で返す
+func (a *App) GetTags() ([]models.Tag, error) {
+	return core.GetTags()
+}
+
+// UpdateTag はタグ名を更新する
+func (a *App) UpdateTag(id int64, name string) error {
+	return core.UpdateTag(id, name)
+}
+
+// DeleteTag はタグを削除する
+func (a *App) DeleteTag(id int64) error {
+	return core.DeleteTag(id)
+}
+
+// GetTransactionTags は取引に紐付いたタグを返す
+func (a *App) GetTransactionTags(transactionID int64) ([]models.Tag, error) {
+	return core.GetTransactionTags(transactionID)
+}
+
+// AddTransactionTags は取引にタグを追加する
+func (a *App) AddTransactionTags(transactionID int64, tagIDs []int64) error {
+	return core.AddTransactionTags(transactionID, tagIDs)
+}
+
+// RemoveTransactionTag は取引からタグを削除する
+func (a *App) RemoveTransactionTag(transactionID, tagID int64) error {
+	return core.RemoveTransactionTag(transactionID, tagID)
+}
+
+// GetTagSummary はタグ別集計データを返す（円グラフ用）
+func (a *App) GetTagSummary(txType, startDate, endDate string) ([]models.TagSummary, error) {
+	return core.GetTagSummary(txType, startDate, endDate)
+}

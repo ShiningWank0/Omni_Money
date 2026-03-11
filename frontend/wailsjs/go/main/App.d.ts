@@ -4,11 +4,21 @@ import {models} from '../models';
 
 export function AddTransaction(arg1:models.TransactionRequest):Promise<models.TransactionResponse>;
 
+export function AddTransactionImage(arg1:number,arg2:models.TransactionImageRequest):Promise<models.TransactionImageResponse>;
+
+export function AddTransactionTags(arg1:number,arg2:Array<number>):Promise<void>;
+
 export function BackupToCSV():Promise<string>;
 
 export function CreateSnapshot():Promise<string>;
 
+export function CreateTag(arg1:string,arg2:any):Promise<models.Tag>;
+
+export function DeleteTag(arg1:number):Promise<void>;
+
 export function DeleteTransaction(arg1:number):Promise<void>;
+
+export function DeleteTransactionImage(arg1:number):Promise<void>;
 
 export function GetAccounts():Promise<Array<string>>;
 
@@ -20,6 +30,14 @@ export function GetCreditCardSettings():Promise<Array<string>>;
 
 export function GetItems(arg1:string):Promise<Array<string>>;
 
+export function GetTagSummary(arg1:string,arg2:string,arg3:string):Promise<Array<models.TagSummary>>;
+
+export function GetTags():Promise<Array<models.Tag>>;
+
+export function GetTransactionImages(arg1:number):Promise<Array<models.TransactionImageResponse>>;
+
+export function GetTransactionTags(arg1:number):Promise<Array<models.Tag>>;
+
 export function GetTransactions(arg1:string,arg2:string):Promise<Array<models.TransactionResponse>>;
 
 export function Greet(arg1:string):Promise<string>;
@@ -28,8 +46,12 @@ export function ImportCSV(arg1:string,arg2:string):Promise<number>;
 
 export function ListSnapshots():Promise<Array<string>>;
 
+export function RemoveTransactionTag(arg1:number,arg2:number):Promise<void>;
+
 export function RestoreSnapshot(arg1:string):Promise<void>;
 
 export function SaveCreditCardSettings(arg1:Array<string>):Promise<void>;
+
+export function UpdateTag(arg1:number,arg2:string):Promise<void>;
 
 export function UpdateTransaction(arg1:number,arg2:models.TransactionRequest):Promise<models.TransactionResponse>;

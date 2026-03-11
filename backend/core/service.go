@@ -2,10 +2,13 @@
 package core
 
 import (
+	"database/sql"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -76,8 +79,8 @@ func GetTransactions(account string, search string) ([]models.TransactionRespons
 		args = append(args, account)
 	}
 	if search != "" {
-		query += " AND item LIKE ?"
-		args = append(args, "%"+search+"%")
+		query += " AND (item LIKE ? OR memo LIKE ?)"
+		args = append(args, "%"+search+"%", "%"+search+"%")
 	}
 	query += " ORDER BY date, id"
 
@@ -130,6 +133,23 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 
 	id, _ := result.LastInsertId()
 
+	// 画像添付処理
+	if len(req.Images) > 0 {
+		for _, img := range req.Images {
+			if err := addTransactionImage(db, id, img); err != nil {
+				// 画像添付エラーは警告として続行
+				fmt.Printf("画像添付警告 (tx=%d): %v\n", id, err)
+			}
+		}
+	}
+
+	// タグ紐付け処理
+	if len(req.Tags) > 0 {
+		for _, tagID := range req.Tags {
+			db.Exec("INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)", id, tagID)
+		}
+	}
+
 	// バックデート挿入も含め、口座全体の残高を時系列順に再計算
 	if err := recalculateBalance(req.Account); err != nil {
 		return nil, fmt.Errorf("残高再計算エラー: %w", err)
@@ -146,6 +166,7 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 	}
 	inserted.Date = parseDate(dateStr)
 	resp := inserted.ToResponse()
+	resp.Tags, _ = GetTransactionTags(id)
 	return &resp, nil
 }
 
@@ -641,4 +662,451 @@ func buildBalanceHistory(rows interface {
 		Dates:    dates,
 		Balances: balances,
 	}, nil
+}
+
+// --- 画像管理 (Agent.md §6.5) ---
+
+// addTransactionImage は取引に画像を追加する（内部ヘルパー）
+func addTransactionImage(db *sql.DB, transactionID int64, img models.TransactionImageRequest) error {
+	data, err := base64.StdEncoding.DecodeString(img.Data)
+	if err != nil {
+		return fmt.Errorf("Base64デコードエラー: %w", err)
+	}
+
+	mimeType := img.MimeType
+	if mimeType == "" {
+		mimeType = guessMimeType(img.Filename)
+	}
+
+	_, err = db.Exec(
+		"INSERT INTO transaction_images (transaction_id, filename, data, mime_type) VALUES (?, ?, ?, ?)",
+		transactionID, img.Filename, data, mimeType,
+	)
+	return err
+}
+
+// AddTransactionImage は取引に画像を追加する
+func AddTransactionImage(transactionID int64, img models.TransactionImageRequest) (*models.TransactionImageResponse, error) {
+	db := database.GetDB()
+	if err := addTransactionImage(db, transactionID, img); err != nil {
+		return nil, err
+	}
+
+	// 追加された画像のIDを取得
+	var id int64
+	var createdAt string
+	err := db.QueryRow(
+		"SELECT id, created_at FROM transaction_images WHERE transaction_id = ? ORDER BY id DESC LIMIT 1",
+		transactionID,
+	).Scan(&id, &createdAt)
+	if err != nil {
+		return nil, err
+	}
+
+	return &models.TransactionImageResponse{
+		ID:        id,
+		Filename:  img.Filename,
+		MimeType:  img.MimeType,
+		CreatedAt: createdAt,
+	}, nil
+}
+
+// GetTransactionImages は取引の画像一覧を返す
+func GetTransactionImages(transactionID int64) ([]models.TransactionImageResponse, error) {
+	db := database.GetDB()
+	rows, err := db.Query(
+		"SELECT id, filename, data, mime_type, created_at FROM transaction_images WHERE transaction_id = ? ORDER BY created_at",
+		transactionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("画像一覧取得エラー: %w", err)
+	}
+	defer rows.Close()
+
+	var images []models.TransactionImageResponse
+	for rows.Next() {
+		var id int64
+		var filename, mimeType, createdAt string
+		var data []byte
+		if err := rows.Scan(&id, &filename, &data, &mimeType, &createdAt); err != nil {
+			return nil, err
+		}
+		images = append(images, models.TransactionImageResponse{
+			ID:        id,
+			Filename:  filename,
+			MimeType:  mimeType,
+			CreatedAt: createdAt,
+			DataURL:   fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data)),
+		})
+	}
+	if images == nil {
+		images = []models.TransactionImageResponse{}
+	}
+	return images, nil
+}
+
+// DeleteTransactionImage は取引から画像を削除する
+func DeleteTransactionImage(imageID int64) error {
+	db := database.GetDB()
+	_, err := db.Exec("DELETE FROM transaction_images WHERE id = ?", imageID)
+	return err
+}
+
+// guessMimeType はファイル名からMIMEタイプを推定する
+func guessMimeType(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	default:
+		return "image/jpeg"
+	}
+}
+
+// --- タグ管理 (Agent.md §6.6) ---
+
+// CreateTag は新しいタグを作成する
+func CreateTag(name string, parentID *int64) (*models.Tag, error) {
+	db := database.GetDB()
+
+	level := 1
+	if parentID != nil {
+		var parentLevel int
+		err := db.QueryRow("SELECT level FROM tags WHERE id = ?", *parentID).Scan(&parentLevel)
+		if err != nil {
+			return nil, fmt.Errorf("親タグが見つかりません: %w", err)
+		}
+		if parentLevel >= 3 {
+			return nil, fmt.Errorf("タグは3階層までです")
+		}
+		level = parentLevel + 1
+	}
+
+	result, err := db.Exec(
+		"INSERT INTO tags (name, parent_id, level) VALUES (?, ?, ?)",
+		name, parentID, level,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("タグ作成エラー: %w", err)
+	}
+
+	id, _ := result.LastInsertId()
+	return &models.Tag{
+		ID:       id,
+		Name:     name,
+		ParentID: parentID,
+		Level:    level,
+	}, nil
+}
+
+// GetTags はタグ一覧をツリー構造で返す
+func GetTags() ([]models.Tag, error) {
+	db := database.GetDB()
+	rows, err := db.Query("SELECT id, name, parent_id, level FROM tags ORDER BY level, name")
+	if err != nil {
+		return nil, fmt.Errorf("タグ一覧取得エラー: %w", err)
+	}
+	defer rows.Close()
+
+	var allTags []models.Tag
+	tagMap := make(map[int64]*models.Tag)
+
+	for rows.Next() {
+		var tag models.Tag
+		var parentID sql.NullInt64
+		if err := rows.Scan(&tag.ID, &tag.Name, &parentID, &tag.Level); err != nil {
+			return nil, err
+		}
+		if parentID.Valid {
+			pid := parentID.Int64
+			tag.ParentID = &pid
+		}
+		allTags = append(allTags, tag)
+		tagMap[tag.ID] = &allTags[len(allTags)-1]
+	}
+
+	// ツリー構造を構築
+	var rootTags []models.Tag
+	for i := range allTags {
+		tag := &allTags[i]
+		if tag.ParentID == nil {
+			rootTags = append(rootTags, *tag)
+		} else {
+			if parent, ok := tagMap[*tag.ParentID]; ok {
+				parent.Children = append(parent.Children, *tag)
+			}
+		}
+	}
+
+	// rootTagsの子を再帰的に設定
+	for i := range rootTags {
+		populateChildren(&rootTags[i], tagMap, allTags)
+	}
+
+	if rootTags == nil {
+		rootTags = []models.Tag{}
+	}
+	return rootTags, nil
+}
+
+// populateChildren は再帰的に子タグを設定する
+func populateChildren(tag *models.Tag, tagMap map[int64]*models.Tag, allTags []models.Tag) {
+	var children []models.Tag
+	for _, t := range allTags {
+		if t.ParentID != nil && *t.ParentID == tag.ID {
+			child := t
+			populateChildren(&child, tagMap, allTags)
+			children = append(children, child)
+		}
+	}
+	tag.Children = children
+}
+
+// UpdateTag はタグ名を更新する
+func UpdateTag(id int64, name string) error {
+	db := database.GetDB()
+	_, err := db.Exec("UPDATE tags SET name = ? WHERE id = ?", name, id)
+	return err
+}
+
+// DeleteTag はタグを削除する（子タグも連鎖削除）
+func DeleteTag(id int64) error {
+	db := database.GetDB()
+	_, err := db.Exec("DELETE FROM tags WHERE id = ?", id)
+	return err
+}
+
+// GetTransactionTags は取引に紐付いたタグを返す
+func GetTransactionTags(transactionID int64) ([]models.Tag, error) {
+	db := database.GetDB()
+	rows, err := db.Query(
+		"SELECT t.id, t.name, t.parent_id, t.level FROM tags t INNER JOIN transaction_tags tt ON t.id = tt.tag_id WHERE tt.transaction_id = ? ORDER BY t.level, t.name",
+		transactionID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tags []models.Tag
+	for rows.Next() {
+		var tag models.Tag
+		var parentID sql.NullInt64
+		if err := rows.Scan(&tag.ID, &tag.Name, &parentID, &tag.Level); err != nil {
+			return nil, err
+		}
+		if parentID.Valid {
+			pid := parentID.Int64
+			tag.ParentID = &pid
+		}
+		tags = append(tags, tag)
+	}
+	if tags == nil {
+		tags = []models.Tag{}
+	}
+	return tags, nil
+}
+
+// AddTransactionTags は取引にタグを追加する
+func AddTransactionTags(transactionID int64, tagIDs []int64) error {
+	db := database.GetDB()
+	for _, tagID := range tagIDs {
+		_, err := db.Exec(
+			"INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)",
+			transactionID, tagID,
+		)
+		if err != nil {
+			return fmt.Errorf("タグ追加エラー: %w", err)
+		}
+	}
+	return nil
+}
+
+// RemoveTransactionTag は取引からタグを削除する
+func RemoveTransactionTag(transactionID, tagID int64) error {
+	db := database.GetDB()
+	_, err := db.Exec(
+		"DELETE FROM transaction_tags WHERE transaction_id = ? AND tag_id = ?",
+		transactionID, tagID,
+	)
+	return err
+}
+
+// GetTagSummary はタグ別集計データを返す（円グラフ用）
+func GetTagSummary(txType string, startDate, endDate string) ([]models.TagSummary, error) {
+	db := database.GetDB()
+
+	// メインクエリ: タグ別の金額集計
+	query := `SELECT t.id, t.name, t.level, t.parent_id,
+		COALESCE(SUM(tr.amount), 0) as total_amount,
+		COUNT(tr.id) as tx_count
+		FROM tags t
+		LEFT JOIN transaction_tags tt ON t.id = tt.tag_id
+		LEFT JOIN transactions tr ON tt.transaction_id = tr.id`
+
+	conditions := []string{}
+	args := []interface{}{}
+
+	if txType != "" {
+		conditions = append(conditions, "tr.type = ?")
+		args = append(args, txType)
+	}
+	if startDate != "" {
+		conditions = append(conditions, "tr.date >= ?")
+		args = append(args, startDate)
+	}
+	if endDate != "" {
+		conditions = append(conditions, "tr.date <= ?")
+		args = append(args, endDate+" 23:59:59")
+	}
+
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	query += " GROUP BY t.id ORDER BY total_amount DESC"
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("タグ集計エラー: %w", err)
+	}
+	defer rows.Close()
+
+	type tagData struct {
+		id       int64
+		name     string
+		level    int
+		parentID sql.NullInt64
+		amount   int64
+		count    int
+	}
+	var allData []tagData
+	var totalAmount int64
+
+	for rows.Next() {
+		var td tagData
+		if err := rows.Scan(&td.id, &td.name, &td.level, &td.parentID, &td.amount, &td.count); err != nil {
+			return nil, err
+		}
+		allData = append(allData, td)
+		if td.level == 1 {
+			totalAmount += td.amount
+		}
+	}
+
+	// ツリー構造の集計データを構築
+	var buildSummary func(parentID *int64) []models.TagSummary
+	buildSummary = func(parentID *int64) []models.TagSummary {
+		var summaries []models.TagSummary
+		for _, td := range allData {
+			match := false
+			if parentID == nil && !td.parentID.Valid {
+				match = true
+			} else if parentID != nil && td.parentID.Valid && td.parentID.Int64 == *parentID {
+				match = true
+			}
+			if match {
+				ratio := float64(0)
+				if totalAmount > 0 {
+					ratio = float64(td.amount) / float64(totalAmount)
+				}
+				s := models.TagSummary{
+					TagID:    td.id,
+					TagName:  td.name,
+					Amount:   td.amount,
+					Count:    td.count,
+					Ratio:    ratio,
+					Children: buildSummary(&td.id),
+				}
+				summaries = append(summaries, s)
+			}
+		}
+		return summaries
+	}
+
+	result := buildSummary(nil)
+	if result == nil {
+		result = []models.TagSummary{}
+	}
+	return result, nil
+}
+
+// --- AI分析 (Agent.md §6.3) ---
+
+// AnalyzeTransactions はAIエージェント向けの取引分析を行う
+func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, error) {
+	db := database.GetDB()
+
+	query := "SELECT id, account, date, item, type, amount, balance, memo FROM transactions WHERE 1=1"
+	args := []interface{}{}
+
+	if req.Account != "" {
+		query += " AND account = ?"
+		args = append(args, req.Account)
+	}
+	if req.Type != "" {
+		query += " AND type = ?"
+		args = append(args, req.Type)
+	}
+	if req.StartDate != "" {
+		query += " AND date >= ?"
+		args = append(args, req.StartDate)
+	}
+	if req.EndDate != "" {
+		query += " AND date <= ?"
+		args = append(args, req.EndDate+" 23:59:59")
+	}
+
+	// タグフィルタ
+	if len(req.TagIDs) > 0 {
+		placeholders := make([]string, len(req.TagIDs))
+		for i, id := range req.TagIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		query += fmt.Sprintf(" AND id IN (SELECT transaction_id FROM transaction_tags WHERE tag_id IN (%s))",
+			strings.Join(placeholders, ","))
+	}
+
+	query += " ORDER BY date, id"
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("分析クエリエラー: %w", err)
+	}
+	defer rows.Close()
+
+	resp := &models.AnalysisResponse{}
+	for rows.Next() {
+		var t models.Transaction
+		var dateStr string
+		if err := rows.Scan(&t.ID, &t.Account, &dateStr, &t.Item, &t.Type, &t.Amount, &t.Balance, &t.Memo); err != nil {
+			return nil, err
+		}
+		t.Date = parseDate(dateStr)
+		txResp := t.ToResponse()
+		resp.Transactions = append(resp.Transactions, txResp)
+		resp.Count++
+		if t.Type == "income" {
+			resp.TotalIncome += t.Amount
+		} else {
+			resp.TotalExpense += t.Amount
+		}
+	}
+	resp.NetAmount = resp.TotalIncome - resp.TotalExpense
+
+	// タグ別集計も含める
+	tagSummaries, _ := GetTagSummary(req.Type, req.StartDate, req.EndDate)
+	resp.TagSummaries = tagSummaries
+
+	if resp.Transactions == nil {
+		resp.Transactions = []models.TransactionResponse{}
+	}
+
+	return resp, nil
 }
