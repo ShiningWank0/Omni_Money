@@ -2,6 +2,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -237,7 +238,10 @@ func ListSnapshots(snapshotDir string) ([]string, error) {
 	return snapshots, nil
 }
 
-// RestoreSnapshot はスナップショットからDBを復元する
+// RestoreSnapshot はスナップショットからDBを復元する。
+// DBを閉じずに ATTACH DATABASE でスナップショットをマウントし、
+// トランザクション内でデータを入れ替える。
+// これによりWALモードのファイルロック問題を完全に回避する。
 func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if snapshotDir == "" {
 		snapshotDir = getSnapshotDir()
@@ -248,32 +252,90 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 		return fmt.Errorf("スナップショットが見つかりません: %s", snapshotName)
 	}
 
-	mu.Lock()
-	currentPath := dbPath
-	// DBを一旦閉じる
-	if db != nil {
-		db.Close()
-		db = nil
-	}
-	mu.Unlock()
+	mu.RLock()
+	currentDB := db
+	mu.RUnlock()
 
-	// スナップショットで上書き
-	if err := copyFile(snapshotPath, currentPath); err != nil {
-		// 復元失敗時も再接続を試みる
-		InitDB(currentPath)
-		return fmt.Errorf("スナップショット復元エラー: %w", err)
+	if currentDB == nil {
+		return fmt.Errorf("データベースが初期化されていません")
 	}
 
-	// 旧セッションのWAL/SHMファイルを削除（残っていると復元データが壊れる）
-	os.Remove(currentPath + "-wal")
-	os.Remove(currentPath + "-shm")
+	ctx := context.Background()
 
-	// 再接続
-	if err := InitDB(currentPath); err != nil {
-		return fmt.Errorf("復元後のDB再接続エラー: %w", err)
+	// 単一接続を確保（ATTACH/PRAGMA は接続単位で有効）
+	conn, err := currentDB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("接続取得エラー: %w", err)
+	}
+	defer conn.Close()
+
+	// 外部キー制約を一時無効化（トランザクション外で設定する必要がある）
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
+		return fmt.Errorf("外部キー無効化エラー: %w", err)
 	}
 
-	log.Printf("スナップショット復元完了: %s", snapshotName)
+	// スナップショットDBをアタッチ
+	if _, err := conn.ExecContext(ctx, "ATTACH DATABASE ? AS snap", snapshotPath); err != nil {
+		conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
+		return fmt.Errorf("スナップショットアタッチエラー: %w", err)
+	}
+	defer conn.ExecContext(ctx, "DETACH DATABASE snap")
+
+	// スナップショットからユーザーテーブルのリストを取得
+	rows, err := conn.QueryContext(ctx,
+		"SELECT name FROM snap.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+	if err != nil {
+		conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
+		return fmt.Errorf("テーブルリスト取得エラー: %w", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
+			return err
+		}
+		tables = append(tables, name)
+	}
+	rows.Close()
+
+	if len(tables) == 0 {
+		conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
+		return fmt.Errorf("スナップショットにテーブルが見つかりません")
+	}
+
+	// トランザクション内で全テーブルのデータを入れ替え
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
+		return fmt.Errorf("トランザクション開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, table := range tables {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM main.\""+table+"\""); err != nil {
+			log.Printf("テーブル %s クリア警告: %v", table, err)
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO main.\""+table+"\" SELECT * FROM snap.\""+table+"\""); err != nil {
+			log.Printf("テーブル %s 復元警告: %v", table, err)
+		}
+	}
+
+	// AUTOINCREMENT カウンタもコピー（存在しない場合は無視）
+	tx.ExecContext(ctx, "DELETE FROM main.sqlite_sequence")
+	tx.ExecContext(ctx, "INSERT INTO main.sqlite_sequence SELECT * FROM snap.sqlite_sequence")
+
+	if err := tx.Commit(); err != nil {
+		conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
+		return fmt.Errorf("復元コミットエラー: %w", err)
+	}
+
+	// 外部キー制約を再有効化
+	conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
+
+	log.Printf("スナップショット復元完了 (ATTACH方式): %s", snapshotName)
 	return nil
 }
 
