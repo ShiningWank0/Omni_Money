@@ -130,12 +130,13 @@ onMounted(fetchSnapshots)
 .snapshot-header h3 {
   margin: 0;
   font-size: 1.1em;
+  color: #333;
 }
 
 .close-btn {
   background: none;
   border: none;
-  color: rgba(255, 255, 255, 0.7);
+  color: #999;
   font-size: 1.5em;
   cursor: pointer;
   padding: 0 4px;
@@ -143,7 +144,7 @@ onMounted(fetchSnapshots)
 }
 
 .close-btn:hover {
-  color: #fff;
+  color: #333;
 }
 
 .snapshot-actions {
@@ -152,27 +153,27 @@ onMounted(fetchSnapshots)
 
 .snapshot-message {
   padding: 8px 12px;
-  border-radius: 6px;
+  border-radius: 8px;
   margin-bottom: 12px;
   font-size: 0.9em;
 }
 
 .snapshot-message.success {
-  background: rgba(100, 220, 130, 0.2);
-  color: rgba(100, 220, 130, 1);
-  border: 1px solid rgba(100, 220, 130, 0.3);
+  background: #e6ffed;
+  color: #155724;
+  border: 1px solid #c3e6cb;
 }
 
 .snapshot-message.error {
-  background: rgba(255, 100, 100, 0.2);
-  color: rgba(255, 100, 100, 1);
-  border: 1px solid rgba(255, 100, 100, 0.3);
+  background: #ffe6e6;
+  color: #721c24;
+  border: 1px solid #f5c6cb;
 }
 
 .snapshot-message.info {
-  background: rgba(100, 180, 255, 0.2);
-  color: rgba(100, 180, 255, 1);
-  border: 1px solid rgba(100, 180, 255, 0.3);
+  background: #e7f3ff;
+  color: #004085;
+  border: 1px solid #b8daff;
 }
 
 .snapshot-list {
@@ -182,7 +183,7 @@ onMounted(fetchSnapshots)
 
 .snapshot-empty {
   text-align: center;
-  color: rgba(255, 255, 255, 0.5);
+  color: #999;
   padding: 24px;
 }
 
@@ -191,7 +192,7 @@ onMounted(fetchSnapshots)
   justify-content: space-between;
   align-items: center;
   padding: 10px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid #eee;
 }
 
 .snapshot-item:last-child {
@@ -207,18 +208,18 @@ onMounted(fetchSnapshots)
 .snapshot-name {
   font-size: 0.85em;
   font-family: monospace;
-  color: rgba(255, 255, 255, 0.8);
+  color: #333;
 }
 
 .snapshot-date {
   font-size: 0.75em;
-  color: rgba(255, 255, 255, 0.5);
+  color: #999;
 }
 
 .restore-btn {
-  background: rgba(255, 180, 60, 0.2);
-  border: 1px solid rgba(255, 180, 60, 0.4);
-  color: rgba(255, 180, 60, 1);
+  background: #fff3e0;
+  border: 1px solid #ffcc80;
+  color: #e65100;
   padding: 5px 12px;
   border-radius: 6px;
   cursor: pointer;
@@ -227,7 +228,7 @@ onMounted(fetchSnapshots)
 }
 
 .restore-btn:hover:not(:disabled) {
-  background: rgba(255, 180, 60, 0.35);
+  background: #ffe0b2;
 }
 
 .restore-btn:disabled {

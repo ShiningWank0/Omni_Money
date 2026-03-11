@@ -102,21 +102,20 @@
               @dragover.prevent="isDragOver = true"
               @dragleave="isDragOver = false"
               @drop.prevent="onImageDrop"
+              @click="triggerFileSelect"
               :class="{ 'drag-over': isDragOver }">
-              <div class="image-previews" v-if="attachedImages.length > 0">
+              <div class="image-previews" v-if="attachedImages.length > 0" @click.stop>
                 <div v-for="(img, index) in attachedImages" :key="index" class="image-preview">
                   <img :src="img.preview" :alt="img.filename">
                   <button type="button" class="image-remove" @click="removeImage(index)">×</button>
                 </div>
               </div>
               <div class="image-upload-placeholder">
-                <span>📷 画像をドラッグ&ドロップ、または</span>
-                <label class="file-select-btn">
-                  ファイルを選択
-                  <input type="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple
-                    @change="onFileSelect" style="display: none;">
-                </label>
+                <span class="upload-icon">📷</span>
+                <span>クリックまたはドラッグ&ドロップで画像を添付</span>
               </div>
+              <input ref="fileInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple
+                @change="onFileSelect" style="display: none;">
             </div>
           </div>
         </div>
@@ -150,6 +149,7 @@ const emit = defineEmits(['save', 'delete', 'close'])
 const showFundItemDropdown = ref(false)
 const isDragOver = ref(false)
 const attachedImages = ref([])
+const fileInput = ref(null)
 const allTags = ref([])
 const selectedTags = ref([])
 const selectedLevel1 = ref('')
@@ -250,6 +250,12 @@ async function loadTags() {
 }
 
 // 画像添付
+function triggerFileSelect() {
+  if (fileInput.value) {
+    fileInput.value.click()
+  }
+}
+
 function onAmountInput(e) {
   form.value.amount = e.target.value.replace(/[^0-9]/g, '')
 }
@@ -354,16 +360,17 @@ onMounted(async () => {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
-  background: rgba(255, 255, 255, 0.15);
+  padding: 3px 10px;
+  background: rgba(102, 126, 234, 0.12);
+  border: 1px solid rgba(102, 126, 234, 0.3);
   border-radius: 12px;
   font-size: 0.8em;
-  color: #e0e0e0;
+  color: #555;
 }
 .tag-remove {
   background: none;
   border: none;
-  color: #ff6b6b;
+  color: #dc3545;
   cursor: pointer;
   font-size: 1em;
   padding: 0;
@@ -377,12 +384,16 @@ onMounted(async () => {
 .tag-select {
   flex: 1;
   min-width: 80px;
-  padding: 4px;
-  border-radius: 6px;
-  border: 1px solid rgba(255,255,255,0.2);
-  background: rgba(0,0,0,0.3);
-  color: #e0e0e0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid #ddd;
+  background: white;
+  color: #333;
   font-size: 0.85em;
+}
+.tag-select:focus {
+  border-color: #667eea;
+  outline: none;
 }
 .new-tag-row {
   display: flex;
@@ -390,38 +401,55 @@ onMounted(async () => {
 }
 .new-tag-input {
   flex: 1;
-  padding: 4px 8px;
-  border-radius: 6px;
-  border: 1px solid rgba(255,255,255,0.2);
-  background: rgba(0,0,0,0.3);
-  color: #e0e0e0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid #ddd;
+  background: white;
+  color: #333;
   font-size: 0.85em;
 }
+.new-tag-input:focus {
+  border-color: #667eea;
+  outline: none;
+}
 .add-tag-btn {
-  padding: 4px 12px;
-  border-radius: 6px;
+  padding: 6px 12px;
+  border-radius: 8px;
   border: none;
-  background: rgba(106, 168, 79, 0.8);
+  background: #667eea;
   color: white;
   cursor: pointer;
   font-size: 0.8em;
+  transition: background 0.2s;
 }
 .add-tag-btn:hover {
-  background: rgba(106, 168, 79, 1);
+  background: #5a6fd6;
 }
 
 /* 画像アップロード */
 .image-upload-area {
   width: 100%;
-  border: 2px dashed rgba(255, 255, 255, 0.2);
-  border-radius: 8px;
-  padding: 12px;
+  min-height: 120px;
+  border: 2px dashed rgba(102, 126, 234, 0.4);
+  border-radius: 12px;
+  padding: 16px;
   text-align: center;
   transition: all 0.2s;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(102, 126, 234, 0.03);
+}
+.image-upload-area:hover {
+  border-color: rgba(102, 126, 234, 0.7);
+  background: rgba(102, 126, 234, 0.06);
 }
 .image-upload-area.drag-over {
   border-color: rgba(106, 168, 79, 0.8);
-  background: rgba(106, 168, 79, 0.1);
+  background: rgba(106, 168, 79, 0.08);
 }
 .image-previews {
   display: flex;
@@ -438,43 +466,34 @@ onMounted(async () => {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  border-radius: 4px;
+  border-radius: 6px;
+  border: 1px solid #ddd;
 }
 .image-remove {
   position: absolute;
-  top: -4px;
-  right: -4px;
-  background: rgba(255, 0, 0, 0.8);
-  border: none;
+  top: -6px;
+  right: -6px;
+  background: #dc3545;
+  border: 2px solid white;
   color: white;
   border-radius: 50%;
-  width: 18px;
-  height: 18px;
-  font-size: 10px;
+  width: 20px;
+  height: 20px;
+  font-size: 11px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 .image-upload-placeholder {
-  color: rgba(255, 255, 255, 0.5);
+  color: #999;
   font-size: 0.85em;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 8px;
-  justify-content: center;
-  flex-wrap: wrap;
+  gap: 6px;
 }
-.file-select-btn {
-  cursor: pointer;
-  padding: 4px 12px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.1);
-  color: #e0e0e0;
-  font-size: 0.9em;
-  transition: background 0.2s;
-}
-.file-select-btn:hover {
-  background: rgba(255, 255, 255, 0.2);
+.upload-icon {
+  font-size: 2em;
 }
 </style>
