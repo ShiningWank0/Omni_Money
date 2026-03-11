@@ -129,6 +129,12 @@ onMounted(() => {
   color: #333;
 }
 
+.form-row label.dropdown-item {
+  display: flex;
+  margin-bottom: 0;
+  font-weight: normal;
+}
+
 .select-wrapper {
   position: relative;
 }
