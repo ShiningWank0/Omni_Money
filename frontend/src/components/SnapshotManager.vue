@@ -23,9 +23,22 @@
             <span class="snapshot-name">{{ formatSnapshotName(snapshot) }}</span>
             <span class="snapshot-date">{{ extractDate(snapshot) }}</span>
           </div>
-          <button class="restore-btn" @click="restoreSnapshot(snapshot)" :disabled="isRestoring">
-            復元
-          </button>
+          <div class="snapshot-actions">
+            <template v-if="confirmingSnapshot === snapshot">
+              <span class="confirm-label">復元しますか？</span>
+              <button class="confirm-yes-btn" @click="executeRestore(snapshot)" :disabled="isRestoring">
+                {{ isRestoring ? '復元中...' : 'はい' }}
+              </button>
+              <button class="confirm-no-btn" @click="confirmingSnapshot = null" :disabled="isRestoring">
+                いいえ
+              </button>
+            </template>
+            <template v-else>
+              <button class="restore-btn" @click="confirmingSnapshot = snapshot" :disabled="isRestoring">
+                復元
+              </button>
+            </template>
+          </div>
         </div>
       </div>
     </div>
@@ -43,6 +56,7 @@ const emit = defineEmits(['close', 'restored'])
 
 const snapshots = ref([])
 const isRestoring = ref(false)
+const confirmingSnapshot = ref(null)
 const message = ref('')
 const messageType = ref('info')
 
@@ -51,7 +65,6 @@ function formatSnapshotName(name) {
 }
 
 function extractDate(name) {
-  // omni_money_20260304_093000_123.db → 2026/03/04 09:30:00
   const match = name.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/)
   if (!match) return ''
   return `${match[1]}/${match[2]}/${match[3]} ${match[4]}:${match[5]}:${match[6]}`
@@ -60,33 +73,27 @@ function extractDate(name) {
 async function fetchSnapshots() {
   try {
     snapshots.value = await apiListSnapshots()
-    // 新しい順にソート
     snapshots.value.sort().reverse()
   } catch (e) {
     console.error('スナップショット一覧取得エラー:', e)
   }
 }
 
-async function restoreSnapshot(name) {
-  if (!confirm(`スナップショット「${formatSnapshotName(name)}」に復元しますか？\n\n現在のデータは上書きされます。この操作は取り消せません。`)) {
-    return
-  }
-
+async function executeRestore(name) {
   isRestoring.value = true
   message.value = ''
   try {
     await apiRestoreSnapshot(name)
-    // リロード後にトースト通知を表示するためlocalStorageにフラグを保存
     localStorage.setItem('snapshot_restored', 'success')
     setTimeout(() => {
       window.location.reload()
     }, 300)
   } catch (e) {
-    // 失敗時はリロードしないのでlocalStorageにエラーメッセージを保存してモーダル内表示
     localStorage.setItem('snapshot_restored', 'error:' + (e.message || '不明なエラー'))
     message.value = '復元に失敗しました: ' + e.message
     messageType.value = 'error'
     isRestoring.value = false
+    confirmingSnapshot.value = null
   }
 }
 
@@ -198,6 +205,54 @@ onMounted(fetchSnapshots)
 .snapshot-date {
   font-size: 0.75em;
   color: #999;
+}
+
+.snapshot-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.confirm-label {
+  font-size: 0.75em;
+  color: #e65100;
+  white-space: nowrap;
+}
+
+.confirm-yes-btn {
+  background: #e65100;
+  border: none;
+  color: #fff;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8em;
+  transition: all 0.2s;
+}
+
+.confirm-yes-btn:hover:not(:disabled) {
+  background: #bf360c;
+}
+
+.confirm-yes-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.confirm-no-btn {
+  background: #f5f5f5;
+  border: 1px solid #ddd;
+  color: #666;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8em;
+  transition: all 0.2s;
+}
+
+.confirm-no-btn:hover:not(:disabled) {
+  background: #eee;
 }
 
 .restore-btn {
