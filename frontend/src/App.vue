@@ -140,6 +140,7 @@
     <SnapshotManager
       v-if="showSnapshotModal"
       @close="showSnapshotModal = false"
+      @restored="handleSnapshotRestored"
     />
 
     <!-- トースト通知 -->
@@ -394,6 +395,13 @@ function openTagChart() {
 function openSnapshotManager() {
   showMenu.value = false
   showSnapshotModal.value = true
+}
+
+async function handleSnapshotRestored() {
+  await store.fetchAccounts()
+  await store.fetchCreditCardSettings()
+  await store.fetchTransactions()
+  showToast('スナップショットから復元しました ✓')
 }
 
 // グローバルクリックでドロップダウンを閉じる

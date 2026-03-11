@@ -241,7 +241,6 @@ func ListSnapshots(snapshotDir string) ([]string, error) {
 // RestoreSnapshot はスナップショットからDBを復元する。
 // DBを閉じずに ATTACH DATABASE でスナップショットをマウントし、
 // トランザクション内でデータを入れ替える。
-// これによりWALモードのファイルロック問題を完全に回避する。
 func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if snapshotDir == "" {
 		snapshotDir = getSnapshotDir()
@@ -262,7 +261,7 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 
 	ctx := context.Background()
 
-	// 単一接続を確保（ATTACH/PRAGMA は接続単位で有効）
+	// 単一接続を確保してロック（ATTACH/PRAGMA は接続単位で有効）
 	conn, err := currentDB.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("接続取得エラー: %w", err)
@@ -273,70 +272,90 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
 		return fmt.Errorf("外部キー無効化エラー: %w", err)
 	}
+	// 関数終了時に必ず再有効化
+	defer conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
 
 	// スナップショットDBをアタッチ
 	if _, err := conn.ExecContext(ctx, "ATTACH DATABASE ? AS snap", snapshotPath); err != nil {
-		conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
 		return fmt.Errorf("スナップショットアタッチエラー: %w", err)
 	}
 	defer conn.ExecContext(ctx, "DETACH DATABASE snap")
 
-	// スナップショットからユーザーテーブルのリストを取得
-	rows, err := conn.QueryContext(ctx,
-		"SELECT name FROM snap.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+	// メインDBのユーザーテーブルリストを取得（復元対象）
+	mainTables, err := getUserTables(ctx, conn, "main")
 	if err != nil {
-		conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
-		return fmt.Errorf("テーブルリスト取得エラー: %w", err)
+		return fmt.Errorf("メインテーブルリスト取得エラー: %w", err)
 	}
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			rows.Close()
-			conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
-			return err
-		}
-		tables = append(tables, name)
-	}
-	rows.Close()
 
-	if len(tables) == 0 {
-		conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
-		return fmt.Errorf("スナップショットにテーブルが見つかりません")
+	// スナップショットDBのテーブルリストを取得
+	snapTables, err := getUserTables(ctx, conn, "snap")
+	if err != nil {
+		return fmt.Errorf("スナップショットテーブルリスト取得エラー: %w", err)
 	}
+
+	snapTableSet := make(map[string]bool)
+	for _, t := range snapTables {
+		snapTableSet[t] = true
+	}
+
+	log.Printf("復元開始: main=%d tables, snap=%d tables", len(mainTables), len(snapTables))
 
 	// トランザクション内で全テーブルのデータを入れ替え
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
-		conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
 		return fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
 	defer tx.Rollback()
 
-	for _, table := range tables {
-		if _, err := tx.ExecContext(ctx, "DELETE FROM main.\""+table+"\""); err != nil {
-			log.Printf("テーブル %s クリア警告: %v", table, err)
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO main.\""+table+"\" SELECT * FROM snap.\""+table+"\""); err != nil {
-			log.Printf("テーブル %s 復元警告: %v", table, err)
+	// 1. メインDBの全テーブルをクリア
+	for _, table := range mainTables {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM main.\"%s\"", table)); err != nil {
+			return fmt.Errorf("テーブル %s クリアエラー: %w", table, err)
 		}
 	}
 
-	// AUTOINCREMENT カウンタもコピー（存在しない場合は無視）
+	// 2. スナップショットから全テーブルのデータをコピー
+	for _, table := range snapTables {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO main.\"%s\" SELECT * FROM snap.\"%s\"", table, table)); err != nil {
+			return fmt.Errorf("テーブル %s 復元エラー: %w", table, err)
+		}
+	}
+
+	// 3. AUTOINCREMENTカウンタもコピー
 	tx.ExecContext(ctx, "DELETE FROM main.sqlite_sequence")
 	tx.ExecContext(ctx, "INSERT INTO main.sqlite_sequence SELECT * FROM snap.sqlite_sequence")
 
 	if err := tx.Commit(); err != nil {
-		conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
 		return fmt.Errorf("復元コミットエラー: %w", err)
 	}
 
-	// 外部キー制約を再有効化
-	conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
+	// 復元確認ログ
+	var count int
+	conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM main.transactions").Scan(&count)
+	log.Printf("スナップショット復元完了: %s (transactions: %d件)", snapshotName, count)
 
-	log.Printf("スナップショット復元完了 (ATTACH方式): %s", snapshotName)
 	return nil
+}
+
+// getUserTables はDBスキーマからユーザーテーブル名のリストを返す
+func getUserTables(ctx context.Context, conn *sql.Conn, schema string) ([]string, error) {
+	query := fmt.Sprintf(
+		"SELECT name FROM %s.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%%'", schema)
+	rows, err := conn.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		tables = append(tables, name)
+	}
+	return tables, nil
 }
 
 // CleanOldSnapshots は古いスナップショットを削除する（世代管理: 最新N件を残す）
