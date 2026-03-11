@@ -418,17 +418,9 @@ func BackupToCSVFile() (string, error) {
 		return "", err
 	}
 
-	homeDir, err := os.UserHomeDir()
+	downloadsDir, err := getDownloadsDir()
 	if err != nil {
-		return "", fmt.Errorf("ホームディレクトリ取得エラー: %w", err)
-	}
-
-	var downloadsDir string
-	switch runtime.GOOS {
-	case "windows":
-		downloadsDir = filepath.Join(homeDir, "Downloads")
-	default:
-		downloadsDir = filepath.Join(homeDir, "Downloads")
+		return "", err
 	}
 
 	if err := os.MkdirAll(downloadsDir, 0755); err != nil {
@@ -445,6 +437,29 @@ func BackupToCSVFile() (string, error) {
 	}
 
 	return filePath, nil
+}
+
+// getDownloadsDir はOS標準のダウンロードフォルダパスを返す
+func getDownloadsDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("ホームディレクトリ取得エラー: %w", err)
+	}
+
+	switch runtime.GOOS {
+	case "windows":
+		// Windows: %USERPROFILE%\Downloads
+		return filepath.Join(homeDir, "Downloads"), nil
+	case "darwin":
+		// macOS: ~/Downloads
+		return filepath.Join(homeDir, "Downloads"), nil
+	default:
+		// Linux: XDG_DOWNLOAD_DIR or ~/Downloads
+		if xdgDownload := os.Getenv("XDG_DOWNLOAD_DIR"); xdgDownload != "" {
+			return xdgDownload, nil
+		}
+		return filepath.Join(homeDir, "Downloads"), nil
+	}
 }
 
 // ImportCSV はCSVコンテンツからデータをインポートする。
