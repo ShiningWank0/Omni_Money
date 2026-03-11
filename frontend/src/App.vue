@@ -423,5 +423,16 @@ onMounted(async () => {
   await store.fetchAccounts()
   await store.fetchCreditCardSettings()
   await store.fetchTransactions()
+
+  // スナップショット復元後のリロードならトースト通知を表示
+  const restoreResult = localStorage.getItem('snapshot_restored')
+  if (restoreResult) {
+    localStorage.removeItem('snapshot_restored')
+    if (restoreResult === 'success') {
+      showToast('スナップショットから復元しました ✓')
+    } else if (restoreResult.startsWith('error:')) {
+      showToast('復元に失敗しました: ' + restoreResult.slice(6), 'error', 5000)
+    }
+  }
 })
 </script>
