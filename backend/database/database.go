@@ -2,7 +2,6 @@
 package database
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -202,7 +201,9 @@ func CreateSnapshot(snapshotDir string) (string, error) {
 		return "", fmt.Errorf("スナップショットディレクトリ作成エラー: %w", err)
 	}
 
-	timestamp := time.Now().Format("20060102_150405")
+	timestamp := time.Now().Format("20060102_150405.000")
+	// ドットをアンダースコアに置換してファイル名に安全な形式にする
+	timestamp = strings.ReplaceAll(timestamp, ".", "_")
 	snapshotPath := filepath.Join(snapshotDir, fmt.Sprintf("omni_money_%s.db", timestamp))
 
 	// ファイルコピー
@@ -239,8 +240,14 @@ func ListSnapshots(snapshotDir string) ([]string, error) {
 }
 
 // RestoreSnapshot はスナップショットからDBを復元する。
-// DBを閉じずに ATTACH DATABASE でスナップショットをマウントし、
-// トランザクション内でデータを入れ替える。
+//
+// 手順:
+//  1. DB接続を完全に遮断（Close + nil化）
+//  2. 現在のDBファイルを .bak に退避
+//  3. SQLite WAL/SHM 一時ファイルを消去
+//  4. スナップショットファイルを元のDBパスにコピー
+//  5. 再接続し PRAGMA integrity_check で整合性を検証
+//  6. 成功なら退避ファイルを削除、失敗なら退避から復旧
 func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if snapshotDir == "" {
 		snapshotDir = getSnapshotDir()
@@ -251,111 +258,78 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 		return fmt.Errorf("スナップショットが見つかりません: %s", snapshotName)
 	}
 
-	mu.RLock()
-	currentDB := db
-	mu.RUnlock()
-
-	if currentDB == nil {
-		return fmt.Errorf("データベースが初期化されていません")
+	// --- 手順1: データベース接続の完全な遮断 ---
+	mu.Lock()
+	currentPath := dbPath
+	if db != nil {
+		// WALの内容をメインDBファイルにフラッシュしてからCloseする
+		db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+		db.Close()
+		db = nil
 	}
+	mu.Unlock()
 
-	ctx := context.Background()
+	backupPath := currentPath + ".bak"
+	restoreFailed := true
 
-	// 単一接続を確保してロック（ATTACH/PRAGMA は接続単位で有効）
-	conn, err := currentDB.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("接続取得エラー: %w", err)
-	}
-	defer conn.Close()
-
-	// 外部キー制約を一時無効化（トランザクション外で設定する必要がある）
-	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
-		return fmt.Errorf("外部キー無効化エラー: %w", err)
-	}
-	// 関数終了時に必ず再有効化
-	defer conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
-
-	// スナップショットDBをアタッチ
-	if _, err := conn.ExecContext(ctx, "ATTACH DATABASE ? AS snap", snapshotPath); err != nil {
-		return fmt.Errorf("スナップショットアタッチエラー: %w", err)
-	}
-	defer conn.ExecContext(ctx, "DETACH DATABASE snap")
-
-	// メインDBのユーザーテーブルリストを取得（復元対象）
-	mainTables, err := getUserTables(ctx, conn, "main")
-	if err != nil {
-		return fmt.Errorf("メインテーブルリスト取得エラー: %w", err)
-	}
-
-	// スナップショットDBのテーブルリストを取得
-	snapTables, err := getUserTables(ctx, conn, "snap")
-	if err != nil {
-		return fmt.Errorf("スナップショットテーブルリスト取得エラー: %w", err)
-	}
-
-	snapTableSet := make(map[string]bool)
-	for _, t := range snapTables {
-		snapTableSet[t] = true
-	}
-
-	log.Printf("復元開始: main=%d tables, snap=%d tables", len(mainTables), len(snapTables))
-
-	// トランザクション内で全テーブルのデータを入れ替え
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("トランザクション開始エラー: %w", err)
-	}
-	defer tx.Rollback()
-
-	// 1. メインDBの全テーブルをクリア
-	for _, table := range mainTables {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM main.\"%s\"", table)); err != nil {
-			return fmt.Errorf("テーブル %s クリアエラー: %w", table, err)
+	// 失敗時は退避ファイルから元の状態に自動復旧する
+	defer func() {
+		if restoreFailed {
+			log.Printf("復元失敗: 退避ファイルから元の状態に復旧します")
+			os.Remove(currentPath)
+			os.Remove(currentPath + "-wal")
+			os.Remove(currentPath + "-shm")
+			os.Rename(backupPath, currentPath)
+			if err := InitDB(currentPath); err != nil {
+				log.Printf("復旧後のDB再接続エラー: %v", err)
+			}
 		}
+	}()
+
+	// --- 手順2: 現在状態の退避 ---
+	if err := os.Rename(currentPath, backupPath); err != nil {
+		// リネーム失敗時はそのまま再接続して返す
+		restoreFailed = false
+		InitDB(currentPath)
+		return fmt.Errorf("データベース退避エラー: %w", err)
 	}
 
-	// 2. スナップショットから全テーブルのデータをコピー
-	for _, table := range snapTables {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO main.\"%s\" SELECT * FROM snap.\"%s\"", table, table)); err != nil {
-			return fmt.Errorf("テーブル %s 復元エラー: %w", table, err)
-		}
+	// --- 手順3: WAL/SHM 一時ファイルの確実な消去 ---
+	os.Remove(currentPath + "-wal")
+	os.Remove(currentPath + "-shm")
+
+	// --- 手順4: スナップショットの複製と配置 ---
+	if err := copyFile(snapshotPath, currentPath); err != nil {
+		return fmt.Errorf("スナップショットコピーエラー: %w", err)
 	}
 
-	// 3. AUTOINCREMENTカウンタもコピー
-	tx.ExecContext(ctx, "DELETE FROM main.sqlite_sequence")
-	tx.ExecContext(ctx, "INSERT INTO main.sqlite_sequence SELECT * FROM snap.sqlite_sequence")
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("復元コミットエラー: %w", err)
+	// --- 手順5: 再接続と整合性の検査 ---
+	newDB, err := sql.Open("sqlite3", currentPath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON")
+	if err != nil {
+		return fmt.Errorf("復元後のDB接続エラー: %w", err)
 	}
 
-	// 復元確認ログ
-	var count int
-	conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM main.transactions").Scan(&count)
-	log.Printf("スナップショット復元完了: %s (transactions: %d件)", snapshotName, count)
+	var integrityResult string
+	if err := newDB.QueryRow("PRAGMA integrity_check").Scan(&integrityResult); err != nil {
+		newDB.Close()
+		return fmt.Errorf("整合性チェック実行エラー: %w", err)
+	}
+	if integrityResult != "ok" {
+		newDB.Close()
+		return fmt.Errorf("整合性チェック失敗: %s", integrityResult)
+	}
 
+	// --- 手順6: 参照の更新と退避ファイルの削除 ---
+	mu.Lock()
+	db = newDB
+	dbPath = currentPath
+	mu.Unlock()
+
+	restoreFailed = false
+	os.Remove(backupPath)
+
+	log.Printf("スナップショット復元完了: %s (integrity_check: ok)", snapshotName)
 	return nil
-}
-
-// getUserTables はDBスキーマからユーザーテーブル名のリストを返す
-func getUserTables(ctx context.Context, conn *sql.Conn, schema string) ([]string, error) {
-	query := fmt.Sprintf(
-		"SELECT name FROM %s.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%%'", schema)
-	rows, err := conn.QueryContext(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		tables = append(tables, name)
-	}
-	return tables, nil
 }
 
 // CleanOldSnapshots は古いスナップショットを削除する（世代管理: 最新N件を残す）
