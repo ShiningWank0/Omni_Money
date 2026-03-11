@@ -166,19 +166,20 @@ const chartOptions = computed(() => ({
     legend: {
       position: 'top',
       labels: {
-        color: 'rgba(255, 255, 255, 0.85)',
+        color: '#333',
         font: { size: 12 },
         boxWidth: 20,
         padding: 12,
       },
     },
     tooltip: {
-      backgroundColor: 'rgba(30, 30, 60, 0.95)',
+      backgroundColor: 'rgba(0, 0, 0, 0.8)',
       titleColor: '#fff',
       bodyColor: '#fff',
-      borderColor: 'rgba(255, 255, 255, 0.2)',
+      borderColor: 'rgba(0, 0, 0, 0.1)',
       borderWidth: 1,
       padding: 10,
+      cornerRadius: 8,
       callbacks: {
         title(items) {
           if (!items.length) return ''
@@ -197,7 +198,7 @@ const chartOptions = computed(() => ({
   scales: {
     x: {
       ticks: {
-        color: 'rgba(255, 255, 255, 0.6)',
+        color: '#666',
         font: { size: 10 },
         maxRotation: 45,
         minRotation: 0,
@@ -205,12 +206,12 @@ const chartOptions = computed(() => ({
         maxTicksLimit: 20,
       },
       grid: {
-        color: 'rgba(255, 255, 255, 0.08)',
+        color: 'rgba(0, 0, 0, 0.06)',
       }
     },
     y: {
       ticks: {
-        color: 'rgba(255, 255, 255, 0.6)',
+        color: '#666',
         font: { size: 11 },
         callback(value) {
           if (Math.abs(value) >= 1000000) {
@@ -223,7 +224,7 @@ const chartOptions = computed(() => ({
         },
       },
       grid: {
-        color: 'rgba(255, 255, 255, 0.08)',
+        color: 'rgba(0, 0, 0, 0.06)',
       },
       beginAtZero: false,
     }
@@ -254,12 +255,13 @@ function updateChart() {
 .graph-modal-header h3 {
   margin: 0;
   font-size: 1.1em;
+  color: #333;
 }
 
 .close-btn {
   background: none;
   border: none;
-  color: rgba(255, 255, 255, 0.7);
+  color: #999;
   font-size: 1.5em;
   cursor: pointer;
   padding: 0 4px;
@@ -267,7 +269,7 @@ function updateChart() {
 }
 
 .close-btn:hover {
-  color: #fff;
+  color: #333;
 }
 
 .graph-controls {
@@ -280,22 +282,23 @@ function updateChart() {
 
 .graph-period-label {
   font-size: 0.9em;
-  color: rgba(255, 255, 255, 0.7);
+  color: #666;
+  font-weight: 500;
 }
 
 .graph-period-select {
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 6px;
-  color: #fff;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  color: #333;
   padding: 6px 10px;
   font-size: 0.85em;
   cursor: pointer;
 }
 
-.graph-period-select option {
-  background: #1e1e3e;
-  color: #fff;
+.graph-period-select:focus {
+  border-color: #667eea;
+  outline: none;
 }
 
 .graph-container {
@@ -303,6 +306,9 @@ function updateChart() {
   min-height: 300px;
   max-height: 60vh;
   position: relative;
+  background: #f8fafc;
+  border-radius: 8px;
+  padding: 8px;
 }
 
 .graph-empty {
@@ -310,7 +316,7 @@ function updateChart() {
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: rgba(255, 255, 255, 0.5);
+  color: #999;
   font-size: 1.1em;
 }
 

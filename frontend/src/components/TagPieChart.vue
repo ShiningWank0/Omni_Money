@@ -1,30 +1,29 @@
 <template>
   <div class="modal-overlay" @click="$emit('close')">
     <div class="modal-content tag-chart-modal" @click.stop>
-      <div class="tag-chart-header">
-        <h3>タグ別分析</h3>
-        <button class="close-btn" @click="$emit('close')">×</button>
-      </div>
+      <h3>タグ別分析</h3>
 
       <!-- 期間フィルタ -->
-      <div class="period-filter">
-        <button v-for="p in periods" :key="p.value"
-          :class="['period-btn', { active: periodMode === p.value }]"
-          @click="setPeriodMode(p.value)">
-          {{ p.label }}
-        </button>
-      </div>
+      <div class="filter-section">
+        <div class="period-filter">
+          <button v-for="p in periods" :key="p.value"
+            :class="['period-btn', { active: periodMode === p.value }]"
+            @click="setPeriodMode(p.value)">
+            {{ p.label }}
+          </button>
+        </div>
 
-      <div v-if="periodMode !== 'all'" class="date-navigator">
-        <button class="nav-btn" @click="navigatePeriod(-1)">◀</button>
-        <span class="period-label">{{ currentPeriodLabel }}</span>
-        <button class="nav-btn" @click="navigatePeriod(1)">▶</button>
-      </div>
+        <div v-if="periodMode !== 'all'" class="date-navigator">
+          <button class="nav-btn" @click="navigatePeriod(-1)">◀</button>
+          <span class="period-label">{{ currentPeriodLabel }}</span>
+          <button class="nav-btn" @click="navigatePeriod(1)">▶</button>
+        </div>
 
-      <!-- 収入/支出タブ -->
-      <div class="type-tabs">
-        <button :class="['tab-btn', { active: chartType === 'expense' }]" @click="chartType = 'expense'">支出</button>
-        <button :class="['tab-btn', { active: chartType === 'income' }]" @click="chartType = 'income'">収入</button>
+        <!-- 収入/支出タブ -->
+        <div class="type-tabs">
+          <button :class="['tab-btn', { active: chartType === 'expense' }]" @click="chartType = 'expense'">支出</button>
+          <button :class="['tab-btn', { active: chartType === 'income' }]" @click="chartType = 'income'">収入</button>
+        </div>
       </div>
 
       <!-- パンくずリスト（ドリルダウン用） -->
@@ -36,23 +35,29 @@
         </span>
       </div>
 
-      <!-- 円グラフ -->
-      <div class="chart-container">
-        <canvas ref="chartCanvas"></canvas>
+      <!-- 円グラフ + 凡例 -->
+      <div class="chart-body">
         <div v-if="currentData.length === 0" class="no-data">データがありません</div>
-      </div>
-
-      <!-- 凡例 -->
-      <div class="chart-legend" v-if="currentData.length > 0">
-        <div v-for="(item, i) in currentData" :key="i"
-          class="legend-item"
-          @click="drillDown(item)"
-          :style="{ cursor: item.children && item.children.length > 0 ? 'pointer' : 'default' }">
-          <span class="legend-color" :style="{ background: chartColors[i % chartColors.length] }"></span>
-          <span class="legend-name">{{ item.tag_name }}</span>
-          <span class="legend-amount">¥{{ item.amount.toLocaleString() }}</span>
-          <span class="legend-ratio">{{ (item.ratio * 100).toFixed(1) }}%</span>
-        </div>
+        <template v-else>
+          <div class="chart-container">
+            <canvas ref="chartCanvas"></canvas>
+          </div>
+          <div class="chart-legend">
+            <div class="legend-total">
+              合計: ¥{{ totalAmount.toLocaleString() }}
+            </div>
+            <div v-for="(item, i) in currentData" :key="i"
+              class="legend-item"
+              @click="drillDown(item)"
+              :class="{ clickable: item.children && item.children.length > 0 }">
+              <span class="legend-color" :style="{ background: chartColors[i % chartColors.length] }"></span>
+              <span class="legend-name">{{ item.tag_name }}</span>
+              <span class="legend-amount">¥{{ item.amount.toLocaleString() }}</span>
+              <span class="legend-ratio">{{ (item.ratio * 100).toFixed(1) }}%</span>
+              <span v-if="item.children && item.children.length > 0" class="legend-drill">▶</span>
+            </div>
+          </div>
+        </template>
       </div>
     </div>
   </div>
@@ -86,9 +91,9 @@ const periods = [
 ]
 
 const chartColors = [
-  '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF',
-  '#FF9F40', '#FF6B6B', '#48BB78', '#ED64A6', '#667EEA',
-  '#F6AD55', '#68D391', '#FC8181', '#63B3ED', '#B794F4'
+  '#667eea', '#764ba2', '#f093fb', '#4facfe', '#00f2fe',
+  '#43e97b', '#fa709a', '#fee140', '#a18cd1', '#fbc2eb',
+  '#ff9a9e', '#fad0c4', '#ffecd2', '#fcb69f', '#a1c4fd'
 ]
 
 const currentPeriodLabel = computed(() => {
@@ -110,6 +115,10 @@ const currentPeriodLabel = computed(() => {
     default:
       return '全期間'
   }
+})
+
+const totalAmount = computed(() => {
+  return currentData.value.reduce((sum, item) => sum + item.amount, 0)
 })
 
 function getDateRange() {
@@ -204,8 +213,8 @@ function renderChart() {
       datasets: [{
         data: data.map(d => d.amount),
         backgroundColor: data.map((_, i) => chartColors[i % chartColors.length]),
-        borderWidth: 1,
-        borderColor: 'rgba(0,0,0,0.2)'
+        borderWidth: 2,
+        borderColor: '#fff'
       }]
     },
     options: {
@@ -214,6 +223,11 @@ function renderChart() {
       plugins: {
         legend: { display: false },
         tooltip: {
+          backgroundColor: 'rgba(0,0,0,0.8)',
+          titleFont: { size: 13 },
+          bodyFont: { size: 12 },
+          padding: 10,
+          cornerRadius: 8,
           callbacks: {
             label: (ctx) => {
               const item = data[ctx.dataIndex]
@@ -251,144 +265,215 @@ onUnmounted(() => {
 
 <style scoped>
 .tag-chart-modal {
-  max-width: 520px;
+  max-width: 560px;
   width: 95%;
-  max-height: 85vh;
+  max-height: calc(100vh - 4rem);
   overflow-y: auto;
 }
-.tag-chart-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
+
+.tag-chart-modal h3 {
+  margin-top: 0;
+  margin-bottom: 1rem;
+  color: #333;
+  text-align: center;
 }
-.tag-chart-header h3 {
-  margin: 0;
+
+.filter-section {
+  margin-bottom: 1rem;
 }
-.close-btn {
-  background: none;
-  border: none;
-  color: #e0e0e0;
-  font-size: 1.5em;
-  cursor: pointer;
-}
+
 .period-filter {
   display: flex;
-  gap: 4px;
-  margin-bottom: 8px;
+  gap: 6px;
+  margin-bottom: 10px;
 }
+
 .period-btn {
   flex: 1;
-  padding: 6px;
-  border: 1px solid rgba(255,255,255,0.2);
-  background: rgba(0,0,0,0.2);
-  color: #aaa;
-  border-radius: 6px;
+  padding: 8px 4px;
+  border: 1px solid #ddd;
+  background: white;
+  color: #666;
+  border-radius: 8px;
   cursor: pointer;
-  font-size: 0.85em;
+  font-size: 0.9em;
   transition: all 0.2s;
 }
-.period-btn.active {
-  background: rgba(106, 168, 79, 0.6);
-  color: white;
-  border-color: rgba(106, 168, 79, 0.8);
+
+.period-btn:hover {
+  border-color: #667eea;
+  color: #667eea;
 }
+
+.period-btn.active {
+  background: #667eea;
+  color: white;
+  border-color: #667eea;
+}
+
 .date-navigator {
   display: flex;
   justify-content: center;
   align-items: center;
   gap: 16px;
-  margin-bottom: 8px;
-}
-.nav-btn {
-  background: none;
-  border: 1px solid rgba(255,255,255,0.2);
-  color: #e0e0e0;
-  border-radius: 4px;
-  padding: 4px 10px;
-  cursor: pointer;
-}
-.period-label {
-  font-size: 0.95em;
-  color: #e0e0e0;
-}
-.type-tabs {
-  display: flex;
-  gap: 4px;
   margin-bottom: 10px;
 }
-.tab-btn {
-  flex: 1;
-  padding: 6px;
-  border: 1px solid rgba(255,255,255,0.2);
-  background: rgba(0,0,0,0.2);
-  color: #aaa;
+
+.nav-btn {
+  background: white;
+  border: 1px solid #ddd;
+  color: #333;
   border-radius: 6px;
+  padding: 6px 12px;
   cursor: pointer;
   transition: all 0.2s;
 }
+
+.nav-btn:hover {
+  border-color: #667eea;
+  color: #667eea;
+}
+
+.period-label {
+  font-size: 1em;
+  font-weight: 500;
+  color: #333;
+}
+
+.type-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.tab-btn {
+  flex: 1;
+  padding: 8px 4px;
+  border: 1px solid #ddd;
+  background: white;
+  color: #666;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: all 0.2s;
+}
+
+.tab-btn:hover {
+  border-color: #667eea;
+}
+
 .tab-btn.active {
-  background: rgba(54, 162, 235, 0.5);
-  color: white;
-  border-color: rgba(54, 162, 235, 0.8);
+  border-color: #667eea;
+  background: rgba(102, 126, 234, 0.1);
+  color: #667eea;
+  font-weight: 500;
 }
+
 .breadcrumbs {
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  background: #f8f9fa;
+  border-radius: 8px;
   font-size: 0.85em;
-  color: #aaa;
+  color: #666;
 }
+
 .breadcrumb-item {
   cursor: pointer;
-  color: #63B3ED;
+  color: #667eea;
 }
+
 .breadcrumb-item:hover {
   text-decoration: underline;
 }
+
 .breadcrumb-sep {
-  color: #666;
+  color: #999;
 }
+
+.chart-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
 .chart-container {
   position: relative;
-  margin: 8px auto;
-  max-width: 280px;
+  width: 100%;
+  max-width: 300px;
+  margin: 0 auto 16px;
 }
+
 .no-data {
   text-align: center;
-  color: #888;
-  padding: 40px;
+  color: #999;
+  padding: 40px 0;
+  font-size: 0.95em;
 }
+
 .chart-legend {
-  margin-top: 12px;
+  width: 100%;
 }
+
+.legend-total {
+  text-align: right;
+  font-weight: bold;
+  color: #333;
+  padding: 8px 10px;
+  border-bottom: 2px solid #eee;
+  margin-bottom: 4px;
+  font-size: 0.95em;
+}
+
 .legend-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 8px;
-  border-radius: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
   transition: background 0.2s;
 }
+
 .legend-item:hover {
-  background: rgba(255,255,255,0.05);
+  background: #f8f9fa;
 }
+
+.legend-item.clickable {
+  cursor: pointer;
+}
+
+.legend-item.clickable:hover {
+  background: rgba(102, 126, 234, 0.08);
+}
+
 .legend-color {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
   flex-shrink: 0;
 }
+
 .legend-name {
   flex: 1;
   font-size: 0.9em;
+  color: #333;
+  font-weight: 500;
 }
+
 .legend-amount {
-  font-size: 0.85em;
-  color: #e0e0e0;
+  font-size: 0.9em;
+  color: #333;
+  font-weight: 500;
 }
+
 .legend-ratio {
   font-size: 0.8em;
-  color: #aaa;
-  min-width: 45px;
+  color: #999;
+  min-width: 50px;
   text-align: right;
+}
+
+.legend-drill {
+  font-size: 0.7em;
+  color: #667eea;
 }
 </style>
