@@ -296,13 +296,12 @@ async function handleSaveTransaction(data) {
     await store.fetchTransactions()
   } catch (e) {
     console.error('取引保存エラー:', e)
-    alert('取引の保存に失敗しました: ' + e.message)
+    showToast('取引の保存に失敗しました: ' + e.message, 'error', 5000)
   }
 }
 
 async function handleDeleteTransaction() {
   if (!editingTransaction.value) return
-  if (!confirm('この取引を削除しますか？')) return
   try {
     await apiDeleteTransaction(editingTransaction.value.id)
     hideAddModal()
@@ -310,7 +309,7 @@ async function handleDeleteTransaction() {
     await store.fetchTransactions()
   } catch (e) {
     console.error('取引削除エラー:', e)
-    alert('取引の削除に失敗しました: ' + e.message)
+    showToast('取引の削除に失敗しました: ' + e.message, 'error', 5000)
   }
 }
 
@@ -365,7 +364,7 @@ async function handleSaveCreditCardSettings(items) {
     await store.fetchTransactions()
   } catch (e) {
     console.error('クレジットカード設定保存エラー:', e)
-    alert('クレジットカード設定の保存に失敗しました')
+    showToast('クレジットカード設定の保存に失敗しました', 'error', 5000)
   }
 }
 
@@ -381,7 +380,7 @@ async function showGraphModal() {
     showGraph.value = true
   } catch (e) {
     console.error('残高推移取得エラー:', e)
-    alert('残高推移データの取得に失敗しました')
+    showToast('残高推移データの取得に失敗しました', 'error', 5000)
   }
 }
 

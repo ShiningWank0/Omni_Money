@@ -119,9 +119,17 @@
             </div>
           </div>
         </div>
+        <div v-if="formError" class="form-error">{{ formError }}</div>
         <div class="modal-buttons" style="display: flex; justify-content: space-between; align-items: center;">
           <div>
-            <button v-if="isEditMode" type="button" class="delete-btn" @click="$emit('delete')">削除</button>
+            <template v-if="isEditMode && !confirmingDelete">
+              <button type="button" class="delete-btn" @click="confirmingDelete = true">削除</button>
+            </template>
+            <template v-if="confirmingDelete">
+              <span class="delete-confirm-label">本当に削除しますか？</span>
+              <button type="button" class="delete-confirm-yes" @click="$emit('delete'); confirmingDelete = false">はい</button>
+              <button type="button" class="delete-confirm-no" @click="confirmingDelete = false">いいえ</button>
+            </template>
           </div>
           <div style="display: flex; gap: 8px;">
             <button type="button" class="cancel-btn" @click="$emit('close')">キャンセル</button>
@@ -148,6 +156,8 @@ const emit = defineEmits(['save', 'delete', 'close'])
 
 const showFundItemDropdown = ref(false)
 const isDragOver = ref(false)
+const confirmingDelete = ref(false)
+const formError = ref('')
 const attachedImages = ref([])
 const fileInput = ref(null)
 const allTags = ref([])
@@ -237,7 +247,7 @@ async function createNewTag() {
     await loadTags()
     selectedTags.value.push({ id: tag.id, name: tag.name })
   } catch (e) {
-    alert('タグ作成エラー: ' + e.message)
+    formError.value = 'タグ作成エラー: ' + e.message
   }
 }
 
@@ -294,9 +304,10 @@ function removeImage(index) {
 function handleSubmit() {
   const amount = parseInt(form.value.amount)
   if (!amount || amount <= 0) {
-    alert('金額は正の数値である必要があります')
+    formError.value = '金額は正の数値である必要があります'
     return
   }
+  formError.value = ''
 
   const data = {
     account: form.value.fundItem,
@@ -497,5 +508,39 @@ onMounted(async () => {
 }
 .upload-icon {
   font-size: 2em;
+}
+.delete-confirm-label {
+  font-size: 0.8em;
+  color: #d32f2f;
+  margin-right: 6px;
+}
+.delete-confirm-yes {
+  background: #d32f2f;
+  border: none;
+  color: #fff;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8em;
+  margin-right: 4px;
+}
+.delete-confirm-yes:hover { background: #b71c1c; }
+.delete-confirm-no {
+  background: #f5f5f5;
+  border: 1px solid #ddd;
+  color: #666;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8em;
+}
+.delete-confirm-no:hover { background: #eee; }
+.form-error {
+  color: #d32f2f;
+  font-size: 0.85em;
+  padding: 6px 8px;
+  background: #ffebee;
+  border-radius: 6px;
+  margin-bottom: 8px;
 }
 </style>
