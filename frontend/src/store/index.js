@@ -138,6 +138,16 @@ export const useAppStore = defineStore('app', () => {
         }
     }
 
+    // 全状態をリセット（スナップショット復元後などに使用）
+    function resetState() {
+        accounts.value = []
+        selectedFundItems.value = []
+        creditCardItems.value = []
+        itemNames.value = []
+        transactions.value = []
+        searchQuery.value = ''
+    }
+
     return {
         accounts,
         selectedFundItems,
@@ -155,6 +165,7 @@ export const useAppStore = defineStore('app', () => {
         fetchCreditCardSettings,
         fetchItems,
         toggleFundItem,
-        toggleAllFundItems
+        toggleAllFundItems,
+        resetState
     }
 })

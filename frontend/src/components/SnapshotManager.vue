@@ -76,12 +76,13 @@ async function restoreSnapshot(name) {
   message.value = ''
   try {
     await apiRestoreSnapshot(name)
-    message.value = 'スナップショットから復元しました'
+    message.value = 'スナップショットから復元しました。再読み込み中...'
     messageType.value = 'success'
-    emit('restored')
+    // 確実にUIを更新するためページをリロード
+    // Go側のDBは既に復元済みなのでリロード後は復元後のデータが表示される
     setTimeout(() => {
-      emit('close')
-    }, 1000)
+      window.location.reload()
+    }, 600)
   } catch (e) {
     message.value = '復元に失敗しました: ' + e.message
     messageType.value = 'error'

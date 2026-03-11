@@ -398,10 +398,18 @@ function openSnapshotManager() {
 }
 
 async function handleSnapshotRestored() {
-  await store.fetchAccounts()
-  await store.fetchCreditCardSettings()
-  await store.fetchTransactions()
-  showToast('スナップショットから復元しました ✓')
+  // 全状態をリセットしてから再取得
+  store.resetState()
+  try {
+    await store.fetchAccounts()
+    await store.fetchCreditCardSettings()
+    await store.fetchTransactions()
+    showToast('スナップショットから復元しました ✓')
+  } catch (e) {
+    console.error('復元後のデータ再取得エラー:', e)
+    // 再取得に失敗した場合はページリロードで確実に反映
+    window.location.reload()
+  }
 }
 
 // グローバルクリックでドロップダウンを閉じる
