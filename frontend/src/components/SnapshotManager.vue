@@ -51,10 +51,10 @@ function formatSnapshotName(name) {
 }
 
 function extractDate(name) {
-  // omni_money_20260304_093000.db → 2026/03/04 09:30
+  // omni_money_20260304_093000_123.db → 2026/03/04 09:30:00
   const match = name.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/)
   if (!match) return ''
-  return `${match[1]}/${match[2]}/${match[3]} ${match[4]}:${match[5]}`
+  return `${match[1]}/${match[2]}/${match[3]} ${match[4]}:${match[5]}:${match[6]}`
 }
 
 async function fetchSnapshots() {
