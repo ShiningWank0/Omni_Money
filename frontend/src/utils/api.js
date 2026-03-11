@@ -162,6 +162,30 @@ export async function backupToCSV() {
 }
 
 /**
+ * CSVバックアップファイルをダウンロードフォルダに保存
+ * @returns {Promise<string>} - 保存先ファイルパス
+ */
+export async function backupToCSVFile() {
+  if (isWails) {
+    return await window.go.main.App.BackupToCSVFile()
+  }
+  // サーバーモード時はブラウザダウンロードにフォールバック
+  const res = await fetch('/api/backup_csv')
+  const csvContent = await res.text()
+  const bom = '\uFEFF'
+  const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `transactions_backup_${new Date().toISOString().slice(0, 10)}.csv`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+  return a.download
+}
+
+/**
  * CSVインポート
  * @param {string} content
  * @param {string} mode

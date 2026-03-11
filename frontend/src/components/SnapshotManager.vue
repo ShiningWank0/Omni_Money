@@ -6,10 +6,8 @@
         <button class="close-btn" @click="$emit('close')">&times;</button>
       </div>
 
-      <div class="snapshot-actions">
-        <button class="ok-btn" @click="createSnapshot" :disabled="isCreating">
-          {{ isCreating ? '作成中...' : '新しいスナップショットを作成' }}
-        </button>
+      <div class="snapshot-info-text">
+        操作ごとに自動保存されます（最大30件）
       </div>
 
       <div v-if="message" class="snapshot-message" :class="messageType">
@@ -37,7 +35,6 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import {
-  createSnapshot as apiCreateSnapshot,
   listSnapshots as apiListSnapshots,
   restoreSnapshot as apiRestoreSnapshot
 } from '../utils/api'
@@ -45,7 +42,6 @@ import {
 defineEmits(['close'])
 
 const snapshots = ref([])
-const isCreating = ref(false)
 const isRestoring = ref(false)
 const message = ref('')
 const messageType = ref('info')
@@ -68,22 +64,6 @@ async function fetchSnapshots() {
     snapshots.value.sort().reverse()
   } catch (e) {
     console.error('スナップショット一覧取得エラー:', e)
-  }
-}
-
-async function createSnapshot() {
-  isCreating.value = true
-  message.value = ''
-  try {
-    await apiCreateSnapshot()
-    message.value = 'スナップショットを作成しました'
-    messageType.value = 'success'
-    await fetchSnapshots()
-  } catch (e) {
-    message.value = 'スナップショット作成に失敗しました: ' + e.message
-    messageType.value = 'error'
-  } finally {
-    isCreating.value = false
   }
 }
 
@@ -133,6 +113,12 @@ onMounted(fetchSnapshots)
   color: #333;
 }
 
+.snapshot-info-text {
+  font-size: 0.85em;
+  color: #888;
+  margin-bottom: 12px;
+}
+
 .close-btn {
   background: none;
   border: none;
@@ -145,10 +131,6 @@ onMounted(fetchSnapshots)
 
 .close-btn:hover {
   color: #333;
-}
-
-.snapshot-actions {
-  margin-bottom: 12px;
 }
 
 .snapshot-message {
