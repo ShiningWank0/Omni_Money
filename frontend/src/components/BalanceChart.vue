@@ -1,6 +1,6 @@
 <template>
   <div class="modal-overlay" @click="$emit('close')">
-    <div class="modal-content graph-modal" @click.stop>
+    <div class="modal-content graph-modal" :style="modalStyle" @click.stop>
       <div class="graph-modal-header">
         <h3>残高推移グラフ</h3>
         <button class="close-btn" @click="$emit('close')">&times;</button>
@@ -24,7 +24,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { Line } from 'vue-chartjs'
 import {
   Chart as ChartJS,
@@ -57,6 +57,20 @@ const props = defineProps({
 defineEmits(['close'])
 
 const selectedPeriod = ref('all')
+const modalStyle = ref({})
+
+function updateModalSize() {
+  const headerCard = document.querySelector('.header.card')
+  const contentCard = document.querySelector('.content-card')
+  if (!headerCard || !contentCard) return
+  const headerRect = headerCard.getBoundingClientRect()
+  const contentRect = contentCard.getBoundingClientRect()
+  modalStyle.value = {
+    width: `${headerRect.width}px`,
+    height: `${contentRect.bottom - headerRect.top}px`,
+    marginTop: `${headerRect.top}px`,
+  }
+}
 
 // 口座ごとの色パレット（グラスモーフィズムに合う色合い）
 const colorPalette = [
@@ -234,15 +248,26 @@ const chartOptions = computed(() => ({
 function updateChart() {
   // computed で自動更新されるため特に処理不要
 }
+
+onMounted(() => {
+  updateModalSize()
+  window.addEventListener('resize', updateModalSize)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', updateModalSize)
+})
 </script>
 
 <style scoped>
 .graph-modal {
-  max-width: 900px;
-  width: 95vw;
-  max-height: 92vh;
+  max-width: none;
+  max-height: none;
+  padding: 1.5rem;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
+  align-self: flex-start;
 }
 
 .graph-modal-header {
@@ -303,8 +328,7 @@ function updateChart() {
 
 .graph-container {
   flex: 1;
-  min-height: 500px;
-  max-height: 80vh;
+  min-height: 0;
   position: relative;
   background: #f8fafc;
   border-radius: 8px;
@@ -322,12 +346,11 @@ function updateChart() {
 
 @media (max-width: 600px) {
   .graph-modal {
-    width: 98vw;
-    max-height: 90vh;
+    padding: 1rem;
   }
 
   .graph-container {
-    min-height: 350px;
+    min-height: 250px;
   }
 }
 </style>
