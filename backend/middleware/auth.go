@@ -7,10 +7,11 @@ import (
 	"strings"
 )
 
-// AIWriteOnlyMiddleware はAI用APIの書き込み専用制御ミドルウェア
+// AIAPIMiddleware はAI用APIの接続制御ミドルウェア
 // AI用の認証鍵（トークン）を検証し、POSTのみを許可する。
-// Agent.md §6.3: 読み込み・変更・削除が要求された場合はHTTP 403で遮断。
-func AIWriteOnlyMiddleware(apiToken string, next http.Handler) http.Handler {
+// Agent.md §6.3: 変更（PUT）・削除（DELETE）が要求された場合はHTTP 403で遮断。
+// 許可パス: POST /api/v1/ai/transactions, POST /api/v1/ai/analysis
+func AIAPIMiddleware(apiToken string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// AI用エンドポイントのみチェック
 		if !strings.HasPrefix(r.URL.Path, "/api/v1/ai/") {
@@ -34,7 +35,7 @@ func AIWriteOnlyMiddleware(apiToken string, next http.Handler) http.Handler {
 
 		// POSTのみ許可。GET/PUT/DELETE等はHTTP 403で即座に遮断（Agent.md §6.3）
 		if r.Method != http.MethodPost {
-			writeJSONError(w, "AI用APIは新規追加(POST)のみ許可されています", http.StatusForbidden)
+			writeJSONError(w, "AI用APIは新規追加(POST)と分析(POST)のみ許可されています", http.StatusForbidden)
 			return
 		}
 

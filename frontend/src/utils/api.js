@@ -162,6 +162,30 @@ export async function backupToCSV() {
 }
 
 /**
+ * CSVバックアップファイルをダウンロードフォルダに保存
+ * @returns {Promise<string>} - 保存先ファイルパス
+ */
+export async function backupToCSVFile() {
+  if (isWails) {
+    return await window.go.main.App.BackupToCSVFile()
+  }
+  // サーバーモード時はブラウザダウンロードにフォールバック
+  const res = await fetch('/api/backup_csv')
+  const csvContent = await res.text()
+  const bom = '\uFEFF'
+  const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `transactions_backup_${new Date().toISOString().slice(0, 10)}.csv`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+  return a.download
+}
+
+/**
  * CSVインポート
  * @param {string} content
  * @param {string} mode
@@ -222,5 +246,192 @@ export async function restoreSnapshot(name) {
   })
   const data = await res.json()
   if (data.error) throw new Error(data.error)
+}
+
+// --- 画像関連 (Agent.md §6.5) ---
+
+/**
+ * 取引に画像を追加
+ * @param {number} transactionId
+ * @param {object} imageData - { filename, data (base64), mime_type }
+ * @returns {Promise<object>}
+ */
+export async function addTransactionImage(transactionId, imageData) {
+  if (isWails) {
+    return await window.go.main.App.AddTransactionImage(transactionId, imageData)
+  }
+  const res = await fetch(`/api/transaction_images/${transactionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(imageData)
+  })
+  return await res.json()
+}
+
+/**
+ * 取引の画像一覧を取得
+ * @param {number} transactionId
+ * @returns {Promise<object[]>}
+ */
+export async function getTransactionImages(transactionId) {
+  if (isWails) {
+    return await window.go.main.App.GetTransactionImages(transactionId)
+  }
+  const res = await fetch(`/api/transaction_images/${transactionId}`)
+  return await res.json()
+}
+
+/**
+ * 取引から画像を削除
+ * @param {number} transactionId
+ * @param {number} imageId
+ * @returns {Promise<void>}
+ */
+export async function deleteTransactionImage(transactionId, imageId) {
+  if (isWails) {
+    return await window.go.main.App.DeleteTransactionImage(imageId)
+  }
+  await fetch(`/api/transaction_images/${transactionId}/${imageId}`, { method: 'DELETE' })
+}
+
+// --- タグ関連 (Agent.md §6.6) ---
+
+/**
+ * タグ一覧を取得（ツリー構造）
+ * @returns {Promise<object[]>}
+ */
+export async function getTags() {
+  if (isWails) {
+    return await window.go.main.App.GetTags()
+  }
+  const res = await fetch('/api/tags')
+  return await res.json()
+}
+
+/**
+ * タグを作成
+ * @param {string} name
+ * @param {number|null} parentId
+ * @returns {Promise<object>}
+ */
+export async function createTag(name, parentId = null) {
+  if (isWails) {
+    return await window.go.main.App.CreateTag(name, parentId)
+  }
+  const res = await fetch('/api/tags', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, parent_id: parentId })
+  })
+  return await res.json()
+}
+
+/**
+ * 「/」区切りのパスからタグを階層的に作成
+ * @param {string} path - 例: "推し活/超かぐや姫！"
+ * @returns {Promise<object>} 末端のタグ
+ */
+export async function createTagByPath(path) {
+  if (isWails) {
+    return await window.go.main.App.CreateTagByPath(path)
+  }
+  const res = await fetch('/api/tags/path', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path })
+  })
+  return await res.json()
+}
+
+/**
+ * タグを更新
+ * @param {number} id
+ * @param {string} name
+ * @returns {Promise<void>}
+ */
+export async function updateTag(id, name) {
+  if (isWails) {
+    return await window.go.main.App.UpdateTag(id, name)
+  }
+  await fetch(`/api/tags/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name })
+  })
+}
+
+/**
+ * タグを削除
+ * @param {number} id
+ * @returns {Promise<void>}
+ */
+export async function deleteTag(id) {
+  if (isWails) {
+    return await window.go.main.App.DeleteTag(id)
+  }
+  await fetch(`/api/tags/${id}`, { method: 'DELETE' })
+}
+
+/**
+ * 取引に紐付いたタグを取得
+ * @param {number} transactionId
+ * @returns {Promise<object[]>}
+ */
+export async function getTransactionTags(transactionId) {
+  if (isWails) {
+    return await window.go.main.App.GetTransactionTags(transactionId)
+  }
+  const res = await fetch(`/api/transaction_tags/${transactionId}`)
+  return await res.json()
+}
+
+/**
+ * 取引にタグを追加
+ * @param {number} transactionId
+ * @param {number[]} tagIds
+ * @returns {Promise<void>}
+ */
+export async function addTransactionTags(transactionId, tagIds) {
+  if (isWails) {
+    return await window.go.main.App.AddTransactionTags(transactionId, tagIds)
+  }
+  await fetch(`/api/transaction_tags/${transactionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tag_ids: tagIds })
+  })
+}
+
+/**
+ * 取引からタグを削除
+ * @param {number} transactionId
+ * @param {number} tagId
+ * @returns {Promise<void>}
+ */
+export async function removeTransactionTag(transactionId, tagId) {
+  if (isWails) {
+    return await window.go.main.App.RemoveTransactionTag(transactionId, tagId)
+  }
+  await fetch(`/api/transaction_tags/${transactionId}/${tagId}`, { method: 'DELETE' })
+}
+
+/**
+ * タグ別集計データを取得（円グラフ用）
+ * @param {string} type - 'income' | 'expense' | ''
+ * @param {string} startDate - YYYY-MM-DD
+ * @param {string} endDate - YYYY-MM-DD
+ * @returns {Promise<object[]>}
+ */
+export async function getTagSummary(type = '', startDate = '', endDate = '') {
+  if (isWails) {
+    return await window.go.main.App.GetTagSummary(type, startDate, endDate)
+  }
+  const params = new URLSearchParams()
+  if (type) params.set('type', type)
+  if (startDate) params.set('start_date', startDate)
+  if (endDate) params.set('end_date', endDate)
+  const query = params.toString() ? `?${params.toString()}` : ''
+  const res = await fetch(`/api/tags/summary${query}`)
+  return await res.json()
 }
 
