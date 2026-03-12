@@ -147,6 +147,11 @@ func (a *App) CreateTag(name string, parentID *int64) (*models.Tag, error) {
 	return core.CreateTag(name, parentID)
 }
 
+// CreateTagByPath は「/」区切りのパスからタグを階層的に作成する
+func (a *App) CreateTagByPath(path string) (*models.Tag, error) {
+	return core.CreateTagByPath(path)
+}
+
 // GetTags はタグ一覧をツリー構造で返す
 func (a *App) GetTags() ([]models.Tag, error) {
 	return core.GetTags()

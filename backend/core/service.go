@@ -957,6 +957,64 @@ func UpdateTag(id int64, name string) error {
 	return err
 }
 
+// CreateTagByPath は「/」区切りのパスからタグを階層的に作成する
+// 例: "推し活/超かぐや姫！" → 「推し活」(L1) → 「超かぐや姫！」(L2) を作成
+func CreateTagByPath(path string) (*models.Tag, error) {
+	db := database.GetDB()
+
+	parts := strings.Split(path, "/")
+	var segments []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			segments = append(segments, p)
+		}
+	}
+
+	if len(segments) == 0 {
+		return nil, fmt.Errorf("タグ名が空です")
+	}
+	if len(segments) > 3 {
+		return nil, fmt.Errorf("タグは3階層までです")
+	}
+
+	var parentID *int64
+	var tag *models.Tag
+
+	for i, name := range segments {
+		level := i + 1
+		var existingID int64
+		var err error
+
+		if parentID == nil {
+			err = db.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&existingID)
+		} else {
+			err = db.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id = ?", name, *parentID).Scan(&existingID)
+		}
+
+		if err == nil {
+			tag = &models.Tag{ID: existingID, Name: name, ParentID: parentID, Level: level}
+			pid := existingID
+			parentID = &pid
+		} else {
+			result, insertErr := db.Exec(
+				"INSERT INTO tags (name, parent_id, level) VALUES (?, ?, ?)",
+				name, parentID, level,
+			)
+			if insertErr != nil {
+				return nil, fmt.Errorf("タグ作成エラー: %w", insertErr)
+			}
+			id, _ := result.LastInsertId()
+			tag = &models.Tag{ID: id, Name: name, ParentID: parentID, Level: level}
+			pid := id
+			parentID = &pid
+		}
+	}
+
+	database.AutoSnapshot()
+	return tag, nil
+}
+
 // DeleteTag はタグを削除する（子タグも連鎖削除）
 func DeleteTag(id int64) error {
 	db := database.GetDB()

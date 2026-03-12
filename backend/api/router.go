@@ -43,6 +43,7 @@ func NewRouter() http.Handler {
 	// タグAPI（Agent.md §6.6）
 	mux.HandleFunc("/api/tags", handleTags)
 	mux.HandleFunc("/api/tags/", handleTagByID)
+	mux.HandleFunc("/api/tags/path", handleCreateTagByPath)
 	mux.HandleFunc("/api/tags/summary", handleTagSummary)
 	mux.HandleFunc("/api/transaction_tags/", handleTransactionTagsAPI)
 
@@ -464,6 +465,26 @@ func handleTags(w http.ResponseWriter, r *http.Request) {
 	default:
 		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func handleCreateTagByPath(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
+		return
+	}
+	tag, err := core.CreateTagByPath(body.Path)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonResponse(w, tag, http.StatusCreated)
 }
 
 func handleTagByID(w http.ResponseWriter, r *http.Request) {

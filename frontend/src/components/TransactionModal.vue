@@ -89,7 +89,7 @@
                 <button type="button" class="add-tag-btn" @click="addSelectedTag">追加</button>
               </div>
               <div class="new-tag-row">
-                <input type="text" v-model="newTagName" placeholder="新規タグ名" class="new-tag-input">
+                <input type="text" v-model="newTagName" placeholder="新規タグ名（/で階層作成）" class="new-tag-input">
                 <button type="button" class="add-tag-btn" @click="createNewTag">作成</button>
               </div>
             </div>
@@ -143,7 +143,7 @@
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
-import { getTags, createTag } from '../utils/api'
+import { getTags, createTag, createTagByPath } from '../utils/api'
 
 const props = defineProps({
   isEditMode: Boolean,
@@ -206,9 +206,25 @@ function onLevel2Change() {
   selectedLevel3.value = ''
 }
 
+function buildTagPath(tags, targetId) {
+  const trail = []
+  function search(nodes) {
+    for (const node of nodes) {
+      trail.push(node.name)
+      if (node.id === targetId) return true
+      if (node.children && search(node.children)) return true
+      trail.pop()
+    }
+    return false
+  }
+  search(tags)
+  return trail.join(' / ')
+}
+
 function getTagPath(tag) {
-  // タグ名をそのまま表示（フラットにしているため）
-  return tag.name
+  if (tag.path) return tag.path
+  const path = buildTagPath(allTags.value, tag.id)
+  return path || tag.name
 }
 
 function addSelectedTag() {
@@ -216,10 +232,10 @@ function addSelectedTag() {
   if (!tagId) return
   if (selectedTags.value.some(t => t.id === tagId)) return
 
-  // タグ情報を探す
   let tag = findTagById(allTags.value, tagId)
   if (tag) {
-    selectedTags.value.push({ id: tag.id, name: tag.name })
+    const fullPath = buildTagPath(allTags.value, tag.id)
+    selectedTags.value.push({ id: tag.id, name: tag.name, path: fullPath })
   }
 }
 
@@ -240,12 +256,22 @@ function removeTag(tagId) {
 
 async function createNewTag() {
   if (!newTagName.value.trim()) return
-  const parentId = Number(selectedLevel2.value || selectedLevel1.value) || null
+  const input = newTagName.value.trim()
+
   try {
-    const tag = await createTag(newTagName.value.trim(), parentId)
+    let tag
+    if (input.includes('/')) {
+      tag = await createTagByPath(input)
+    } else {
+      const parentId = Number(selectedLevel2.value || selectedLevel1.value) || null
+      tag = await createTag(input, parentId)
+    }
     newTagName.value = ''
     await loadTags()
-    selectedTags.value.push({ id: tag.id, name: tag.name })
+    if (!selectedTags.value.some(t => t.id === tag.id)) {
+      const fullPath = buildTagPath(allTags.value, tag.id)
+      selectedTags.value.push({ id: tag.id, name: tag.name, path: fullPath })
+    }
   } catch (e) {
     formError.value = 'タグ作成エラー: ' + e.message
   }
@@ -348,7 +374,10 @@ onMounted(async () => {
 
     // 既存タグをロード
     if (tx.tags && tx.tags.length > 0) {
-      selectedTags.value = tx.tags.map(t => ({ id: t.id, name: t.name }))
+      selectedTags.value = tx.tags.map(t => {
+        const fullPath = buildTagPath(allTags.value, t.id)
+        return { id: t.id, name: t.name, path: fullPath }
+      })
     }
   }
 })
