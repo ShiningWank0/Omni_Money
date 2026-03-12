@@ -6,16 +6,44 @@ export function AddTransaction(arg1) {
   return window['go']['main']['App']['AddTransaction'](arg1);
 }
 
+export function AddTransactionImage(arg1, arg2) {
+  return window['go']['main']['App']['AddTransactionImage'](arg1, arg2);
+}
+
+export function AddTransactionTags(arg1, arg2) {
+  return window['go']['main']['App']['AddTransactionTags'](arg1, arg2);
+}
+
 export function BackupToCSV() {
   return window['go']['main']['App']['BackupToCSV']();
+}
+
+export function BackupToCSVFile() {
+  return window['go']['main']['App']['BackupToCSVFile']();
 }
 
 export function CreateSnapshot() {
   return window['go']['main']['App']['CreateSnapshot']();
 }
 
+export function CreateTag(arg1, arg2) {
+  return window['go']['main']['App']['CreateTag'](arg1, arg2);
+}
+
+export function CreateTagByPath(arg1) {
+  return window['go']['main']['App']['CreateTagByPath'](arg1);
+}
+
+export function DeleteTag(arg1) {
+  return window['go']['main']['App']['DeleteTag'](arg1);
+}
+
 export function DeleteTransaction(arg1) {
   return window['go']['main']['App']['DeleteTransaction'](arg1);
+}
+
+export function DeleteTransactionImage(arg1) {
+  return window['go']['main']['App']['DeleteTransactionImage'](arg1);
 }
 
 export function GetAccounts() {
@@ -38,6 +66,22 @@ export function GetItems(arg1) {
   return window['go']['main']['App']['GetItems'](arg1);
 }
 
+export function GetTagSummary(arg1, arg2, arg3) {
+  return window['go']['main']['App']['GetTagSummary'](arg1, arg2, arg3);
+}
+
+export function GetTags() {
+  return window['go']['main']['App']['GetTags']();
+}
+
+export function GetTransactionImages(arg1) {
+  return window['go']['main']['App']['GetTransactionImages'](arg1);
+}
+
+export function GetTransactionTags(arg1) {
+  return window['go']['main']['App']['GetTransactionTags'](arg1);
+}
+
 export function GetTransactions(arg1, arg2) {
   return window['go']['main']['App']['GetTransactions'](arg1, arg2);
 }
@@ -54,12 +98,20 @@ export function ListSnapshots() {
   return window['go']['main']['App']['ListSnapshots']();
 }
 
+export function RemoveTransactionTag(arg1, arg2) {
+  return window['go']['main']['App']['RemoveTransactionTag'](arg1, arg2);
+}
+
 export function RestoreSnapshot(arg1) {
   return window['go']['main']['App']['RestoreSnapshot'](arg1);
 }
 
 export function SaveCreditCardSettings(arg1) {
   return window['go']['main']['App']['SaveCreditCardSettings'](arg1);
+}
+
+export function UpdateTag(arg1, arg2) {
+  return window['go']['main']['App']['UpdateTag'](arg1, arg2);
 }
 
 export function UpdateTransaction(arg1, arg2) {

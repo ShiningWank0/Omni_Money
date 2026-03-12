@@ -39,7 +39,7 @@
       </div>
       <div class="header-search">
         <div class="search-container">
-          <input type="text" class="search-box" placeholder="資金使用項目に対する検索が可能" v-model="store.searchQuery" @input="onSearchInput">
+          <input type="text" class="search-box" placeholder="項目名・メモで検索" v-model="store.searchQuery" @input="onSearchInput">
           <span class="search-icon">🔍</span>
         </div>
         <button class="add-btn add-btn-desktop" @click="showAddModal" title="新しい取引を追加">+</button>
@@ -53,6 +53,7 @@
         <button class="menu-btn" @click="showImportCSVModalMethod">CSVインポート</button>
         <button class="menu-btn" @click="openCreditCardSettings">クレジットカード設定</button>
         <button class="menu-btn" @click="showGraphModal">残高推移グラフ表示</button>
+        <button class="menu-btn" @click="openTagChart">タグ別分析</button>
         <button class="menu-btn" @click="openSnapshotManager">スナップショット管理</button>
       </div>
     </div>
@@ -128,11 +129,26 @@
       @close="showGraph = false"
     />
 
+    <!-- タグ別分析円グラフ (Agent.md §6.6) -->
+    <TagPieChart
+      v-if="showTagChart"
+      :credit-card-items="store.creditCardItems"
+      @close="showTagChart = false"
+    />
+
     <!-- スナップショット管理モーダル -->
     <SnapshotManager
       v-if="showSnapshotModal"
       @close="showSnapshotModal = false"
+      @restored="handleSnapshotRestored"
     />
+
+    <!-- トースト通知 -->
+    <Transition name="toast-fade">
+      <div v-if="toast.visible" class="toast" :class="toast.type">
+        {{ toast.message }}
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -144,11 +160,12 @@ import CSVImportModal from './components/CSVImportModal.vue'
 import CreditCardSettingsModal from './components/CreditCardSettingsModal.vue'
 import BalanceChart from './components/BalanceChart.vue'
 import SnapshotManager from './components/SnapshotManager.vue'
+import TagPieChart from './components/TagPieChart.vue'
 import {
   addTransaction,
   updateTransaction,
   deleteTransaction as apiDeleteTransaction,
-  backupToCSV as apiBackupToCSV,
+  backupToCSVFile as apiBackupToCSVFile,
   saveCreditCardSettings as apiSaveCreditCardSettings,
   getBalanceHistoryFiltered
 } from './utils/api'
@@ -163,11 +180,23 @@ const showImportCSVModal = ref(false)
 const showCreditCardModal = ref(false)
 const showGraph = ref(false)
 const showSnapshotModal = ref(false)
+const showTagChart = ref(false)
 const isEditMode = ref(false)
 const editingTransaction = ref(null)
 const dateSortOrder = ref('desc')
 const selectedCreditCardItems = ref([])
 const balanceHistoryData = ref(null)
+
+// トースト通知
+const toast = ref({ visible: false, message: '', type: 'success' })
+let toastTimer = null
+function showToast(message, type = 'success', duration = 3000) {
+  clearTimeout(toastTimer)
+  toast.value = { visible: true, message, type }
+  toastTimer = setTimeout(() => {
+    toast.value.visible = false
+  }, duration)
+}
 
 // 日付でソートされた取引リスト
 const sortedTransactions = computed(() => {
@@ -267,13 +296,12 @@ async function handleSaveTransaction(data) {
     await store.fetchTransactions()
   } catch (e) {
     console.error('取引保存エラー:', e)
-    alert('取引の保存に失敗しました: ' + e.message)
+    showToast('取引の保存に失敗しました: ' + e.message, 'error', 5000)
   }
 }
 
 async function handleDeleteTransaction() {
   if (!editingTransaction.value) return
-  if (!confirm('この取引を削除しますか？')) return
   try {
     await apiDeleteTransaction(editingTransaction.value.id)
     hideAddModal()
@@ -281,7 +309,7 @@ async function handleDeleteTransaction() {
     await store.fetchTransactions()
   } catch (e) {
     console.error('取引削除エラー:', e)
-    alert('取引の削除に失敗しました: ' + e.message)
+    showToast('取引の削除に失敗しました: ' + e.message, 'error', 5000)
   }
 }
 
@@ -289,18 +317,15 @@ async function handleDeleteTransaction() {
 async function backupToCSV() {
   showMenu.value = false
   try {
-    const csvContent = await apiBackupToCSV()
-    // ダウンロード
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `transactions_backup_${new Date().toISOString().slice(0, 10)}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
+    const filePath = await apiBackupToCSVFile()
+    if (!filePath) {
+      showToast('バックアップデータが空です', 'error')
+      return
+    }
+    showToast('CSVバックアップを保存しました ✓')
   } catch (e) {
     console.error('CSVバックアップエラー:', e)
-    alert('CSVバックアップに失敗しました')
+    showToast('CSVバックアップに失敗しました', 'error')
   }
 }
 
@@ -339,7 +364,7 @@ async function handleSaveCreditCardSettings(items) {
     await store.fetchTransactions()
   } catch (e) {
     console.error('クレジットカード設定保存エラー:', e)
-    alert('クレジットカード設定の保存に失敗しました')
+    showToast('クレジットカード設定の保存に失敗しました', 'error', 5000)
   }
 }
 
@@ -355,14 +380,35 @@ async function showGraphModal() {
     showGraph.value = true
   } catch (e) {
     console.error('残高推移取得エラー:', e)
-    alert('残高推移データの取得に失敗しました')
+    showToast('残高推移データの取得に失敗しました', 'error', 5000)
   }
+}
+
+// タグ別分析
+function openTagChart() {
+  showMenu.value = false
+  showTagChart.value = true
 }
 
 // スナップショット管理
 function openSnapshotManager() {
   showMenu.value = false
   showSnapshotModal.value = true
+}
+
+async function handleSnapshotRestored() {
+  // 全状態をリセットしてから再取得
+  store.resetState()
+  try {
+    await store.fetchAccounts()
+    await store.fetchCreditCardSettings()
+    await store.fetchTransactions()
+    showToast('スナップショットから復元しました ✓')
+  } catch (e) {
+    console.error('復元後のデータ再取得エラー:', e)
+    // 再取得に失敗した場合はページリロードで確実に反映
+    window.location.reload()
+  }
 }
 
 // グローバルクリックでドロップダウンを閉じる
@@ -376,5 +422,16 @@ onMounted(async () => {
   await store.fetchAccounts()
   await store.fetchCreditCardSettings()
   await store.fetchTransactions()
+
+  // スナップショット復元後のリロードならトースト通知を表示
+  const restoreResult = localStorage.getItem('snapshot_restored')
+  if (restoreResult) {
+    localStorage.removeItem('snapshot_restored')
+    if (restoreResult === 'success') {
+      showToast('スナップショットから復元しました ✓')
+    } else if (restoreResult.startsWith('error:')) {
+      showToast('復元に失敗しました: ' + restoreResult.slice(6), 'error', 5000)
+    }
+  }
 })
 </script>

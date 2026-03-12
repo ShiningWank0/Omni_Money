@@ -62,10 +62,74 @@
             <label>メモ (任意):</label>
             <input type="text" v-model="form.memo" placeholder="メモを入力">
           </div>
+
+          <!-- タグ選択 (Agent.md §6.6) -->
+          <div class="form-row">
+            <label>タグ:</label>
+            <div class="tag-selector">
+              <div class="selected-tags">
+                <span v-for="tag in selectedTags" :key="tag.id" class="tag-badge">
+                  {{ getTagPath(tag) }}
+                  <button type="button" class="tag-remove" @click="removeTag(tag.id)">×</button>
+                </span>
+              </div>
+              <div class="tag-dropdown-group">
+                <select v-model="selectedLevel1" @change="onLevel1Change" class="tag-select">
+                  <option value="">タグを選択...</option>
+                  <option v-for="t in level1Tags" :key="t.id" :value="t.id">{{ t.name }}</option>
+                </select>
+                <select v-if="level2Tags.length > 0" v-model="selectedLevel2" @change="onLevel2Change" class="tag-select">
+                  <option value="">サブタグ...</option>
+                  <option v-for="t in level2Tags" :key="t.id" :value="t.id">{{ t.name }}</option>
+                </select>
+                <select v-if="level3Tags.length > 0" v-model="selectedLevel3" class="tag-select">
+                  <option value="">サブサブタグ...</option>
+                  <option v-for="t in level3Tags" :key="t.id" :value="t.id">{{ t.name }}</option>
+                </select>
+                <button type="button" class="add-tag-btn" @click="addSelectedTag">追加</button>
+              </div>
+              <div class="new-tag-row">
+                <input type="text" v-model="newTagName" placeholder="新規タグ名（/で階層作成）" class="new-tag-input">
+                <button type="button" class="add-tag-btn" @click="createNewTag">作成</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 画像添付 (Agent.md §6.5) -->
+          <div class="form-row">
+            <label>画像:</label>
+            <div class="image-upload-area"
+              @dragover.prevent="isDragOver = true"
+              @dragleave="isDragOver = false"
+              @drop.prevent="onImageDrop"
+              @click="triggerFileSelect"
+              :class="{ 'drag-over': isDragOver }">
+              <div class="image-previews" v-if="attachedImages.length > 0" @click.stop>
+                <div v-for="(img, index) in attachedImages" :key="index" class="image-preview">
+                  <img :src="img.preview" :alt="img.filename">
+                  <button type="button" class="image-remove" @click="removeImage(index)">×</button>
+                </div>
+              </div>
+              <div class="image-upload-placeholder">
+                <span class="upload-icon">📷</span>
+                <span>クリックまたはドラッグ&ドロップで画像を添付</span>
+              </div>
+              <input ref="fileInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple
+                @change="onFileSelect" style="display: none;">
+            </div>
+          </div>
         </div>
+        <div v-if="formError" class="form-error">{{ formError }}</div>
         <div class="modal-buttons" style="display: flex; justify-content: space-between; align-items: center;">
           <div>
-            <button v-if="isEditMode" type="button" class="delete-btn" @click="$emit('delete')">削除</button>
+            <template v-if="isEditMode && !confirmingDelete">
+              <button type="button" class="delete-btn" @click="confirmingDelete = true">削除</button>
+            </template>
+            <template v-if="confirmingDelete">
+              <span class="delete-confirm-label">本当に削除しますか？</span>
+              <button type="button" class="delete-confirm-yes" @click="$emit('delete'); confirmingDelete = false">はい</button>
+              <button type="button" class="delete-confirm-no" @click="confirmingDelete = false">いいえ</button>
+            </template>
           </div>
           <div style="display: flex; gap: 8px;">
             <button type="button" class="cancel-btn" @click="$emit('close')">キャンセル</button>
@@ -78,7 +142,8 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { getTags, createTag, createTagByPath } from '../utils/api'
 
 const props = defineProps({
   isEditMode: Boolean,
@@ -90,6 +155,17 @@ const props = defineProps({
 const emit = defineEmits(['save', 'delete', 'close'])
 
 const showFundItemDropdown = ref(false)
+const isDragOver = ref(false)
+const confirmingDelete = ref(false)
+const formError = ref('')
+const attachedImages = ref([])
+const fileInput = ref(null)
+const allTags = ref([])
+const selectedTags = ref([])
+const selectedLevel1 = ref('')
+const selectedLevel2 = ref('')
+const selectedLevel3 = ref('')
+const newTagName = ref('')
 
 const form = ref({
   date: new Date().toISOString().slice(0, 10),
@@ -109,30 +185,182 @@ const isNewItem = computed(() => {
   return form.value.item && !props.itemNames.includes(form.value.item)
 })
 
+// タグ階層
+const level1Tags = computed(() => allTags.value)
+const level2Tags = computed(() => {
+  if (!selectedLevel1.value) return []
+  const parent = allTags.value.find(t => t.id === Number(selectedLevel1.value))
+  return parent?.children || []
+})
+const level3Tags = computed(() => {
+  if (!selectedLevel2.value) return []
+  const parent = level2Tags.value.find(t => t.id === Number(selectedLevel2.value))
+  return parent?.children || []
+})
+
+function onLevel1Change() {
+  selectedLevel2.value = ''
+  selectedLevel3.value = ''
+}
+function onLevel2Change() {
+  selectedLevel3.value = ''
+}
+
+function buildTagPath(tags, targetId) {
+  const trail = []
+  function search(nodes) {
+    for (const node of nodes) {
+      trail.push(node.name)
+      if (node.id === targetId) return true
+      if (node.children && search(node.children)) return true
+      trail.pop()
+    }
+    return false
+  }
+  search(tags)
+  return trail.join(' / ')
+}
+
+function getTagPath(tag) {
+  if (tag.path) return tag.path
+  const path = buildTagPath(allTags.value, tag.id)
+  return path || tag.name
+}
+
+function addSelectedTag() {
+  const tagId = Number(selectedLevel3.value || selectedLevel2.value || selectedLevel1.value)
+  if (!tagId) return
+  if (selectedTags.value.some(t => t.id === tagId)) return
+
+  let tag = findTagById(allTags.value, tagId)
+  if (tag) {
+    const fullPath = buildTagPath(allTags.value, tag.id)
+    selectedTags.value.push({ id: tag.id, name: tag.name, path: fullPath })
+  }
+}
+
+function findTagById(tags, id) {
+  for (const t of tags) {
+    if (t.id === id) return t
+    if (t.children) {
+      const found = findTagById(t.children, id)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+function removeTag(tagId) {
+  selectedTags.value = selectedTags.value.filter(t => t.id !== tagId)
+}
+
+async function createNewTag() {
+  if (!newTagName.value.trim()) return
+  const input = newTagName.value.trim()
+
+  try {
+    let tag
+    if (input.includes('/')) {
+      tag = await createTagByPath(input)
+    } else {
+      const parentId = Number(selectedLevel2.value || selectedLevel1.value) || null
+      tag = await createTag(input, parentId)
+    }
+    newTagName.value = ''
+    await loadTags()
+    if (!selectedTags.value.some(t => t.id === tag.id)) {
+      const fullPath = buildTagPath(allTags.value, tag.id)
+      selectedTags.value.push({ id: tag.id, name: tag.name, path: fullPath })
+    }
+  } catch (e) {
+    formError.value = 'タグ作成エラー: ' + e.message
+  }
+}
+
+async function loadTags() {
+  try {
+    allTags.value = await getTags()
+  } catch (e) {
+    allTags.value = []
+  }
+}
+
+// 画像添付
+function triggerFileSelect() {
+  if (fileInput.value) {
+    fileInput.value.click()
+  }
+}
+
 function onAmountInput(e) {
-  // 数値以外を除去
   form.value.amount = e.target.value.replace(/[^0-9]/g, '')
+}
+
+function onFileSelect(e) {
+  const files = Array.from(e.target.files)
+  processFiles(files)
+}
+
+function onImageDrop(e) {
+  isDragOver.value = false
+  const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'))
+  processFiles(files)
+}
+
+function processFiles(files) {
+  for (const file of files) {
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const base64 = e.target.result.split(',')[1]
+      attachedImages.value.push({
+        filename: file.name,
+        data: base64,
+        mime_type: file.type,
+        preview: e.target.result
+      })
+    }
+    reader.readAsDataURL(file)
+  }
+}
+
+function removeImage(index) {
+  attachedImages.value.splice(index, 1)
 }
 
 function handleSubmit() {
   const amount = parseInt(form.value.amount)
   if (!amount || amount <= 0) {
-    alert('金額は正の数値である必要があります')
+    formError.value = '金額は正の数値である必要があります'
     return
   }
+  formError.value = ''
 
-  emit('save', {
+  const data = {
     account: form.value.fundItem,
     date: form.value.date,
     time: form.value.time,
     item: form.value.item,
     type: form.value.type,
     amount: amount,
-    memo: form.value.memo
-  })
+    memo: form.value.memo,
+    tags: selectedTags.value.map(t => t.id)
+  }
+
+  // 画像がある場合はBase64で含める
+  if (attachedImages.value.length > 0) {
+    data.images = attachedImages.value.map(img => ({
+      filename: img.filename,
+      data: img.data,
+      mime_type: img.mime_type
+    }))
+  }
+
+  emit('save', data)
 }
 
-onMounted(() => {
+onMounted(async () => {
+  await loadTags()
+
   if (props.isEditMode && props.transaction) {
     const tx = props.transaction
     const dateParts = (tx.date || '').split(' ')
@@ -143,6 +371,205 @@ onMounted(() => {
     form.value.item = tx.item || ''
     form.value.amount = String(tx.amount || '')
     form.value.memo = tx.memo || ''
+
+    // 既存タグをロード
+    if (tx.tags && tx.tags.length > 0) {
+      selectedTags.value = tx.tags.map(t => {
+        const fullPath = buildTagPath(allTags.value, t.id)
+        return { id: t.id, name: t.name, path: fullPath }
+      })
+    }
   }
 })
 </script>
+
+<style scoped>
+/* タグセレクター */
+.tag-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.selected-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.tag-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  background: rgba(102, 126, 234, 0.12);
+  border: 1px solid rgba(102, 126, 234, 0.3);
+  border-radius: 12px;
+  font-size: 0.8em;
+  color: #555;
+}
+.tag-remove {
+  background: none;
+  border: none;
+  color: #dc3545;
+  cursor: pointer;
+  font-size: 1em;
+  padding: 0;
+  line-height: 1;
+}
+.tag-dropdown-group {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.tag-select {
+  flex: 1;
+  min-width: 80px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid #ddd;
+  background: white;
+  color: #333;
+  font-size: 0.85em;
+}
+.tag-select:focus {
+  border-color: #667eea;
+  outline: none;
+}
+.new-tag-row {
+  display: flex;
+  gap: 4px;
+}
+.new-tag-input {
+  flex: 1;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid #ddd;
+  background: white;
+  color: #333;
+  font-size: 0.85em;
+}
+.new-tag-input:focus {
+  border-color: #667eea;
+  outline: none;
+}
+.add-tag-btn {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: none;
+  background: #667eea;
+  color: white;
+  cursor: pointer;
+  font-size: 0.8em;
+  transition: background 0.2s;
+}
+.add-tag-btn:hover {
+  background: #5a6fd6;
+}
+
+/* 画像アップロード */
+.image-upload-area {
+  width: 100%;
+  min-height: 120px;
+  border: 2px dashed rgba(102, 126, 234, 0.4);
+  border-radius: 12px;
+  padding: 16px;
+  text-align: center;
+  transition: all 0.2s;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(102, 126, 234, 0.03);
+  box-sizing: border-box;
+}
+.image-upload-area:hover {
+  border-color: rgba(102, 126, 234, 0.7);
+  background: rgba(102, 126, 234, 0.06);
+}
+.image-upload-area.drag-over {
+  border-color: rgba(106, 168, 79, 0.8);
+  background: rgba(106, 168, 79, 0.08);
+}
+.image-previews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.image-preview {
+  position: relative;
+  width: 60px;
+  height: 60px;
+}
+.image-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid #ddd;
+}
+.image-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: #dc3545;
+  border: 2px solid white;
+  color: white;
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  font-size: 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.image-upload-placeholder {
+  color: #999;
+  font-size: 0.85em;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.upload-icon {
+  font-size: 2em;
+}
+.delete-confirm-label {
+  font-size: 0.8em;
+  color: #d32f2f;
+  margin-right: 6px;
+}
+.delete-confirm-yes {
+  background: #d32f2f;
+  border: none;
+  color: #fff;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8em;
+  margin-right: 4px;
+}
+.delete-confirm-yes:hover { background: #b71c1c; }
+.delete-confirm-no {
+  background: #f5f5f5;
+  border: 1px solid #ddd;
+  color: #666;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8em;
+}
+.delete-confirm-no:hover { background: #eee; }
+.form-error {
+  color: #d32f2f;
+  font-size: 0.85em;
+  padding: 6px 8px;
+  background: #ffebee;
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+</style>

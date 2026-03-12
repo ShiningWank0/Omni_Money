@@ -108,6 +108,33 @@ func createTables() error {
 			FOREIGN KEY (parent_id) REFERENCES transactions(id) ON DELETE CASCADE,
 			FOREIGN KEY (child_id) REFERENCES transactions(id) ON DELETE CASCADE
 		)`,
+		// 取引画像テーブル（Agent.md §6.5）
+		`CREATE TABLE IF NOT EXISTS transaction_images (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			transaction_id INTEGER NOT NULL,
+			filename TEXT NOT NULL,
+			data BLOB NOT NULL,
+			mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+		)`,
+		// タグテーブル（Agent.md §6.6: 3階層タグシステム）
+		`CREATE TABLE IF NOT EXISTS tags (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			parent_id INTEGER DEFAULT NULL,
+			level INTEGER NOT NULL DEFAULT 1 CHECK(level IN (1, 2, 3)),
+			FOREIGN KEY (parent_id) REFERENCES tags(id) ON DELETE CASCADE,
+			UNIQUE(name, parent_id)
+		)`,
+		// 取引タグ紐付けテーブル
+		`CREATE TABLE IF NOT EXISTS transaction_tags (
+			transaction_id INTEGER NOT NULL,
+			tag_id INTEGER NOT NULL,
+			PRIMARY KEY (transaction_id, tag_id),
+			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE,
+			FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+		)`,
 		// 設定テーブル
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
@@ -117,6 +144,11 @@ func createTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account)`,
 		`CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date)`,
 		`CREATE INDEX IF NOT EXISTS idx_transactions_item ON transactions(item)`,
+		`CREATE INDEX IF NOT EXISTS idx_transactions_memo ON transactions(memo)`,
+		`CREATE INDEX IF NOT EXISTS idx_transaction_images_txid ON transaction_images(transaction_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_txid ON transaction_tags(transaction_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_tagid ON transaction_tags(tag_id)`,
 	}
 
 	for _, stmt := range statements {
@@ -130,26 +162,48 @@ func createTables() error {
 
 // --- スナップショット機能 (Agent.md §6.2) ---
 
+// getSnapshotDir はDBパスと同じディレクトリ配下の snapshots/ を返す。
+// ユーザーが保存場所を意識しなくて済むようにアプリデータ内に格納する。
+func getSnapshotDir() string {
+	mu.RLock()
+	p := dbPath
+	mu.RUnlock()
+	if p == "" {
+		return "snapshots"
+	}
+	return filepath.Join(filepath.Dir(p), "snapshots")
+}
+
 // CreateSnapshot は現在のDBファイルのスナップショットを作成する。
 // snapshotDir にタイムスタンプ付きのコピーを保存する。
 func CreateSnapshot(snapshotDir string) (string, error) {
 	mu.RLock()
 	currentPath := dbPath
+	currentDB := db
 	mu.RUnlock()
 
 	if currentPath == "" {
 		return "", fmt.Errorf("データベースが初期化されていません")
 	}
 
+	// WALの内容をメインDBファイルにフラッシュしてからコピーする
+	if currentDB != nil {
+		if _, err := currentDB.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			log.Printf("WALチェックポイント警告: %v", err)
+		}
+	}
+
 	if snapshotDir == "" {
-		snapshotDir = "snapshots"
+		snapshotDir = getSnapshotDir()
 	}
 
 	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
 		return "", fmt.Errorf("スナップショットディレクトリ作成エラー: %w", err)
 	}
 
-	timestamp := time.Now().Format("20060102_150405")
+	timestamp := time.Now().Format("20060102_150405.000")
+	// ドットをアンダースコアに置換してファイル名に安全な形式にする
+	timestamp = strings.ReplaceAll(timestamp, ".", "_")
 	snapshotPath := filepath.Join(snapshotDir, fmt.Sprintf("omni_money_%s.db", timestamp))
 
 	// ファイルコピー
@@ -164,7 +218,7 @@ func CreateSnapshot(snapshotDir string) (string, error) {
 // ListSnapshots は利用可能なスナップショットのリストを返す
 func ListSnapshots(snapshotDir string) ([]string, error) {
 	if snapshotDir == "" {
-		snapshotDir = "snapshots"
+		snapshotDir = getSnapshotDir()
 	}
 
 	entries, err := os.ReadDir(snapshotDir)
@@ -185,10 +239,18 @@ func ListSnapshots(snapshotDir string) ([]string, error) {
 	return snapshots, nil
 }
 
-// RestoreSnapshot はスナップショットからDBを復元する
+// RestoreSnapshot はスナップショットからDBを復元する。
+//
+// 手順:
+//  1. DB接続を完全に遮断（Close + nil化）
+//  2. 現在のDBファイルを .bak に退避
+//  3. SQLite WAL/SHM 一時ファイルを消去
+//  4. スナップショットファイルを元のDBパスにコピー
+//  5. 再接続し PRAGMA integrity_check で整合性を検証
+//  6. 成功なら退避ファイルを削除、失敗なら退避から復旧
 func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if snapshotDir == "" {
-		snapshotDir = "snapshots"
+		snapshotDir = getSnapshotDir()
 	}
 
 	snapshotPath := filepath.Join(snapshotDir, snapshotName)
@@ -196,63 +258,120 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 		return fmt.Errorf("スナップショットが見つかりません: %s", snapshotName)
 	}
 
+	// --- 手順1: データベース接続の完全な遮断 ---
 	mu.Lock()
 	currentPath := dbPath
-	// DBを一旦閉じる
 	if db != nil {
+		// WALの内容をメインDBファイルにフラッシュしてからCloseする
+		db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 		db.Close()
 		db = nil
 	}
 	mu.Unlock()
 
-	// スナップショットで上書き
-	if err := copyFile(snapshotPath, currentPath); err != nil {
-		// 復元失敗時も再接続を試みる
+	backupPath := currentPath + ".bak"
+	restoreFailed := true
+
+	// 失敗時は退避ファイルから元の状態に自動復旧する
+	defer func() {
+		if restoreFailed {
+			log.Printf("復元失敗: 退避ファイルから元の状態に復旧します")
+			os.Remove(currentPath)
+			os.Remove(currentPath + "-wal")
+			os.Remove(currentPath + "-shm")
+			os.Rename(backupPath, currentPath)
+			if err := InitDB(currentPath); err != nil {
+				log.Printf("復旧後のDB再接続エラー: %v", err)
+			}
+		}
+	}()
+
+	// --- 手順2: 現在状態の退避 ---
+	if err := os.Rename(currentPath, backupPath); err != nil {
+		// リネーム失敗時はそのまま再接続して返す
+		restoreFailed = false
 		InitDB(currentPath)
-		return fmt.Errorf("スナップショット復元エラー: %w", err)
+		return fmt.Errorf("データベース退避エラー: %w", err)
 	}
 
-	// 再接続
-	if err := InitDB(currentPath); err != nil {
-		return fmt.Errorf("復元後のDB再接続エラー: %w", err)
+	// --- 手順3: WAL/SHM 一時ファイルの確実な消去 ---
+	os.Remove(currentPath + "-wal")
+	os.Remove(currentPath + "-shm")
+
+	// --- 手順4: スナップショットの複製と配置 ---
+	if err := copyFile(snapshotPath, currentPath); err != nil {
+		return fmt.Errorf("スナップショットコピーエラー: %w", err)
 	}
 
-	log.Printf("スナップショット復元完了: %s", snapshotName)
+	// --- 手順5: 再接続と整合性の検査 ---
+	newDB, err := sql.Open("sqlite3", currentPath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON")
+	if err != nil {
+		return fmt.Errorf("復元後のDB接続エラー: %w", err)
+	}
+
+	var integrityResult string
+	if err := newDB.QueryRow("PRAGMA integrity_check").Scan(&integrityResult); err != nil {
+		newDB.Close()
+		return fmt.Errorf("整合性チェック実行エラー: %w", err)
+	}
+	if integrityResult != "ok" {
+		newDB.Close()
+		return fmt.Errorf("整合性チェック失敗: %s", integrityResult)
+	}
+
+	// --- 手順6: 参照の更新と退避ファイルの削除 ---
+	mu.Lock()
+	db = newDB
+	dbPath = currentPath
+	mu.Unlock()
+
+	restoreFailed = false
+	os.Remove(backupPath)
+
+	log.Printf("スナップショット復元完了: %s (integrity_check: ok)", snapshotName)
 	return nil
 }
 
-// CleanOldSnapshots は古いスナップショットを削除する（世代管理）
-func CleanOldSnapshots(snapshotDir string, keepDays int) error {
+// CleanOldSnapshots は古いスナップショットを削除する（世代管理: 最新N件を残す）
+func CleanOldSnapshots(snapshotDir string, maxKeep int) error {
 	if snapshotDir == "" {
-		snapshotDir = "snapshots"
+		snapshotDir = getSnapshotDir()
 	}
-	if keepDays <= 0 {
-		keepDays = 30
+	if maxKeep <= 0 {
+		maxKeep = 30
 	}
 
-	entries, err := os.ReadDir(snapshotDir)
+	snapshots, err := ListSnapshots(snapshotDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("スナップショット一覧取得エラー: %w", err)
+		return err
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -keepDays)
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".db") {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().Before(cutoff) {
-			os.Remove(filepath.Join(snapshotDir, entry.Name()))
-			log.Printf("古いスナップショットを削除: %s", entry.Name())
-		}
+	// snapshotsは名前でソート済み（古い順）
+	if len(snapshots) <= maxKeep {
+		return nil
+	}
+
+	// 古いものから削除
+	toDelete := snapshots[:len(snapshots)-maxKeep]
+	for _, name := range toDelete {
+		os.Remove(filepath.Join(snapshotDir, name))
+		log.Printf("古いスナップショットを削除: %s", name)
 	}
 	return nil
+}
+
+// AutoSnapshot は操作ごとに自動スナップショットを作成し、30世代を維持する
+func AutoSnapshot() {
+	go func() {
+		_, err := CreateSnapshot("")
+		if err != nil {
+			log.Printf("自動スナップショット作成エラー: %v", err)
+			return
+		}
+		if err := CleanOldSnapshots("", 30); err != nil {
+			log.Printf("スナップショットクリーンアップエラー: %v", err)
+		}
+	}()
 }
 
 // copyFile はファイルをコピーする
