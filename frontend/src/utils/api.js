@@ -327,6 +327,23 @@ export async function createTag(name, parentId = null) {
 }
 
 /**
+ * 「/」区切りのパスからタグを階層的に作成
+ * @param {string} path - 例: "推し活/超かぐや姫！"
+ * @returns {Promise<object>} 末端のタグ
+ */
+export async function createTagByPath(path) {
+  if (isWails) {
+    return await window.go.main.App.CreateTagByPath(path)
+  }
+  const res = await fetch('/api/tags/path', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path })
+  })
+  return await res.json()
+}
+
+/**
  * タグを更新
  * @param {number} id
  * @param {string} name

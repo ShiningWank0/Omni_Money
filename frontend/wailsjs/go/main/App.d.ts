@@ -16,6 +16,8 @@ export function CreateSnapshot():Promise<string>;
 
 export function CreateTag(arg1:string,arg2:any):Promise<models.Tag>;
 
+export function CreateTagByPath(arg1:string):Promise<models.Tag>;
+
 export function DeleteTag(arg1:number):Promise<void>;
 
 export function DeleteTransaction(arg1:number):Promise<void>;
