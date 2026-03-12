@@ -1086,37 +1086,38 @@ func RemoveTransactionTag(transactionID, tagID int64) error {
 }
 
 // GetTagSummary はタグ別集計データを返す（円グラフ用）
+// フィルタ条件はLEFT JOINのON句に配置し、全タグを保持した上で
+// 子タグの金額を親タグに集約する。
 func GetTagSummary(txType string, startDate, endDate string) ([]models.TagSummary, error) {
 	db := database.GetDB()
 
-	// メインクエリ: タグ別の金額集計
+	// フィルタ条件をON句に含めてLEFT JOINを維持する
+	// WHERE句に入れるとLEFT JOINがINNER JOIN相当になり、
+	// 子タグにのみ紐付いた取引の親タグが結果から除外されてしまう
+	joinConditions := []string{"tt.transaction_id = tr.id"}
+	args := []interface{}{}
+
+	if txType != "" {
+		joinConditions = append(joinConditions, "tr.type = ?")
+		args = append(args, txType)
+	}
+	if startDate != "" {
+		joinConditions = append(joinConditions, "tr.date >= ?")
+		args = append(args, startDate)
+	}
+	if endDate != "" {
+		joinConditions = append(joinConditions, "tr.date <= ?")
+		args = append(args, endDate+" 23:59:59")
+	}
+
 	query := `SELECT t.id, t.name, t.level, t.parent_id,
 		COALESCE(SUM(tr.amount), 0) as total_amount,
 		COUNT(tr.id) as tx_count
 		FROM tags t
 		LEFT JOIN transaction_tags tt ON t.id = tt.tag_id
-		LEFT JOIN transactions tr ON tt.transaction_id = tr.id`
-
-	conditions := []string{}
-	args := []interface{}{}
-
-	if txType != "" {
-		conditions = append(conditions, "tr.type = ?")
-		args = append(args, txType)
-	}
-	if startDate != "" {
-		conditions = append(conditions, "tr.date >= ?")
-		args = append(args, startDate)
-	}
-	if endDate != "" {
-		conditions = append(conditions, "tr.date <= ?")
-		args = append(args, endDate+" 23:59:59")
-	}
-
-	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
-	}
-	query += " GROUP BY t.id ORDER BY total_amount DESC"
+		LEFT JOIN transactions tr ON ` + strings.Join(joinConditions, " AND ") + `
+		GROUP BY t.id
+		ORDER BY total_amount DESC`
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -1133,7 +1134,6 @@ func GetTagSummary(txType string, startDate, endDate string) ([]models.TagSummar
 		count    int
 	}
 	var allData []tagData
-	var totalAmount int64
 
 	for rows.Next() {
 		var td tagData
@@ -1141,12 +1141,9 @@ func GetTagSummary(txType string, startDate, endDate string) ([]models.TagSummar
 			return nil, err
 		}
 		allData = append(allData, td)
-		if td.level == 1 {
-			totalAmount += td.amount
-		}
 	}
 
-	// ツリー構造の集計データを構築
+	// ツリー構造を構築し、子タグの金額を親タグに集約する
 	var buildSummary func(parentID *int64) []models.TagSummary
 	buildSummary = func(parentID *int64) []models.TagSummary {
 		var summaries []models.TagSummary
@@ -1158,25 +1155,55 @@ func GetTagSummary(txType string, startDate, endDate string) ([]models.TagSummar
 				match = true
 			}
 			if match {
-				ratio := float64(0)
-				if totalAmount > 0 {
-					ratio = float64(td.amount) / float64(totalAmount)
+				children := buildSummary(&td.id)
+				// 子タグの金額・件数を親に集約
+				amount := td.amount
+				count := td.count
+				for _, child := range children {
+					amount += child.Amount
+					count += child.Count
 				}
 				s := models.TagSummary{
 					TagID:    td.id,
 					TagName:  td.name,
-					Amount:   td.amount,
-					Count:    td.count,
-					Ratio:    ratio,
-					Children: buildSummary(&td.id),
+					Amount:   amount,
+					Count:    count,
+					Children: children,
 				}
 				summaries = append(summaries, s)
 			}
 		}
-		return summaries
+		// 金額が0のタグを除外
+		var filtered []models.TagSummary
+		for _, s := range summaries {
+			if s.Amount > 0 {
+				filtered = append(filtered, s)
+			}
+		}
+		sort.Slice(filtered, func(i, j int) bool {
+			return filtered[i].Amount > filtered[j].Amount
+		})
+		return filtered
 	}
 
 	result := buildSummary(nil)
+
+	// トップレベルの合計金額からratioを算出
+	var totalAmount int64
+	for _, s := range result {
+		totalAmount += s.Amount
+	}
+	var setRatios func([]models.TagSummary)
+	setRatios = func(summaries []models.TagSummary) {
+		for i := range summaries {
+			if totalAmount > 0 {
+				summaries[i].Ratio = float64(summaries[i].Amount) / float64(totalAmount)
+			}
+			setRatios(summaries[i].Children)
+		}
+	}
+	setRatios(result)
+
 	if result == nil {
 		result = []models.TagSummary{}
 	}

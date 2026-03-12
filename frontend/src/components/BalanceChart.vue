@@ -240,7 +240,7 @@ function updateChart() {
 .graph-modal {
   max-width: 900px;
   width: 95vw;
-  max-height: 85vh;
+  max-height: 92vh;
   display: flex;
   flex-direction: column;
 }
@@ -303,12 +303,12 @@ function updateChart() {
 
 .graph-container {
   flex: 1;
-  min-height: 300px;
-  max-height: 60vh;
+  min-height: 500px;
+  max-height: 80vh;
   position: relative;
   background: #f8fafc;
   border-radius: 8px;
-  padding: 8px;
+  padding: 12px;
 }
 
 .graph-empty {
@@ -327,7 +327,7 @@ function updateChart() {
   }
 
   .graph-container {
-    min-height: 250px;
+    min-height: 350px;
   }
 }
 </style>
