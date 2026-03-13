@@ -21,6 +21,17 @@ type TransactionLink struct {
 	ChildID  int64 `json:"child_id"`
 }
 
+// LinkedTransactionResponse は紐付け取引のレスポンス（簡易情報）
+type LinkedTransactionResponse struct {
+	ID       int64  `json:"id"`
+	FundItem string `json:"fundItem"`
+	Date     string `json:"date"`
+	Item     string `json:"item"`
+	Type     string `json:"type"`
+	Amount   int64  `json:"amount"`
+	Memo     string `json:"memo"`
+}
+
 // TransactionImage は取引画像の構造体（Agent.md §6.5）
 type TransactionImage struct {
 	ID            int64     `json:"id"`
