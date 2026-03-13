@@ -148,31 +148,38 @@ jobs:
 
       - name: Create GitHub Release
         if: steps.check_release.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ env.APP_VERSION }}
-          name: Omni Money v${{ env.APP_VERSION }}
-          body: |
-            ## Omni Money v${{ env.APP_VERSION }}
-
-            ### ダウンロード
-            - **macOS (Apple Silicon / Intel)**: `omni-money-macos-v${{ env.APP_VERSION }}.zip`
-            - **Windows**: `omni-money-windows-v${{ env.APP_VERSION }}.zip`
-            - **Linux**: `omni-money-linux-v${{ env.APP_VERSION }}.tar.gz`
-
-            ### macOS で初回起動する場合
-            zipを解凍後、ターミナルで以下を実行してから起動してください：
-            ```bash
-            xattr -cr "Omni Money.app"
-            ```
-            または、右クリック →「開く」→「システム設定 > プライバシーとセキュリティ > このまま開く」でも起動できます。
-
-            ### Docker
-            ```bash
-            docker pull ghcr.io/${{ github.repository }}:${{ env.APP_VERSION }}
-            ```
-          files: dist/**/*
-          draft: false
-          prerelease: ${{ contains(env.APP_VERSION, '-') }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          PRERELEASE_FLAG=""
+          if echo "${{ env.APP_VERSION }}" | grep -q '-'; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          cat > /tmp/release-notes.md << 'NOTES_EOF'
+          ## Omni Money v${{ env.APP_VERSION }}
+
+          ### ダウンロード
+          - **macOS (Apple Silicon / Intel)**: `omni-money-macos-v${{ env.APP_VERSION }}.zip`
+          - **Windows**: `omni-money-windows-v${{ env.APP_VERSION }}.zip`
+          - **Linux**: `omni-money-linux-v${{ env.APP_VERSION }}.tar.gz`
+
+          ### macOS で初回起動する場合
+          zipを解凍後、ターミナルで以下を実行してから起動してください：
+          ```bash
+          xattr -cr "Omni Money.app"
+          ```
+          または、右クリック →「開く」→「システム設定 > プライバシーとセキュリティ > このまま開く」でも起動できます。
+
+          ### Docker
+          ```bash
+          docker pull ghcr.io/${{ github.repository }}:${{ env.APP_VERSION }}
+          ```
+          NOTES_EOF
+
+          gh release create "v${{ env.APP_VERSION }}" \
+            --title "Omni Money v${{ env.APP_VERSION }}" \
+            --notes-file /tmp/release-notes.md \
+            $PRERELEASE_FLAG \
+            $(find dist/ -type f)
