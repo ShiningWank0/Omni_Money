@@ -8,7 +8,12 @@ import (
 	"strings"
 )
 
-const cspHeaderValue = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:"
+const (
+	cspHeaderValue = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:"
+
+	// maxRequestBodySize はリクエストボディの最大サイズ（10MB）
+	maxRequestBodySize = 10 * 1024 * 1024
+)
 
 // SecurityHeadersMiddleware はセキュリティヘッダーを全レスポンスに付与する
 func SecurityHeadersMiddleware(next http.Handler) http.Handler {
@@ -18,6 +23,16 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Content-Security-Policy", cspHeaderValue)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// MaxBodySizeMiddleware はリクエストボディサイズを制限しDoS攻撃を緩和する
+func MaxBodySizeMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+		}
 		next.ServeHTTP(w, r)
 	})
 }

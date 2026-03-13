@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,6 +18,8 @@ const (
 	SessionCookieName = "omni_money_session"
 	// DefaultSessionMaxAge はセッション有効期限の既定値（24時間）
 	DefaultSessionMaxAge = 24 * time.Hour
+	// sessionCleanupInterval は期限切れセッション清掃の実行間隔
+	sessionCleanupInterval = 10 * time.Minute
 )
 
 type sessionContextKey string
@@ -36,6 +39,7 @@ type Session struct {
 type SessionManager struct {
 	maxAge   time.Duration
 	sessions sync.Map // map[string]Session
+	done     chan struct{}
 }
 
 // NewSessionManager はSessionManagerを生成する
@@ -43,7 +47,42 @@ func NewSessionManager(maxAge time.Duration) *SessionManager {
 	if maxAge <= 0 {
 		maxAge = DefaultSessionMaxAge
 	}
-	return &SessionManager{maxAge: maxAge}
+	sm := &SessionManager{
+		maxAge: maxAge,
+		done:   make(chan struct{}),
+	}
+	go sm.cleanupLoop()
+	return sm
+}
+
+// Close はセッションクリーンアップgoroutineを停止する
+func (m *SessionManager) Close() {
+	select {
+	case <-m.done:
+	default:
+		close(m.done)
+	}
+}
+
+// cleanupLoop は期限切れセッションを定期的に削除する（メモリリーク防止）
+func (m *SessionManager) cleanupLoop() {
+	ticker := time.NewTicker(sessionCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.done:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			m.sessions.Range(func(key, value interface{}) bool {
+				session, ok := value.(Session)
+				if !ok || now.After(session.ExpiresAt) {
+					m.sessions.Delete(key)
+				}
+				return true
+			})
+		}
+	}
 }
 
 // MaxAge はセッション有効期限を返す
@@ -72,8 +111,12 @@ func (m *SessionManager) CreateSession(username string) (*Session, error) {
 func generateSessionID() (string, error) {
 	// 32バイト以上のランダム値を16進文字列化（Agent.md §6.4.1）
 	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
+	n, err := rand.Read(buf)
+	if err != nil {
 		return "", err
+	}
+	if n != 32 {
+		return "", fmt.Errorf("セッションID生成に必要なランダムバイト数を取得できませんでした: %d/32", n)
 	}
 	return hex.EncodeToString(buf), nil
 }
