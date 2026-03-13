@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -43,7 +44,25 @@ func NewSessionManager(maxAge time.Duration) *SessionManager {
 	if maxAge <= 0 {
 		maxAge = DefaultSessionMaxAge
 	}
-	return &SessionManager{maxAge: maxAge}
+	sm := &SessionManager{maxAge: maxAge}
+	go sm.cleanupLoop()
+	return sm
+}
+
+// cleanupLoop は期限切れセッションを定期的に削除する（メモリリーク防止）
+func (m *SessionManager) cleanupLoop() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+		m.sessions.Range(func(key, value interface{}) bool {
+			session, ok := value.(Session)
+			if !ok || now.After(session.ExpiresAt) {
+				m.sessions.Delete(key)
+			}
+			return true
+		})
+	}
 }
 
 // MaxAge はセッション有効期限を返す
@@ -72,8 +91,12 @@ func (m *SessionManager) CreateSession(username string) (*Session, error) {
 func generateSessionID() (string, error) {
 	// 32バイト以上のランダム値を16進文字列化（Agent.md §6.4.1）
 	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
+	n, err := rand.Read(buf)
+	if err != nil {
 		return "", err
+	}
+	if n != 32 {
+		return "", fmt.Errorf("セッションID生成に必要なランダムバイト数を取得できませんでした: %d/32", n)
 	}
 	return hex.EncodeToString(buf), nil
 }

@@ -69,6 +69,7 @@ func NewRouter() http.Handler {
 	// サーバーモード用ミドルウェアの適用
 	var handler http.Handler = mux
 	handler = middleware.SessionAuthMiddleware(sessionManager, handler)
+	handler = middleware.MaxBodySizeMiddleware(handler)
 	handler = middleware.RateLimitMiddleware(handler)
 	handler = middleware.CORSMiddleware(handler)
 	handler = middleware.SecurityHeadersMiddleware(handler)

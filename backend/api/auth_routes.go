@@ -18,7 +18,7 @@ func handleAuthLogin(authManager *middleware.AuthSessionManager) http.HandlerFun
 		}
 
 		if !authManager.PasswordConfigured() {
-			jsonError(w, "AUTH_PASSWORD_HASH が設定されていません", http.StatusInternalServerError)
+			jsonError(w, "サーバー設定エラー: 管理者に連絡してください", http.StatusInternalServerError)
 			return
 		}
 
