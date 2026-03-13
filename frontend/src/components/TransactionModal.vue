@@ -118,6 +118,41 @@
                 @change="onFileSelect" style="display: none;">
             </div>
           </div>
+
+          <!-- 取引紐付け (Agent.md §6.2) - 編集モード時のみ表示 -->
+          <div v-if="isEditMode" class="form-row">
+            <label>紐付け:</label>
+            <div class="link-section">
+              <div v-if="linkedTransactions.length > 0" class="linked-list">
+                <div v-for="lt in linkedTransactions" :key="lt.id" class="linked-item">
+                  <div class="linked-info">
+                    <span class="linked-date">{{ lt.date }}</span>
+                    <span class="linked-account">{{ lt.fundItem }}</span>
+                    <span class="linked-item-name">{{ lt.item }}</span>
+                    <span :class="lt.type === 'income' ? 'linked-amount-income' : 'linked-amount-expense'">
+                      {{ lt.type === 'income' ? '+' : '-' }}¥{{ Number(lt.amount).toLocaleString() }}
+                    </span>
+                  </div>
+                  <button type="button" class="link-remove" @click="unlinkTransaction(lt.id)">×</button>
+                </div>
+              </div>
+              <div v-else class="linked-empty">紐付けされた取引はありません</div>
+              <div class="link-search-row">
+                <input type="text" v-model="linkSearchQuery" placeholder="取引を検索して紐付け..."
+                  class="link-search-input" @input="onLinkSearch" @focus="showLinkResults = true">
+              </div>
+              <div v-if="showLinkResults && linkSearchResults.length > 0" class="link-search-results">
+                <div v-for="sr in linkSearchResults" :key="sr.id" class="link-search-item" @click="linkTransaction(sr)">
+                  <span class="linked-date">{{ sr.date }}</span>
+                  <span class="linked-account">{{ sr.fundItem || sr.account }}</span>
+                  <span class="linked-item-name">{{ sr.item }}</span>
+                  <span :class="sr.type === 'income' ? 'linked-amount-income' : 'linked-amount-expense'">
+                    {{ sr.type === 'income' ? '+' : '-' }}¥{{ Number(sr.amount).toLocaleString() }}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
         <div v-if="formError" class="form-error">{{ formError }}</div>
         <div class="modal-buttons" style="display: flex; justify-content: space-between; align-items: center;">
@@ -143,7 +178,7 @@
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
-import { getTags, createTag, createTagByPath } from '../utils/api'
+import { getTags, createTag, createTagByPath, getTransactionLinks, addTransactionLink, removeTransactionLink, getTransactions } from '../utils/api'
 
 const props = defineProps({
   isEditMode: Boolean,
@@ -285,6 +320,65 @@ async function loadTags() {
   }
 }
 
+// --- 取引紐付け (Agent.md §6.2) ---
+const linkedTransactions = ref([])
+const linkSearchQuery = ref('')
+const linkSearchResults = ref([])
+const showLinkResults = ref(false)
+let linkSearchTimer = null
+
+async function loadLinkedTransactions() {
+  if (!props.isEditMode || !props.transaction?.id) return
+  try {
+    linkedTransactions.value = await getTransactionLinks(props.transaction.id)
+  } catch (e) {
+    linkedTransactions.value = []
+  }
+}
+
+function onLinkSearch() {
+  clearTimeout(linkSearchTimer)
+  if (!linkSearchQuery.value.trim()) {
+    linkSearchResults.value = []
+    showLinkResults.value = false
+    return
+  }
+  linkSearchTimer = setTimeout(async () => {
+    try {
+      const all = await getTransactions('', linkSearchQuery.value.trim())
+      const currentId = props.transaction?.id
+      const linkedIds = new Set(linkedTransactions.value.map(lt => lt.id))
+      linkSearchResults.value = (all || [])
+        .filter(t => t.id !== currentId && !linkedIds.has(t.id))
+        .slice(0, 10)
+      showLinkResults.value = true
+    } catch (e) {
+      linkSearchResults.value = []
+    }
+  }, 300)
+}
+
+async function linkTransaction(tx) {
+  try {
+    await addTransactionLink(props.transaction.id, tx.id)
+    await loadLinkedTransactions()
+    linkSearchQuery.value = ''
+    linkSearchResults.value = []
+    showLinkResults.value = false
+  } catch (e) {
+    formError.value = '紐付けエラー: ' + (e.message || e)
+  }
+}
+
+async function unlinkTransaction(linkedId) {
+  try {
+    await removeTransactionLink(props.transaction.id, linkedId)
+    await loadLinkedTransactions()
+  } catch (e) {
+    formError.value = '紐付け解除エラー: ' + (e.message || e)
+  }
+}
+
 // 画像添付
 function triggerFileSelect() {
   if (fileInput.value) {
@@ -379,6 +473,9 @@ onMounted(async () => {
         return { id: t.id, name: t.name, path: fullPath }
       })
     }
+
+    // 紐付け取引をロード
+    await loadLinkedTransactions()
   }
 })
 </script>
@@ -571,5 +668,119 @@ onMounted(async () => {
   background: #ffebee;
   border-radius: 6px;
   margin-bottom: 8px;
+}
+
+/* 取引紐付け (Agent.md §6.2) */
+.link-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.linked-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+.linked-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: rgba(102, 126, 234, 0.06);
+  border: 1px solid rgba(102, 126, 234, 0.15);
+  border-radius: 8px;
+  font-size: 0.82em;
+}
+.linked-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.linked-date {
+  color: #888;
+  white-space: nowrap;
+  font-size: 0.9em;
+}
+.linked-account {
+  color: #667eea;
+  white-space: nowrap;
+  font-size: 0.9em;
+}
+.linked-item-name {
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.linked-amount-income {
+  color: #6aa84f;
+  white-space: nowrap;
+  font-weight: bold;
+}
+.linked-amount-expense {
+  color: #d32f2f;
+  white-space: nowrap;
+  font-weight: bold;
+}
+.link-remove {
+  background: none;
+  border: none;
+  color: #dc3545;
+  cursor: pointer;
+  font-size: 1.1em;
+  padding: 0 4px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.linked-empty {
+  color: #999;
+  font-size: 0.82em;
+  padding: 4px 0;
+}
+.link-search-row {
+  display: flex;
+  gap: 4px;
+}
+.link-search-input {
+  flex: 1;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid #ddd;
+  background: white;
+  color: #333;
+  font-size: 0.85em;
+}
+.link-search-input:focus {
+  border-color: #667eea;
+  outline: none;
+}
+.link-search-results {
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  background: white;
+}
+.link-search-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 0.82em;
+  transition: background 0.15s;
+}
+.link-search-item:hover {
+  background: rgba(102, 126, 234, 0.08);
+}
+.link-search-item:not(:last-child) {
+  border-bottom: 1px solid #f0f0f0;
 }
 </style>

@@ -435,3 +435,48 @@ export async function getTagSummary(type = '', startDate = '', endDate = '') {
   return await res.json()
 }
 
+// --- 取引紐付け (Agent.md §6.2) ---
+
+/**
+ * 取引に紐付いた取引の一覧を取得
+ * @param {number} transactionId
+ * @returns {Promise<object[]>}
+ */
+export async function getTransactionLinks(transactionId) {
+  if (isWails) {
+    return await window.go.main.App.GetTransactionLinks(transactionId)
+  }
+  const res = await fetch(`/api/transaction_links/${transactionId}`)
+  return await res.json()
+}
+
+/**
+ * 取引同士を紐付ける
+ * @param {number} transactionId
+ * @param {number} linkedId
+ * @returns {Promise<void>}
+ */
+export async function addTransactionLink(transactionId, linkedId) {
+  if (isWails) {
+    return await window.go.main.App.AddTransactionLink(transactionId, linkedId)
+  }
+  await fetch(`/api/transaction_links/${transactionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ linked_id: linkedId })
+  })
+}
+
+/**
+ * 取引の紐付けを解除する
+ * @param {number} transactionId
+ * @param {number} linkedId
+ * @returns {Promise<void>}
+ */
+export async function removeTransactionLink(transactionId, linkedId) {
+  if (isWails) {
+    return await window.go.main.App.RemoveTransactionLink(transactionId, linkedId)
+  }
+  await fetch(`/api/transaction_links/${transactionId}/${linkedId}`, { method: 'DELETE' })
+}
+
