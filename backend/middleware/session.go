@@ -18,6 +18,8 @@ const (
 	SessionCookieName = "omni_money_session"
 	// DefaultSessionMaxAge はセッション有効期限の既定値（24時間）
 	DefaultSessionMaxAge = 24 * time.Hour
+	// sessionCleanupInterval は期限切れセッション清掃の実行間隔
+	sessionCleanupInterval = 10 * time.Minute
 )
 
 type sessionContextKey string
@@ -37,6 +39,7 @@ type Session struct {
 type SessionManager struct {
 	maxAge   time.Duration
 	sessions sync.Map // map[string]Session
+	done     chan struct{}
 }
 
 // NewSessionManager はSessionManagerを生成する
@@ -44,24 +47,41 @@ func NewSessionManager(maxAge time.Duration) *SessionManager {
 	if maxAge <= 0 {
 		maxAge = DefaultSessionMaxAge
 	}
-	sm := &SessionManager{maxAge: maxAge}
+	sm := &SessionManager{
+		maxAge: maxAge,
+		done:   make(chan struct{}),
+	}
 	go sm.cleanupLoop()
 	return sm
 }
 
+// Close はセッションクリーンアップgoroutineを停止する
+func (m *SessionManager) Close() {
+	select {
+	case <-m.done:
+	default:
+		close(m.done)
+	}
+}
+
 // cleanupLoop は期限切れセッションを定期的に削除する（メモリリーク防止）
 func (m *SessionManager) cleanupLoop() {
-	ticker := time.NewTicker(10 * time.Minute)
+	ticker := time.NewTicker(sessionCleanupInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		now := time.Now()
-		m.sessions.Range(func(key, value interface{}) bool {
-			session, ok := value.(Session)
-			if !ok || now.After(session.ExpiresAt) {
-				m.sessions.Delete(key)
-			}
-			return true
-		})
+	for {
+		select {
+		case <-m.done:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			m.sessions.Range(func(key, value interface{}) bool {
+				session, ok := value.(Session)
+				if !ok || now.After(session.ExpiresAt) {
+					m.sessions.Delete(key)
+				}
+				return true
+			})
+		}
 	}
 }
 
