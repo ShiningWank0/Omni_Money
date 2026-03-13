@@ -16,6 +16,30 @@ export namespace models {
 	        this.balances = source["balances"];
 	    }
 	}
+	export class LinkedTransactionResponse {
+	    id: number;
+	    fundItem: string;
+	    date: string;
+	    item: string;
+	    type: string;
+	    amount: number;
+	    memo: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LinkedTransactionResponse(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.fundItem = source["fundItem"];
+	        this.date = source["date"];
+	        this.item = source["item"];
+	        this.type = source["type"];
+	        this.amount = source["amount"];
+	        this.memo = source["memo"];
+	    }
+	}
 	export class Tag {
 	    id: number;
 	    name: string;

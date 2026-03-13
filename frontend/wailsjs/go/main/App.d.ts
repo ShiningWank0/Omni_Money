@@ -6,6 +6,8 @@ export function AddTransaction(arg1:models.TransactionRequest):Promise<models.Tr
 
 export function AddTransactionImage(arg1:number,arg2:models.TransactionImageRequest):Promise<models.TransactionImageResponse>;
 
+export function AddTransactionLink(arg1:number,arg2:number):Promise<void>;
+
 export function AddTransactionTags(arg1:number,arg2:Array<number>):Promise<void>;
 
 export function BackupToCSV():Promise<string>;
@@ -40,6 +42,8 @@ export function GetTags():Promise<Array<models.Tag>>;
 
 export function GetTransactionImages(arg1:number):Promise<Array<models.TransactionImageResponse>>;
 
+export function GetTransactionLinks(arg1:number):Promise<Array<models.LinkedTransactionResponse>>;
+
 export function GetTransactionTags(arg1:number):Promise<Array<models.Tag>>;
 
 export function GetTransactions(arg1:string,arg2:string):Promise<Array<models.TransactionResponse>>;
@@ -49,6 +53,8 @@ export function Greet(arg1:string):Promise<string>;
 export function ImportCSV(arg1:string,arg2:string):Promise<number>;
 
 export function ListSnapshots():Promise<Array<string>>;
+
+export function RemoveTransactionLink(arg1:number,arg2:number):Promise<void>;
 
 export function RemoveTransactionTag(arg1:number,arg2:number):Promise<void>;
 
