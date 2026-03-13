@@ -14,7 +14,7 @@ const (
 	loginRateLimitPerMinute    = 10
 	aiTxRateLimitPerMinute     = 30
 	rateLimitWindow            = time.Minute
-	rateLimitRetentionDuration = 2 * time.Minute
+	rateLimitRetentionDuration = rateLimitWindow * 2
 )
 
 type requestWindow struct {
