@@ -186,3 +186,20 @@ func (a *App) RemoveTransactionTag(transactionID, tagID int64) error {
 func (a *App) GetTagSummary(txType, startDate, endDate string) ([]models.TagSummary, error) {
 	return core.GetTagSummary(txType, startDate, endDate)
 }
+
+// --- 取引紐付け関連 (Agent.md §6.2) ---
+
+// GetTransactionLinks は取引に紐付いた取引の一覧を返す
+func (a *App) GetTransactionLinks(transactionID int64) ([]models.LinkedTransactionResponse, error) {
+	return core.GetTransactionLinks(transactionID)
+}
+
+// AddTransactionLink は取引同士を紐付ける
+func (a *App) AddTransactionLink(parentID, childID int64) error {
+	return core.AddTransactionLink(parentID, childID)
+}
+
+// RemoveTransactionLink は取引の紐付けを解除する
+func (a *App) RemoveTransactionLink(transactionID, linkedID int64) error {
+	return core.RemoveTransactionLink(transactionID, linkedID)
+}

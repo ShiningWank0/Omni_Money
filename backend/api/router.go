@@ -47,6 +47,9 @@ func NewRouter() http.Handler {
 	mux.HandleFunc("/api/tags/summary", handleTagSummary)
 	mux.HandleFunc("/api/transaction_tags/", handleTransactionTagsAPI)
 
+	// 取引紐付けAPI（Agent.md §6.2）
+	mux.HandleFunc("/api/transaction_links/", handleTransactionLinksAPI)
+
 	// AI専用エンドポイント（Agent.md §6.3: POST のみ許可）
 	apiToken := os.Getenv("AI_API_TOKEN")
 	aiMux := http.NewServeMux()
@@ -595,6 +598,63 @@ func handleTransactionTagsAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "タグを削除しました"}, http.StatusOK)
+
+	default:
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// --- 取引紐付けAPI ハンドラー (Agent.md §6.2) ---
+
+func handleTransactionLinksAPI(w http.ResponseWriter, r *http.Request) {
+	// /api/transaction_links/{txId} or /api/transaction_links/{txId}/{linkedId}
+	path := strings.TrimPrefix(r.URL.Path, "/api/transaction_links/")
+	parts := strings.SplitN(path, "/", 2)
+
+	txID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		jsonError(w, "無効な取引IDです", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		links, err := core.GetTransactionLinks(txID)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, links, http.StatusOK)
+
+	case http.MethodPost:
+		var body struct {
+			LinkedID int64 `json:"linked_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
+			return
+		}
+		if err := core.AddTransactionLink(txID, body.LinkedID); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, map[string]string{"message": "紐付けを追加しました"}, http.StatusOK)
+
+	case http.MethodDelete:
+		if len(parts) < 2 {
+			jsonError(w, "紐付け先の取引IDが必要です", http.StatusBadRequest)
+			return
+		}
+		linkedID, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			jsonError(w, "無効な取引IDです", http.StatusBadRequest)
+			return
+		}
+		if err := core.RemoveTransactionLink(txID, linkedID); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]string{"message": "紐付けを解除しました"}, http.StatusOK)
 
 	default:
 		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
