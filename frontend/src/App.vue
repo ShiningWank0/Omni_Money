@@ -55,6 +55,7 @@
         <button class="menu-btn" @click="showGraphModal">残高推移グラフ表示</button>
         <button class="menu-btn" @click="openTagChart">タグ別分析</button>
         <button class="menu-btn" @click="openSnapshotManager">スナップショット管理</button>
+        <button v-if="!isWailsMode" class="menu-btn logout-btn" @click="logout">ログアウト</button>
       </div>
     </div>
 
@@ -167,7 +168,9 @@ import {
   deleteTransaction as apiDeleteTransaction,
   backupToCSVFile as apiBackupToCSVFile,
   saveCreditCardSettings as apiSaveCreditCardSettings,
-  getBalanceHistoryFiltered
+  getBalanceHistoryFiltered,
+  isWailsMode,
+  logout as apiLogout
 } from './utils/api'
 
 const store = useAppStore()
@@ -394,6 +397,17 @@ function openTagChart() {
 function openSnapshotManager() {
   showMenu.value = false
   showSnapshotModal.value = true
+}
+
+async function logout() {
+  showMenu.value = false
+  try {
+    await apiLogout()
+    window.location.href = '/login'
+  } catch (e) {
+    console.error('ログアウトエラー:', e)
+    showToast('ログアウトに失敗しました', 'error', 5000)
+  }
 }
 
 async function handleSnapshotRestored() {
