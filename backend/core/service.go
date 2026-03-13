@@ -1284,3 +1284,80 @@ func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, 
 
 	return resp, nil
 }
+
+// --- 取引紐付け（リンク）機能 (Agent.md §6.2) ---
+
+// GetTransactionLinks は指定した取引に紐付いた取引の一覧を返す（親・子の双方向）
+func GetTransactionLinks(transactionID int64) ([]models.LinkedTransactionResponse, error) {
+	db := database.GetDB()
+	query := `
+		SELECT t.id, t.account, t.date, t.item, t.type, t.amount, t.memo
+		FROM transactions t
+		WHERE t.id IN (
+			SELECT child_id FROM transaction_links WHERE parent_id = ?
+			UNION
+			SELECT parent_id FROM transaction_links WHERE child_id = ?
+		)
+		ORDER BY t.date DESC, t.id DESC
+	`
+	rows, err := db.Query(query, transactionID, transactionID)
+	if err != nil {
+		return nil, fmt.Errorf("紐付け取引取得エラー: %w", err)
+	}
+	defer rows.Close()
+
+	var results []models.LinkedTransactionResponse
+	for rows.Next() {
+		var r models.LinkedTransactionResponse
+		var dateTime time.Time
+		if err := rows.Scan(&r.ID, &r.FundItem, &dateTime, &r.Item, &r.Type, &r.Amount, &r.Memo); err != nil {
+			return nil, fmt.Errorf("紐付け取引スキャンエラー: %w", err)
+		}
+		if dateTime.Hour() == 0 && dateTime.Minute() == 0 && dateTime.Second() == 0 {
+			r.Date = dateTime.Format("2006-01-02")
+		} else {
+			r.Date = dateTime.Format("2006-01-02 15:04:05")
+		}
+		results = append(results, r)
+	}
+	if results == nil {
+		results = []models.LinkedTransactionResponse{}
+	}
+	return results, nil
+}
+
+// AddTransactionLink は取引同士を紐付ける
+func AddTransactionLink(parentID, childID int64) error {
+	if parentID == childID {
+		return fmt.Errorf("同一の取引同士は紐付けできません")
+	}
+	db := database.GetDB()
+	// 正規化: 小さいIDをparent_id、大きいIDをchild_idにする（重複防止）
+	p, c := parentID, childID
+	if p > c {
+		p, c = c, p
+	}
+	_, err := db.Exec("INSERT OR IGNORE INTO transaction_links (parent_id, child_id) VALUES (?, ?)", p, c)
+	if err != nil {
+		return fmt.Errorf("紐付け追加エラー: %w", err)
+	}
+	return nil
+}
+
+// RemoveTransactionLink は取引の紐付けを解除する
+func RemoveTransactionLink(transactionID, linkedID int64) error {
+	db := database.GetDB()
+	// 正規化された方向で削除を試行（両方向チェック）
+	result, err := db.Exec(
+		"DELETE FROM transaction_links WHERE (parent_id = ? AND child_id = ?) OR (parent_id = ? AND child_id = ?)",
+		transactionID, linkedID, linkedID, transactionID,
+	)
+	if err != nil {
+		return fmt.Errorf("紐付け削除エラー: %w", err)
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return fmt.Errorf("指定された紐付けは存在しません")
+	}
+	return nil
+}
