@@ -30,7 +30,7 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 // MaxBodySizeMiddleware はリクエストボディサイズを制限しDoS攻撃を緩和する
 func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Body != nil && r.ContentLength != 0 {
+		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		}
 		next.ServeHTTP(w, r)
