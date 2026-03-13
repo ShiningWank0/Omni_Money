@@ -10,6 +10,10 @@ export function AddTransactionImage(arg1, arg2) {
   return window['go']['main']['App']['AddTransactionImage'](arg1, arg2);
 }
 
+export function AddTransactionLink(arg1, arg2) {
+  return window['go']['main']['App']['AddTransactionLink'](arg1, arg2);
+}
+
 export function AddTransactionTags(arg1, arg2) {
   return window['go']['main']['App']['AddTransactionTags'](arg1, arg2);
 }
@@ -78,6 +82,10 @@ export function GetTransactionImages(arg1) {
   return window['go']['main']['App']['GetTransactionImages'](arg1);
 }
 
+export function GetTransactionLinks(arg1) {
+  return window['go']['main']['App']['GetTransactionLinks'](arg1);
+}
+
 export function GetTransactionTags(arg1) {
   return window['go']['main']['App']['GetTransactionTags'](arg1);
 }
@@ -96,6 +104,10 @@ export function ImportCSV(arg1, arg2) {
 
 export function ListSnapshots() {
   return window['go']['main']['App']['ListSnapshots']();
+}
+
+export function RemoveTransactionLink(arg1, arg2) {
+  return window['go']['main']['App']['RemoveTransactionLink'](arg1, arg2);
 }
 
 export function RemoveTransactionTag(arg1, arg2) {
