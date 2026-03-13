@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -19,10 +18,20 @@ import (
 
 // NewRouter はサーバーモード用のHTTPルーターを作成する
 func NewRouter() http.Handler {
+	sessionManager := middleware.NewSessionManager(middleware.SessionMaxAgeFromEnv())
+	authManager := middleware.NewAuthSessionManager(sessionManager, os.Getenv("AUTH_PASSWORD_HASH"))
+
 	mux := http.NewServeMux()
 
 	// 静的ファイル配信（フロントエンドのビルド成果物）
+	mux.HandleFunc("/login", handleLoginPage)
+	mux.HandleFunc("/login/", handleLoginPage)
 	mux.Handle("/", http.FileServer(http.Dir("frontend/dist")))
+
+	// 認証API（Agent.md §6.4.1）
+	mux.HandleFunc("/api/auth/login", handleAuthLogin(authManager))
+	mux.HandleFunc("/api/auth/logout", handleAuthLogout(authManager))
+	mux.HandleFunc("/api/auth/status", handleAuthStatus(authManager))
 
 	// API エンドポイント（メソッド制約付き）
 	mux.HandleFunc("/api/accounts", methodGuard(http.MethodGet, handleAccounts))
@@ -57,55 +66,18 @@ func NewRouter() http.Handler {
 	aiMux.HandleFunc("/api/v1/ai/analysis", handleAIAnalysis)
 	mux.Handle("/api/v1/ai/", middleware.AIAPIMiddleware(apiToken, aiMux))
 
-	// CORSミドルウェアで包む
-	return corsMiddleware(mux)
+	// サーバーモード用ミドルウェアの適用
+	var handler http.Handler = mux
+	handler = middleware.SessionAuthMiddleware(sessionManager, handler)
+	handler = middleware.RateLimitMiddleware(handler)
+	handler = middleware.CORSMiddleware(handler)
+	handler = middleware.SecurityHeadersMiddleware(handler)
+	handler = middleware.ProxyMiddleware(middleware.NewProxyConfigFromEnv(), handler)
+	return handler
 }
 
-// corsMiddleware はサーバーモードでブラウザからのクロスオリジンアクセスを許可する
-func corsMiddleware(next http.Handler) http.Handler {
-	allowedOrigins := make(map[string]struct{})
-	for _, origin := range strings.Split(os.Getenv("CORS_ALLOWED_ORIGINS"), ",") {
-		origin = strings.TrimSpace(origin)
-		if origin == "" || origin == "*" {
-			continue
-		}
-		allowedOrigins[origin] = struct{}{}
-	}
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		originAllowed := origin != "" && isOriginAllowed(origin, r.Host, allowedOrigins)
-		if originAllowed {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		}
-
-		if r.Method == http.MethodOptions {
-			if origin != "" && !originAllowed {
-				w.WriteHeader(http.StatusForbidden)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
-}
-
-func isOriginAllowed(origin, host string, allowedOrigins map[string]struct{}) bool {
-	if len(allowedOrigins) > 0 {
-		_, ok := allowedOrigins[origin]
-		return ok
-	}
-
-	u, err := url.Parse(origin)
-	if err != nil {
-		return false
-	}
-	return u.Host == host
+func handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, "frontend/dist/index.html")
 }
 
 // methodGuard は特定のHTTPメソッドのみ許可するラッパー
