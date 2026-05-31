@@ -52,6 +52,7 @@
         <button class="menu-btn" @click="backupToCSV">CSVバックアップ</button>
         <button class="menu-btn" @click="showImportCSVModalMethod">CSVインポート</button>
         <button class="menu-btn" @click="openCreditCardSettings">クレジットカード設定</button>
+        <button class="menu-btn" @click="openBankAccountSettings">銀行口座設定</button>
         <button class="menu-btn" @click="showGraphModal">残高推移グラフ表示</button>
         <button class="menu-btn" @click="openTagChart">タグ別分析</button>
         <button class="menu-btn" @click="openSnapshotManager">スナップショット管理</button>
@@ -101,6 +102,8 @@
       :transaction="editingTransaction"
       :fund-items="store.accounts"
       :item-names="store.itemNames"
+      :credit-card-items="store.creditCardItems"
+      :bank-account-items="store.bankAccountItems"
       @save="handleSaveTransaction"
       @delete="handleDeleteTransaction"
       @close="hideAddModal"
@@ -120,6 +123,19 @@
       :selected-items="selectedCreditCardItems"
       @save="handleSaveCreditCardSettings"
       @close="hideCreditCardSettings"
+    />
+
+    <!-- 銀行口座設定モーダル -->
+    <CreditCardSettingsModal
+      v-if="showBankAccountModal"
+      title="銀行口座設定"
+      item-label="銀行口座項目"
+      dropdown-hint="カード引き落とし元として扱う資金項目を選択してください"
+      :info-lines="bankAccountInfoLines"
+      :fund-items="store.accounts"
+      :selected-items="selectedBankAccountItems"
+      @save="handleSaveBankAccountSettings"
+      @close="hideBankAccountSettings"
     />
 
     <!-- 残高推移グラフモーダル -->
@@ -168,6 +184,7 @@ import {
   deleteTransaction as apiDeleteTransaction,
   backupToCSVFile as apiBackupToCSVFile,
   saveCreditCardSettings as apiSaveCreditCardSettings,
+  saveBankAccountSettings as apiSaveBankAccountSettings,
   getBalanceHistoryFiltered,
   isWailsMode,
   logout as apiLogout
@@ -181,6 +198,7 @@ const showAccountDropdown = ref(false)
 const showAddTransactionModal = ref(false)
 const showImportCSVModal = ref(false)
 const showCreditCardModal = ref(false)
+const showBankAccountModal = ref(false)
 const showGraph = ref(false)
 const showSnapshotModal = ref(false)
 const showTagChart = ref(false)
@@ -188,7 +206,13 @@ const isEditMode = ref(false)
 const editingTransaction = ref(null)
 const dateSortOrder = ref('desc')
 const selectedCreditCardItems = ref([])
+const selectedBankAccountItems = ref([])
 const balanceHistoryData = ref(null)
+const bankAccountInfoLines = [
+  'カード支払い取引と銀行口座引き落とし取引の紐付け候補になります',
+  '銀行口座項目は現在残高や残高推移の計算から除外されません',
+  '紐付け機能はクレジットカード項目と銀行口座項目の組み合わせだけで使えます'
+]
 
 // トースト通知
 const toast = ref({ visible: false, message: '', type: 'success' })
@@ -371,6 +395,30 @@ async function handleSaveCreditCardSettings(items) {
   }
 }
 
+// 銀行口座設定
+async function openBankAccountSettings() {
+  showMenu.value = false
+  await store.fetchBankAccountSettings()
+  selectedBankAccountItems.value = [...store.bankAccountItems]
+  showBankAccountModal.value = true
+}
+
+function hideBankAccountSettings() {
+  showBankAccountModal.value = false
+}
+
+async function handleSaveBankAccountSettings(items) {
+  try {
+    await apiSaveBankAccountSettings(items)
+    await store.fetchBankAccountSettings()
+    hideBankAccountSettings()
+    await store.fetchTransactions()
+  } catch (e) {
+    console.error('銀行口座設定保存エラー:', e)
+    showToast('銀行口座設定の保存に失敗しました', 'error', 5000)
+  }
+}
+
 // グラフモーダル
 async function showGraphModal() {
   showMenu.value = false
@@ -416,6 +464,7 @@ async function handleSnapshotRestored() {
   try {
     await store.fetchAccounts()
     await store.fetchCreditCardSettings()
+    await store.fetchBankAccountSettings()
     await store.fetchTransactions()
     showToast('スナップショットから復元しました ✓')
   } catch (e) {
@@ -435,6 +484,7 @@ onMounted(async () => {
   document.addEventListener('click', handleGlobalClick)
   await store.fetchAccounts()
   await store.fetchCreditCardSettings()
+  await store.fetchBankAccountSettings()
   await store.fetchTransactions()
 
   // スナップショット復元後のリロードならトースト通知を表示
