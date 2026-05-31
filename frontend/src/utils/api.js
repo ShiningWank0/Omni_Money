@@ -41,6 +41,12 @@ async function parseError(response, fallbackMessage) {
   }
 }
 
+async function throwIfNotOk(response, fallbackMessage) {
+  if (!response.ok) {
+    throw new Error(await parseError(response, fallbackMessage))
+  }
+}
+
 /**
  * 認証状態を取得
  * @returns {Promise<object>}
@@ -580,11 +586,12 @@ export async function addTransactionLink(transactionId, linkedId) {
   if (isWails) {
     return await window.go.main.App.AddTransactionLink(transactionId, linkedId)
   }
-  await apiFetch(`/api/transaction_links/${transactionId}`, {
+  const res = await apiFetch(`/api/transaction_links/${transactionId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ linked_id: linkedId })
   })
+  await throwIfNotOk(res, '紐付けに失敗しました')
 }
 
 /**
@@ -597,5 +604,6 @@ export async function removeTransactionLink(transactionId, linkedId) {
   if (isWails) {
     return await window.go.main.App.RemoveTransactionLink(transactionId, linkedId)
   }
-  await apiFetch(`/api/transaction_links/${transactionId}/${linkedId}`, { method: 'DELETE' })
+  const res = await apiFetch(`/api/transaction_links/${transactionId}/${linkedId}`, { method: 'DELETE' })
+  await throwIfNotOk(res, '紐付け解除に失敗しました')
 }
