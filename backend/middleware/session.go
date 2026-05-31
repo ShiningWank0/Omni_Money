@@ -37,9 +37,10 @@ type Session struct {
 // SessionManager はインメモリのセッションストア
 // Agent.md §6.4.1 に従い sync.Map で管理する
 type SessionManager struct {
-	maxAge   time.Duration
-	sessions sync.Map // map[string]Session
-	done     chan struct{}
+	maxAge    time.Duration
+	sessions  sync.Map // map[string]Session
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // NewSessionManager はSessionManagerを生成する
@@ -57,11 +58,9 @@ func NewSessionManager(maxAge time.Duration) *SessionManager {
 
 // Close はセッションクリーンアップgoroutineを停止する
 func (m *SessionManager) Close() {
-	select {
-	case <-m.done:
-	default:
+	m.closeOnce.Do(func() {
 		close(m.done)
-	}
+	})
 }
 
 // cleanupLoop は期限切れセッションを定期的に削除する（メモリリーク防止）
