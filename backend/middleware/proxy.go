@@ -3,6 +3,7 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -20,6 +21,8 @@ const (
 type ProxyConfig struct {
 	trustedCIDRs []*net.IPNet
 	forceHTTPS   bool
+	allowedHosts map[string]struct{}
+	redirectHost string
 }
 
 // NewProxyConfigFromEnv は環境変数からProxyConfigを作成する
@@ -27,6 +30,8 @@ func NewProxyConfigFromEnv() *ProxyConfig {
 	cfg := &ProxyConfig{
 		trustedCIDRs: parseTrustedProxies(os.Getenv("TRUSTED_PROXIES")),
 		forceHTTPS:   strings.EqualFold(strings.TrimSpace(os.Getenv("FORCE_HTTPS")), "true"),
+		allowedHosts: parseAllowedHosts(os.Getenv("ALLOWED_HOSTS")),
+		redirectHost: normalizeHost(os.Getenv("HTTPS_REDIRECT_HOST")),
 	}
 	return cfg
 }
@@ -77,6 +82,26 @@ func (c *ProxyConfig) isTrustedProxy(ip net.IP) bool {
 	return false
 }
 
+func (c *ProxyConfig) isAllowedHost(host string) bool {
+	host = normalizeHost(host)
+	if host == "" {
+		return false
+	}
+	_, ok := c.allowedHosts[host]
+	return ok
+}
+
+func parseAllowedHosts(raw string) map[string]struct{} {
+	hosts := make(map[string]struct{})
+	for _, token := range strings.Split(raw, ",") {
+		host := normalizeHost(token)
+		if host != "" {
+			hosts[host] = struct{}{}
+		}
+	}
+	return hosts
+}
+
 // ProxyMiddleware は信頼プロキシ経由時のみ Forwarded ヘッダーを反映し、
 // FORCE_HTTPS=true かつ http 判定時は https へ301リダイレクトする
 func ProxyMiddleware(config *ProxyConfig, next http.Handler) http.Handler {
@@ -98,13 +123,8 @@ func ProxyMiddleware(config *ProxyConfig, next http.Handler) http.Handler {
 
 		if config.isTrustedProxy(remoteIP) {
 			if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-				parts := strings.Split(forwarded, ",")
-				for _, part := range parts {
-					candidate := strings.TrimSpace(part)
-					if parsed := net.ParseIP(candidate); parsed != nil {
-						clientIP = parsed.String()
-						break
-					}
+				if resolved := config.resolveForwardedFor(forwarded, remoteIP); resolved != nil {
+					clientIP = resolved.String()
 				}
 			} else if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
 				if parsed := net.ParseIP(realIP); parsed != nil {
@@ -122,7 +142,12 @@ func ProxyMiddleware(config *ProxyConfig, next http.Handler) http.Handler {
 		}
 
 		if config.forceHTTPS && proto == "http" {
-			targetURL := "https://" + r.Host + r.URL.RequestURI()
+			redirectHost := config.redirectTargetHost(r.Host)
+			if redirectHost == "" {
+				jsonError(w, "Bad Request", http.StatusBadRequest)
+				return
+			}
+			targetURL := "https://" + redirectHost + r.URL.RequestURI()
 			http.Redirect(w, r, targetURL, http.StatusMovedPermanently)
 			return
 		}
@@ -133,12 +158,75 @@ func ProxyMiddleware(config *ProxyConfig, next http.Handler) http.Handler {
 	})
 }
 
+func (c *ProxyConfig) resolveForwardedFor(header string, remoteIP net.IP) net.IP {
+	parts := strings.Split(header, ",")
+	hops := make([]net.IP, 0, len(parts)+1)
+	for _, part := range parts {
+		if parsed := net.ParseIP(strings.TrimSpace(part)); parsed != nil {
+			hops = append(hops, parsed)
+		}
+	}
+	if remoteIP != nil {
+		hops = append(hops, remoteIP)
+	}
+
+	for i := len(hops) - 1; i >= 0; i-- {
+		if !c.isTrustedProxy(hops[i]) {
+			return hops[i]
+		}
+	}
+	if len(hops) > 0 {
+		return hops[0]
+	}
+	return nil
+}
+
+func (c *ProxyConfig) redirectTargetHost(requestHost string) string {
+	if c.redirectHost != "" {
+		return c.redirectHost
+	}
+	host := normalizeHost(requestHost)
+	if !c.isAllowedHost(host) {
+		return ""
+	}
+	return host
+}
+
+func normalizeHost(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" || strings.Contains(raw, "/") || strings.Contains(raw, "@") {
+		return ""
+	}
+	host := raw
+	if h, p, err := net.SplitHostPort(raw); err == nil {
+		if h == "" || p == "" {
+			return ""
+		}
+		host = h
+	} else if strings.Contains(raw, ":") {
+		if net.ParseIP(strings.Trim(raw, "[]")) == nil {
+			return ""
+		}
+	}
+	if strings.ContainsAny(raw, " \t\r\n") {
+		return ""
+	}
+	if strings.Trim(host, "[]") == "" {
+		return ""
+	}
+	return raw
+}
+
 func parseRemoteIP(remoteAddr string) net.IP {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		host = remoteAddr
 	}
 	return net.ParseIP(strings.TrimSpace(host))
+}
+
+func jsonError(w http.ResponseWriter, message string, status int) {
+	http.Error(w, fmt.Sprintf(`{"error":%q}`, message), status)
 }
 
 // ClientIPFromRequest はミドルウェアで解決済みのクライアントIPを返す

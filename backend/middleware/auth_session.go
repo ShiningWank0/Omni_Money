@@ -16,6 +16,10 @@ const (
 	LoginAttemptLimit = 5
 	// LoginLockoutDuration はロック時間
 	LoginLockoutDuration = 15 * time.Minute
+	// loginAttemptRetentionDuration は失敗試行記録を保持する最大無活動時間
+	loginAttemptRetentionDuration = 30 * time.Minute
+	// loginAttemptGCInterval は古い失敗試行記録の掃除間隔
+	loginAttemptGCInterval = time.Minute
 )
 
 type loginAttempt struct {
@@ -30,6 +34,7 @@ type AuthSessionManager struct {
 
 	mu       sync.Mutex
 	attempts map[string]loginAttempt // key: client IP
+	lastGC   time.Time
 }
 
 // NewAuthSessionManager はAuthSessionManagerを生成する
@@ -66,6 +71,7 @@ func (a *AuthSessionManager) IsIPLocked(ip string) (bool, time.Duration) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.gcLoginAttemptsLocked(now)
 
 	attempt, ok := a.attempts[ip]
 	if !ok {
@@ -92,6 +98,7 @@ func (a *AuthSessionManager) RecordLoginAttempt(ip string, success bool) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.gcLoginAttemptsLocked(now)
 
 	if success {
 		delete(a.attempts, ip)
@@ -110,6 +117,7 @@ func (a *AuthSessionManager) RemainingAttempts(ip string) int {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.gcLoginAttemptsLocked(time.Now())
 
 	attempt, ok := a.attempts[ip]
 	if !ok {
@@ -132,6 +140,19 @@ func normalizeIPKey(ip string) string {
 		return "unknown"
 	}
 	return ip
+}
+
+func (a *AuthSessionManager) gcLoginAttemptsLocked(now time.Time) {
+	if !a.lastGC.IsZero() && now.Sub(a.lastGC) < loginAttemptGCInterval {
+		return
+	}
+	cutoff := now.Add(-loginAttemptRetentionDuration)
+	for ip, attempt := range a.attempts {
+		if attempt.LastAttempt.Before(cutoff) {
+			delete(a.attempts, ip)
+		}
+	}
+	a.lastGC = now
 }
 
 // SessionMaxAgeFromEnv は環境変数SESSION_MAX_AGE_HOURSからセッション有効期限を算出する
