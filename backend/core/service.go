@@ -222,6 +222,9 @@ func UpdateTransaction(id int64, req models.TransactionRequest) (*models.Transac
 			return nil, fmt.Errorf("残高再計算エラー: %w", err)
 		}
 	}
+	if err := pruneInvalidTransactionLinks(); err != nil {
+		return nil, fmt.Errorf("紐付け整合性チェックエラー: %w", err)
+	}
 
 	// 更新後のデータを取得
 	var t models.Transaction
@@ -349,6 +352,9 @@ func SaveCreditCardSettings(items []string) error {
 	if err := saveStringSliceSetting("credit_card_items", items); err != nil {
 		return fmt.Errorf("クレジットカード設定保存エラー: %w", err)
 	}
+	if err := pruneInvalidTransactionLinks(); err != nil {
+		return fmt.Errorf("紐付け整合性チェックエラー: %w", err)
+	}
 	database.AutoSnapshot()
 	return nil
 }
@@ -362,6 +368,9 @@ func GetBankAccountSettings() ([]string, error) {
 func SaveBankAccountSettings(items []string) error {
 	if err := saveStringSliceSetting("bank_account_items", items); err != nil {
 		return fmt.Errorf("銀行口座設定保存エラー: %w", err)
+	}
+	if err := pruneInvalidTransactionLinks(); err != nil {
+		return fmt.Errorf("紐付け整合性チェックエラー: %w", err)
 	}
 	database.AutoSnapshot()
 	return nil
@@ -1392,17 +1401,59 @@ func validateCardWithdrawalLink(transactionID, linkedID int64) error {
 		return fmt.Errorf("紐付け対象の取引が見つかりません")
 	}
 
+	accountA := strings.TrimSpace(accounts[transactionID])
+	accountB := strings.TrimSpace(accounts[linkedID])
+	if isCardWithdrawalLinkAccounts(accountA, accountB) {
+		return nil
+	}
+	return fmt.Errorf("紐付けはクレジットカード項目と銀行口座項目の取引間でのみ追加できます")
+}
+
+func pruneInvalidTransactionLinks() error {
+	db := database.GetDB()
+	rows, err := db.Query(`
+		SELECT l.parent_id, p.account, l.child_id, c.account
+		FROM transaction_links l
+		JOIN transactions p ON p.id = l.parent_id
+		JOIN transactions c ON c.id = l.child_id
+	`)
+	if err != nil {
+		return fmt.Errorf("紐付け取得エラー: %w", err)
+	}
+	defer rows.Close()
+
+	var invalidPairs [][2]int64
+	for rows.Next() {
+		var parentID, childID int64
+		var parentAccount, childAccount string
+		if err := rows.Scan(&parentID, &parentAccount, &childID, &childAccount); err != nil {
+			return fmt.Errorf("紐付けスキャンエラー: %w", err)
+		}
+		if !isCardWithdrawalLinkAccounts(parentAccount, childAccount) {
+			invalidPairs = append(invalidPairs, [2]int64{parentID, childID})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("紐付け行取得エラー: %w", err)
+	}
+
+	for _, pair := range invalidPairs {
+		if _, err := db.Exec("DELETE FROM transaction_links WHERE parent_id = ? AND child_id = ?", pair[0], pair[1]); err != nil {
+			return fmt.Errorf("不正な紐付け削除エラー: %w", err)
+		}
+	}
+	return nil
+}
+
+func isCardWithdrawalLinkAccounts(accountA, accountB string) bool {
 	creditCardItems, _ := GetCreditCardSettings()
 	bankAccountItems, _ := GetBankAccountSettings()
 	creditCards := stringSet(creditCardItems)
 	bankAccounts := stringSet(bankAccountItems)
 
-	accountA := strings.TrimSpace(accounts[transactionID])
-	accountB := strings.TrimSpace(accounts[linkedID])
-	if (creditCards[accountA] && bankAccounts[accountB]) || (bankAccounts[accountA] && creditCards[accountB]) {
-		return nil
-	}
-	return fmt.Errorf("紐付けはクレジットカード項目と銀行口座項目の取引間でのみ追加できます")
+	accountA = strings.TrimSpace(accountA)
+	accountB = strings.TrimSpace(accountB)
+	return (creditCards[accountA] && bankAccounts[accountB]) || (bankAccounts[accountA] && creditCards[accountB])
 }
 
 func stringSet(items []string) map[string]bool {
