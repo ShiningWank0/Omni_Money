@@ -242,6 +242,34 @@ export async function saveCreditCardSettings(items) {
 }
 
 /**
+ * 銀行口座設定を取得
+ * @returns {Promise<string[]>}
+ */
+export async function getBankAccountSettings() {
+  if (isWails) {
+    return await window.go.main.App.GetBankAccountSettings()
+  }
+  const res = await apiFetch('/api/bank_account_settings')
+  return await res.json()
+}
+
+/**
+ * 銀行口座設定を保存
+ * @param {string[]} items
+ * @returns {Promise<void>}
+ */
+export async function saveBankAccountSettings(items) {
+  if (isWails) {
+    return await window.go.main.App.SaveBankAccountSettings(items)
+  }
+  await apiFetch('/api/bank_account_settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bank_account_items: items })
+  })
+}
+
+/**
  * CSVバックアップを取得
  * @returns {Promise<string>}
  */

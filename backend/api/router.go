@@ -41,6 +41,7 @@ func NewRouter() http.Handler {
 	mux.HandleFunc("/api/balance_history", methodGuard(http.MethodGet, handleBalanceHistory))
 	mux.HandleFunc("/api/balance_history_filtered", methodGuard(http.MethodGet, handleBalanceHistoryFiltered))
 	mux.HandleFunc("/api/credit_card_settings", handleCreditCardSettings)
+	mux.HandleFunc("/api/bank_account_settings", handleBankAccountSettings)
 	mux.HandleFunc("/api/backup_csv", methodGuard(http.MethodGet, handleBackupCSV))
 	mux.HandleFunc("/api/import_csv", methodGuard(http.MethodPost, handleImportCSV))
 	mux.HandleFunc("/api/snapshots", handleSnapshots)
@@ -226,6 +227,38 @@ func handleCreditCardSettings(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, map[string]interface{}{
 			"message":           "クレジットカード設定を保存しました",
 			"credit_card_items": body.CreditCardItems,
+		}, http.StatusOK)
+
+	default:
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleBankAccountSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		items, err := core.GetBankAccountSettings()
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, items, http.StatusOK)
+
+	case http.MethodPost:
+		var body struct {
+			BankAccountItems []string `json:"bank_account_items"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
+			return
+		}
+		if err := core.SaveBankAccountSettings(body.BankAccountItems); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]interface{}{
+			"message":            "銀行口座設定を保存しました",
+			"bank_account_items": body.BankAccountItems,
 		}, http.StatusOK)
 
 	default:
