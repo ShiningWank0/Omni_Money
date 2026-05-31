@@ -46,10 +46,10 @@ func GetItems(account string) ([]string, error) {
 	var query string
 	var args []interface{}
 	if account != "" {
-		query = "SELECT DISTINCT item FROM transactions WHERE account = ? ORDER BY item"
+		query = "SELECT item FROM transactions WHERE account = ? GROUP BY item ORDER BY COUNT(*) DESC, item ASC"
 		args = []interface{}{account}
 	} else {
-		query = "SELECT DISTINCT item FROM transactions ORDER BY item"
+		query = "SELECT item FROM transactions GROUP BY item ORDER BY COUNT(*) DESC, item ASC"
 	}
 
 	rows, err := db.Query(query, args...)
