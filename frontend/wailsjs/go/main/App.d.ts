@@ -32,6 +32,8 @@ export function GetBalanceHistory():Promise<models.BalanceHistoryResponse>;
 
 export function GetBalanceHistoryFiltered(arg1:Array<string>):Promise<models.BalanceHistoryResponse>;
 
+export function GetBankAccountSettings():Promise<Array<string>>;
+
 export function GetCreditCardSettings():Promise<Array<string>>;
 
 export function GetItems(arg1:string):Promise<Array<string>>;
@@ -61,6 +63,8 @@ export function RemoveTransactionTag(arg1:number,arg2:number):Promise<void>;
 export function RestoreSnapshot(arg1:string):Promise<void>;
 
 export function SaveCreditCardSettings(arg1:Array<string>):Promise<void>;
+
+export function SaveBankAccountSettings(arg1:Array<string>):Promise<void>;
 
 export function UpdateTag(arg1:number,arg2:string):Promise<void>;
 

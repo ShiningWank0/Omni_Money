@@ -1,25 +1,23 @@
 <template>
   <div class="modal-overlay" @click="$emit('close')">
     <div class="modal-content cc-settings-modal" @click.stop>
-      <h3>クレジットカード設定</h3>
+      <h3>{{ title }}</h3>
 
       <div class="info-box">
         <p>
           <strong>設定の効果：</strong><br>
-          • クレジットカードとして設定した項目は残高計算から除外されます<br>
-          • 取引履歴では残高表示が「-」になります<br>
-          • 2重会計を防ぎ、正確な残高管理が可能です
+          <span v-for="line in infoLines" :key="line">• {{ line }}<br></span>
         </p>
       </div>
 
       <div class="form-row">
-        <label>クレジットカード項目：</label>
+        <label>{{ itemLabel }}：</label>
         <div class="select-wrapper">
           <button @click="showDropdown = !showDropdown" class="select-button">
             {{ displayText }} ▼
           </button>
           <div v-if="showDropdown" class="select-dropdown">
-            <div class="dropdown-hint">利用可能な資金項目から選択してください</div>
+            <div class="dropdown-hint">{{ dropdownHint }}</div>
             <label v-for="item in fundItems" :key="item" class="dropdown-item"
               :class="{ selected: localSelected.includes(item) }">
               <input type="checkbox" :checked="localSelected.includes(item)" @change="toggleItem(item)">
@@ -50,6 +48,17 @@
 import { ref, computed, onMounted } from 'vue'
 
 const props = defineProps({
+  title: { type: String, default: 'クレジットカード設定' },
+  itemLabel: { type: String, default: 'クレジットカード項目' },
+  dropdownHint: { type: String, default: '利用可能な資金項目から選択してください' },
+  infoLines: {
+    type: Array,
+    default: () => [
+      'クレジットカードとして設定した項目は残高計算から除外されます',
+      '取引履歴では残高表示が「-」になります',
+      '2重会計を防ぎ、正確な残高管理が可能です'
+    ]
+  },
   fundItems: { type: Array, default: () => [] },
   selectedItems: { type: Array, default: () => [] }
 })

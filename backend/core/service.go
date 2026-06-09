@@ -46,10 +46,10 @@ func GetItems(account string) ([]string, error) {
 	var query string
 	var args []interface{}
 	if account != "" {
-		query = "SELECT DISTINCT item FROM transactions WHERE account = ? ORDER BY item"
+		query = "SELECT item FROM transactions WHERE account = ? GROUP BY item ORDER BY COUNT(*) DESC, item ASC"
 		args = []interface{}{account}
 	} else {
-		query = "SELECT DISTINCT item FROM transactions ORDER BY item"
+		query = "SELECT item FROM transactions GROUP BY item ORDER BY COUNT(*) DESC, item ASC"
 	}
 
 	rows, err := db.Query(query, args...)
@@ -222,6 +222,9 @@ func UpdateTransaction(id int64, req models.TransactionRequest) (*models.Transac
 			return nil, fmt.Errorf("残高再計算エラー: %w", err)
 		}
 	}
+	if err := pruneInvalidTransactionLinks(); err != nil {
+		return nil, fmt.Errorf("紐付け整合性チェックエラー: %w", err)
+	}
 
 	// 更新後のデータを取得
 	var t models.Transaction
@@ -341,9 +344,42 @@ func GetBalanceHistoryFiltered(fundItems []string) (*models.BalanceHistoryRespon
 
 // GetCreditCardSettings はクレジットカード設定を取得する
 func GetCreditCardSettings() ([]string, error) {
+	return getStringSliceSetting("credit_card_items")
+}
+
+// SaveCreditCardSettings はクレジットカード設定を保存する
+func SaveCreditCardSettings(items []string) error {
+	if err := saveStringSliceSetting("credit_card_items", items); err != nil {
+		return fmt.Errorf("クレジットカード設定保存エラー: %w", err)
+	}
+	if err := pruneInvalidTransactionLinks(); err != nil {
+		return fmt.Errorf("紐付け整合性チェックエラー: %w", err)
+	}
+	database.AutoSnapshot()
+	return nil
+}
+
+// GetBankAccountSettings はカード引き落とし元の銀行口座設定を取得する
+func GetBankAccountSettings() ([]string, error) {
+	return getStringSliceSetting("bank_account_items")
+}
+
+// SaveBankAccountSettings はカード引き落とし元の銀行口座設定を保存する
+func SaveBankAccountSettings(items []string) error {
+	if err := saveStringSliceSetting("bank_account_items", items); err != nil {
+		return fmt.Errorf("銀行口座設定保存エラー: %w", err)
+	}
+	if err := pruneInvalidTransactionLinks(); err != nil {
+		return fmt.Errorf("紐付け整合性チェックエラー: %w", err)
+	}
+	database.AutoSnapshot()
+	return nil
+}
+
+func getStringSliceSetting(key string) ([]string, error) {
 	db := database.GetDB()
 	var value string
-	err := db.QueryRow("SELECT value FROM settings WHERE key = 'credit_card_items'").Scan(&value)
+	err := db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&value)
 	if err != nil {
 		return []string{}, nil
 	}
@@ -354,22 +390,18 @@ func GetCreditCardSettings() ([]string, error) {
 	return items, nil
 }
 
-// SaveCreditCardSettings はクレジットカード設定を保存する
-func SaveCreditCardSettings(items []string) error {
+func saveStringSliceSetting(key string, items []string) error {
 	db := database.GetDB()
 	data, err := json.Marshal(items)
 	if err != nil {
 		return fmt.Errorf("JSONシリアライズエラー: %w", err)
 	}
 	_, err = db.Exec(
-		"INSERT OR REPLACE INTO settings (key, value) VALUES ('credit_card_items', ?)",
+		"INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+		key,
 		string(data),
 	)
-	if err != nil {
-		return fmt.Errorf("クレジットカード設定保存エラー: %w", err)
-	}
-	database.AutoSnapshot()
-	return nil
+	return err
 }
 
 // BackupToCSV はCSVバックアップファイルのパスを返す
@@ -1332,6 +1364,9 @@ func AddTransactionLink(parentID, childID int64) error {
 		return fmt.Errorf("同一の取引同士は紐付けできません")
 	}
 	db := database.GetDB()
+	if err := validateCardWithdrawalLink(parentID, childID); err != nil {
+		return err
+	}
 	// 正規化: 小さいIDをparent_id、大きいIDをchild_idにする（重複防止）
 	p, c := parentID, childID
 	if p > c {
@@ -1341,7 +1376,95 @@ func AddTransactionLink(parentID, childID int64) error {
 	if err != nil {
 		return fmt.Errorf("紐付け追加エラー: %w", err)
 	}
+	database.AutoSnapshot()
 	return nil
+}
+
+func validateCardWithdrawalLink(transactionID, linkedID int64) error {
+	db := database.GetDB()
+	accounts := make(map[int64]string, 2)
+	rows, err := db.Query("SELECT id, account FROM transactions WHERE id IN (?, ?)", transactionID, linkedID)
+	if err != nil {
+		return fmt.Errorf("紐付け対象取得エラー: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var account string
+		if err := rows.Scan(&id, &account); err != nil {
+			return fmt.Errorf("紐付け対象スキャンエラー: %w", err)
+		}
+		accounts[id] = account
+	}
+	if len(accounts) != 2 {
+		return fmt.Errorf("紐付け対象の取引が見つかりません")
+	}
+
+	accountA := strings.TrimSpace(accounts[transactionID])
+	accountB := strings.TrimSpace(accounts[linkedID])
+	if isCardWithdrawalLinkAccounts(accountA, accountB) {
+		return nil
+	}
+	return fmt.Errorf("紐付けはクレジットカード項目と銀行口座項目の取引間でのみ追加できます")
+}
+
+func pruneInvalidTransactionLinks() error {
+	db := database.GetDB()
+	rows, err := db.Query(`
+		SELECT l.parent_id, p.account, l.child_id, c.account
+		FROM transaction_links l
+		JOIN transactions p ON p.id = l.parent_id
+		JOIN transactions c ON c.id = l.child_id
+	`)
+	if err != nil {
+		return fmt.Errorf("紐付け取得エラー: %w", err)
+	}
+	defer rows.Close()
+
+	var invalidPairs [][2]int64
+	for rows.Next() {
+		var parentID, childID int64
+		var parentAccount, childAccount string
+		if err := rows.Scan(&parentID, &parentAccount, &childID, &childAccount); err != nil {
+			return fmt.Errorf("紐付けスキャンエラー: %w", err)
+		}
+		if !isCardWithdrawalLinkAccounts(parentAccount, childAccount) {
+			invalidPairs = append(invalidPairs, [2]int64{parentID, childID})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("紐付け行取得エラー: %w", err)
+	}
+
+	for _, pair := range invalidPairs {
+		if _, err := db.Exec("DELETE FROM transaction_links WHERE parent_id = ? AND child_id = ?", pair[0], pair[1]); err != nil {
+			return fmt.Errorf("不正な紐付け削除エラー: %w", err)
+		}
+	}
+	return nil
+}
+
+func isCardWithdrawalLinkAccounts(accountA, accountB string) bool {
+	creditCardItems, _ := GetCreditCardSettings()
+	bankAccountItems, _ := GetBankAccountSettings()
+	creditCards := stringSet(creditCardItems)
+	bankAccounts := stringSet(bankAccountItems)
+
+	accountA = strings.TrimSpace(accountA)
+	accountB = strings.TrimSpace(accountB)
+	return (creditCards[accountA] && bankAccounts[accountB]) || (bankAccounts[accountA] && creditCards[accountB])
+}
+
+func stringSet(items []string) map[string]bool {
+	set := make(map[string]bool, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			set[item] = true
+		}
+	}
+	return set
 }
 
 // RemoveTransactionLink は取引の紐付けを解除する
@@ -1359,5 +1482,6 @@ func RemoveTransactionLink(transactionID, linkedID int64) error {
 	if affected == 0 {
 		return fmt.Errorf("指定された紐付けは存在しません")
 	}
+	database.AutoSnapshot()
 	return nil
 }

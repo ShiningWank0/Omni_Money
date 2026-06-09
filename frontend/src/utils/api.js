@@ -2,7 +2,105 @@
 // デスクトップモード時はWailsのGoバインディングを直接呼び出し、
 // サーバーモード時はREST APIを呼び出すよう抽象化する
 
-const isWails = typeof window.go !== 'undefined'
+export const isWailsMode = typeof window.go !== 'undefined'
+const isWails = isWailsMode
+
+function getPathname(url) {
+  try {
+    return new URL(url, window.location.origin).pathname
+  } catch {
+    return ''
+  }
+}
+
+async function apiFetch(url, options = {}, config = {}) {
+  const { skipAuthRedirect = false } = config
+  const response = await fetch(url, {
+    credentials: 'include',
+    ...options
+  })
+
+  if (!isWailsMode && !skipAuthRedirect && response.status === 401) {
+    const path = getPathname(url)
+    const skipPaths = new Set(['/api/auth/login', '/api/auth/status'])
+    if (!skipPaths.has(path) && window.location.pathname !== '/login') {
+      window.location.href = '/login'
+    }
+    throw new Error('認証が必要です')
+  }
+
+  return response
+}
+
+async function parseError(response, fallbackMessage) {
+  try {
+    const data = await response.json()
+    return data?.error || fallbackMessage
+  } catch {
+    return fallbackMessage
+  }
+}
+
+async function throwIfNotOk(response, fallbackMessage) {
+  if (!response.ok) {
+    throw new Error(await parseError(response, fallbackMessage))
+  }
+}
+
+/**
+ * 認証状態を取得
+ * @returns {Promise<object>}
+ */
+export async function getAuthStatus() {
+  if (isWails) {
+    return { authenticated: true }
+  }
+
+  const res = await apiFetch('/api/auth/status', {}, { skipAuthRedirect: true })
+  return await res.json()
+}
+
+/**
+ * ログイン
+ * @param {string} password
+ * @returns {Promise<object>}
+ */
+export async function login(password) {
+  if (isWails) {
+    return { authenticated: true, message: 'デスクトップモードでは認証不要です' }
+  }
+
+  const res = await apiFetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password })
+  }, { skipAuthRedirect: true })
+
+  const data = await res.json()
+  if (!res.ok) {
+    const err = new Error(data?.error || 'ログインに失敗しました')
+    if (typeof data?.remaining_attempts === 'number') {
+      err.remainingAttempts = data.remaining_attempts
+    }
+    throw err
+  }
+  return data
+}
+
+/**
+ * ログアウト
+ * @returns {Promise<void>}
+ */
+export async function logout() {
+  if (isWails) return
+
+  const res = await apiFetch('/api/auth/logout', {
+    method: 'POST'
+  }, { skipAuthRedirect: true })
+  if (!res.ok) {
+    throw new Error(await parseError(res, 'ログアウトに失敗しました'))
+  }
+}
 
 /**
  * 口座リストを取得
@@ -12,7 +110,7 @@ export async function getAccounts() {
   if (isWails) {
     return await window.go.main.App.GetAccounts()
   }
-  const res = await fetch('/api/accounts')
+  const res = await apiFetch('/api/accounts')
   return await res.json()
 }
 
@@ -26,7 +124,7 @@ export async function getItems(account = '') {
     return await window.go.main.App.GetItems(account)
   }
   const params = account ? `?account=${encodeURIComponent(account)}` : ''
-  const res = await fetch(`/api/items${params}`)
+  const res = await apiFetch(`/api/items${params}`)
   return await res.json()
 }
 
@@ -44,7 +142,7 @@ export async function getTransactions(account = '', search = '') {
   if (account) params.set('account', account)
   if (search) params.set('search', search)
   const query = params.toString() ? `?${params.toString()}` : ''
-  const res = await fetch(`/api/transactions${query}`)
+  const res = await apiFetch(`/api/transactions${query}`)
   return await res.json()
 }
 
@@ -57,7 +155,7 @@ export async function addTransaction(data) {
   if (isWails) {
     return await window.go.main.App.AddTransaction(data)
   }
-  const res = await fetch('/api/transactions', {
+  const res = await apiFetch('/api/transactions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
@@ -75,7 +173,7 @@ export async function updateTransaction(id, data) {
   if (isWails) {
     return await window.go.main.App.UpdateTransaction(id, data)
   }
-  const res = await fetch(`/api/transactions/${id}`, {
+  const res = await apiFetch(`/api/transactions/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
@@ -92,7 +190,7 @@ export async function deleteTransaction(id) {
   if (isWails) {
     return await window.go.main.App.DeleteTransaction(id)
   }
-  await fetch(`/api/transactions/${id}`, { method: 'DELETE' })
+  await apiFetch(`/api/transactions/${id}`, { method: 'DELETE' })
 }
 
 /**
@@ -103,7 +201,7 @@ export async function getBalanceHistory() {
   if (isWails) {
     return await window.go.main.App.GetBalanceHistory()
   }
-  const res = await fetch('/api/balance_history')
+  const res = await apiFetch('/api/balance_history')
   return await res.json()
 }
 
@@ -117,7 +215,7 @@ export async function getBalanceHistoryFiltered(fundItems) {
     return await window.go.main.App.GetBalanceHistoryFiltered(fundItems)
   }
   const params = fundItems.map(i => `fund_items=${encodeURIComponent(i)}`).join('&')
-  const res = await fetch(`/api/balance_history_filtered?${params}`)
+  const res = await apiFetch(`/api/balance_history_filtered?${params}`)
   return await res.json()
 }
 
@@ -129,7 +227,7 @@ export async function getCreditCardSettings() {
   if (isWails) {
     return await window.go.main.App.GetCreditCardSettings()
   }
-  const res = await fetch('/api/credit_card_settings')
+  const res = await apiFetch('/api/credit_card_settings')
   return await res.json()
 }
 
@@ -142,10 +240,38 @@ export async function saveCreditCardSettings(items) {
   if (isWails) {
     return await window.go.main.App.SaveCreditCardSettings(items)
   }
-  await fetch('/api/credit_card_settings', {
+  await apiFetch('/api/credit_card_settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ credit_card_items: items })
+  })
+}
+
+/**
+ * 銀行口座設定を取得
+ * @returns {Promise<string[]>}
+ */
+export async function getBankAccountSettings() {
+  if (isWails) {
+    return await window.go.main.App.GetBankAccountSettings()
+  }
+  const res = await apiFetch('/api/bank_account_settings')
+  return await res.json()
+}
+
+/**
+ * 銀行口座設定を保存
+ * @param {string[]} items
+ * @returns {Promise<void>}
+ */
+export async function saveBankAccountSettings(items) {
+  if (isWails) {
+    return await window.go.main.App.SaveBankAccountSettings(items)
+  }
+  await apiFetch('/api/bank_account_settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bank_account_items: items })
   })
 }
 
@@ -157,7 +283,7 @@ export async function backupToCSV() {
   if (isWails) {
     return await window.go.main.App.BackupToCSV()
   }
-  const res = await fetch('/api/backup_csv')
+  const res = await apiFetch('/api/backup_csv')
   return await res.text()
 }
 
@@ -170,7 +296,7 @@ export async function backupToCSVFile() {
     return await window.go.main.App.BackupToCSVFile()
   }
   // サーバーモード時はブラウザダウンロードにフォールバック
-  const res = await fetch('/api/backup_csv')
+  const res = await apiFetch('/api/backup_csv')
   const csvContent = await res.text()
   const bom = '\uFEFF'
   const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8;' })
@@ -195,7 +321,7 @@ export async function importCSV(content, mode = 'append') {
   if (isWails) {
     return await window.go.main.App.ImportCSV(content, mode)
   }
-  const res = await fetch('/api/import_csv', {
+  const res = await apiFetch('/api/import_csv', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content, mode })
@@ -212,7 +338,7 @@ export async function createSnapshot() {
   if (isWails) {
     return await window.go.main.App.CreateSnapshot()
   }
-  const res = await fetch('/api/snapshots', { method: 'POST' })
+  const res = await apiFetch('/api/snapshots', { method: 'POST' })
   const data = await res.json()
   if (data.error) throw new Error(data.error)
   return data.path
@@ -226,7 +352,7 @@ export async function listSnapshots() {
   if (isWails) {
     return await window.go.main.App.ListSnapshots()
   }
-  const res = await fetch('/api/snapshots')
+  const res = await apiFetch('/api/snapshots')
   return await res.json()
 }
 
@@ -239,7 +365,7 @@ export async function restoreSnapshot(name) {
   if (isWails) {
     return await window.go.main.App.RestoreSnapshot(name)
   }
-  const res = await fetch(`/api/snapshots/restore`, {
+  const res = await apiFetch(`/api/snapshots/restore`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name })
@@ -260,7 +386,7 @@ export async function addTransactionImage(transactionId, imageData) {
   if (isWails) {
     return await window.go.main.App.AddTransactionImage(transactionId, imageData)
   }
-  const res = await fetch(`/api/transaction_images/${transactionId}`, {
+  const res = await apiFetch(`/api/transaction_images/${transactionId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(imageData)
@@ -277,7 +403,7 @@ export async function getTransactionImages(transactionId) {
   if (isWails) {
     return await window.go.main.App.GetTransactionImages(transactionId)
   }
-  const res = await fetch(`/api/transaction_images/${transactionId}`)
+  const res = await apiFetch(`/api/transaction_images/${transactionId}`)
   return await res.json()
 }
 
@@ -291,7 +417,7 @@ export async function deleteTransactionImage(transactionId, imageId) {
   if (isWails) {
     return await window.go.main.App.DeleteTransactionImage(imageId)
   }
-  await fetch(`/api/transaction_images/${transactionId}/${imageId}`, { method: 'DELETE' })
+  await apiFetch(`/api/transaction_images/${transactionId}/${imageId}`, { method: 'DELETE' })
 }
 
 // --- タグ関連 (Agent.md §6.6) ---
@@ -304,7 +430,7 @@ export async function getTags() {
   if (isWails) {
     return await window.go.main.App.GetTags()
   }
-  const res = await fetch('/api/tags')
+  const res = await apiFetch('/api/tags')
   return await res.json()
 }
 
@@ -318,7 +444,7 @@ export async function createTag(name, parentId = null) {
   if (isWails) {
     return await window.go.main.App.CreateTag(name, parentId)
   }
-  const res = await fetch('/api/tags', {
+  const res = await apiFetch('/api/tags', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, parent_id: parentId })
@@ -335,7 +461,7 @@ export async function createTagByPath(path) {
   if (isWails) {
     return await window.go.main.App.CreateTagByPath(path)
   }
-  const res = await fetch('/api/tags/path', {
+  const res = await apiFetch('/api/tags/path', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path })
@@ -353,7 +479,7 @@ export async function updateTag(id, name) {
   if (isWails) {
     return await window.go.main.App.UpdateTag(id, name)
   }
-  await fetch(`/api/tags/${id}`, {
+  await apiFetch(`/api/tags/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name })
@@ -369,7 +495,7 @@ export async function deleteTag(id) {
   if (isWails) {
     return await window.go.main.App.DeleteTag(id)
   }
-  await fetch(`/api/tags/${id}`, { method: 'DELETE' })
+  await apiFetch(`/api/tags/${id}`, { method: 'DELETE' })
 }
 
 /**
@@ -381,7 +507,7 @@ export async function getTransactionTags(transactionId) {
   if (isWails) {
     return await window.go.main.App.GetTransactionTags(transactionId)
   }
-  const res = await fetch(`/api/transaction_tags/${transactionId}`)
+  const res = await apiFetch(`/api/transaction_tags/${transactionId}`)
   return await res.json()
 }
 
@@ -395,7 +521,7 @@ export async function addTransactionTags(transactionId, tagIds) {
   if (isWails) {
     return await window.go.main.App.AddTransactionTags(transactionId, tagIds)
   }
-  await fetch(`/api/transaction_tags/${transactionId}`, {
+  await apiFetch(`/api/transaction_tags/${transactionId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ tag_ids: tagIds })
@@ -412,7 +538,7 @@ export async function removeTransactionTag(transactionId, tagId) {
   if (isWails) {
     return await window.go.main.App.RemoveTransactionTag(transactionId, tagId)
   }
-  await fetch(`/api/transaction_tags/${transactionId}/${tagId}`, { method: 'DELETE' })
+  await apiFetch(`/api/transaction_tags/${transactionId}/${tagId}`, { method: 'DELETE' })
 }
 
 /**
@@ -431,7 +557,7 @@ export async function getTagSummary(type = '', startDate = '', endDate = '') {
   if (startDate) params.set('start_date', startDate)
   if (endDate) params.set('end_date', endDate)
   const query = params.toString() ? `?${params.toString()}` : ''
-  const res = await fetch(`/api/tags/summary${query}`)
+  const res = await apiFetch(`/api/tags/summary${query}`)
   return await res.json()
 }
 
@@ -446,7 +572,7 @@ export async function getTransactionLinks(transactionId) {
   if (isWails) {
     return await window.go.main.App.GetTransactionLinks(transactionId)
   }
-  const res = await fetch(`/api/transaction_links/${transactionId}`)
+  const res = await apiFetch(`/api/transaction_links/${transactionId}`)
   return await res.json()
 }
 
@@ -460,11 +586,12 @@ export async function addTransactionLink(transactionId, linkedId) {
   if (isWails) {
     return await window.go.main.App.AddTransactionLink(transactionId, linkedId)
   }
-  await fetch(`/api/transaction_links/${transactionId}`, {
+  const res = await apiFetch(`/api/transaction_links/${transactionId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ linked_id: linkedId })
   })
+  await throwIfNotOk(res, '紐付けに失敗しました')
 }
 
 /**
@@ -477,6 +604,6 @@ export async function removeTransactionLink(transactionId, linkedId) {
   if (isWails) {
     return await window.go.main.App.RemoveTransactionLink(transactionId, linkedId)
   }
-  await fetch(`/api/transaction_links/${transactionId}/${linkedId}`, { method: 'DELETE' })
+  const res = await apiFetch(`/api/transaction_links/${transactionId}/${linkedId}`, { method: 'DELETE' })
+  await throwIfNotOk(res, '紐付け解除に失敗しました')
 }
-
