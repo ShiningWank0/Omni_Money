@@ -4,6 +4,7 @@ import {
     getAccounts,
     getTransactions,
     getCreditCardSettings,
+    getBankAccountSettings,
     getItems
 } from '../utils/api'
 
@@ -12,6 +13,7 @@ export const useAppStore = defineStore('app', () => {
     const accounts = ref([])
     const selectedFundItems = ref([])
     const creditCardItems = ref([])
+    const bankAccountItems = ref([])
     const itemNames = ref([])
 
     // 取引関連
@@ -109,6 +111,16 @@ export const useAppStore = defineStore('app', () => {
         }
     }
 
+    // 銀行口座設定を取得
+    async function fetchBankAccountSettings() {
+        try {
+            const result = await getBankAccountSettings()
+            bankAccountItems.value = result || []
+        } catch (e) {
+            console.error('銀行口座設定取得エラー:', e)
+        }
+    }
+
     // 項目名リストを取得
     async function fetchItems(account = '') {
         try {
@@ -143,6 +155,7 @@ export const useAppStore = defineStore('app', () => {
         accounts.value = []
         selectedFundItems.value = []
         creditCardItems.value = []
+        bankAccountItems.value = []
         itemNames.value = []
         transactions.value = []
         searchQuery.value = ''
@@ -152,6 +165,7 @@ export const useAppStore = defineStore('app', () => {
         accounts,
         selectedFundItems,
         creditCardItems,
+        bankAccountItems,
         itemNames,
         transactions,
         searchQuery,
@@ -163,6 +177,7 @@ export const useAppStore = defineStore('app', () => {
         fetchAccounts,
         fetchTransactions,
         fetchCreditCardSettings,
+        fetchBankAccountSettings,
         fetchItems,
         toggleFundItem,
         toggleAllFundItems,

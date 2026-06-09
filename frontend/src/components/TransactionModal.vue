@@ -119,10 +119,11 @@
             </div>
           </div>
 
-          <!-- 取引紐付け (Agent.md §6.2) - 編集モード時のみ表示 -->
-          <div v-if="isEditMode" class="form-row">
+          <!-- 取引紐付け (Agent.md §6.2) - カード支払いと銀行引き落としのみ -->
+          <div v-if="showLinkSection" class="form-row">
             <label>紐付け:</label>
             <div class="link-section">
+              <div class="link-hint">{{ linkHint }}</div>
               <div v-if="linkedTransactions.length > 0" class="linked-list">
                 <div v-for="lt in linkedTransactions" :key="lt.id" class="linked-item">
                   <div class="linked-info">
@@ -137,11 +138,11 @@
                 </div>
               </div>
               <div v-else class="linked-empty">紐付けされた取引はありません</div>
-              <div class="link-search-row">
+              <div v-if="canSearchLinks" class="link-search-row">
                 <input type="text" v-model="linkSearchQuery" placeholder="取引を検索して紐付け..."
                   class="link-search-input" @input="onLinkSearch" @focus="showLinkResults = true">
               </div>
-              <div v-if="showLinkResults && linkSearchResults.length > 0" class="link-search-results">
+              <div v-if="canSearchLinks && showLinkResults && linkSearchResults.length > 0" class="link-search-results">
                 <div v-for="sr in linkSearchResults" :key="sr.id" class="link-search-item" @click="linkTransaction(sr)">
                   <span class="linked-date">{{ sr.date }}</span>
                   <span class="linked-account">{{ sr.fundItem || sr.account }}</span>
@@ -184,7 +185,9 @@ const props = defineProps({
   isEditMode: Boolean,
   transaction: Object,
   fundItems: { type: Array, default: () => [] },
-  itemNames: { type: Array, default: () => [] }
+  itemNames: { type: Array, default: () => [] },
+  creditCardItems: { type: Array, default: () => [] },
+  bankAccountItems: { type: Array, default: () => [] }
 })
 
 const emit = defineEmits(['save', 'delete', 'close'])
@@ -218,6 +221,17 @@ const isNewFundItem = computed(() => {
 
 const isNewItem = computed(() => {
   return form.value.item && !props.itemNames.includes(form.value.item)
+})
+
+const currentFundItem = computed(() => form.value.fundItem || props.transaction?.account || props.transaction?.fundItem || '')
+const isCurrentCreditCard = computed(() => props.creditCardItems.includes(currentFundItem.value))
+const isCurrentBankAccount = computed(() => props.bankAccountItems.includes(currentFundItem.value))
+const canSearchLinks = computed(() => isCurrentCreditCard.value || isCurrentBankAccount.value)
+const showLinkSection = computed(() => props.isEditMode && props.transaction?.id && (canSearchLinks.value || linkedTransactions.value.length > 0))
+const linkHint = computed(() => {
+  if (isCurrentCreditCard.value) return '銀行口座項目の引き落とし取引だけを紐付けできます'
+  if (isCurrentBankAccount.value) return 'クレジットカード項目の支払い取引だけを紐付けできます'
+  return '紐付けはクレジットカード項目と銀行口座項目の組み合わせだけで使えます'
 })
 
 // タグ階層
@@ -350,12 +364,24 @@ function onLinkSearch() {
       const linkedIds = new Set(linkedTransactions.value.map(lt => lt.id))
       linkSearchResults.value = (all || [])
         .filter(t => t.id !== currentId && !linkedIds.has(t.id))
+        .filter(isLinkCounterpart)
         .slice(0, 10)
       showLinkResults.value = true
     } catch (e) {
       linkSearchResults.value = []
     }
   }, 300)
+}
+
+function isLinkCounterpart(tx) {
+  const account = tx.account || tx.fundItem || ''
+  if (isCurrentCreditCard.value) {
+    return props.bankAccountItems.includes(account)
+  }
+  if (isCurrentBankAccount.value) {
+    return props.creditCardItems.includes(account)
+  }
+  return false
 }
 
 async function linkTransaction(tx) {
@@ -677,6 +703,11 @@ onMounted(async () => {
   gap: 6px;
   width: 100%;
   box-sizing: border-box;
+}
+.link-hint {
+  color: #666;
+  font-size: 0.82em;
+  line-height: 1.4;
 }
 .linked-list {
   display: flex;

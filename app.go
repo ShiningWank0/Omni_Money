@@ -84,6 +84,16 @@ func (a *App) SaveCreditCardSettings(items []string) error {
 	return core.SaveCreditCardSettings(items)
 }
 
+// GetBankAccountSettings はカード引き落とし元の銀行口座設定を取得する
+func (a *App) GetBankAccountSettings() ([]string, error) {
+	return core.GetBankAccountSettings()
+}
+
+// SaveBankAccountSettings はカード引き落とし元の銀行口座設定を保存する
+func (a *App) SaveBankAccountSettings(items []string) error {
+	return core.SaveBankAccountSettings(items)
+}
+
 // --- CSV関連 ---
 
 // BackupToCSV はCSVバックアップを作成する

@@ -62,6 +62,10 @@ export function GetBalanceHistoryFiltered(arg1) {
   return window['go']['main']['App']['GetBalanceHistoryFiltered'](arg1);
 }
 
+export function GetBankAccountSettings() {
+  return window['go']['main']['App']['GetBankAccountSettings']();
+}
+
 export function GetCreditCardSettings() {
   return window['go']['main']['App']['GetCreditCardSettings']();
 }
@@ -120,6 +124,10 @@ export function RestoreSnapshot(arg1) {
 
 export function SaveCreditCardSettings(arg1) {
   return window['go']['main']['App']['SaveCreditCardSettings'](arg1);
+}
+
+export function SaveBankAccountSettings(arg1) {
+  return window['go']['main']['App']['SaveBankAccountSettings'](arg1);
 }
 
 export function UpdateTag(arg1, arg2) {
