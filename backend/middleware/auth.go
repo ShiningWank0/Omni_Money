@@ -2,6 +2,7 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -25,10 +26,15 @@ func AIAPIMiddleware(apiToken string, next http.Handler) http.Handler {
 			return
 		}
 
-		// トークン検証
-		token := r.Header.Get("Authorization")
-		expectedToken := "Bearer " + apiToken
-		if token != expectedToken {
+		// トークン検証。比較時間からトークン内容を推測されにくいよう定数時間比較を使う。
+		authorization := strings.TrimSpace(r.Header.Get("Authorization"))
+		const bearerPrefix = "Bearer "
+		if !strings.HasPrefix(authorization, bearerPrefix) {
+			writeJSONError(w, "認証が必要です", http.StatusUnauthorized)
+			return
+		}
+		providedToken := strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix))
+		if len(providedToken) != len(apiToken) || subtle.ConstantTimeCompare([]byte(providedToken), []byte(apiToken)) != 1 {
 			writeJSONError(w, "認証が必要です", http.StatusUnauthorized)
 			return
 		}

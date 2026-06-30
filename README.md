@@ -105,10 +105,18 @@ wails build
 cd frontend
 npm run build
 cd ..
+AUTH_PASSWORD_HASH='<bcryptハッシュ>' \
+AI_API_TOKEN='<32文字以上のランダム値>' \
 go run -tags server ./server.go
 ```
 
-標準では `0.0.0.0:4000` で待ち受けます。
+公開Webは標準で `0.0.0.0:4000`、AI専用APIは `127.0.0.1:4001` で待ち受けます。
+両方とも同じGoプロセスとSQLiteを使用しますが、HTTPルーターと認証境界は分離されています。
+
+- 公開WebポートにはAI APIルートを登録しません。
+- AI専用ポートには通常API、ログインAPI、静的ファイルを登録しません。
+- `AI_API_TOKEN` 未設定時はAI専用リスナー自体を起動しません。
+- AI専用リスナーは既定でlocalhost以外へバインドできません。
 
 主な環境変数:
 
@@ -117,25 +125,90 @@ go run -tags server ./server.go
 | `DB_PATH` | `omni_money.db` | SQLite データベースの保存先 |
 | `HOST_IP` | `0.0.0.0` | 待受アドレス |
 | `PORT` | `4000` | 待受ポート |
-| `AI_API_TOKEN` | なし | AI API の Bearer トークン |
+| `AUTH_PASSWORD_HASH` | なし（必須） | ログインパスワードのbcryptハッシュ |
+| `SESSION_MAX_AGE_HOURS` | `24` | セッション有効期間（時間） |
+| `AI_API_TOKEN` | なし | 32文字以上のAI API Bearerトークン。未設定ならAI API無効 |
+| `AI_HOST_IP` | `127.0.0.1` | AI専用リスナーの待受アドレス |
+| `AI_PORT` | `4001` | AI専用リスナーのポート |
+| `AI_ALLOW_REMOTE` | `false` | AIを非ループバックで待受する明示許可。Docker内の待受時のみ利用 |
+| `TRUSTED_PROXIES` | なし | 信頼するリバースプロキシIP/CIDR |
+| `FORCE_HTTPS` | `false` | 公開WebのHTTPSリダイレクト |
+| `HTTPS_REDIRECT_HOST` | なし | HTTPSリダイレクト先 |
+| `ALLOWED_HOSTS` | なし | HTTPSリダイレクトで許可するホスト |
 | `CORS_ALLOWED_ORIGINS` | 同一オリジンのみ | 許可する CORS オリジンのカンマ区切りリスト |
 
 ## Docker で起動
 
 ```bash
 docker build -t omni-money .
-docker run --rm -p 4000:4000 -v "$(pwd)/data:/app/data" omni-money
+docker run --rm \
+  -p 4000:4000 \
+  -e AUTH_PASSWORD_HASH='<bcryptハッシュ>' \
+  -v "$(pwd)/data:/app/data" \
+  omni-money
 ```
 
 起動後、ブラウザで `http://localhost:4000` を開きます。
 
+AI APIも利用する場合は、コンテナ内部では全インターフェースで待ち受けさせつつ、
+Dockerホスト側では必ずlocalhostに限定して公開します。
+
+```bash
+docker run --rm \
+  -p 4000:4000 \
+  -p 127.0.0.1:4001:4001 \
+  -e AUTH_PASSWORD_HASH='<bcryptハッシュ>' \
+  -e AI_API_TOKEN='<32文字以上のランダム値>' \
+  -e AI_HOST_IP=0.0.0.0 \
+  -e AI_ALLOW_REMOTE=true \
+  -v "$(pwd)/data:/app/data" \
+  omni-money
+```
+
+`-p 4001:4001` のようにホストIPを省略してAIポートを公開しないでください。
+AIを利用しない場合は `AI_API_TOKEN` と4001番ポートの公開を両方省略します。
+
+### Docker Compose / TrueNAS
+
+同梱の `compose.yaml` は、家計簿Webを4000番、AI APIをDockerホストのlocalhost:4001へ分離して、
+1コンテナで起動します。
+
+```bash
+cp .env.example .env
+# .env の AUTH_PASSWORD_HASH、AI_API_TOKEN、OMNI_DATA_DIR を編集
+docker compose up -d --build
+```
+
+bcryptハッシュは `$` を含むため、`.env` では例のとおり値全体をシングルクォートで囲んでください。
+
+TrueNAS Custom Appでは `compose.yaml` 相当の設定を使い、次を守ってください。
+
+- `/app/data` を `/mnt/<pool>/apps/omni-money` 等の永続Datasetへ割り当てる
+- Webのコンテナポート4000だけをLANまたはリバースプロキシへ公開する
+- AIのコンテナポート4001はホストIP `127.0.0.1` に限定する
+- TrueNAS UIでホストIPを限定できない場合は4001を公開しない
+- 外部公開はCaddy/Nginx等でTLS終端し、`TRUSTED_PROXIES`を限定設定する
+
+設定値は次のように生成できます。bcrypt生成はパスワードを対話入力するため、シェル履歴へ平文を残しません。
+
+```bash
+docker run -it --rm httpd:2.4-alpine htpasswd -nBC 12 omni
+openssl rand -hex 32
+```
+
+1つ目の出力は `omni:` より後ろのbcryptハッシュだけを `AUTH_PASSWORD_HASH` に設定し、
+2つ目の出力を `AI_API_TOKEN` に設定します。
+
 ## AI API
 
-AI API は `AI_API_TOKEN` を設定した場合のみ利用できます。
+AI API は `AI_API_TOKEN` を設定した場合のみ、公開Webとは別のAI専用リスナーで利用できます。
 リクエストには `Authorization: Bearer <AI_API_TOKEN>` を付与してください。
 
 ```bash
-AI_API_TOKEN=example-token go run -tags server ./server.go
+curl -X POST http://127.0.0.1:4001/api/v1/ai/analysis \
+  -H 'Authorization: Bearer <AI_API_TOKEN>' \
+  -H 'Content-Type: application/json' \
+  -d '{}'
 ```
 
 利用可能なエンドポイント:
@@ -146,6 +219,10 @@ AI_API_TOKEN=example-token go run -tags server ./server.go
 | `POST` | `/api/v1/ai/analysis` | 条件指定で収支を分析 |
 
 AI API では `POST` のみ許可され、`GET`、`PUT`、`DELETE` などは拒否されます。
+公開Webポート `:4000/api/v1/ai/*` ではAIトークンを受け付けません。
+
+クラウドLLMを使う場合も、AIトークンをLLMへ渡したりAIポートをインターネット公開したりせず、
+ローカルのエージェントプロセスがLLMのtool callを受けて `127.0.0.1:4001` を呼び出してください。
 
 ## 開発時の確認
 
