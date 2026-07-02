@@ -1121,6 +1121,12 @@ func RemoveTransactionTag(transactionID, tagID int64) error {
 // フィルタ条件はLEFT JOINのON句に配置し、全タグを保持した上で
 // 子タグの金額を親タグに集約する。
 func GetTagSummary(txType string, startDate, endDate string) ([]models.TagSummary, error) {
+	return getTagSummaryFiltered(txType, startDate, endDate, "", nil)
+}
+
+// getTagSummaryFiltered はAI分析を含む呼び出し元の全フィルターを適用し、
+// 条件に一致した取引群についてタグ別集計を返す。
+func getTagSummaryFiltered(txType, startDate, endDate, account string, tagIDs []int64) ([]models.TagSummary, error) {
 	db := database.GetDB()
 
 	// フィルタ条件をON句に含めてLEFT JOINを維持する
@@ -1140,6 +1146,21 @@ func GetTagSummary(txType string, startDate, endDate string) ([]models.TagSummar
 	if endDate != "" {
 		joinConditions = append(joinConditions, "tr.date <= ?")
 		args = append(args, endDate+" 23:59:59")
+	}
+	if account != "" {
+		joinConditions = append(joinConditions, "tr.account = ?")
+		args = append(args, account)
+	}
+	if len(tagIDs) > 0 {
+		placeholders := make([]string, len(tagIDs))
+		for i, id := range tagIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		joinConditions = append(joinConditions, fmt.Sprintf(
+			"tr.id IN (SELECT transaction_id FROM transaction_tags WHERE tag_id IN (%s))",
+			strings.Join(placeholders, ","),
+		))
 	}
 
 	query := `SELECT t.id, t.name, t.level, t.parent_id,
@@ -1306,8 +1327,11 @@ func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, 
 	}
 	resp.NetAmount = resp.TotalIncome - resp.TotalExpense
 
-	// タグ別集計も含める
-	tagSummaries, _ := GetTagSummary(req.Type, req.StartDate, req.EndDate)
+	// タグ別集計にも取引一覧と同じフィルターを適用する。
+	tagSummaries, err := getTagSummaryFiltered(req.Type, req.StartDate, req.EndDate, req.Account, req.TagIDs)
+	if err != nil {
+		return nil, fmt.Errorf("タグ別分析エラー: %w", err)
+	}
 	resp.TagSummaries = tagSummaries
 
 	if resp.Transactions == nil {

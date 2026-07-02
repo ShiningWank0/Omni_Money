@@ -52,6 +52,7 @@
         <button class="menu-btn" @click="backupToCSV">CSVバックアップ</button>
         <button class="menu-btn" @click="showImportCSVModalMethod">CSVインポート</button>
         <button class="menu-btn" @click="openCreditCardSettings">クレジットカード設定</button>
+        <button v-if="!isWailsMode" class="menu-btn" @click="openAIAPIConsole">AI API操作</button>
         <button class="menu-btn" @click="openBankAccountSettings">銀行口座設定</button>
         <button class="menu-btn" @click="showGraphModal">残高推移グラフ表示</button>
         <button class="menu-btn" @click="openTagChart">タグ別分析</button>
@@ -125,6 +126,13 @@
       @close="hideCreditCardSettings"
     />
 
+    <!-- AI専用API 管理コンソール（サーバーモードのみ） -->
+    <AIAPIConsoleModal
+      v-if="showAIAPIConsole"
+      @close="showAIAPIConsole = false"
+      @transaction-added="handleAITransactionAdded"
+    />
+
     <!-- 銀行口座設定モーダル -->
     <CreditCardSettingsModal
       v-if="showBankAccountModal"
@@ -178,6 +186,7 @@ import CreditCardSettingsModal from './components/CreditCardSettingsModal.vue'
 import BalanceChart from './components/BalanceChart.vue'
 import SnapshotManager from './components/SnapshotManager.vue'
 import TagPieChart from './components/TagPieChart.vue'
+import AIAPIConsoleModal from './components/AIAPIConsoleModal.vue'
 import {
   addTransaction,
   updateTransaction,
@@ -202,6 +211,7 @@ const showBankAccountModal = ref(false)
 const showGraph = ref(false)
 const showSnapshotModal = ref(false)
 const showTagChart = ref(false)
+const showAIAPIConsole = ref(false)
 const isEditMode = ref(false)
 const editingTransaction = ref(null)
 const dateSortOrder = ref('desc')
@@ -381,6 +391,17 @@ async function openCreditCardSettings() {
 
 function hideCreditCardSettings() {
   showCreditCardModal.value = false
+}
+
+function openAIAPIConsole() {
+  showMenu.value = false
+  showAIAPIConsole.value = true
+}
+
+async function handleAITransactionAdded() {
+  await store.fetchAccounts()
+  await store.fetchTransactions()
+  showToast('AI専用入口から取引を追加しました ✓')
 }
 
 async function handleSaveCreditCardSettings(items) {
