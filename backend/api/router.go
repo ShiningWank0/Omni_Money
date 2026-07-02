@@ -36,6 +36,11 @@ func NewRouter() http.Handler {
 	mux.HandleFunc("/api/auth/logout", handleAuthLogout(authManager))
 	mux.HandleFunc("/api/auth/status", handleAuthStatus(authManager))
 
+	// 認証済み管理UIから固定loopbackのAI専用リスナーへ中継する。
+	// Bearer tokenと接続先はブラウザへ公開しない。
+	mux.HandleFunc("/api/ai-console/transactions", methodGuard(http.MethodPost, handleAIConsoleProxy("/api/v1/ai/transactions")))
+	mux.HandleFunc("/api/ai-console/analysis", methodGuard(http.MethodPost, handleAIConsoleProxy("/api/v1/ai/analysis")))
+
 	// API エンドポイント（メソッド制約付き）
 	mux.HandleFunc("/api/accounts", methodGuard(http.MethodGet, handleAccounts))
 	mux.HandleFunc("/api/items", methodGuard(http.MethodGet, handleItems))
@@ -340,6 +345,16 @@ func handleAITransactions(w http.ResponseWriter, r *http.Request) {
 	var req models.TransactionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
+		return
+	}
+	req, err := normalizeAndValidateAITransaction(req, time.Now())
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req, err = validateAITransactionReferences(req)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
