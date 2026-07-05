@@ -92,9 +92,14 @@ function accountOf(tx) {
   return tx.account || tx.fundItem
 }
 
+// ローカルタイムゾーンでYYYY-MMを返す(toISOStringはUTCのため月境界がずれる)
+function localMonthKey(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+
 // 今月の収入・支出・収支
 const monthlyStats = computed(() => {
-  const thisMonth = new Date().toISOString().slice(0, 7)
+  const thisMonth = localMonthKey(new Date())
   let income = 0
   let expense = 0
   for (const tx of props.transactions) {
@@ -162,7 +167,7 @@ const monthlyChartData = computed(() => {
   const months = []
   const now = new Date()
   for (let i = 5; i >= 0; i--) {
-    months.push(new Date(now.getFullYear(), now.getMonth() - i, 1).toISOString().slice(0, 7))
+    months.push(localMonthKey(new Date(now.getFullYear(), now.getMonth() - i, 1)))
   }
   const income = months.map(() => 0)
   const expense = months.map(() => 0)
