@@ -17,9 +17,10 @@ import (
 )
 
 var (
-	db     *sql.DB
-	dbPath string
-	mu     sync.RWMutex
+	db         *sql.DB
+	dbPath     string
+	mu         sync.RWMutex
+	snapshotMu sync.Mutex
 )
 
 // InitDB はSQLiteデータベースを初期化する。
@@ -48,9 +49,12 @@ func initDBLocked(path string) error {
 	// データベースディレクトリが存在しない場合は作成
 	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := ensurePrivateDir(dir); err != nil {
 			return fmt.Errorf("データベースディレクトリ作成エラー: %w", err)
 		}
+	}
+	if err := ensurePrivateFile(path); err != nil {
+		return fmt.Errorf("データベースファイル権限設定エラー: %w", err)
 	}
 
 	var err error
@@ -61,7 +65,14 @@ func initDBLocked(path string) error {
 
 	// 接続テスト
 	if err := db.Ping(); err != nil {
+		db.Close()
+		db = nil
 		return fmt.Errorf("データベースping失敗: %w", err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		db.Close()
+		db = nil
+		return fmt.Errorf("データベースファイル権限設定エラー: %w", err)
 	}
 
 	// テーブル作成
@@ -162,6 +173,17 @@ func createTables() error {
 		}
 	}
 
+	// SQLiteのUNIQUE制約ではNULL同士が重複扱いにならないため、
+	// ルートタグだけは部分UNIQUE INDEXで名前の重複を防止する。
+	const rootTagIndex = `CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_root_name ON tags(name) WHERE parent_id IS NULL`
+	if _, err := db.Exec(rootTagIndex); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed: tags.name") {
+			log.Printf("ルートタグ重複警告: 既存の重複データがあるため idx_tags_root_name を作成できませんでした: %v", err)
+		} else {
+			return fmt.Errorf("SQL実行エラー (ルートタグ一意インデックス): %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -182,6 +204,9 @@ func getSnapshotDir() string {
 // CreateSnapshot は現在のDBファイルのスナップショットを作成する。
 // snapshotDir にタイムスタンプ付きのコピーを保存する。
 func CreateSnapshot(snapshotDir string) (string, error) {
+	snapshotMu.Lock()
+	defer snapshotMu.Unlock()
+
 	mu.RLock()
 	currentPath := dbPath
 	currentDB := db
@@ -193,8 +218,12 @@ func CreateSnapshot(snapshotDir string) (string, error) {
 
 	// WALの内容をメインDBファイルにフラッシュしてからコピーする
 	if currentDB != nil {
-		if _, err := currentDB.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-			log.Printf("WALチェックポイント警告: %v", err)
+		var busy, logFrames, checkpointedFrames int
+		if err := currentDB.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointedFrames); err != nil {
+			return "", fmt.Errorf("WALチェックポイントエラー: %w", err)
+		}
+		if busy != 0 {
+			return "", fmt.Errorf("WALチェックポイントエラー: ビジー状態です (log=%d, checkpointed=%d)", logFrames, checkpointedFrames)
 		}
 	}
 
@@ -202,18 +231,29 @@ func CreateSnapshot(snapshotDir string) (string, error) {
 		snapshotDir = getSnapshotDir()
 	}
 
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := ensurePrivateDir(snapshotDir); err != nil {
 		return "", fmt.Errorf("スナップショットディレクトリ作成エラー: %w", err)
 	}
 
-	timestamp := time.Now().Format("20060102_150405.000")
+	timestamp := time.Now().Format("20060102_150405.000000000")
 	// ドットをアンダースコアに置換してファイル名に安全な形式にする
 	timestamp = strings.ReplaceAll(timestamp, ".", "_")
-	snapshotPath := filepath.Join(snapshotDir, fmt.Sprintf("omni_money_%s.db", timestamp))
+	basePath := filepath.Join(snapshotDir, fmt.Sprintf("omni_money_%s.db", timestamp))
+	snapshotPath := basePath
 
-	// ファイルコピー
-	if err := copyFile(currentPath, snapshotPath); err != nil {
-		return "", fmt.Errorf("スナップショット作成エラー: %w", err)
+	// 排他的に作成し、時刻分解能内に連続作成されても既存ファイルを上書きしない。
+	for suffix := 0; ; suffix++ {
+		if suffix > 0 {
+			snapshotPath = fmt.Sprintf("%s_%d.db", strings.TrimSuffix(basePath, ".db"), suffix)
+		}
+		err := copyFileExclusive(currentPath, snapshotPath)
+		if os.IsExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("スナップショット作成エラー: %w", err)
+		}
+		break
 	}
 
 	log.Printf("スナップショット作成完了: %s", snapshotPath)
@@ -387,7 +427,9 @@ func CleanOldSnapshots(snapshotDir string, maxKeep int) error {
 	return nil
 }
 
-// AutoSnapshot は操作ごとに自動スナップショットを作成し、30世代を維持する
+// AutoSnapshot は操作ごとに自動スナップショットを非同期に作成し、30世代を維持する。
+// 作成処理自体はCreateSnapshot内のsnapshotMuで直列化されるため、
+// 同時呼び出しでもファイル競合は起きない。
 func AutoSnapshot() {
 	go func() {
 		_, err := CreateSnapshot("")
@@ -403,20 +445,49 @@ func AutoSnapshot() {
 
 // copyFile はファイルをコピーする
 func copyFile(src, dst string) error {
+	return copyFileWithFlags(src, dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+}
+
+func copyFileExclusive(src, dst string) error {
+	return copyFileWithFlags(src, dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+}
+
+func copyFileWithFlags(src, dst string, flags int) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
 
-	out, err := os.Create(dst)
+	out, err := os.OpenFile(dst, flags, 0600)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
+	if err := out.Chmod(0600); err != nil {
+		return err
+	}
 
 	if _, err := io.Copy(out, in); err != nil {
 		return err
 	}
 	return out.Sync()
+}
+
+func ensurePrivateDir(path string) error {
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0700)
+}
+
+func ensurePrivateFile(path string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0600)
 }
