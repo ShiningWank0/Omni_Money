@@ -28,7 +28,12 @@ var (
 func InitDB(path string) error {
 	mu.Lock()
 	defer mu.Unlock()
+	return initDBLocked(path)
+}
 
+// initDBLocked は mu.Lock() を保持した状態で呼び出す前提の初期化本体。
+// RestoreSnapshot のようにロックを保持したまま再初期化する経路と共有する。
+func initDBLocked(path string) error {
 	// 既存の接続があればまず閉じる
 	if db != nil {
 		db.Close()
@@ -249,6 +254,13 @@ func ListSnapshots(snapshotDir string) ([]string, error) {
 //  5. 再接続し PRAGMA integrity_check で整合性を検証
 //  6. 成功なら退避ファイルを削除、失敗なら退避から復旧
 func RestoreSnapshot(snapshotDir, snapshotName string) error {
+	// スナップショット名の検証（パストラバーサル防止）。
+	// APIから任意の名前が渡り得るため、ディレクトリ区切りや ".." を含む名前、
+	// snapshots/ 直下の .db ファイル以外は拒否する。
+	if err := validateSnapshotName(snapshotName); err != nil {
+		return err
+	}
+
 	if snapshotDir == "" {
 		snapshotDir = getSnapshotDir()
 	}
@@ -258,8 +270,12 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 		return fmt.Errorf("スナップショットが見つかりません: %s", snapshotName)
 	}
 
-	// --- 手順1: データベース接続の完全な遮断 ---
+	// 復元中に他のリクエストが nil の DB 接続へアクセスして panic しないよう、
+	// ファイル差し替えと再接続が終わるまでロックを保持し続ける。
 	mu.Lock()
+	defer mu.Unlock()
+
+	// --- 手順1: データベース接続の完全な遮断 ---
 	currentPath := dbPath
 	if db != nil {
 		// WALの内容をメインDBファイルにフラッシュしてからCloseする
@@ -267,7 +283,6 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 		db.Close()
 		db = nil
 	}
-	mu.Unlock()
 
 	backupPath := currentPath + ".bak"
 	restoreFailed := true
@@ -280,7 +295,7 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 			os.Remove(currentPath + "-wal")
 			os.Remove(currentPath + "-shm")
 			os.Rename(backupPath, currentPath)
-			if err := InitDB(currentPath); err != nil {
+			if err := initDBLocked(currentPath); err != nil {
 				log.Printf("復旧後のDB再接続エラー: %v", err)
 			}
 		}
@@ -290,7 +305,7 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if err := os.Rename(currentPath, backupPath); err != nil {
 		// リネーム失敗時はそのまま再接続して返す
 		restoreFailed = false
-		InitDB(currentPath)
+		initDBLocked(currentPath)
 		return fmt.Errorf("データベース退避エラー: %w", err)
 	}
 
@@ -320,15 +335,27 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	}
 
 	// --- 手順6: 参照の更新と退避ファイルの削除 ---
-	mu.Lock()
 	db = newDB
 	dbPath = currentPath
-	mu.Unlock()
 
 	restoreFailed = false
 	os.Remove(backupPath)
 
 	log.Printf("スナップショット復元完了: %s (integrity_check: ok)", snapshotName)
+	return nil
+}
+
+// validateSnapshotName はスナップショット名として安全な形式かを検証する
+func validateSnapshotName(name string) error {
+	if name == "" {
+		return fmt.Errorf("スナップショット名が必要です")
+	}
+	if name != filepath.Base(name) ||
+		strings.ContainsAny(name, `/\`) ||
+		strings.Contains(name, "..") ||
+		!strings.HasSuffix(name, ".db") {
+		return fmt.Errorf("スナップショット名が不正です")
+	}
 	return nil
 }
 
