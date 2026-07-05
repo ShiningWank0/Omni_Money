@@ -63,10 +63,13 @@
 
     <!-- 残高表示と取引履歴を統合したカード -->
     <div class="card content-card">
-      <div class="balance-section">
-        <div class="balance-label">現在の残高</div>
-        <div class="balance-amount">{{ formatCurrency(store.currentBalance) }}</div>
-      </div>
+      <DashboardPanel
+        :transactions="store.transactions"
+        :credit-card-items="store.creditCardItems"
+        :balance-history="dashboardHistory"
+        :current-balance="store.currentBalance"
+        @open-balance-chart="showGraphModal"
+      />
 
       <div class="transaction-section">
         <table class="transaction-table">
@@ -187,6 +190,7 @@ import BalanceChart from './components/BalanceChart.vue'
 import SnapshotManager from './components/SnapshotManager.vue'
 import TagPieChart from './components/TagPieChart.vue'
 import AIAPIConsoleModal from './components/AIAPIConsoleModal.vue'
+import DashboardPanel from './components/DashboardPanel.vue'
 import {
   addTransaction,
   updateTransaction,
@@ -218,6 +222,21 @@ const dateSortOrder = ref('desc')
 const selectedCreditCardItems = ref([])
 const selectedBankAccountItems = ref([])
 const balanceHistoryData = ref(null)
+const dashboardHistory = ref(null)
+
+// ダッシュボードの残高推移を取得（取引履歴の更新に追従）
+async function refreshDashboardHistory() {
+  try {
+    const selectedAccounts = store.selectedFundItems.length > 0
+      ? store.selectedFundItems
+      : store.actualFundItems
+    dashboardHistory.value = await getBalanceHistoryFiltered(selectedAccounts)
+  } catch (e) {
+    console.error('ダッシュボード残高推移取得エラー:', e)
+  }
+}
+
+watch(() => store.transactions, refreshDashboardHistory)
 const bankAccountInfoLines = [
   'カード支払い取引と銀行口座引き落とし取引の紐付け候補になります',
   '銀行口座項目は現在残高や残高推移の計算から除外されません',
