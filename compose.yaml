@@ -1,0 +1,31 @@
+services:
+  omni-money:
+    build:
+      context: .
+    image: omni-money:local
+    container_name: omni-money
+    restart: unless-stopped
+    ports:
+      # 家計簿Web。外部公開時はリバースプロキシとTLSを使用する。
+      - "${OMNI_WEB_BIND_IP:-0.0.0.0}:${OMNI_WEB_PORT:-4000}:4000"
+      # AI APIはDockerホストのlocalhostにだけ公開する。
+      - "127.0.0.1:${OMNI_AI_PORT:-4001}:4001"
+    environment:
+      DB_PATH: /app/data/omni_money.db
+      HOST_IP: 0.0.0.0
+      PORT: 4000
+      AUTH_PASSWORD_HASH: "${AUTH_PASSWORD_HASH:?AUTH_PASSWORD_HASH is required}"
+      AI_API_TOKEN: "${AI_API_TOKEN:-}"
+      # コンテナ内ではDockerのポート転送を受けるため全IFで待ち受ける。
+      # ホスト側の公開先は上の127.0.0.1指定で制限する。
+      AI_HOST_IP: 0.0.0.0
+      AI_PORT: 4001
+      AI_ALLOW_REMOTE: "true"
+      SESSION_MAX_AGE_HOURS: "${SESSION_MAX_AGE_HOURS:-24}"
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
+      FORCE_HTTPS: "${FORCE_HTTPS:-false}"
+      HTTPS_REDIRECT_HOST: "${HTTPS_REDIRECT_HOST:-}"
+      ALLOWED_HOSTS: "${ALLOWED_HOSTS:-}"
+      CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS:-}"
+    volumes:
+      - "${OMNI_DATA_DIR:-./data}:/app/data"
