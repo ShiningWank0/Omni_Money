@@ -42,7 +42,7 @@ func main() {
 	// 公開Web用ホストIPとポートの設定
 	host := os.Getenv("HOST_IP")
 	if host == "" {
-		host = "0.0.0.0"
+		host = "127.0.0.1"
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -54,6 +54,9 @@ func main() {
 	keyFile := strings.TrimSpace(os.Getenv("TLS_KEY_FILE"))
 	if (certFile == "") != (keyFile == "") {
 		log.Fatal("TLS_CERT_FILE と TLS_KEY_FILE は両方指定してください")
+	}
+	if certFile == "" && !isLoopbackHost(host) {
+		log.Printf("警告: 公開Webを非ループバックアドレス %s にTLSなしでバインドします。通信内容が平文で送受信されるため、盗聴・改ざんのリスクがあります", addr)
 	}
 
 	srv := &http.Server{

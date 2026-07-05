@@ -26,6 +26,37 @@ func TestBankAccountSettingsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestInvalidSettingJSONReturnsErrorAndStopsPruning(t *testing.T) {
+	setupCoreTestDB(t)
+	cardTx := insertTestTransaction(t, "credit card", "2026-01-01", "食費", "expense", 1000, -1000)
+	bankTx := insertTestTransaction(t, "main bank", "2026-01-27", "カード引き落とし", "expense", 1000, -1000)
+	if _, err := database.GetDB().Exec(
+		"INSERT INTO transaction_links (parent_id, child_id) VALUES (?, ?)", cardTx, bankTx,
+	); err != nil {
+		t.Fatalf("transaction link insert failed: %v", err)
+	}
+	if _, err := database.GetDB().Exec(
+		"INSERT INTO settings (key, value) VALUES (?, ?)", "credit_card_items", "not-json",
+	); err != nil {
+		t.Fatalf("invalid setting insert failed: %v", err)
+	}
+
+	if _, err := GetCreditCardSettings(); err == nil {
+		t.Fatal("GetCreditCardSettings succeeded, want JSON error")
+	}
+	if err := pruneInvalidTransactionLinks(); err == nil {
+		t.Fatal("pruneInvalidTransactionLinks succeeded, want settings error")
+	}
+
+	var count int
+	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transaction_links").Scan(&count); err != nil {
+		t.Fatalf("transaction link count query failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("transaction link count = %d, want 1 after aborted prune", count)
+	}
+}
+
 func TestAddTransactionLinkRequiresCreditCardAndBankPair(t *testing.T) {
 	setupCoreTestDB(t)
 	cardTx := insertTestTransaction(t, "credit card", "2026-01-01", "食費", "expense", 1000, -1000)
