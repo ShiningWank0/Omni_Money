@@ -216,11 +216,6 @@ func SessionAuthMiddleware(sessionManager *SessionManager, next http.Handler) ht
 func requiresSessionAuth(r *http.Request) bool {
 	path := r.URL.Path
 
-	// AI APIは独自トークン認証を使用
-	if strings.HasPrefix(path, "/api/v1/ai/") {
-		return false
-	}
-
 	// 非APIパス（静的ファイル配信）は認証不要
 	if !strings.HasPrefix(path, "/api/") {
 		return false

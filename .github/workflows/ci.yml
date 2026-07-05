@@ -51,6 +51,12 @@ jobs:
       - name: Build server entrypoint
         run: go build -tags server -o /tmp/omni_money_server ./server.go
 
+      - name: Validate Docker Compose configuration
+        env:
+          AUTH_PASSWORD_HASH: '$2y$12$abcdefghijklmnopqrstuvabcdefghijklmnopqrstuv12'
+          AI_API_TOKEN: '0123456789abcdef0123456789abcdef'
+        run: docker compose config --quiet
+
   frontend:
     name: Frontend build
     runs-on: ubuntu-latest

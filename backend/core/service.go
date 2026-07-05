@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -126,8 +127,14 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 		return nil, err
 	}
 
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("トランザクション開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+
 	// INSERT（balanceは仮値0。直後にrecalculateBalanceで正しい値に上書きされる）
-	result, err := db.Exec(
+	result, err := tx.Exec(
 		"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, ?)",
 		req.Account, date, req.Item, req.Type, req.Amount, req.Memo,
 	)
@@ -135,12 +142,15 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 		return nil, fmt.Errorf("取引追加エラー: %w", err)
 	}
 
-	id, _ := result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("取引ID取得エラー: %w", err)
+	}
 
 	// 画像添付処理
 	if len(req.Images) > 0 {
 		for _, img := range req.Images {
-			if err := addTransactionImage(db, id, img); err != nil {
+			if err := addTransactionImage(tx, id, img); err != nil {
 				// 画像添付エラーは警告として続行
 				fmt.Printf("画像添付警告 (tx=%d): %v\n", id, err)
 			}
@@ -150,23 +160,28 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 	// タグ紐付け処理
 	if len(req.Tags) > 0 {
 		for _, tagID := range req.Tags {
-			db.Exec("INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)", id, tagID)
+			if _, err := tx.Exec("INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)", id, tagID); err != nil {
+				return nil, fmt.Errorf("タグ紐付けエラー: %w", err)
+			}
 		}
 	}
 
 	// バックデート挿入も含め、口座全体の残高を時系列順に再計算
-	if err := recalculateBalance(req.Account); err != nil {
+	if err := recalculateBalanceIn(tx, req.Account); err != nil {
 		return nil, fmt.Errorf("残高再計算エラー: %w", err)
 	}
 
 	// 再計算後の正しい値を取得して返却
 	var inserted models.Transaction
 	var dateStr string
-	err = db.QueryRow(
+	err = tx.QueryRow(
 		"SELECT id, account, date, item, type, amount, balance, memo FROM transactions WHERE id = ?", id,
 	).Scan(&inserted.ID, &inserted.Account, &dateStr, &inserted.Item, &inserted.Type, &inserted.Amount, &inserted.Balance, &inserted.Memo)
 	if err != nil {
 		return nil, fmt.Errorf("追加後データ取得エラー: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("トランザクションコミットエラー: %w", err)
 	}
 	inserted.Date = parseDate(dateStr)
 	resp := inserted.ToResponse()
@@ -188,15 +203,21 @@ func UpdateTransaction(id int64, req models.TransactionRequest) (*models.Transac
 		return nil, err
 	}
 
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("トランザクション開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+
 	// 既存データの口座名を取得
 	var oldAccount string
-	err = db.QueryRow("SELECT account FROM transactions WHERE id = ?", id).Scan(&oldAccount)
+	err = tx.QueryRow("SELECT account FROM transactions WHERE id = ?", id).Scan(&oldAccount)
 	if err != nil {
 		return nil, fmt.Errorf("取引が見つかりません: %w", err)
 	}
 
 	// 更新
-	_, err = db.Exec(
+	_, err = tx.Exec(
 		"UPDATE transactions SET account = ?, date = ?, item = ?, type = ?, amount = ?, memo = ? WHERE id = ?",
 		req.Account, date, req.Item, req.Type, req.Amount, req.Memo, id,
 	)
@@ -205,10 +226,14 @@ func UpdateTransaction(id int64, req models.TransactionRequest) (*models.Transac
 	}
 
 	// タグの更新: 既存のタグを削除して再挿入
-	db.Exec("DELETE FROM transaction_tags WHERE transaction_id = ?", id)
+	if _, err := tx.Exec("DELETE FROM transaction_tags WHERE transaction_id = ?", id); err != nil {
+		return nil, fmt.Errorf("タグ紐付け削除エラー: %w", err)
+	}
 	if len(req.Tags) > 0 {
 		for _, tagID := range req.Tags {
-			db.Exec("INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)", id, tagID)
+			if _, err := tx.Exec("INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)", id, tagID); err != nil {
+				return nil, fmt.Errorf("タグ紐付けエラー: %w", err)
+			}
 		}
 	}
 
@@ -218,22 +243,25 @@ func UpdateTransaction(id int64, req models.TransactionRequest) (*models.Transac
 		accounts = append(accounts, oldAccount)
 	}
 	for _, acc := range accounts {
-		if err := recalculateBalance(acc); err != nil {
+		if err := recalculateBalanceIn(tx, acc); err != nil {
 			return nil, fmt.Errorf("残高再計算エラー: %w", err)
 		}
-	}
-	if err := pruneInvalidTransactionLinks(); err != nil {
-		return nil, fmt.Errorf("紐付け整合性チェックエラー: %w", err)
 	}
 
 	// 更新後のデータを取得
 	var t models.Transaction
 	var dateStr string
-	err = db.QueryRow(
+	err = tx.QueryRow(
 		"SELECT id, account, date, item, type, amount, balance, memo FROM transactions WHERE id = ?", id,
 	).Scan(&t.ID, &t.Account, &dateStr, &t.Item, &t.Type, &t.Amount, &t.Balance, &t.Memo)
 	if err != nil {
 		return nil, fmt.Errorf("更新後データ取得エラー: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("トランザクションコミットエラー: %w", err)
+	}
+	if err := pruneInvalidTransactionLinks(); err != nil {
+		return nil, fmt.Errorf("紐付け整合性チェックエラー: %w", err)
 	}
 	t.Date = parseDate(dateStr)
 	resp := t.ToResponse()
@@ -245,22 +273,30 @@ func UpdateTransaction(id int64, req models.TransactionRequest) (*models.Transac
 // DeleteTransaction は取引を削除する
 func DeleteTransaction(id int64) error {
 	db := database.GetDB()
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("トランザクション開始エラー: %w", err)
+	}
+	defer tx.Rollback()
 
 	var account string
-	err := db.QueryRow("SELECT account FROM transactions WHERE id = ?", id).Scan(&account)
+	err = tx.QueryRow("SELECT account FROM transactions WHERE id = ?", id).Scan(&account)
 	if err != nil {
 		return fmt.Errorf("取引が見つかりません: %w", err)
 	}
 
-	if _, err := db.Exec("DELETE FROM transactions WHERE id = ?", id); err != nil {
+	if _, err := tx.Exec("DELETE FROM transactions WHERE id = ?", id); err != nil {
 		return fmt.Errorf("取引削除エラー: %w", err)
 	}
 
-	err = recalculateBalance(account)
-	if err == nil {
-		database.AutoSnapshot()
+	if err := recalculateBalanceIn(tx, account); err != nil {
+		return fmt.Errorf("残高再計算エラー: %w", err)
 	}
-	return err
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("トランザクションコミットエラー: %w", err)
+	}
+	database.AutoSnapshot()
+	return nil
 }
 
 // GetBalanceHistory は残高推移データを返す
@@ -555,16 +591,31 @@ func ImportCSV(content string, mode string) (int, error) {
 		item := strings.TrimSpace(record[headerMap["item"]])
 		txType := strings.ToLower(strings.TrimSpace(record[headerMap["type"]]))
 		amountStr := strings.TrimSpace(record[headerMap["amount"]])
+		rowNumber := imported + 2
 
-		var amount int64
-		fmt.Sscanf(amountStr, "%d", &amount)
+		if account == "" {
+			return 0, fmt.Errorf("口座名は必須です (行%d)", rowNumber)
+		}
+		if item == "" {
+			return 0, fmt.Errorf("項目は必須です (行%d)", rowNumber)
+		}
+		if txType != "income" && txType != "expense" {
+			return 0, fmt.Errorf("種別はincomeまたはexpenseである必要があります (行%d)", rowNumber)
+		}
+		amount, err := strconv.ParseInt(amountStr, 10, 64)
+		if err != nil || amount <= 0 {
+			return 0, fmt.Errorf("金額は正の整数である必要があります (行%d)", rowNumber)
+		}
 
 		memo := ""
 		if idx, ok := headerMap["memo"]; ok && idx < len(record) {
 			memo = strings.TrimSpace(record[idx])
 		}
 
-		date := parseDate(dateStr)
+		date, err := parseDateStrict(dateStr)
+		if err != nil {
+			return 0, fmt.Errorf("日付形式が正しくありません (行%d): %w", rowNumber, err)
+		}
 
 		_, err = stmt.Exec(account, date, item, txType, amount, memo)
 		if err != nil {
@@ -591,13 +642,17 @@ func ImportCSV(content string, mode string) (int, error) {
 
 // --- ヘルパー関数 ---
 
-// recalculateBalance は口座内の全取引を時系列順に辿り、残高を再計算する。
-// 複数のUPDATEをSQLトランザクションで包み、途中失敗時のデータ不整合を防止する。
-func recalculateBalance(account string) error {
-	db := database.GetDB()
+type sqlExecutor interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
+	Prepare(query string) (*sql.Stmt, error)
+}
 
+// recalculateBalanceIn は指定されたDBまたはトランザクション内で口座残高を再計算する。
+func recalculateBalanceIn(q sqlExecutor, account string) error {
 	// 時系列順で取引データを取得
-	rows, err := db.Query(
+	rows, err := q.Query(
 		"SELECT id, type, amount FROM transactions WHERE account = ? ORDER BY date, id",
 		account,
 	)
@@ -606,7 +661,6 @@ func recalculateBalance(account string) error {
 	}
 	defer rows.Close()
 
-	// メモリに読み込んでからトランザクション内で一括更新
 	type balanceUpdate struct {
 		id      int64
 		balance int64
@@ -627,19 +681,19 @@ func recalculateBalance(account string) error {
 		}
 		updates = append(updates, balanceUpdate{id: id, balance: runningBalance})
 	}
-	rows.Close() // 明示的に閉じてからトランザクションを開始
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("残高再計算行取得エラー: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("残高再計算行クローズエラー: %w", err)
+	}
 
 	if len(updates) == 0 {
 		return nil
 	}
 
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("トランザクション開始エラー: %w", err)
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.Prepare("UPDATE transactions SET balance = ? WHERE id = ?")
+	stmt, err := q.Prepare("UPDATE transactions SET balance = ? WHERE id = ?")
 	if err != nil {
 		return fmt.Errorf("プリペアドステートメントエラー: %w", err)
 	}
@@ -651,6 +705,21 @@ func recalculateBalance(account string) error {
 		}
 	}
 
+	return nil
+}
+
+// recalculateBalance は口座内の全取引を自前のSQLトランザクションで再計算する。
+func recalculateBalance(account string) error {
+	db := database.GetDB()
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("トランザクション開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := recalculateBalanceIn(tx, account); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("トランザクションコミットエラー: %w", err)
 	}
@@ -660,6 +729,14 @@ func recalculateBalance(account string) error {
 // parseDate は複数の受け入れ可能なフォーマットを許容し、
 // どれにも一致しない場合は現在時刻を返す。
 func parseDate(dateStr string) time.Time {
+	t, err := parseDateStrict(dateStr)
+	if err != nil {
+		return time.Now()
+	}
+	return t
+}
+
+func parseDateStrict(dateStr string) (time.Time, error) {
 	formats := []string{
 		"2006-01-02 15:04:05",
 		"2006-01-02T15:04:05Z",
@@ -669,10 +746,10 @@ func parseDate(dateStr string) time.Time {
 	}
 	for _, format := range formats {
 		if t, err := time.Parse(format, dateStr); err == nil {
-			return t
+			return t, nil
 		}
 	}
-	return time.Now()
+	return time.Time{}, fmt.Errorf("対応していない日付形式です: %q", dateStr)
 }
 
 func parseTransactionDate(dateStr, timeStr string) (time.Time, error) {
@@ -771,7 +848,7 @@ func buildBalanceHistory(rows interface {
 // --- 画像管理 (Agent.md §6.5) ---
 
 // addTransactionImage は取引に画像を追加する（内部ヘルパー）
-func addTransactionImage(db *sql.DB, transactionID int64, img models.TransactionImageRequest) error {
+func addTransactionImage(db sqlExecutor, transactionID int64, img models.TransactionImageRequest) error {
 	data, err := base64.StdEncoding.DecodeString(img.Data)
 	if err != nil {
 		return fmt.Errorf("Base64デコードエラー: %w", err)
@@ -1121,6 +1198,12 @@ func RemoveTransactionTag(transactionID, tagID int64) error {
 // フィルタ条件はLEFT JOINのON句に配置し、全タグを保持した上で
 // 子タグの金額を親タグに集約する。
 func GetTagSummary(txType string, startDate, endDate string) ([]models.TagSummary, error) {
+	return getTagSummaryFiltered(txType, startDate, endDate, "", nil)
+}
+
+// getTagSummaryFiltered はAI分析を含む呼び出し元の全フィルターを適用し、
+// 条件に一致した取引群についてタグ別集計を返す。
+func getTagSummaryFiltered(txType, startDate, endDate, account string, tagIDs []int64) ([]models.TagSummary, error) {
 	db := database.GetDB()
 
 	// フィルタ条件をON句に含めてLEFT JOINを維持する
@@ -1140,6 +1223,21 @@ func GetTagSummary(txType string, startDate, endDate string) ([]models.TagSummar
 	if endDate != "" {
 		joinConditions = append(joinConditions, "tr.date <= ?")
 		args = append(args, endDate+" 23:59:59")
+	}
+	if account != "" {
+		joinConditions = append(joinConditions, "tr.account = ?")
+		args = append(args, account)
+	}
+	if len(tagIDs) > 0 {
+		placeholders := make([]string, len(tagIDs))
+		for i, id := range tagIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		joinConditions = append(joinConditions, fmt.Sprintf(
+			"tr.id IN (SELECT transaction_id FROM transaction_tags WHERE tag_id IN (%s))",
+			strings.Join(placeholders, ","),
+		))
 	}
 
 	query := `SELECT t.id, t.name, t.level, t.parent_id,
@@ -1306,8 +1404,11 @@ func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, 
 	}
 	resp.NetAmount = resp.TotalIncome - resp.TotalExpense
 
-	// タグ別集計も含める
-	tagSummaries, _ := GetTagSummary(req.Type, req.StartDate, req.EndDate)
+	// タグ別集計にも取引一覧と同じフィルターを適用する。
+	tagSummaries, err := getTagSummaryFiltered(req.Type, req.StartDate, req.EndDate, req.Account, req.TagIDs)
+	if err != nil {
+		return nil, fmt.Errorf("タグ別分析エラー: %w", err)
+	}
 	resp.TagSummaries = tagSummaries
 
 	if resp.Transactions == nil {
