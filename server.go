@@ -99,6 +99,9 @@ func main() {
 		}
 
 		aiAddr := net.JoinHostPort(aiHost, aiPort)
+		if !isLoopbackHost(aiHost) {
+			log.Printf("警告: AI専用APIを非ループバックアドレス %s にTLSなしで公開します。BearerトークンとAI送受信データが平文で流れるため、Dockerのlocalhost限定ポート公開やリバースプロキシでのTLS終端で必ず保護してください", aiAddr)
+		}
 		aiServer := &http.Server{
 			Addr:         aiAddr,
 			Handler:      api.NewAIRouter(aiToken),

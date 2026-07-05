@@ -253,6 +253,7 @@ func TestAITransactionRequiresFields(t *testing.T) {
 		{name: "item", mutate: func(req *models.TransactionRequest) { req.Item = " " }},
 		{name: "type", mutate: func(req *models.TransactionRequest) { req.Type = "other" }},
 		{name: "amount", mutate: func(req *models.TransactionRequest) { req.Amount = 0 }},
+		{name: "amount上限超過", mutate: func(req *models.TransactionRequest) { req.Amount = maxAITransactionAmount + 1 }},
 	}
 
 	for _, tt := range tests {
@@ -261,6 +262,28 @@ func TestAITransactionRequiresFields(t *testing.T) {
 			tt.mutate(&req)
 			if _, err := normalizeAndValidateAITransaction(req, now); err == nil {
 				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+func TestAIConsoleRelayHostHonorsLoopbackAIHostIP(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "未設定", value: "", want: "127.0.0.1"},
+		{name: "IPv6ループバック", value: "::1", want: "::1"},
+		{name: "非ループバックはフォールバック", value: "0.0.0.0", want: "127.0.0.1"},
+		{name: "外部アドレスはフォールバック", value: "192.168.1.10", want: "127.0.0.1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AI_HOST_IP", tt.value)
+			if got := aiConsoleRelayHost(); got != tt.want {
+				t.Fatalf("aiConsoleRelayHost() = %q, want %q", got, tt.want)
 			}
 		})
 	}
