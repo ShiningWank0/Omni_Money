@@ -1,15 +1,19 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 	"unicode"
 
+	"omni_money/backend/aicredentials"
 	"omni_money/backend/database"
 	"omni_money/backend/models"
 	"omni_money/backend/validation"
 )
+
+var errAITagNotAllowed = errors.New("タグIDはこの資格情報で使用できません")
 
 const (
 	maxAIAccountBytes = 256
@@ -80,7 +84,7 @@ func normalizeAndValidateAITransaction(req models.TransactionRequest, now time.T
 
 // validateAITransactionReferences はAI入力に含まれるDB参照を事前検証する。
 // 画像は通常Web/Wailsと同じcore.AddTransaction境界で検証する。
-func validateAITransactionReferences(req models.TransactionRequest) (models.TransactionRequest, error) {
+func validateAITransactionReferences(req models.TransactionRequest, credential *aicredentials.Credential) (models.TransactionRequest, error) {
 	if len(req.Tags) > maxAITagIDs {
 		return req, fmt.Errorf("タグIDは%d件までです", maxAITagIDs)
 	}
@@ -90,6 +94,9 @@ func validateAITransactionReferences(req models.TransactionRequest) (models.Tran
 		for _, tagID := range req.Tags {
 			if tagID <= 0 {
 				return req, fmt.Errorf("タグIDは正の整数で指定してください")
+			}
+			if !credential.AllowsTag(tagID) {
+				return req, errAITagNotAllowed
 			}
 			if _, exists := seen[tagID]; exists {
 				continue
@@ -113,7 +120,7 @@ func validateAITransactionReferences(req models.TransactionRequest) (models.Tran
 			return req, fmt.Errorf("タグの存在確認に失敗しました: %w", err)
 		}
 		if count != len(uniqueTags) {
-			return req, fmt.Errorf("存在しないタグIDが含まれています")
+			return req, errAITagNotAllowed
 		}
 		req.Tags = uniqueTags
 	}

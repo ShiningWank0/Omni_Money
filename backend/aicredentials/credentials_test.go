@@ -28,6 +28,7 @@ func validTestFile() *File {
 			ExpiresAt:         notBefore.Add(30 * 24 * time.Hour),
 			Scopes:            []string{"analysis:summary", "console:relay"},
 			Accounts:          []string{testAccount},
+			AllowedTagIDs:     []int64{10, 20},
 			MaxAnalysisDays:   30,
 			MaxResults:        100,
 			AnalysisStartDate: "2026-01-01",
@@ -47,6 +48,9 @@ func TestFileValidateAndCredentialHelpers(t *testing.T) {
 	}
 	if !credential.AllowsAccount(testAccount) || credential.AllowsAccount("銀行") {
 		t.Fatalf("unexpected accounts: %#v", credential.Accounts)
+	}
+	if !credential.AllowsTag(10) || credential.AllowsTag(30) {
+		t.Fatalf("unexpected allowed tags: %#v", credential.AllowedTagIDs)
 	}
 	if !credential.AllowConsoleRelay {
 		t.Fatal("AllowConsoleRelay = false, want true")
@@ -76,6 +80,14 @@ func TestFileValidateRejectsInvalidCredentials(t *testing.T) {
 		{name: "missing accounts", mutate: func(f *File) { f.Credentials[0].Accounts = nil }},
 		{name: "blank account", mutate: func(f *File) { f.Credentials[0].Accounts = []string{" "} }},
 		{name: "wildcard", mutate: func(f *File) { f.Credentials[0].Accounts = []string{"*"} }},
+		{name: "invalid tag id", mutate: func(f *File) { f.Credentials[0].AllowedTagIDs = []int64{0} }},
+		{name: "duplicate tag id", mutate: func(f *File) { f.Credentials[0].AllowedTagIDs = []int64{10, 10} }},
+		{name: "too many tag ids", mutate: func(f *File) {
+			f.Credentials[0].AllowedTagIDs = make([]int64, MaxAllowedTagIDs+1)
+			for i := range f.Credentials[0].AllowedTagIDs {
+				f.Credentials[0].AllowedTagIDs[i] = int64(i + 1)
+			}
+		}},
 		{name: "analysis days low", mutate: func(f *File) { f.Credentials[0].MaxAnalysisDays = 0 }},
 		{name: "analysis days high", mutate: func(f *File) { f.Credentials[0].MaxAnalysisDays = 367 }},
 		{name: "results low", mutate: func(f *File) { f.Credentials[0].MaxResults = 0 }},

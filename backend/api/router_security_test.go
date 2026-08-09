@@ -384,13 +384,13 @@ func TestAITransactionRejectsInvalidTagsAndImages(t *testing.T) {
 
 	unknownTag := valid
 	unknownTag.Tags = []int64{999999}
-	if _, err := validateAITransactionReferences(unknownTag); err == nil {
+	if _, err := validateAITransactionReferences(unknownTag, &aicredentials.Credential{AllowedTagIDs: []int64{999999}}); err == nil {
 		t.Fatal("expected unknown tag validation error")
 	}
 
 	tooManyTags := valid
 	tooManyTags.Tags = make([]int64, maxAITagIDs+1)
-	if _, err := validateAITransactionReferences(tooManyTags); err == nil {
+	if _, err := validateAITransactionReferences(tooManyTags, nil); err == nil {
 		t.Fatal("expected tag count validation error")
 	}
 

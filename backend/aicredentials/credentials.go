@@ -23,6 +23,7 @@ const (
 	MaxAnalysisDays       = 366
 	MinResults            = 1
 	MaxResults            = 500
+	MaxAllowedTagIDs      = 100
 
 	ScopeTransactionsCreate   = "transactions:create"
 	ScopeAnalysisSummary      = "analysis:summary"
@@ -64,6 +65,7 @@ type Credential struct {
 	ExpiresAt         time.Time `json:"expires_at"`
 	Scopes            []string  `json:"scopes"`
 	Accounts          []string  `json:"accounts"`
+	AllowedTagIDs     []int64   `json:"allowed_tag_ids,omitempty"`
 	MaxAnalysisDays   int       `json:"max_analysis_days"`
 	MaxResults        int       `json:"max_results"`
 	AnalysisStartDate string    `json:"analysis_start_date,omitempty"`
@@ -73,6 +75,7 @@ type Credential struct {
 	tokenHash  [sha256.Size]byte
 	scopeSet   map[string]struct{}
 	accountSet map[string]struct{}
+	tagSet     map[int64]struct{}
 }
 
 // HashToken returns the canonical hash stored in a credential file.
@@ -174,6 +177,19 @@ func (c *Credential) validate() error {
 		}
 		c.accountSet[account] = struct{}{}
 	}
+	if len(c.AllowedTagIDs) > MaxAllowedTagIDs {
+		return fmt.Errorf("allowed_tag_ids must contain at most %d entries", MaxAllowedTagIDs)
+	}
+	c.tagSet = make(map[int64]struct{}, len(c.AllowedTagIDs))
+	for _, tagID := range c.AllowedTagIDs {
+		if tagID <= 0 {
+			return errors.New("allowed_tag_ids must contain only positive integers")
+		}
+		if _, duplicate := c.tagSet[tagID]; duplicate {
+			return fmt.Errorf("duplicate allowed tag id %d", tagID)
+		}
+		c.tagSet[tagID] = struct{}{}
+	}
 
 	if c.MaxAnalysisDays < MinAnalysisDays || c.MaxAnalysisDays > MaxAnalysisDays {
 		return fmt.Errorf("max_analysis_days must be between %d and %d", MinAnalysisDays, MaxAnalysisDays)
@@ -269,10 +285,29 @@ func (c *Credential) AllowsAccount(account string) bool {
 	return false
 }
 
+// AllowsTag reports whether a tag ID is explicitly allowed for AI write and
+// analysis filters. An empty allowlist deliberately grants no tag access.
+func (c *Credential) AllowsTag(tagID int64) bool {
+	if c == nil || tagID <= 0 {
+		return false
+	}
+	if c.tagSet != nil {
+		_, ok := c.tagSet[tagID]
+		return ok
+	}
+	for _, candidate := range c.AllowedTagIDs {
+		if candidate == tagID {
+			return true
+		}
+	}
+	return false
+}
+
 func (c Credential) clone() Credential {
 	cloned := c
 	cloned.Scopes = append([]string(nil), c.Scopes...)
 	cloned.Accounts = append([]string(nil), c.Accounts...)
+	cloned.AllowedTagIDs = append([]int64(nil), c.AllowedTagIDs...)
 	cloned.scopeSet = make(map[string]struct{}, len(c.scopeSet))
 	for scope := range c.scopeSet {
 		cloned.scopeSet[scope] = struct{}{}
@@ -280,6 +315,10 @@ func (c Credential) clone() Credential {
 	cloned.accountSet = make(map[string]struct{}, len(c.accountSet))
 	for account := range c.accountSet {
 		cloned.accountSet[account] = struct{}{}
+	}
+	cloned.tagSet = make(map[int64]struct{}, len(c.tagSet))
+	for tagID := range c.tagSet {
+		cloned.tagSet[tagID] = struct{}{}
 	}
 	return cloned
 }

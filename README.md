@@ -130,7 +130,7 @@ AUTH_PASSWORD_HASH='<bcrypt-hash>' go run -tags server ./server.go
 
 `<bcrypt-hash>` は実際に作成した bcrypt ハッシュへ置き換えてください。作成方法は[利用ガイド](docs/how-to-use.md#21-bcrypt-ハッシュを作成する)を参照してください。
 
-公開Webは標準で `0.0.0.0:4000` で待ち受けます。AI API は期限・権限・口座制約を持つ資格情報ファイルを指定した場合だけ有効になります。
+公開Webは標準でホストの `127.0.0.1:4000` にだけ公開されます（Dockerコンテナ内の待受は `0.0.0.0:4000`）。AI API は期限・権限・口座・タグ制約を持つ資格情報ファイルを指定した場合だけ有効になります。
 
 ```bash
 umask 077
@@ -144,6 +144,7 @@ go run ./cmd/ai-credential issue \
   --scope analysis:transactions \
   --scope console:relay \
   --account '現金' \
+  --tag-id 1 \
   --analysis-start-date '<YYYY-MM-DD>' \
   --analysis-end-date '<YYYY-MM-DD>' \
   --max-analysis-days 30 \
@@ -162,7 +163,7 @@ go run -tags server ./server.go
 - `AI_CREDENTIALS_FILE` 未設定時はAI専用リスナー自体を起動しません。
 - AI専用リスナーは既定でlocalhost以外へバインドできません。
 - 非ループバック待受はTLS 1.3とクライアント証明書認証（mTLS）が必須です。
-- 資格情報は最大90日で失効し、scope、口座、分析可能な固定日付範囲、1リクエストの期間、明細件数を個別に制限します。
+- 資格情報は最大90日で失効し、scope、口座、許可タグID、分析可能な固定日付範囲、1リクエストの期間、明細件数を個別に制限します。`--tag-id` を省略した資格情報は、タグの付与やタグ指定分析を行えません。
 
 主な環境変数:
 
@@ -268,7 +269,7 @@ curl -X POST http://127.0.0.1:4001/api/v1/ai/analysis \
 AI API では `POST` のみ許可され、`GET`、`PUT`、`DELETE` などは拒否されます。
 公開Webポート `:4000/api/v1/ai/*` ではAIトークンを受け付けません。
 
-資格情報のscopeは `transactions:create`、`analysis:summary`、`analysis:transactions`、`analysis:memo`、`console:relay` です。分析は既定で集計だけを返し、資格情報で許可された単一口座・固定日付範囲の中で最大30日（資格情報の上限が短ければその日数）へ自動的に絞ります。日付窓をずらして資格情報の固定範囲外を読むことはできません。明細は `include_transactions: true`、メモはさらに `include_memo: true` と対応scopeが必要で、最大500件のカーソルページングです。
+資格情報のscopeは `transactions:create`、`analysis:summary`、`analysis:transactions`、`analysis:memo`、`console:relay` です。分析は既定で集計だけを返し、資格情報で許可された単一口座・固定日付範囲の中で最大30日（資格情報の上限が短ければその日数）へ自動的に絞ります。日付窓をずらして資格情報の固定範囲外を読むことはできません。タグの付与とタグ指定分析は、資格情報に列挙したタグIDだけを許可します。明細は `include_transactions: true`、メモはさらに `include_memo: true` と対応scopeが必要で、最大500件のカーソルページングです。
 
 資格情報の更新は、ホスト上の通常ファイルを直接参照する構成では `rotate` / `revoke` 後に `SIGHUP` を送ると無停止で反映されます。不正な置換ファイルは拒否され、直前の有効な設定を維持します。Compose Secretsは実行中コンテナ内で置換内容が見えない場合があるため、更新後に `docker compose -f compose.yaml -f compose.ai.yaml up -d --force-recreate omni-money` を実行してください。APIアクセスはcredential ID、mTLS証明書fingerprint、HMAC化した口座参照、期間、明細種別、該当／返却件数を、Web中継は実クライアントIPを構造化監査ログへ残します。資格情報操作も構造化監査し、トークン・本文・項目・メモ・金額は記録しません。運用環境では標準出力をアクセス制限された永続ログへ転送してください。
 

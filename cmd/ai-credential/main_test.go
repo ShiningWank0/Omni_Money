@@ -26,6 +26,7 @@ func TestIssueRotateListAndRevoke(t *testing.T) {
 		"--expires-at", now.Add(24 * time.Hour).Format(time.RFC3339),
 		"--scope", "analysis:summary", "--scope", "console:relay",
 		"--account", "現金", "--max-analysis-days", "30", "--max-results", "100",
+		"--tag-id", "10", "--tag-id", "20",
 		"--analysis-start-date", "2026-01-01", "--analysis-end-date", "2026-12-31",
 	}, environment)
 	if exitCode != 0 {
@@ -52,8 +53,12 @@ func TestIssueRotateListAndRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Authenticate(firstToken, now); err != nil {
+	issued, err := store.Authenticate(firstToken, now)
+	if err != nil {
 		t.Fatalf("issued token failed authentication: %v", err)
+	}
+	if !issued.AllowsTag(10) || issued.AllowsTag(30) {
+		t.Fatalf("issued tag allowlist = %#v", issued.AllowedTagIDs)
 	}
 
 	listOutput := &bytes.Buffer{}

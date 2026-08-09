@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,24 @@ type stringList []string
 func (values *stringList) String() string { return strings.Join(*values, ",") }
 func (values *stringList) Set(value string) error {
 	*values = append(*values, value)
+	return nil
+}
+
+type int64List []int64
+
+func (values *int64List) String() string {
+	parts := make([]string, len(*values))
+	for i, value := range *values {
+		parts[i] = strconv.FormatInt(value, 10)
+	}
+	return strings.Join(parts, ",")
+}
+func (values *int64List) Set(value string) error {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fmt.Errorf("tag id must be an integer: %w", err)
+	}
+	*values = append(*values, parsed)
 	return nil
 }
 
@@ -84,8 +103,10 @@ func runIssue(args []string, environment commandEnvironment) error {
 	analysisEndDate := flags.String("analysis-end-date", "", "latest analysis date, YYYY-MM-DD")
 	var scopes stringList
 	var accounts stringList
+	var allowedTagIDs int64List
 	flags.Var(&scopes, "scope", "allowed scope (repeatable)")
 	flags.Var(&accounts, "account", "explicitly allowed account (repeatable; wildcard is forbidden)")
+	flags.Var(&allowedTagIDs, "tag-id", "explicitly allowed tag id (repeatable; default: none)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -115,6 +136,7 @@ func runIssue(args []string, environment commandEnvironment) error {
 		ExpiresAt:         expiresAt,
 		Scopes:            append([]string(nil), scopes...),
 		Accounts:          append([]string(nil), accounts...),
+		AllowedTagIDs:     append([]int64(nil), allowedTagIDs...),
 		MaxAnalysisDays:   *maxAnalysisDays,
 		MaxResults:        *maxResults,
 		AnalysisStartDate: *analysisStartDate,

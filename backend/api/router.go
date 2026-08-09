@@ -361,9 +361,13 @@ func handleAITransactions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	middleware.RecordAIRequestAudit(r.Context(), req.Account, req.Date, req.Date, false, false, nil, nil)
-	req, err = validateAITransactionReferences(req)
+	req, err = validateAITransactionReferences(req, credential)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		status := http.StatusBadRequest
+		if errors.Is(err, errAITagNotAllowed) {
+			status = http.StatusForbidden
+		}
+		jsonError(w, err.Error(), status)
 		return
 	}
 	createdCount := 1
@@ -879,6 +883,9 @@ func validateAndScopeAIAnalysis(req models.AnalysisRequest, credential *aicreden
 		}
 		if _, exists := seenTags[tagID]; exists {
 			continue
+		}
+		if !credential.AllowsTag(tagID) {
+			return req, http.StatusForbidden, errAITagNotAllowed
 		}
 		seenTags[tagID] = struct{}{}
 		uniqueTags = append(uniqueTags, tagID)
