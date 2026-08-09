@@ -227,6 +227,10 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 	if err := validateTransactionData(req); err != nil {
 		return nil, err
 	}
+	preparedImages, err := prepareTransactionImages(req.Images)
+	if err != nil {
+		return nil, err
+	}
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -248,14 +252,9 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 		return nil, fmt.Errorf("取引ID取得エラー: %w", err)
 	}
 
-	// 画像添付処理
-	if len(req.Images) > 0 {
-		for _, img := range req.Images {
-			if err := addTransactionImage(tx, id, img); err != nil {
-				// 画像添付エラーは警告として続行
-				fmt.Printf("画像添付警告 (tx=%d): %v\n", id, err)
-			}
-		}
+	// 画像は検証・クォータ確認・取引作成を同じSQL transactionで確定する。
+	if err := insertPreparedTransactionImages(tx, id, preparedImages); err != nil {
+		return nil, err
 	}
 
 	// タグ紐付け処理
@@ -303,6 +302,10 @@ func UpdateTransaction(id int64, req models.TransactionRequest) (*models.Transac
 	if err := validateTransactionData(req); err != nil {
 		return nil, err
 	}
+	preparedImages, err := prepareTransactionImages(req.Images)
+	if err != nil {
+		return nil, err
+	}
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -324,6 +327,14 @@ func UpdateTransaction(id int64, req models.TransactionRequest) (*models.Transac
 	)
 	if err != nil {
 		return nil, fmt.Errorf("取引更新エラー: %w", err)
+	}
+	if err := insertPreparedTransactionImages(tx, id, preparedImages); err != nil {
+		return nil, err
+	}
+	if oldAccount != req.Account && len(preparedImages) == 0 {
+		if err := checkImageStorageQuota(tx, id, nil); err != nil {
+			return nil, err
+		}
 	}
 
 	// タグの更新: 既存のタグを削除して再挿入
@@ -1084,47 +1095,45 @@ func buildBalanceHistory(rows interface {
 
 // --- 画像管理 (Agent.md §6.5) ---
 
-// addTransactionImage は取引に画像を追加する（内部ヘルパー）
-func addTransactionImage(db sqlExecutor, transactionID int64, img models.TransactionImageRequest) error {
-	data, err := base64.StdEncoding.DecodeString(img.Data)
-	if err != nil {
-		return fmt.Errorf("Base64デコードエラー: %w", err)
-	}
-
-	mimeType := img.MimeType
-	if mimeType == "" {
-		mimeType = guessMimeType(img.Filename)
-	}
-
-	_, err = db.Exec(
-		"INSERT INTO transaction_images (transaction_id, filename, data, mime_type) VALUES (?, ?, ?, ?)",
-		transactionID, img.Filename, data, mimeType,
-	)
-	return err
-}
-
 // AddTransactionImage は取引に画像を追加する
 func AddTransactionImage(transactionID int64, img models.TransactionImageRequest) (*models.TransactionImageResponse, error) {
 	db := database.GetDB()
-	if err := addTransactionImage(db, transactionID, img); err != nil {
+	prepared, err := prepareTransactionImages([]models.TransactionImageRequest{img})
+	if err != nil {
 		return nil, err
 	}
 
-	// 追加された画像のIDを取得
-	var id int64
-	var createdAt string
-	err := db.QueryRow(
-		"SELECT id, created_at FROM transaction_images WHERE transaction_id = ? ORDER BY id DESC LIMIT 1",
-		transactionID,
-	).Scan(&id, &createdAt)
+	tx, err := db.Begin()
 	if err != nil {
+		return nil, fmt.Errorf("トランザクション開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := checkImageStorageQuota(tx, transactionID, prepared); err != nil {
 		return nil, err
+	}
+	result, err := insertPreparedTransactionImage(tx, transactionID, prepared[0])
+	if err != nil {
+		return nil, fmt.Errorf("画像保存エラー: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("画像ID取得エラー: %w", err)
+	}
+
+	var createdAt string
+	err = tx.QueryRow("SELECT created_at FROM transaction_images WHERE id = ?", id).Scan(&createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("画像保存結果取得エラー: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("画像保存コミットエラー: %w", err)
 	}
 
 	resp := &models.TransactionImageResponse{
 		ID:        id,
-		Filename:  img.Filename,
-		MimeType:  img.MimeType,
+		Filename:  prepared[0].filename,
+		MimeType:  prepared[0].mimeType,
 		CreatedAt: createdAt,
 	}
 	database.AutoSnapshot()
@@ -1151,13 +1160,21 @@ func GetTransactionImages(transactionID int64) ([]models.TransactionImageRespons
 		if err := rows.Scan(&id, &filename, &data, &mimeType, &createdAt); err != nil {
 			return nil, err
 		}
-		images = append(images, models.TransactionImageResponse{
+		response := models.TransactionImageResponse{
 			ID:        id,
 			Filename:  filename,
 			MimeType:  mimeType,
 			CreatedAt: createdAt,
-			DataURL:   fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data)),
-		})
+		}
+		prepared, validationErr := prepareDecodedTransactionImage(filename, mimeType, data)
+		if validationErr != nil {
+			// 旧バージョンで保存された不正BLOBをブラウザへ返さない。
+			response.Invalid = true
+		} else {
+			response.MimeType = prepared.mimeType
+			response.DataURL = fmt.Sprintf("data:%s;base64,%s", prepared.mimeType, base64.StdEncoding.EncodeToString(prepared.data))
+		}
+		images = append(images, response)
 	}
 	if images == nil {
 		images = []models.TransactionImageResponse{}
@@ -1165,31 +1182,145 @@ func GetTransactionImages(transactionID int64) ([]models.TransactionImageRespons
 	return images, nil
 }
 
-// DeleteTransactionImage は取引から画像を削除する
+// DeleteTransactionImage はWails互換用に画像IDを指定して削除する。
 func DeleteTransactionImage(imageID int64) error {
-	db := database.GetDB()
-	_, err := db.Exec("DELETE FROM transaction_images WHERE id = ?", imageID)
-	if err == nil {
-		database.AutoSnapshot()
-	}
-	return err
+	return deleteTransactionImage("id = ?", imageID)
 }
 
-// guessMimeType はファイル名からMIMEタイプを推定する
-func guessMimeType(filename string) string {
-	ext := strings.ToLower(filepath.Ext(filename))
-	switch ext {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".gif":
-		return "image/gif"
-	case ".webp":
-		return "image/webp"
-	default:
-		return "image/jpeg"
+// DeleteTransactionImageForTransaction はURL上の取引IDと画像の所属を照合して削除する。
+func DeleteTransactionImageForTransaction(transactionID, imageID int64) error {
+	return deleteTransactionImage("transaction_id = ? AND id = ?", transactionID, imageID)
+}
+
+func deleteTransactionImage(where string, args ...interface{}) error {
+	db := database.GetDB()
+	result, err := db.Exec("DELETE FROM transaction_images WHERE "+where, args...)
+	if err != nil {
+		return fmt.Errorf("画像削除エラー: %w", err)
 	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("画像削除結果確認エラー: %w", err)
+	}
+	if deleted != 1 {
+		return fmt.Errorf("画像が見つかりません")
+	}
+	database.AutoSnapshot()
+	return nil
+}
+
+func insertPreparedTransactionImages(db sqlExecutor, transactionID int64, images []preparedTransactionImage) error {
+	if len(images) == 0 {
+		return nil
+	}
+	if err := checkImageStorageQuota(db, transactionID, images); err != nil {
+		return err
+	}
+	for _, image := range images {
+		if _, err := insertPreparedTransactionImage(db, transactionID, image); err != nil {
+			return fmt.Errorf("画像保存エラー: %w", err)
+		}
+	}
+	return nil
+}
+
+func insertPreparedTransactionImage(db sqlExecutor, transactionID int64, image preparedTransactionImage) (sql.Result, error) {
+	return db.Exec(
+		"INSERT INTO transaction_images (transaction_id, filename, data, mime_type) VALUES (?, ?, ?, ?)",
+		transactionID, image.filename, image.data, image.mimeType,
+	)
+}
+
+func checkImageStorageQuota(db sqlExecutor, transactionID int64, images []preparedTransactionImage) error {
+	var account string
+	if err := db.QueryRow("SELECT account FROM transactions WHERE id = ?", transactionID).Scan(&account); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("取引が見つかりません")
+		}
+		return fmt.Errorf("画像の取引確認エラー: %w", err)
+	}
+
+	var additionalBytes int64
+	for _, image := range images {
+		additionalBytes += int64(len(image.data))
+	}
+
+	var transactionCount, transactionBytes int64
+	if err := db.QueryRow(
+		"SELECT COUNT(*), COALESCE(SUM(length(data)), 0) FROM transaction_images WHERE transaction_id = ?",
+		transactionID,
+	).Scan(&transactionCount, &transactionBytes); err != nil {
+		return fmt.Errorf("取引画像使用量確認エラー: %w", err)
+	}
+	if transactionCount+int64(len(images)) > int64(models.MaxImagesPerTransaction) {
+		return fmt.Errorf("画像は1取引につき%d件までです", models.MaxImagesPerTransaction)
+	}
+	if transactionBytes+additionalBytes > models.MaxImageBytesPerTransaction {
+		return fmt.Errorf("画像データの合計は1取引につき%d MiBまでです", models.MaxImageBytesPerTransaction/(1024*1024))
+	}
+
+	var accountBytes int64
+	if err := db.QueryRow(`
+		SELECT COALESCE(SUM(length(ti.data)), 0)
+		FROM transaction_images ti
+		JOIN transactions t ON t.id = ti.transaction_id
+		WHERE t.account = ?`, account,
+	).Scan(&accountBytes); err != nil {
+		return fmt.Errorf("口座画像使用量確認エラー: %w", err)
+	}
+	if accountBytes+additionalBytes > models.MaxImageBytesPerAccount {
+		return fmt.Errorf("口座「%s」の画像保存量は%d MiBまでです", account, models.MaxImageBytesPerAccount/(1024*1024))
+	}
+
+	var databaseBytes int64
+	if err := db.QueryRow("SELECT COALESCE(SUM(length(data)), 0) FROM transaction_images").Scan(&databaseBytes); err != nil {
+		return fmt.Errorf("画像DB使用量確認エラー: %w", err)
+	}
+	if databaseBytes+additionalBytes > models.MaxImageBytesDatabase {
+		return fmt.Errorf("DB全体の画像保存量は%d MiBまでです", models.MaxImageBytesDatabase/(1024*1024))
+	}
+	return nil
+}
+
+// GetImageStorageUsage は現在の画像保存量と上限を返す。
+func GetImageStorageUsage() (*models.ImageStorageUsage, error) {
+	db := database.GetDB()
+	usage := &models.ImageStorageUsage{
+		MaxImageBytes:           models.MaxImageBytes,
+		MaxImagePixels:          models.MaxImagePixels,
+		MaxImagesPerTransaction: models.MaxImagesPerTransaction,
+		MaxBytesPerTransaction:  models.MaxImageBytesPerTransaction,
+		MaxBytesPerAccount:      models.MaxImageBytesPerAccount,
+		MaxBytesDatabase:        models.MaxImageBytesDatabase,
+		Accounts:                []models.AccountImageStorageUsage{},
+	}
+	if err := db.QueryRow(
+		"SELECT COUNT(*), COALESCE(SUM(length(data)), 0) FROM transaction_images",
+	).Scan(&usage.ImageCount, &usage.Bytes); err != nil {
+		return nil, fmt.Errorf("画像使用量取得エラー: %w", err)
+	}
+
+	rows, err := db.Query(`
+		SELECT t.account, COUNT(*), COALESCE(SUM(length(ti.data)), 0)
+		FROM transaction_images ti
+		JOIN transactions t ON t.id = ti.transaction_id
+		GROUP BY t.account
+		ORDER BY t.account`)
+	if err != nil {
+		return nil, fmt.Errorf("口座別画像使用量取得エラー: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var account models.AccountImageStorageUsage
+		if err := rows.Scan(&account.Account, &account.ImageCount, &account.Bytes); err != nil {
+			return nil, fmt.Errorf("口座別画像使用量スキャンエラー: %w", err)
+		}
+		usage.Accounts = append(usage.Accounts, account)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("口座別画像使用量取得エラー: %w", err)
+	}
+	return usage, nil
 }
 
 // --- タグ管理 (Agent.md §6.6) ---

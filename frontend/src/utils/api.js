@@ -161,6 +161,7 @@ export async function addTransaction(data) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
   })
+  await throwIfNotOk(res, '取引の追加に失敗しました')
   return await res.json()
 }
 
@@ -179,6 +180,7 @@ export async function updateTransaction(id, data) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
   })
+  await throwIfNotOk(res, '取引の更新に失敗しました')
   return await res.json()
 }
 
@@ -392,6 +394,7 @@ export async function addTransactionImage(transactionId, imageData) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(imageData)
   })
+  await throwIfNotOk(res, '画像の追加に失敗しました')
   return await res.json()
 }
 
