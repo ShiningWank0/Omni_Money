@@ -565,6 +565,7 @@ async function fetchPrivateData() {
 async function handlePageShow(event) {
   if (isWailsMode || !event.persisted) return
 
+  isInitialLoading.value = true
   clearSensitiveClientState()
   try {
     const auth = await getAuthStatus()
@@ -576,6 +577,8 @@ async function handlePageShow(event) {
   } catch (e) {
     console.error('キャッシュ復元後の再認証エラー:', e)
     window.location.replace('/login')
+  } finally {
+    isInitialLoading.value = false
   }
 }
 

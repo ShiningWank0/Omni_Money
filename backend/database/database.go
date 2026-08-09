@@ -274,7 +274,11 @@ func validateCriticalSchema(target *sql.DB) error {
 		objectType string
 		name       string
 	}{
+		{objectType: "index", name: "idx_transactions_account_date_id"},
+		{objectType: "index", name: "idx_transaction_links_child_id"},
 		{objectType: "index", name: "idx_transaction_images_txid"},
+		{objectType: "trigger", name: "validate_transactions_amount_insert"},
+		{objectType: "trigger", name: "validate_transactions_amount_update"},
 		{objectType: "trigger", name: "trg_transaction_images_quota_insert"},
 		{objectType: "trigger", name: "trg_transaction_images_immutable_update"},
 	}

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"omni_money/backend/validation"
 )
 
 // TestRestoreSnapshotE2E は6ステップ復元ロジックのE2Eテスト。
@@ -186,7 +188,11 @@ func TestRestoreSnapshotReappliesCurrentSchemaGuards(t *testing.T) {
 	}
 
 	for _, object := range []string{
+		"idx_transactions_account_date_id",
+		"idx_transaction_links_child_id",
 		"idx_transaction_images_txid",
+		"validate_transactions_amount_insert",
+		"validate_transactions_amount_update",
 		"trg_transaction_images_quota_insert",
 		"trg_transaction_images_immutable_update",
 	} {
@@ -200,6 +206,12 @@ func TestRestoreSnapshotReappliesCurrentSchemaGuards(t *testing.T) {
 		if count != 1 {
 			t.Fatalf("schema guard %s was not restored", object)
 		}
+	}
+	if _, err := GetDB().Exec(
+		"INSERT INTO transactions (account, date, item, type, amount, balance) VALUES ('cash', '2026-01-01', 'too large', 'income', ?, 0)",
+		validation.MaxTransactionAmount+1,
+	); err == nil {
+		t.Fatal("restored amount trigger accepted an out-of-range transaction")
 	}
 
 	if _, err := GetDB().Exec(

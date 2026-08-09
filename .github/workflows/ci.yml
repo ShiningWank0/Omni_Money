@@ -55,7 +55,6 @@ jobs:
       - name: Validate Docker Compose configuration
         env:
           AUTH_PASSWORD_HASH: '$2y$12$abcdefghijklmnopqrstuvabcdefghijklmnopqrstuv12'
-          AI_API_TOKEN: '0123456789abcdef0123456789abcdef'
         run: docker compose config --quiet
 
   frontend:
