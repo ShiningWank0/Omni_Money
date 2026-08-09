@@ -205,8 +205,14 @@ const selectedLevel2 = ref('')
 const selectedLevel3 = ref('')
 const newTagName = ref('')
 
+// ローカルタイムゾーンの今日をYYYY-MM-DDで返す(toISOStringはUTCのため日本時間の深夜に前日となる)
+function localToday() {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+}
+
 const form = ref({
-  date: new Date().toISOString().slice(0, 10),
+  date: localToday(),
   time: '',
   fundItem: '',
   type: 'expense',

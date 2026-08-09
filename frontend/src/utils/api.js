@@ -14,7 +14,7 @@ function getPathname(url) {
 }
 
 async function apiFetch(url, options = {}, config = {}) {
-  const { skipAuthRedirect = false } = config
+  const { skipAuthRedirect = false, skipOkCheck = false, errorMessage = 'リクエストに失敗しました' } = config
   const response = await fetch(url, {
     credentials: 'include',
     ...options
@@ -29,6 +29,11 @@ async function apiFetch(url, options = {}, config = {}) {
     throw new Error('認証が必要です')
   }
 
+  // HTTPエラーを共通的に例外化し、サーバーのエラーメッセージを伝播する
+  if (!skipOkCheck && !response.ok) {
+    throw new Error(await parseError(response, errorMessage))
+  }
+
   return response
 }
 
@@ -41,12 +46,6 @@ async function parseError(response, fallbackMessage) {
   }
 }
 
-async function throwIfNotOk(response, fallbackMessage) {
-  if (!response.ok) {
-    throw new Error(await parseError(response, fallbackMessage))
-  }
-}
-
 /**
  * 認証状態を取得
  * @returns {Promise<object>}
@@ -56,7 +55,7 @@ export async function getAuthStatus() {
     return { authenticated: true }
   }
 
-  const res = await apiFetch('/api/auth/status', {}, { skipAuthRedirect: true })
+  const res = await apiFetch('/api/auth/status', {}, { skipAuthRedirect: true, skipOkCheck: true })
   return await res.json()
 }
 
@@ -74,7 +73,7 @@ export async function login(password) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ password })
-  }, { skipAuthRedirect: true })
+  }, { skipAuthRedirect: true, skipOkCheck: true })
 
   const data = await res.json()
   if (!res.ok) {
@@ -94,12 +93,9 @@ export async function login(password) {
 export async function logout() {
   if (isWails) return
 
-  const res = await apiFetch('/api/auth/logout', {
+  await apiFetch('/api/auth/logout', {
     method: 'POST'
-  }, { skipAuthRedirect: true })
-  if (!res.ok) {
-    throw new Error(await parseError(res, 'ログアウトに失敗しました'))
-  }
+  }, { skipAuthRedirect: true, errorMessage: 'ログアウトに失敗しました' })
 }
 
 /**
@@ -590,8 +586,7 @@ export async function addTransactionLink(transactionId, linkedId) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ linked_id: linkedId })
-  })
-  await throwIfNotOk(res, '紐付けに失敗しました')
+  }, { errorMessage: '紐付けに失敗しました' })
 }
 
 /**
@@ -604,6 +599,5 @@ export async function removeTransactionLink(transactionId, linkedId) {
   if (isWails) {
     return await window.go.main.App.RemoveTransactionLink(transactionId, linkedId)
   }
-  const res = await apiFetch(`/api/transaction_links/${transactionId}/${linkedId}`, { method: 'DELETE' })
-  await throwIfNotOk(res, '紐付け解除に失敗しました')
+  await apiFetch(`/api/transaction_links/${transactionId}/${linkedId}`, { method: 'DELETE' }, { errorMessage: '紐付け解除に失敗しました' })
 }
