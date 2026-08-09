@@ -16,7 +16,10 @@ import (
 	"omni_money/backend/models"
 )
 
-// NewRouter はサーバーモード用のHTTPルーターを作成する
+// NewRouter は公開Web用ルーターを作成する。
+//
+// AI API は意図的にこのルーターへ登録しない。公開WebとAI APIの認証境界を
+// ポート単位で分離し、AIトークンが通常のセッション認証を迂回する経路を防ぐ。
 func NewRouter() http.Handler {
 	sessionManager := middleware.NewSessionManager(middleware.SessionMaxAgeFromEnv())
 	authManager := middleware.NewAuthSessionManager(sessionManager, os.Getenv("AUTH_PASSWORD_HASH"))
@@ -60,12 +63,13 @@ func NewRouter() http.Handler {
 	// 取引紐付けAPI（Agent.md §6.2）
 	mux.HandleFunc("/api/transaction_links/", handleTransactionLinksAPI)
 
-	// AI専用エンドポイント（Agent.md §6.3: POST のみ許可）
-	apiToken := os.Getenv("AI_API_TOKEN")
-	aiMux := http.NewServeMux()
-	aiMux.HandleFunc("/api/v1/ai/transactions", handleAITransactions)
-	aiMux.HandleFunc("/api/v1/ai/analysis", handleAIAnalysis)
-	mux.Handle("/api/v1/ai/", middleware.AIAPIMiddleware(apiToken, aiMux))
+	// 公開WebポートではAI APIを提供しない。認証済みセッションからアクセスしても404。
+	mux.HandleFunc("/api/v1/ai/", http.NotFound)
+
+	// Docker等の死活監視用。家計簿データは返さない。
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
+	})
 
 	// サーバーモード用ミドルウェアの適用
 	var handler http.Handler = mux
@@ -75,6 +79,27 @@ func NewRouter() http.Handler {
 	handler = middleware.CORSMiddleware(handler)
 	handler = middleware.SecurityHeadersMiddleware(handler)
 	handler = middleware.ProxyMiddleware(middleware.NewProxyConfigFromEnv(), handler)
+	return handler
+}
+
+// NewAIRouter はAI専用リスナー用のルーターを作成する。
+// 通常の家計簿API、静的ファイル、ユーザー認証APIは一切登録しない。
+func NewAIRouter(apiToken string) http.Handler {
+	aiMux := http.NewServeMux()
+	aiMux.HandleFunc("/api/v1/ai/transactions", handleAITransactions)
+	aiMux.HandleFunc("/api/v1/ai/analysis", handleAIAnalysis)
+
+	var handler http.Handler = middleware.AIAPIMiddleware(apiToken, aiMux)
+	handler = middleware.MaxBodySizeMiddleware(handler)
+	handler = middleware.RateLimitMiddleware(handler)
+	handler = middleware.SecurityHeadersMiddleware(handler)
+
+	// 分析レスポンスや家計簿データを中間キャッシュへ保存させない。
+	inner := handler
+	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		inner.ServeHTTP(w, r)
+	})
 	return handler
 }
 

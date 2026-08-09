@@ -60,12 +60,19 @@ USER omni
 # 環境変数のデフォルト値
 ENV DB_PATH=/app/data/omni_money.db \
     HOST_IP=0.0.0.0 \
-    PORT=4000
+    PORT=4000 \
+    AI_HOST_IP=127.0.0.1 \
+    AI_PORT=4001 \
+    AI_ALLOW_REMOTE=false
 
-EXPOSE 4000
+EXPOSE 4000 4001
 
 # ヘルスチェック
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -qO- http://localhost:4000/api/accounts || exit 1
+    CMD if [ -n "$TLS_CERT_FILE" ]; then \
+          wget --no-check-certificate -qO- "https://127.0.0.1:${PORT}/healthz"; \
+        else \
+          wget -qO- "http://127.0.0.1:${PORT}/healthz"; \
+        fi || exit 1
 
 ENTRYPOINT ["./omni_money_server"]

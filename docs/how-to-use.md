@@ -118,7 +118,28 @@ Docker の `4000:4000` は、通常すべてのホスト側ネットワークイ
 
 ルーターで TCP 4000 番をインターネットへ直接ポート転送しないでください。自宅外から使う場合は、VPN または HTTPS を終端するリバースプロキシを利用します。
 
-通常の利用では `AI_API_TOKEN` を設定しません。未設定なら AI 用 API は拒否されます。
+通常の利用では `AI_API_TOKEN` を設定しません。未設定なら AI 専用リスナー自体が起動しません。
+
+### 2.3 AI APIを利用する場合の境界
+
+AI APIを有効にすると、公開Webの4000番とは別にAI専用の4001番が使われます。
+
+- 通常起動ではAI専用リスナーは `127.0.0.1:4001` だけで待ち受けます。
+- 公開Webの `/api/v1/ai/*` は利用できず、ログイン済みでも404になります。
+- AI専用ポートには通常の家計簿API、ログインAPI、画面配信を登録しません。
+- AI専用の2エンドポイントは32文字以上のBearerトークンとPOSTを必須とします。
+- クラウドLLMへAIトークンを渡さず、ローカルの仲介プロセスが `127.0.0.1:4001` を呼び出します。
+
+Dockerではコンテナ内のリスナーを `0.0.0.0:4001` にする必要がありますが、ホスト側の公開先は必ずlocalhostへ限定します。次のオプションを通常の `docker run` に追加します。
+
+```bash
+-p 127.0.0.1:4001:4001 \
+-e AI_API_TOKEN='<32文字以上のランダム値>' \
+-e AI_HOST_IP=0.0.0.0 \
+-e AI_ALLOW_REMOTE=true
+```
+
+`-p 4001:4001` のようにホストIPを省略するとLAN側にも公開されるため使用しません。同じDockerネットワーク内の別コンテナからはコンテナの4001番へ到達できるため、信頼できないコンテナを同じネットワークへ参加させないでください。
 
 ## 3. Mac の Colima で Docker 版を使う
 
@@ -178,7 +199,7 @@ docker run -d \
   -e DB_PATH=/app/data/omni_money.db \
   -p 127.0.0.1:4000:4000 \
   -v "$HOME/OmniMoneyServer/data:/app/data" \
-  --health-cmd='wget -qO- http://127.0.0.1:4000/api/auth/status >/dev/null || exit 1' \
+  --health-cmd='wget -qO- http://127.0.0.1:4000/healthz >/dev/null || exit 1' \
   --health-interval=30s \
   --health-timeout=5s \
   --health-start-period=10s \
@@ -299,7 +320,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - wget -qO- http://127.0.0.1:4000/api/auth/status >/dev/null || exit 1
+        - wget -qO- http://127.0.0.1:4000/healthz >/dev/null || exit 1
       interval: 30s
       timeout: 5s
       start_period: 10s
@@ -310,6 +331,8 @@ services:
 7. 起動しない場合は、アプリの Logs で `AUTH_PASSWORD_HASH` と `/app/data` の権限エラーを確認します。
 
 本番運用では `latest` ではなく `0.1.11` のようなバージョンタグを指定すると、再デプロイ時に意図せずバージョンが変わるのを防げます。
+
+このTrueNAS例はAI用4001番を公開しません。AI APIが不要ならこのまま使用してください。TrueNASホスト上のローカルプロセスからAI APIを使う場合も、ホストIPを `127.0.0.1` に限定して4001番を公開できることを確認できない限り、AI用ポートを追加しないでください。
 
 ### 4.4 Mac から TrueNAS へアクセスする
 

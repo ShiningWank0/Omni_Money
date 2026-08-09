@@ -34,6 +34,11 @@ tmp_wails/
 # Logs
 logs/
 
+# Local secrets
+.env
+.env.*
+!.env.example
+
 # Backups
 backups/
 build/bin/
