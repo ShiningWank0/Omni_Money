@@ -170,33 +170,55 @@ type aiAuditRecord struct {
 	MatchedCount                  *int   `json:"matched_count,omitempty"`
 	ReturnedCount                 *int   `json:"returned_count,omitempty"`
 	IdempotencyReplayed           bool   `json:"idempotency_replayed,omitempty"`
+	Occurrences                   uint64 `json:"occurrences,omitempty"`
+	FirstSeen                     string `json:"first_seen,omitempty"`
+	LastSeen                      string `json:"last_seen,omitempty"`
 }
 
 // AIAPIMiddleware authenticates scoped, expiring credentials for the isolated
 // AI listener. It never logs bearer tokens, request bodies, memos, or amounts.
 func AIAPIMiddleware(store *aicredentials.Store, auditStore *audithmac.Store, next http.Handler) http.Handler {
+	return newAIAPIMiddleware(store, auditStore, next, time.Now, writeAIAuditLog)
+}
+
+func newAIAPIMiddleware(
+	store *aicredentials.Store,
+	auditStore *audithmac.Store,
+	next http.Handler,
+	now aiNowFunc,
+	emit aiAuditLogFunc,
+) http.Handler {
+	if now == nil {
+		now = time.Now
+	}
 	limiter := newAICredentialRateLimiter()
+	failedAuthAudits := newAIFailedAuthAuditAggregator()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/v1/ai/") {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		started := time.Now()
+		started := now()
 		operation := aiOperation(r.URL.Path)
 		remoteIP := remoteHost(r.RemoteAddr)
 		credentialID := ""
 		mtlsClientFingerprint := peerCertificateFingerprint(r)
 		var requestScope *aiRequestAuditScope
 		audit := func(allowed bool, status int, reason string) {
+			completed := now()
+			duration := completed.Sub(started).Milliseconds()
+			if duration < 0 {
+				duration = 0
+			}
 			record := aiAuditRecord{
-				Timestamp:        time.Now().UTC().Format(time.RFC3339Nano),
+				Timestamp:        completed.UTC().Format(time.RFC3339Nano),
 				CredentialID:     credentialID,
 				Operation:        operation,
 				RemoteIP:         remoteIP,
 				Allowed:          allowed,
 				Status:           status,
-				DurationMS:       time.Since(started).Milliseconds(),
+				DurationMS:       duration,
 				Reason:           reason,
 				MTLSClientSHA256: mtlsClientFingerprint,
 			}
@@ -213,8 +235,11 @@ func AIAPIMiddleware(store *aicredentials.Store, auditStore *audithmac.Store, ne
 				record.ReturnedCount = requestScope.returnedCount
 				record.IdempotencyReplayed = requestScope.idempotencyReplayed
 			}
-			if encoded, err := json.Marshal(record); err == nil {
-				log.Printf("AI_API_AUDIT %s", encoded)
+			if emit == nil {
+				return
+			}
+			for _, emittedRecord := range failedAuthAudits.record(record, completed) {
+				emit(emittedRecord)
 			}
 		}
 
@@ -224,7 +249,7 @@ func AIAPIMiddleware(store *aicredentials.Store, auditStore *audithmac.Store, ne
 			audit(false, http.StatusServiceUnavailable, "audit_key_unavailable")
 			return
 		}
-		if limiter.blocked(failedAuthenticationKey, aiFailedAuthRequestsPerMinute, time.Now()) {
+		if limiter.blocked(failedAuthenticationKey, aiFailedAuthRequestsPerMinute, now()) {
 			w.Header().Set("Retry-After", "60")
 			writeJSONError(w, "リクエストが多すぎます", http.StatusTooManyRequests)
 			audit(false, http.StatusTooManyRequests, "authentication_rate_limited")
@@ -232,7 +257,7 @@ func AIAPIMiddleware(store *aicredentials.Store, auditStore *audithmac.Store, ne
 		}
 		providedToken, ok := bearerToken(r.Header.Get("Authorization"))
 		if !ok || store == nil {
-			if !limiter.allow(failedAuthenticationKey, aiFailedAuthRequestsPerMinute, time.Now()) {
+			if !limiter.allow(failedAuthenticationKey, aiFailedAuthRequestsPerMinute, now()) {
 				w.Header().Set("Retry-After", "60")
 				writeJSONError(w, "リクエストが多すぎます", http.StatusTooManyRequests)
 				audit(false, http.StatusTooManyRequests, "authentication_rate_limited")
@@ -242,9 +267,9 @@ func AIAPIMiddleware(store *aicredentials.Store, auditStore *audithmac.Store, ne
 			audit(false, http.StatusUnauthorized, "authentication_failed")
 			return
 		}
-		credential, err := store.Authenticate(providedToken, time.Now())
+		credential, err := store.Authenticate(providedToken, now())
 		if err != nil {
-			if !limiter.allow(failedAuthenticationKey, aiFailedAuthRequestsPerMinute, time.Now()) {
+			if !limiter.allow(failedAuthenticationKey, aiFailedAuthRequestsPerMinute, now()) {
 				w.Header().Set("Retry-After", "60")
 				writeJSONError(w, "リクエストが多すぎます", http.StatusTooManyRequests)
 				audit(false, http.StatusTooManyRequests, "authentication_rate_limited")
@@ -279,7 +304,7 @@ func AIAPIMiddleware(store *aicredentials.Store, auditStore *audithmac.Store, ne
 			return
 		}
 
-		if !limiter.allow(credential.ID+"\x00"+remoteIP+"\x00"+operation, aiRequestLimit(r.URL.Path), time.Now()) {
+		if !limiter.allow(credential.ID+"\x00"+remoteIP+"\x00"+operation, aiRequestLimit(r.URL.Path), now()) {
 			w.Header().Set("Retry-After", "60")
 			writeJSONError(w, "リクエストが多すぎます", http.StatusTooManyRequests)
 			audit(false, http.StatusTooManyRequests, "rate_limited")
@@ -292,6 +317,12 @@ func AIAPIMiddleware(store *aicredentials.Store, auditStore *audithmac.Store, ne
 		next.ServeHTTP(recorder, r.WithContext(ctx))
 		audit(recorder.status < http.StatusBadRequest, recorder.status, "")
 	})
+}
+
+func writeAIAuditLog(record aiAuditRecord) {
+	if encoded, err := json.Marshal(record); err == nil {
+		log.Printf("AI_API_AUDIT %s", encoded)
+	}
 }
 
 func peerCertificateFingerprint(r *http.Request) string {
