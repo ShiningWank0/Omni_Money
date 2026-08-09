@@ -370,13 +370,37 @@ func handleAITransactions(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), status)
 		return
 	}
-	createdCount := 1
-	middleware.RecordAIRequestAudit(r.Context(), req.Account, req.Date, req.Date, false, false, nil, &createdCount)
-
-	resp, err := core.AddTransaction(req)
+	idempotencyKeyHash, err := aiIdempotencyKeyHash(r.Header)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	result, err := core.AddAITransaction(r.Context(), req, core.AITransactionIdentity{
+		CredentialID:          credential.ID,
+		IdempotencyKeySHA256:  idempotencyKeyHash,
+		RequestSHA256:         canonicalAITransactionDigest(req),
+		MaxTransactionsPerDay: credential.MaxTransactionsPerDay,
+		Now:                   time.Now(),
+	})
+	if err != nil {
+		if errors.Is(err, core.ErrAIIdempotencyConflict) {
+			jsonError(w, "Idempotency-Keyは別のリクエストで使用済みです", http.StatusConflict)
+			return
+		}
+		var quotaError *core.AIDailyQuotaExceededError
+		if errors.As(err, &quotaError) {
+			w.Header().Set("Retry-After", strconv.Itoa(quotaError.RetryAfterSeconds))
+			jsonError(w, "AI経由の取引追加が日次上限に達しました", http.StatusTooManyRequests)
+			return
+		}
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	createdCount := 1
+	middleware.RecordAIRequestAudit(r.Context(), req.Account, req.Date, req.Date, false, false, nil, &createdCount)
+	if result.Replayed {
+		middleware.RecordAIIdempotencyReplay(r.Context())
+		w.Header().Set("Idempotency-Replayed", "true")
 	}
 
 	jsonResponse(w, map[string]interface{}{
@@ -385,7 +409,7 @@ func handleAITransactions(w http.ResponseWriter, r *http.Request) {
 			ID      int64  `json:"id"`
 			Account string `json:"account"`
 			Date    string `json:"date"`
-		}{ID: resp.ID, Account: resp.Account, Date: resp.Date},
+		}{ID: result.Transaction.ID, Account: result.Transaction.Account, Date: result.Transaction.Date},
 	}, http.StatusCreated)
 }
 

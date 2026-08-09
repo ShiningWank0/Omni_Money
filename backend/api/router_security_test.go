@@ -514,18 +514,24 @@ func TestPublicTransactionDoesNotUseAIDateWindow(t *testing.T) {
 func TestAIConsoleProxyKeepsTokenServerSide(t *testing.T) {
 	var gotAuthorization string
 	var gotRelayMarker string
+	var gotIdempotencyKey string
 	var gotHost string
 	var gotPath string
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		gotAuthorization = r.Header.Get("Authorization")
 		gotRelayMarker = r.Header.Get("X-Omni-AI-Console-Relay")
+		gotIdempotencyKey = r.Header.Get("Idempotency-Key")
 		gotHost = r.URL.Host
 		gotPath = r.URL.Path
 		return &http.Response{
 			StatusCode: http.StatusCreated,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
-			Request:    r,
+			Header: http.Header{
+				"Content-Type":         []string{"application/json"},
+				"Idempotency-Replayed": []string{"true"},
+				"Retry-After":          []string{"123"},
+			},
+			Body:    io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Request: r,
 		}, nil
 	})}
 	originalClient := aiConsoleHTTPClient
@@ -543,6 +549,7 @@ func TestAIConsoleProxyKeepsTokenServerSide(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(originalLogOutput) })
 
 	req := httptest.NewRequest(http.MethodPost, "/api/ai-console/transactions", strings.NewReader(`{"amount":100}`))
+	req.Header.Set("Idempotency-Key", "console-idempotency-key-0001")
 	recorder := httptest.NewRecorder()
 	handleAIConsoleProxy("/api/v1/ai/transactions").ServeHTTP(recorder, req)
 
@@ -551,6 +558,12 @@ func TestAIConsoleProxyKeepsTokenServerSide(t *testing.T) {
 	}
 	if gotAuthorization != "Bearer "+testAIToken {
 		t.Fatalf("Authorization = %q", gotAuthorization)
+	}
+	if gotIdempotencyKey != "console-idempotency-key-0001" {
+		t.Fatalf("Idempotency-Key = %q", gotIdempotencyKey)
+	}
+	if recorder.Header().Get("Idempotency-Replayed") != "true" || recorder.Header().Get("Retry-After") != "123" {
+		t.Fatalf("safe upstream headers were not relayed: %v", recorder.Header())
 	}
 	if gotHost != "127.0.0.1:43123" {
 		t.Fatalf("host = %q, want fixed loopback target", gotHost)
@@ -638,6 +651,7 @@ func postAITransaction(t *testing.T, handler http.Handler, body string) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/transactions", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testAIToken)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "test-idempotency-key-0001")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusCreated {

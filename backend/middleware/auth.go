@@ -31,14 +31,24 @@ type aiCredentialContextKey struct{}
 type aiAuditScopeContextKey struct{}
 
 type aiRequestAuditScope struct {
-	hmacKey          [sha256.Size]byte
-	accountReference string
-	startDate        string
-	endDate          string
-	includeDetails   bool
-	includeMemo      bool
-	matchedCount     *int
-	returnedCount    *int
+	hmacKey             [sha256.Size]byte
+	accountReference    string
+	startDate           string
+	endDate             string
+	includeDetails      bool
+	includeMemo         bool
+	matchedCount        *int
+	returnedCount       *int
+	idempotencyReplayed bool
+}
+
+// RecordAIIdempotencyReplay marks a successful write as a replay without
+// attaching the idempotency key or request content to the audit record.
+func RecordAIIdempotencyReplay(ctx context.Context) {
+	scope, ok := ctx.Value(aiAuditScopeContextKey{}).(*aiRequestAuditScope)
+	if ok && scope != nil {
+		scope.idempotencyReplayed = true
+	}
 }
 
 // AICredentialFromContext returns the authenticated AI credential attached by
@@ -131,22 +141,23 @@ func (limiter *aiCredentialRateLimiter) blocked(key string, limit int, now time.
 }
 
 type aiAuditRecord struct {
-	Timestamp        string `json:"timestamp"`
-	CredentialID     string `json:"credential_id,omitempty"`
-	Operation        string `json:"operation"`
-	RemoteIP         string `json:"remote_ip,omitempty"`
-	Allowed          bool   `json:"allowed"`
-	Status           int    `json:"status"`
-	DurationMS       int64  `json:"duration_ms"`
-	Reason           string `json:"reason,omitempty"`
-	MTLSClientSHA256 string `json:"mtls_client_sha256,omitempty"`
-	AccountReference string `json:"account_hmac_sha256,omitempty"`
-	StartDate        string `json:"start_date,omitempty"`
-	EndDate          string `json:"end_date,omitempty"`
-	IncludeDetails   bool   `json:"include_details,omitempty"`
-	IncludeMemo      bool   `json:"include_memo,omitempty"`
-	MatchedCount     *int   `json:"matched_count,omitempty"`
-	ReturnedCount    *int   `json:"returned_count,omitempty"`
+	Timestamp           string `json:"timestamp"`
+	CredentialID        string `json:"credential_id,omitempty"`
+	Operation           string `json:"operation"`
+	RemoteIP            string `json:"remote_ip,omitempty"`
+	Allowed             bool   `json:"allowed"`
+	Status              int    `json:"status"`
+	DurationMS          int64  `json:"duration_ms"`
+	Reason              string `json:"reason,omitempty"`
+	MTLSClientSHA256    string `json:"mtls_client_sha256,omitempty"`
+	AccountReference    string `json:"account_hmac_sha256,omitempty"`
+	StartDate           string `json:"start_date,omitempty"`
+	EndDate             string `json:"end_date,omitempty"`
+	IncludeDetails      bool   `json:"include_details,omitempty"`
+	IncludeMemo         bool   `json:"include_memo,omitempty"`
+	MatchedCount        *int   `json:"matched_count,omitempty"`
+	ReturnedCount       *int   `json:"returned_count,omitempty"`
+	IdempotencyReplayed bool   `json:"idempotency_replayed,omitempty"`
 }
 
 // AIAPIMiddleware authenticates scoped, expiring credentials for the isolated
@@ -185,6 +196,7 @@ func AIAPIMiddleware(store *aicredentials.Store, next http.Handler) http.Handler
 				record.IncludeMemo = requestScope.includeMemo
 				record.MatchedCount = requestScope.matchedCount
 				record.ReturnedCount = requestScope.returnedCount
+				record.IdempotencyReplayed = requestScope.idempotencyReplayed
 			}
 			if encoded, err := json.Marshal(record); err == nil {
 				log.Printf("AI_API_AUDIT %s", encoded)

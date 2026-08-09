@@ -199,6 +199,9 @@ func forwardAIConsoleRequest(w http.ResponseWriter, r *http.Request, targetURL, 
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Omni-AI-Console-Relay", "1")
+	for _, value := range r.Header.Values("Idempotency-Key") {
+		request.Header.Add("Idempotency-Key", value)
+	}
 
 	response, err := client.Do(request)
 	if err != nil {
@@ -219,6 +222,12 @@ func forwardAIConsoleRequest(w http.ResponseWriter, r *http.Request, targetURL, 
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	if value := response.Header.Get("Idempotency-Replayed"); value != "" {
+		w.Header().Set("Idempotency-Replayed", value)
+	}
+	if value := response.Header.Get("Retry-After"); value != "" {
+		w.Header().Set("Retry-After", value)
+	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = w.Write(responseBody)
 }

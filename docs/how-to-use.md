@@ -149,10 +149,13 @@ go run ./cmd/ai-credential issue \
   --analysis-start-date '<YYYY-MM-DD>' \
   --analysis-end-date '<YYYY-MM-DD>' \
   --max-analysis-days 30 \
-  --max-results 100 > secrets/ai_console_token
+  --max-results 100 \
+  --max-transactions-per-day 100 > secrets/ai_console_token
 ```
 
 `--tag-id` は、その資格情報で取引へ付与したり分析条件に指定したりできる既存タグIDです。必要なタグだけを繰り返し指定してください。省略した場合はタグ操作を許可しません。
+
+AIの取引追加は16〜128文字の `Idempotency-Key` ヘッダーを必須とします。タイムアウト等で結果が不明な場合は、同じ本文と同じkeyを再送してください。再送は同じ結果を返し、日次上限を重ねて消費しません。同じkeyを別の本文へ再利用すると409、`--max-transactions-per-day` で指定したUTC日次上限を超えると `Retry-After` 付きの429になります。raw keyはDBや監査ログへ保存されません。
 
 Dockerでは資格情報、console token、CA、サーバー証明書、クライアント証明書をリポジトリ外に準備し、`docker compose -f compose.yaml -f compose.ai.yaml up -d --build` で起動します。コンテナ内の非ループバック待受はTLS 1.3とmTLSが揃わない限り起動を拒否し、ホスト側は `127.0.0.1:4001` に限定されます。証明書の検証名は既定で `omni-money-ai` です。
 

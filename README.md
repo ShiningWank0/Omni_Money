@@ -148,7 +148,8 @@ go run ./cmd/ai-credential issue \
   --analysis-start-date '<YYYY-MM-DD>' \
   --analysis-end-date '<YYYY-MM-DD>' \
   --max-analysis-days 30 \
-  --max-results 100 > secrets/ai_console_token
+  --max-results 100 \
+  --max-transactions-per-day 100 > secrets/ai_console_token
 
 AUTH_PASSWORD_HASH='<bcrypt-hash>' \
 AI_CREDENTIALS_FILE="$PWD/secrets/ai_credentials.json" \
@@ -261,6 +262,18 @@ curl -X POST http://127.0.0.1:4001/api/v1/ai/analysis \
   -d '{}'
 ```
 
+取引追加には、再送しても重複登録されないよう、要求ごとに生成した16〜128文字の
+`Idempotency-Key` が必須です。通信結果が不明な場合は同じ本文と同じkeyで再送してください。
+同じkeyを異なる本文へ再利用すると409、資格情報ごとのUTC日次上限を超えると429になります。
+
+```bash
+curl -X POST http://127.0.0.1:4001/api/v1/ai/transactions \
+  -H 'Authorization: Bearer <AI_CREDENTIAL>' \
+  -H 'Idempotency-Key: <RANDOM-REQUEST-ID>' \
+  -H 'Content-Type: application/json' \
+  -d '{"account":"現金","date":"2026-08-09","item":"食費","type":"expense","amount":1000}'
+```
+
 利用可能なエンドポイント:
 
 | Method | Path | 説明 |
@@ -271,7 +284,7 @@ curl -X POST http://127.0.0.1:4001/api/v1/ai/analysis \
 AI API では `POST` のみ許可され、`GET`、`PUT`、`DELETE` などは拒否されます。
 公開Webポート `:4000/api/v1/ai/*` ではAIトークンを受け付けません。
 
-資格情報のscopeは `transactions:create`、`analysis:summary`、`analysis:transactions`、`analysis:memo`、`console:relay` です。分析は既定で集計だけを返し、資格情報で許可された単一口座・固定日付範囲の中で最大30日（資格情報の上限が短ければその日数）へ自動的に絞ります。日付窓をずらして資格情報の固定範囲外を読むことはできません。タグの付与とタグ指定分析は、資格情報に列挙したタグIDだけを許可します。明細は `include_transactions: true`、メモはさらに `include_memo: true` と対応scopeが必要で、最大500件のカーソルページングです。
+資格情報のscopeは `transactions:create`、`analysis:summary`、`analysis:transactions`、`analysis:memo`、`console:relay` です。AI取引の日次上限は `--max-transactions-per-day`（既定100、1〜1000）で設定し、成功件数とidempotency情報はSQLiteへ原子的に保存されます。raw idempotency keyは保存・記録しません。分析は既定で集計だけを返し、資格情報で許可された単一口座・固定日付範囲の中で最大30日（資格情報の上限が短ければその日数）へ自動的に絞ります。日付窓をずらして資格情報の固定範囲外を読むことはできません。タグの付与とタグ指定分析は、資格情報に列挙したタグIDだけを許可します。明細は `include_transactions: true`、メモはさらに `include_memo: true` と対応scopeが必要で、最大500件のカーソルページングです。
 
 資格情報の更新は、ホスト上の通常ファイルを直接参照する構成では `rotate` / `revoke` 後に `SIGHUP` を送ると無停止で反映されます。不正な置換ファイルは拒否され、直前の有効な設定を維持します。Compose Secretsは実行中コンテナ内で置換内容が見えない場合があるため、更新後に `docker compose -f compose.yaml -f compose.ai.yaml up -d --force-recreate omni-money` を実行してください。APIアクセスはcredential ID、mTLS証明書fingerprint、HMAC化した口座参照、期間、明細種別、該当／返却件数を、Web中継は実クライアントIPを構造化監査ログへ残します。資格情報操作も構造化監査し、トークン・本文・項目・メモ・金額は記録しません。運用環境では標準出力をアクセス制限された永続ログへ転送してください。
 

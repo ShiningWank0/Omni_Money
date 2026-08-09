@@ -219,16 +219,7 @@ func getTransactionTagsForFilteredTransactions(db *sql.DB, whereClause string, a
 // INSERT時のbalanceは仮値（0）で挿入する。
 func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse, error) {
 	db := database.GetDB()
-
-	date, err := parseTransactionDate(req.Date, req.Time)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := validateTransactionData(req); err != nil {
-		return nil, err
-	}
-	preparedImages, err := prepareTransactionImages(req.Images)
+	prepared, err := prepareTransactionInsert(req)
 	if err != nil {
 		return nil, err
 	}
@@ -239,10 +230,50 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 	}
 	defer tx.Rollback()
 
-	// INSERT（balanceは仮値0。直後にrecalculateBalanceで正しい値に上書きされる）
+	resp, err := addPreparedTransactionIn(tx, prepared)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("トランザクションコミットエラー: %w", err)
+	}
+	resp.Tags, _ = GetTransactionTags(resp.ID)
+	database.AutoSnapshot()
+	return resp, nil
+}
+
+type preparedTransactionInsert struct {
+	request models.TransactionRequest
+	date    time.Time
+	images  []preparedTransactionImage
+}
+
+// prepareTransactionInsert performs all validation and expensive image
+// decoding before a SQL write transaction is opened. Both UI and AI writes use
+// this exact path so their ledger semantics remain identical.
+func prepareTransactionInsert(req models.TransactionRequest) (preparedTransactionInsert, error) {
+	date, err := parseTransactionDate(req.Date, req.Time)
+	if err != nil {
+		return preparedTransactionInsert{}, err
+	}
+	if err := validateTransactionData(req); err != nil {
+		return preparedTransactionInsert{}, err
+	}
+	preparedImages, err := prepareTransactionImages(req.Images)
+	if err != nil {
+		return preparedTransactionInsert{}, err
+	}
+	return preparedTransactionInsert{request: req, date: date, images: preparedImages}, nil
+}
+
+// addPreparedTransactionIn mutates the ledger using the caller-owned SQL
+// transaction. The caller alone decides whether to commit, which lets the AI
+// path atomically combine idempotency, quota accounting, and the ledger write.
+func addPreparedTransactionIn(tx *sql.Tx, prepared preparedTransactionInsert) (*models.TransactionResponse, error) {
+	req := prepared.request
 	result, err := tx.Exec(
 		"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, ?)",
-		req.Account, date, req.Item, req.Type, req.Amount, req.Memo,
+		req.Account, prepared.date, req.Item, req.Type, req.Amount, req.Memo,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("取引追加エラー: %w", err)
@@ -253,42 +284,29 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 		return nil, fmt.Errorf("取引ID取得エラー: %w", err)
 	}
 
-	// 画像は検証・クォータ確認・取引作成を同じSQL transactionで確定する。
-	if err := insertPreparedTransactionImages(tx, id, preparedImages); err != nil {
+	if err := insertPreparedTransactionImages(tx, id, prepared.images); err != nil {
 		return nil, err
 	}
-
-	// タグ紐付け処理
-	if len(req.Tags) > 0 {
-		for _, tagID := range req.Tags {
-			if _, err := tx.Exec("INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)", id, tagID); err != nil {
-				return nil, fmt.Errorf("タグ紐付けエラー: %w", err)
-			}
+	for _, tagID := range req.Tags {
+		if _, err := tx.Exec("INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)", id, tagID); err != nil {
+			return nil, fmt.Errorf("タグ紐付けエラー: %w", err)
 		}
 	}
 
-	// バックデート挿入も含め、口座全体の残高を時系列順に再計算
 	if err := recalculateBalanceIn(tx, req.Account); err != nil {
 		return nil, fmt.Errorf("残高再計算エラー: %w", err)
 	}
 
-	// 再計算後の正しい値を取得して返却
 	var inserted models.Transaction
 	var dateStr string
-	err = tx.QueryRow(
+	if err := tx.QueryRow(
 		"SELECT id, account, date, item, type, amount, balance, memo FROM transactions WHERE id = ?", id,
-	).Scan(&inserted.ID, &inserted.Account, &dateStr, &inserted.Item, &inserted.Type, &inserted.Amount, &inserted.Balance, &inserted.Memo)
-	if err != nil {
+	).Scan(&inserted.ID, &inserted.Account, &dateStr, &inserted.Item, &inserted.Type, &inserted.Amount, &inserted.Balance, &inserted.Memo); err != nil {
 		return nil, fmt.Errorf("追加後データ取得エラー: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("トランザクションコミットエラー: %w", err)
-	}
 	inserted.Date = parseDate(dateStr)
-	resp := inserted.ToResponse()
-	resp.Tags, _ = GetTransactionTags(id)
-	database.AutoSnapshot()
-	return &resp, nil
+	response := inserted.ToResponse()
+	return &response, nil
 }
 
 // UpdateTransaction は既存の取引を更新する
