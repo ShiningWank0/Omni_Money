@@ -253,6 +253,7 @@ func TestAITransactionRequiresFields(t *testing.T) {
 		{name: "item", mutate: func(req *models.TransactionRequest) { req.Item = " " }},
 		{name: "type", mutate: func(req *models.TransactionRequest) { req.Type = "other" }},
 		{name: "amount", mutate: func(req *models.TransactionRequest) { req.Amount = 0 }},
+		{name: "amount上限超過", mutate: func(req *models.TransactionRequest) { req.Amount = maxAITransactionAmount + 1 }},
 	}
 
 	for _, tt := range tests {
@@ -261,6 +262,28 @@ func TestAITransactionRequiresFields(t *testing.T) {
 			tt.mutate(&req)
 			if _, err := normalizeAndValidateAITransaction(req, now); err == nil {
 				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+func TestAIConsoleRelayHostHonorsLoopbackAIHostIP(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "未設定", value: "", want: "127.0.0.1"},
+		{name: "IPv6ループバック", value: "::1", want: "::1"},
+		{name: "非ループバックはフォールバック", value: "0.0.0.0", want: "127.0.0.1"},
+		{name: "外部アドレスはフォールバック", value: "192.168.1.10", want: "127.0.0.1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AI_HOST_IP", tt.value)
+			if got := aiConsoleRelayHost(); got != tt.want {
+				t.Fatalf("aiConsoleRelayHost() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -298,6 +321,99 @@ func TestAITransactionRejectsInvalidTagsAndImages(t *testing.T) {
 	if _, err := validateAITransactionReferences(unsafeFilename); err == nil {
 		t.Fatal("expected unsafe filename validation error")
 	}
+}
+
+func TestAIAnalysisRejectsInvalidFilters(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "invalid type", body: `{"type":"other"}`},
+		{name: "invalid start date", body: `{"start_date":"2026/01/01"}`},
+		{name: "invalid end date", body: `{"end_date":"2026-02-30"}`},
+		{name: "reversed date range", body: `{"start_date":"2026-02-01","end_date":"2026-01-31"}`},
+		{name: "zero tag id", body: `{"tag_ids":[0]}`},
+		{name: "negative tag id", body: `{"tag_ids":[-1]}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := NewAIRouter(testAIToken)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/analysis", strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer "+testAIToken)
+			req.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+
+			handler.ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+			}
+			if !strings.Contains(recorder.Body.String(), `"error"`) {
+				t.Fatalf("response does not contain Japanese validation error: %s", recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestDeleteTransactionImageRequiresMatchingTransaction(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "omni_money_test.db")
+	if err := database.InitDB(dbPath); err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	t.Cleanup(database.CloseDB)
+
+	tx1 := insertAPITestTransaction(t, "cash")
+	tx2 := insertAPITestTransaction(t, "bank")
+	result, err := database.GetDB().Exec(
+		"INSERT INTO transaction_images (transaction_id, filename, data, mime_type) VALUES (?, ?, ?, ?)",
+		tx1, "receipt.png", []byte("image"), "image/png",
+	)
+	if err != nil {
+		t.Fatalf("image insert failed: %v", err)
+	}
+	imageID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("image LastInsertId failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/transaction_images/%d/%d", tx2, imageID), nil)
+	recorder := httptest.NewRecorder()
+	handleTransactionImages(recorder, req)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("mismatched delete status = %d, want %d; body=%s", recorder.Code, http.StatusNotFound, recorder.Body.String())
+	}
+	var count int
+	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transaction_images WHERE id = ?", imageID).Scan(&count); err != nil {
+		t.Fatalf("image count query failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("image count after mismatched delete = %d, want 1", count)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/transaction_images/%d/%d", tx1, imageID), nil)
+	recorder = httptest.NewRecorder()
+	handleTransactionImages(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("matching delete status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+}
+
+func insertAPITestTransaction(t *testing.T, account string) int64 {
+	t.Helper()
+	result, err := database.GetDB().Exec(
+		"INSERT INTO transactions (account, date, item, type, amount, balance) VALUES (?, '2026-01-01', 'test', 'expense', 1, -1)",
+		account,
+	)
+	if err != nil {
+		t.Fatalf("transaction insert failed: %v", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("transaction LastInsertId failed: %v", err)
+	}
+	return id
 }
 
 func TestPublicTransactionDoesNotUseAIDateWindow(t *testing.T) {

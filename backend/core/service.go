@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -37,6 +38,9 @@ func GetAccounts() ([]string, error) {
 		}
 		accounts = append(accounts, account)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("口座リスト行取得エラー: %w", err)
+	}
 	return accounts, nil
 }
 
@@ -66,6 +70,9 @@ func GetItems(account string) ([]string, error) {
 			return nil, fmt.Errorf("項目スキャンエラー: %w", err)
 		}
 		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("項目リスト行取得エラー: %w", err)
 	}
 	return items, nil
 }
@@ -104,6 +111,9 @@ func GetTransactions(account string, search string) ([]models.TransactionRespons
 		resp := t.ToResponse()
 		resp.Tags, _ = GetTransactionTags(int64(t.ID))
 		transactions = append(transactions, resp)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("取引履歴行取得エラー: %w", err)
 	}
 
 	if transactions == nil {
@@ -150,9 +160,8 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 	// 画像添付処理
 	if len(req.Images) > 0 {
 		for _, img := range req.Images {
-			if err := addTransactionImage(tx, id, img); err != nil {
-				// 画像添付エラーは警告として続行
-				fmt.Printf("画像添付警告 (tx=%d): %v\n", id, err)
+			if _, err := addTransactionImage(tx, id, img); err != nil {
+				return nil, fmt.Errorf("画像添付エラー: %w", err)
 			}
 		}
 	}
@@ -326,7 +335,10 @@ func GetBalanceHistoryFiltered(fundItems []string) (*models.BalanceHistoryRespon
 	db := database.GetDB()
 
 	// クレジットカード設定を取得
-	creditCardItems, _ := GetCreditCardSettings()
+	creditCardItems, err := GetCreditCardSettings()
+	if err != nil {
+		return nil, fmt.Errorf("クレジットカード設定取得エラー: %w", err)
+	}
 	creditCardMap := make(map[string]bool)
 	for _, item := range creditCardItems {
 		creditCardMap[item] = true
@@ -416,12 +428,15 @@ func getStringSliceSetting(key string) ([]string, error) {
 	db := database.GetDB()
 	var value string
 	err := db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&value)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		return []string{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("設定取得エラー: %w", err)
 	}
 	var items []string
 	if err := json.Unmarshal([]byte(value), &items); err != nil {
-		return []string{}, nil
+		return nil, fmt.Errorf("設定JSON解析エラー: %w", err)
 	}
 	return items, nil
 }
@@ -474,7 +489,13 @@ func BackupToCSV() (string, error) {
 			memo,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("バックアップ行取得エラー: %w", err)
+	}
 	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return "", fmt.Errorf("CSV生成エラー: %w", err)
+	}
 
 	return builder.String(), nil
 }
@@ -787,6 +808,7 @@ func validateTransactionData(req models.TransactionRequest) error {
 func buildBalanceHistory(rows interface {
 	Next() bool
 	Scan(...interface{}) error
+	Err() error
 }) (*models.BalanceHistoryResponse, error) {
 	accountBalances := make(map[string]map[string]int64)
 	allDates := make(map[string]bool)
@@ -810,6 +832,9 @@ func buildBalanceHistory(rows interface {
 		}
 		accountBalances[account][dateKey] = balance
 		allDates[dateKey] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("残高履歴行取得エラー: %w", err)
 	}
 
 	// 日付をソート
@@ -848,10 +873,10 @@ func buildBalanceHistory(rows interface {
 // --- 画像管理 (Agent.md §6.5) ---
 
 // addTransactionImage は取引に画像を追加する（内部ヘルパー）
-func addTransactionImage(db sqlExecutor, transactionID int64, img models.TransactionImageRequest) error {
+func addTransactionImage(db sqlExecutor, transactionID int64, img models.TransactionImageRequest) (sql.Result, error) {
 	data, err := base64.StdEncoding.DecodeString(img.Data)
 	if err != nil {
-		return fmt.Errorf("Base64デコードエラー: %w", err)
+		return nil, fmt.Errorf("Base64デコードエラー: %w", err)
 	}
 
 	mimeType := img.MimeType
@@ -859,29 +884,30 @@ func addTransactionImage(db sqlExecutor, transactionID int64, img models.Transac
 		mimeType = guessMimeType(img.Filename)
 	}
 
-	_, err = db.Exec(
+	result, err := db.Exec(
 		"INSERT INTO transaction_images (transaction_id, filename, data, mime_type) VALUES (?, ?, ?, ?)",
 		transactionID, img.Filename, data, mimeType,
 	)
-	return err
+	return result, err
 }
 
 // AddTransactionImage は取引に画像を追加する
 func AddTransactionImage(transactionID int64, img models.TransactionImageRequest) (*models.TransactionImageResponse, error) {
 	db := database.GetDB()
-	if err := addTransactionImage(db, transactionID, img); err != nil {
+	result, err := addTransactionImage(db, transactionID, img)
+	if err != nil {
 		return nil, err
 	}
 
-	// 追加された画像のIDを取得
-	var id int64
-	var createdAt string
-	err := db.QueryRow(
-		"SELECT id, created_at FROM transaction_images WHERE transaction_id = ? ORDER BY id DESC LIMIT 1",
-		transactionID,
-	).Scan(&id, &createdAt)
+	id, err := result.LastInsertId()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("画像ID取得エラー: %w", err)
+	}
+
+	var createdAt string
+	err = db.QueryRow("SELECT created_at FROM transaction_images WHERE id = ?", id).Scan(&createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("画像追加後データ取得エラー: %w", err)
 	}
 
 	resp := &models.TransactionImageResponse{
@@ -922,20 +948,48 @@ func GetTransactionImages(transactionID int64) ([]models.TransactionImageRespons
 			DataURL:   fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data)),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("画像一覧行取得エラー: %w", err)
+	}
 	if images == nil {
 		images = []models.TransactionImageResponse{}
 	}
 	return images, nil
 }
 
-// DeleteTransactionImage は取引から画像を削除する
+// DeleteTransactionImage はデスクトップAPIから指定された画像を削除する。
 func DeleteTransactionImage(imageID int64) error {
 	db := database.GetDB()
-	_, err := db.Exec("DELETE FROM transaction_images WHERE id = ?", imageID)
-	if err == nil {
+	result, err := db.Exec("DELETE FROM transaction_images WHERE id = ?", imageID)
+	if err != nil {
+		return fmt.Errorf("画像削除エラー: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("画像削除結果取得エラー: %w", err)
+	}
+	if affected > 0 {
 		database.AutoSnapshot()
 	}
-	return err
+	return nil
+}
+
+// DeleteTransactionImageForTransaction は指定取引に属する画像だけを削除する。
+func DeleteTransactionImageForTransaction(transactionID, imageID int64) (bool, error) {
+	db := database.GetDB()
+	result, err := db.Exec("DELETE FROM transaction_images WHERE id = ? AND transaction_id = ?", imageID, transactionID)
+	if err != nil {
+		return false, fmt.Errorf("画像削除エラー: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("画像削除結果取得エラー: %w", err)
+	}
+	if affected == 0 {
+		return false, nil
+	}
+	database.AutoSnapshot()
+	return true, nil
 }
 
 // guessMimeType はファイル名からMIMEタイプを推定する
@@ -1003,7 +1057,6 @@ func GetTags() ([]models.Tag, error) {
 	defer rows.Close()
 
 	var allTags []models.Tag
-	tagMap := make(map[int64]*models.Tag)
 
 	for rows.Next() {
 		var tag models.Tag
@@ -1016,25 +1069,18 @@ func GetTags() ([]models.Tag, error) {
 			tag.ParentID = &pid
 		}
 		allTags = append(allTags, tag)
-		tagMap[tag.ID] = &allTags[len(allTags)-1]
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("タグ一覧行取得エラー: %w", err)
 	}
 
-	// ツリー構造を構築
+	// ルートから再帰的にツリー構造を構築する。
 	var rootTags []models.Tag
-	for i := range allTags {
-		tag := &allTags[i]
+	for _, tag := range allTags {
 		if tag.ParentID == nil {
-			rootTags = append(rootTags, *tag)
-		} else {
-			if parent, ok := tagMap[*tag.ParentID]; ok {
-				parent.Children = append(parent.Children, *tag)
-			}
+			populateChildren(&tag, allTags)
+			rootTags = append(rootTags, tag)
 		}
-	}
-
-	// rootTagsの子を再帰的に設定
-	for i := range rootTags {
-		populateChildren(&rootTags[i], tagMap, allTags)
 	}
 
 	if rootTags == nil {
@@ -1044,12 +1090,12 @@ func GetTags() ([]models.Tag, error) {
 }
 
 // populateChildren は再帰的に子タグを設定する
-func populateChildren(tag *models.Tag, tagMap map[int64]*models.Tag, allTags []models.Tag) {
+func populateChildren(tag *models.Tag, allTags []models.Tag) {
 	var children []models.Tag
 	for _, t := range allTags {
 		if t.ParentID != nil && *t.ParentID == tag.ID {
 			child := t
-			populateChildren(&child, tagMap, allTags)
+			populateChildren(&child, allTags)
 			children = append(children, child)
 		}
 	}
@@ -1086,6 +1132,11 @@ func CreateTagByPath(path string) (*models.Tag, error) {
 	if len(segments) > 3 {
 		return nil, fmt.Errorf("タグは3階層までです")
 	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("トランザクション開始エラー: %w", err)
+	}
+	defer tx.Rollback()
 
 	var parentID *int64
 	var tag *models.Tag
@@ -1093,33 +1144,42 @@ func CreateTagByPath(path string) (*models.Tag, error) {
 	for i, name := range segments {
 		level := i + 1
 		var existingID int64
-		var err error
+		var selectErr error
 
 		if parentID == nil {
-			err = db.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&existingID)
+			selectErr = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&existingID)
 		} else {
-			err = db.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id = ?", name, *parentID).Scan(&existingID)
+			selectErr = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id = ?", name, *parentID).Scan(&existingID)
 		}
 
-		if err == nil {
+		tagParentID := parentID
+		if selectErr == nil {
 			tag = &models.Tag{ID: existingID, Name: name, ParentID: parentID, Level: level}
 			pid := existingID
 			parentID = &pid
-		} else {
-			result, insertErr := db.Exec(
+		} else if errors.Is(selectErr, sql.ErrNoRows) {
+			result, insertErr := tx.Exec(
 				"INSERT INTO tags (name, parent_id, level) VALUES (?, ?, ?)",
-				name, parentID, level,
+				name, tagParentID, level,
 			)
 			if insertErr != nil {
 				return nil, fmt.Errorf("タグ作成エラー: %w", insertErr)
 			}
-			id, _ := result.LastInsertId()
-			tag = &models.Tag{ID: id, Name: name, ParentID: parentID, Level: level}
+			id, idErr := result.LastInsertId()
+			if idErr != nil {
+				return nil, fmt.Errorf("タグID取得エラー: %w", idErr)
+			}
+			tag = &models.Tag{ID: id, Name: name, ParentID: tagParentID, Level: level}
 			pid := id
 			parentID = &pid
+		} else {
+			return nil, fmt.Errorf("タグ確認エラー: %w", selectErr)
 		}
 	}
 
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("トランザクションコミットエラー: %w", err)
+	}
 	database.AutoSnapshot()
 	return tag, nil
 }
@@ -1159,6 +1219,9 @@ func GetTransactionTags(transactionID int64) ([]models.Tag, error) {
 		}
 		tags = append(tags, tag)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("取引タグ行取得エラー: %w", err)
+	}
 	if tags == nil {
 		tags = []models.Tag{}
 	}
@@ -1168,14 +1231,32 @@ func GetTransactionTags(transactionID int64) ([]models.Tag, error) {
 // AddTransactionTags は取引にタグを追加する
 func AddTransactionTags(transactionID int64, tagIDs []int64) error {
 	db := database.GetDB()
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("トランザクション開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 部分保存を防ぐため、全タグの存在をINSERT前に検証する。
 	for _, tagID := range tagIDs {
-		_, err := db.Exec(
+		var exists int
+		if err := tx.QueryRow("SELECT 1 FROM tags WHERE id = ?", tagID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("タグが見つかりません: ID %d", tagID)
+		} else if err != nil {
+			return fmt.Errorf("タグ確認エラー: %w", err)
+		}
+	}
+	for _, tagID := range tagIDs {
+		_, err := tx.Exec(
 			"INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)",
 			transactionID, tagID,
 		)
 		if err != nil {
 			return fmt.Errorf("タグ追加エラー: %w", err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("トランザクションコミットエラー: %w", err)
 	}
 	database.AutoSnapshot()
 	return nil
@@ -1271,6 +1352,9 @@ func getTagSummaryFiltered(txType, startDate, endDate, account string, tagIDs []
 			return nil, err
 		}
 		allData = append(allData, td)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("タグ集計行取得エラー: %w", err)
 	}
 
 	// ツリー構造を構築し、子タグの金額を親タグに集約する
@@ -1402,6 +1486,9 @@ func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, 
 			resp.TotalExpense += t.Amount
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("分析行取得エラー: %w", err)
+	}
 	resp.NetAmount = resp.TotalIncome - resp.TotalExpense
 
 	// タグ別集計にも取引一覧と同じフィルターを適用する。
@@ -1453,6 +1540,9 @@ func GetTransactionLinks(transactionID int64) ([]models.LinkedTransactionRespons
 		}
 		results = append(results, r)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("紐付け取引行取得エラー: %w", err)
+	}
 	if results == nil {
 		results = []models.LinkedTransactionResponse{}
 	}
@@ -1483,6 +1573,10 @@ func AddTransactionLink(parentID, childID int64) error {
 
 func validateCardWithdrawalLink(transactionID, linkedID int64) error {
 	db := database.GetDB()
+	creditCards, bankAccounts, err := cardWithdrawalAccountSets()
+	if err != nil {
+		return err
+	}
 	accounts := make(map[int64]string, 2)
 	rows, err := db.Query("SELECT id, account FROM transactions WHERE id IN (?, ?)", transactionID, linkedID)
 	if err != nil {
@@ -1498,13 +1592,16 @@ func validateCardWithdrawalLink(transactionID, linkedID int64) error {
 		}
 		accounts[id] = account
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("紐付け対象行取得エラー: %w", err)
+	}
 	if len(accounts) != 2 {
 		return fmt.Errorf("紐付け対象の取引が見つかりません")
 	}
 
 	accountA := strings.TrimSpace(accounts[transactionID])
 	accountB := strings.TrimSpace(accounts[linkedID])
-	if isCardWithdrawalLinkAccounts(accountA, accountB) {
+	if isCardWithdrawalLinkAccounts(accountA, accountB, creditCards, bankAccounts) {
 		return nil
 	}
 	return fmt.Errorf("紐付けはクレジットカード項目と銀行口座項目の取引間でのみ追加できます")
@@ -1512,6 +1609,10 @@ func validateCardWithdrawalLink(transactionID, linkedID int64) error {
 
 func pruneInvalidTransactionLinks() error {
 	db := database.GetDB()
+	creditCards, bankAccounts, err := cardWithdrawalAccountSets()
+	if err != nil {
+		return err
+	}
 	rows, err := db.Query(`
 		SELECT l.parent_id, p.account, l.child_id, c.account
 		FROM transaction_links l
@@ -1530,7 +1631,7 @@ func pruneInvalidTransactionLinks() error {
 		if err := rows.Scan(&parentID, &parentAccount, &childID, &childAccount); err != nil {
 			return fmt.Errorf("紐付けスキャンエラー: %w", err)
 		}
-		if !isCardWithdrawalLinkAccounts(parentAccount, childAccount) {
+		if !isCardWithdrawalLinkAccounts(parentAccount, childAccount, creditCards, bankAccounts) {
 			invalidPairs = append(invalidPairs, [2]int64{parentID, childID})
 		}
 	}
@@ -1546,15 +1647,22 @@ func pruneInvalidTransactionLinks() error {
 	return nil
 }
 
-func isCardWithdrawalLinkAccounts(accountA, accountB string) bool {
-	creditCardItems, _ := GetCreditCardSettings()
-	bankAccountItems, _ := GetBankAccountSettings()
-	creditCards := stringSet(creditCardItems)
-	bankAccounts := stringSet(bankAccountItems)
-
+func isCardWithdrawalLinkAccounts(accountA, accountB string, creditCards, bankAccounts map[string]bool) bool {
 	accountA = strings.TrimSpace(accountA)
 	accountB = strings.TrimSpace(accountB)
 	return (creditCards[accountA] && bankAccounts[accountB]) || (bankAccounts[accountA] && creditCards[accountB])
+}
+
+func cardWithdrawalAccountSets() (map[string]bool, map[string]bool, error) {
+	creditCardItems, err := GetCreditCardSettings()
+	if err != nil {
+		return nil, nil, fmt.Errorf("クレジットカード設定取得エラー: %w", err)
+	}
+	bankAccountItems, err := GetBankAccountSettings()
+	if err != nil {
+		return nil, nil, fmt.Errorf("銀行口座設定取得エラー: %w", err)
+	}
+	return stringSet(creditCardItems), stringSet(bankAccountItems), nil
 }
 
 func stringSet(items []string) map[string]bool {

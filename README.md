@@ -116,7 +116,7 @@ AUTH_PASSWORD_HASH='<bcrypt-hash>' go run -tags server ./server.go
 
 `<bcrypt-hash>` は実際に作成した bcrypt ハッシュへ置き換えてください。作成方法は[利用ガイド](docs/how-to-use.md#21-bcrypt-ハッシュを作成する)を参照してください。
 
-公開Webは標準で `0.0.0.0:4000` で待ち受けます。AI APIも利用する場合だけ、32文字以上のランダムなトークンを追加します。
+公開Webは標準で `127.0.0.1:4000` で待ち受けます。LAN内の別端末からアクセスする場合は `HOST_IP=0.0.0.0` を明示的に設定してください（TLSなしで非ループバックへ公開すると起動ログに平文通信の警告が出ます）。AI APIも利用する場合だけ、32文字以上のランダムなトークンを追加します。
 
 ```bash
 AUTH_PASSWORD_HASH='<bcrypt-hash>' \
@@ -136,7 +136,7 @@ go run -tags server ./server.go
 | 変数 | 既定値 | 説明 |
 | --- | --- | --- |
 | `DB_PATH` | `omni_money.db` | SQLite データベースの保存先 |
-| `HOST_IP` | `0.0.0.0` | 待受アドレス |
+| `HOST_IP` | `127.0.0.1` | 待受アドレス。LAN公開時は `0.0.0.0` を明示設定 |
 | `PORT` | `4000` | 待受ポート |
 | `AUTH_PASSWORD_HASH` | なし（必須） | ログインパスワードの bcrypt ハッシュ |
 | `SESSION_MAX_AGE_HOURS` | `24` | セッション有効期間（時間） |

@@ -38,9 +38,20 @@ func handleAIConsoleProxy(aiPath string) http.HandlerFunc {
 			return
 		}
 
-		targetURL := "http://" + net.JoinHostPort("127.0.0.1", port) + aiPath
+		targetURL := "http://" + net.JoinHostPort(aiConsoleRelayHost(), port) + aiPath
 		forwardAIConsoleRequest(w, r, targetURL, token, aiConsoleHTTPClient)
 	}
+}
+
+// aiConsoleRelayHost は中継先ホストを返す。AI_HOST_IPが::1などのループバック
+// アドレスならそれを尊重し、0.0.0.0等の非ループバック(Docker内待受)や未設定は
+// 127.0.0.1へフォールバックする。非ループバックへの転送は行わない。
+func aiConsoleRelayHost() string {
+	host := strings.TrimSpace(os.Getenv("AI_HOST_IP"))
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return host
+	}
+	return "127.0.0.1"
 }
 
 func forwardAIConsoleRequest(w http.ResponseWriter, r *http.Request, targetURL, token string, client *http.Client) {

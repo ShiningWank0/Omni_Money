@@ -472,8 +472,13 @@ func handleTransactionImages(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "無効な画像IDです", http.StatusBadRequest)
 			return
 		}
-		if err := core.DeleteTransactionImage(imgID); err != nil {
+		deleted, err := core.DeleteTransactionImageForTransaction(txID, imgID)
+		if err != nil {
 			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !deleted {
+			jsonError(w, "指定された取引の画像が見つかりません", http.StatusNotFound)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "画像を削除しました"}, http.StatusOK)
@@ -720,6 +725,10 @@ func handleAIAnalysis(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 		return
 	}
+	if err := validateAnalysisRequest(req); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	resp, err := core.AnalyzeTransactions(req)
 	if err != nil {
@@ -728,4 +737,34 @@ func handleAIAnalysis(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, resp, http.StatusOK)
+}
+
+func validateAnalysisRequest(req models.AnalysisRequest) error {
+	if req.Type != "" && req.Type != "income" && req.Type != "expense" {
+		return fmt.Errorf("種別はincome、expense、または空で指定してください")
+	}
+
+	var start, end time.Time
+	var err error
+	if req.StartDate != "" {
+		start, err = time.Parse("2006-01-02", req.StartDate)
+		if err != nil || start.Format("2006-01-02") != req.StartDate {
+			return fmt.Errorf("開始日はYYYY-MM-DD形式で指定してください")
+		}
+	}
+	if req.EndDate != "" {
+		end, err = time.Parse("2006-01-02", req.EndDate)
+		if err != nil || end.Format("2006-01-02") != req.EndDate {
+			return fmt.Errorf("終了日はYYYY-MM-DD形式で指定してください")
+		}
+	}
+	if !start.IsZero() && !end.IsZero() && start.After(end) {
+		return fmt.Errorf("開始日は終了日以前に指定してください")
+	}
+	for _, tagID := range req.TagIDs {
+		if tagID <= 0 {
+			return fmt.Errorf("タグIDは正の整数で指定してください")
+		}
+	}
+	return nil
 }

@@ -42,7 +42,7 @@ func main() {
 	// 公開Web用ホストIPとポートの設定
 	host := os.Getenv("HOST_IP")
 	if host == "" {
-		host = "0.0.0.0"
+		host = "127.0.0.1"
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -54,6 +54,9 @@ func main() {
 	keyFile := strings.TrimSpace(os.Getenv("TLS_KEY_FILE"))
 	if (certFile == "") != (keyFile == "") {
 		log.Fatal("TLS_CERT_FILE と TLS_KEY_FILE は両方指定してください")
+	}
+	if certFile == "" && !isLoopbackHost(host) {
+		log.Printf("警告: 公開Webを非ループバックアドレス %s にTLSなしでバインドします。通信内容が平文で送受信されるため、盗聴・改ざんのリスクがあります", addr)
 	}
 
 	srv := &http.Server{
@@ -96,6 +99,9 @@ func main() {
 		}
 
 		aiAddr := net.JoinHostPort(aiHost, aiPort)
+		if !isLoopbackHost(aiHost) {
+			log.Printf("警告: AI専用APIを非ループバックアドレス %s にTLSなしで公開します。BearerトークンとAI送受信データが平文で流れるため、Dockerのlocalhost限定ポート公開やリバースプロキシでのTLS終端で必ず保護してください", aiAddr)
+		}
 		aiServer := &http.Server{
 			Addr:         aiAddr,
 			Handler:      api.NewAIRouter(aiToken),
