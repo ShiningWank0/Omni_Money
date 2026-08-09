@@ -9,7 +9,7 @@ COPY frontend/src ./src
 RUN npm run build
 
 # ===== Stage 2: バックエンドのビルド =====
-FROM golang:1.24-alpine AS backend-builder
+FROM golang:1.25.12-alpine AS backend-builder
 
 # CGO有効化（SQLite用）
 RUN apk add --no-cache gcc musl-dev

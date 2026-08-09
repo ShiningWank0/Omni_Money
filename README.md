@@ -73,7 +73,7 @@ macOS デスクトップアプリ、Mac + Colima、TrueNAS Custom App の詳し�
 
 ## 必要な環境
 
-- Go 1.23 以上
+- Go 1.25 以上
 - Node.js 24.18.0 LTS（`frontend/.nvmrc` と同じ版）
 - npm
 - Wails CLI

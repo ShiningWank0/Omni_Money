@@ -119,6 +119,63 @@ func TestPrepareTransactionImageRejectsInvalidContent(t *testing.T) {
 	}
 }
 
+func TestPrepareTransactionImageRejectsVulnerableWebPShapesWithoutPanic(t *testing.T) {
+	validWebP, err := base64.StdEncoding.DecodeString("UklGRrIBAABXRUJQVlA4TKUBAAAvSsAYAA8w//M///MfeJAkbXvaSG7m8Q3GfYSBJekwQztm/IcZlgwnmWImn2BK7aFmBtnVir6q//8VOkFE/xm4baTIu8c48ArEo6+B3zFKYln3pqClSCKX0begFTAXFOLXHSyF8cCNcZEG4OywuA4KVVfJCiArU7GAgJI8+lJP/OKMT/fBAjevg1cYB7YVkFuWga2lyPi5I0HFy5YTpWIHg0RZpkniRVW9odHAKOwosWuOGdxIyn2OvaCDvhg/we6TwadPBPbqBV58MsLmMJ8yZnOWk8SRz4N+QoyPL+MnamzMvcE1rHNEr91F9GKZPVUcS9w7PhhH36suB9qPeYb/oLk6cuTiJ0wOK3m5h1cKjW6EVZCYMK7dxcKCBdgP9HkKr9gkAO2P8GKZGWVdIAatQa+1IDpt6qyorVwdy01xdW8Jkfk6xjEXmVQQ+HQdFr6OKhIN34dXWq0+0qr6EJSCeeVLH9+gvGTLyqM65PQ44ihzlTXxQKjKbAvshXgir7Lil9w4L2bvMycmjQcqXaMCO6BlY28i+FOLzbfI1vEqxAhotocAAA==")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "oversized VP8X canvas", data: oversizedWebPCanvas()},
+		{name: "VP8X payload dimension mismatch", data: mismatchedWebPCanvas(validWebP)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.Fatalf("malformed WebP caused panic: %v", recovered)
+				}
+			}()
+			if _, err := prepareTransactionImage(imageRequest("malformed.webp", "image/webp", tt.data)); err == nil {
+				t.Fatal("malformed WebP was accepted")
+			}
+		})
+	}
+}
+
+func oversizedWebPCanvas() []byte {
+	return []byte{
+		'R', 'I', 'F', 'F',
+		22, 0, 0, 0,
+		'W', 'E', 'B', 'P',
+		'V', 'P', '8', 'X',
+		10, 0, 0, 0,
+		1 << 4, 0, 0, 0,
+		0xff, 0xff, 0x00,
+		0xff, 0x7f, 0x00,
+	}
+}
+
+func mismatchedWebPCanvas(validWebP []byte) []byte {
+	if len(validWebP) < 12 {
+		return nil
+	}
+	vp8xChunk := []byte{
+		'V', 'P', '8', 'X',
+		10, 0, 0, 0,
+		0, 0, 0, 0,
+		0, 0, 0,
+		0, 0, 0,
+	}
+	data := append([]byte("RIFF\x00\x00\x00\x00WEBP"), vp8xChunk...)
+	data = append(data, validWebP[12:]...)
+	binary.LittleEndian.PutUint32(data[4:8], uint32(len(data)-8))
+	return data
+}
+
 func TestPrepareTransactionImagesEnforcesBatchCount(t *testing.T) {
 	request := imageRequest("receipt.png", "image/png", encodePNG(t))
 	requests := make([]models.TransactionImageRequest, models.MaxImagesPerTransaction+1)
