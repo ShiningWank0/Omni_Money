@@ -3,13 +3,16 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"omni_money/backend/aicredentials"
 	"omni_money/backend/core"
 	"omni_money/backend/database"
 	"omni_money/backend/middleware"
@@ -91,14 +94,13 @@ func NewRouter() http.Handler {
 
 // NewAIRouter はAI専用リスナー用のルーターを作成する。
 // 通常の家計簿API、静的ファイル、ユーザー認証APIは一切登録しない。
-func NewAIRouter(apiToken string) http.Handler {
+func NewAIRouter(credentialStore *aicredentials.Store) http.Handler {
 	aiMux := http.NewServeMux()
 	aiMux.HandleFunc("/api/v1/ai/transactions", handleAITransactions)
 	aiMux.HandleFunc("/api/v1/ai/analysis", handleAIAnalysis)
 
-	var handler http.Handler = middleware.AIAPIMiddleware(apiToken, aiMux)
-	handler = middleware.MaxBodySizeMiddleware(handler)
-	handler = middleware.RateLimitMiddleware(handler)
+	var handler http.Handler = middleware.MaxBodySizeMiddleware(aiMux)
+	handler = middleware.AIAPIMiddleware(credentialStore, handler)
 	handler = middleware.SecurityHeadersMiddleware(handler)
 	handler = middleware.CacheControlMiddleware(handler)
 	return handler
@@ -338,8 +340,14 @@ func handleAITransactions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	credential, ok := middleware.AICredentialFromContext(r.Context())
+	if !ok {
+		jsonError(w, "認証が必要です", http.StatusUnauthorized)
+		return
+	}
+
 	var req models.TransactionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeStrictAIJSON(r, &req); err != nil {
 		jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 		return
 	}
@@ -348,11 +356,18 @@ func handleAITransactions(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !credential.AllowsAccount(req.Account) {
+		jsonError(w, "指定した口座への追加権限がありません", http.StatusForbidden)
+		return
+	}
+	middleware.RecordAIRequestAudit(r.Context(), req.Account, req.Date, req.Date, false, false, nil, nil)
 	req, err = validateAITransactionReferences(req)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	createdCount := 1
+	middleware.RecordAIRequestAudit(r.Context(), req.Account, req.Date, req.Date, false, false, nil, &createdCount)
 
 	resp, err := core.AddTransaction(req)
 	if err != nil {
@@ -361,8 +376,12 @@ func handleAITransactions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, map[string]interface{}{
-		"message":     "取引が正常に追加されました (AI API)",
-		"transaction": resp,
+		"message": "取引が正常に追加されました (AI API)",
+		"transaction": struct {
+			ID      int64  `json:"id"`
+			Account string `json:"account"`
+			Date    string `json:"date"`
+		}{ID: resp.ID, Account: resp.Account, Date: resp.Date},
 	}, http.StatusCreated)
 }
 
@@ -720,17 +739,180 @@ func handleAIAnalysis(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	credential, ok := middleware.AICredentialFromContext(r.Context())
+	if !ok {
+		jsonError(w, "認証が必要です", http.StatusUnauthorized)
+		return
+	}
+
 	var req models.AnalysisRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeStrictAIJSON(r, &req); err != nil {
 		jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 		return
 	}
+	var status int
+	req, status, err := validateAndScopeAIAnalysis(req, credential, time.Now())
+	if err != nil {
+		jsonError(w, err.Error(), status)
+		return
+	}
+	middleware.RecordAIRequestAudit(r.Context(), req.Account, req.StartDate, req.EndDate, req.IncludeTransactions, req.IncludeMemo, nil, nil)
 
 	resp, err := core.AnalyzeTransactions(req)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	middleware.RecordAIRequestAudit(r.Context(), req.Account, req.StartDate, req.EndDate, req.IncludeTransactions, req.IncludeMemo, &resp.Count, &resp.ReturnedCount)
 
 	jsonResponse(w, resp, http.StatusOK)
+}
+
+func decodeStrictAIJSON(r *http.Request, destination any) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("JSON本文には単一の値だけ指定してください")
+	}
+	return nil
+}
+
+func validateAndScopeAIAnalysis(req models.AnalysisRequest, credential *aicredentials.Credential, now time.Time) (models.AnalysisRequest, int, error) {
+	const (
+		dateLayout            = "2006-01-02"
+		defaultAnalysisDays   = 30
+		hardMaxAnalysisTagIDs = 20
+		hardMaxResults        = 500
+	)
+	if credential == nil {
+		return req, http.StatusUnauthorized, fmt.Errorf("認証が必要です")
+	}
+	req.MaxTagSummaries = credential.MaxResults
+
+	req.StartDate = strings.TrimSpace(req.StartDate)
+	req.EndDate = strings.TrimSpace(req.EndDate)
+	req.Account = strings.TrimSpace(req.Account)
+	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
+	req.Cursor = strings.TrimSpace(req.Cursor)
+
+	if req.Account == "" {
+		if len(credential.Accounts) == 1 && credential.Accounts[0] != "*" {
+			req.Account = credential.Accounts[0]
+		} else {
+			return req, http.StatusBadRequest, fmt.Errorf("分析対象の口座を明示してください")
+		}
+	}
+	if len(req.Account) > maxAIAccountBytes || hasAIUnsafeRune(req.Account) {
+		return req, http.StatusBadRequest, fmt.Errorf("口座名が無効です")
+	}
+	if !credential.AllowsAccount(req.Account) {
+		return req, http.StatusForbidden, fmt.Errorf("指定した口座の分析権限がありません")
+	}
+	credentialStartDate, err := time.Parse(dateLayout, credential.AnalysisStartDate)
+	if err != nil {
+		return req, http.StatusInternalServerError, fmt.Errorf("資格情報の分析期間設定が無効です")
+	}
+	credentialEndDate, err := time.Parse(dateLayout, credential.AnalysisEndDate)
+	if err != nil {
+		return req, http.StatusInternalServerError, fmt.Errorf("資格情報の分析期間設定が無効です")
+	}
+
+	if (req.StartDate == "") != (req.EndDate == "") {
+		return req, http.StatusBadRequest, fmt.Errorf("開始日と終了日は両方指定してください")
+	}
+	if req.StartDate == "" {
+		end := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		if end.After(credentialEndDate) {
+			end = credentialEndDate
+		}
+		if end.Before(credentialStartDate) {
+			return req, http.StatusForbidden, fmt.Errorf("現在日は資格情報に許可された分析期間外です")
+		}
+		days := defaultAnalysisDays
+		if credential.MaxAnalysisDays < days {
+			days = credential.MaxAnalysisDays
+		}
+		start := end.AddDate(0, 0, -(days - 1))
+		if start.Before(credentialStartDate) {
+			start = credentialStartDate
+		}
+		req.StartDate = start.Format(dateLayout)
+		req.EndDate = end.Format(dateLayout)
+	}
+	startDate, err := time.Parse(dateLayout, req.StartDate)
+	if err != nil {
+		return req, http.StatusBadRequest, fmt.Errorf("開始日はYYYY-MM-DD形式で指定してください")
+	}
+	endDate, err := time.Parse(dateLayout, req.EndDate)
+	if err != nil {
+		return req, http.StatusBadRequest, fmt.Errorf("終了日はYYYY-MM-DD形式で指定してください")
+	}
+	if endDate.Before(startDate) {
+		return req, http.StatusBadRequest, fmt.Errorf("終了日は開始日以降にしてください")
+	}
+	if startDate.Before(credentialStartDate) || endDate.After(credentialEndDate) {
+		return req, http.StatusForbidden, fmt.Errorf(
+			"分析期間はこの資格情報に許可された%sから%sまでにしてください",
+			credential.AnalysisStartDate,
+			credential.AnalysisEndDate,
+		)
+	}
+	inclusiveDays := int(endDate.Sub(startDate)/(24*time.Hour)) + 1
+	if inclusiveDays > credential.MaxAnalysisDays {
+		return req, http.StatusForbidden, fmt.Errorf("分析期間はこの資格情報に許可された%d日以内にしてください", credential.MaxAnalysisDays)
+	}
+
+	if req.Type != "" && req.Type != "income" && req.Type != "expense" {
+		return req, http.StatusBadRequest, fmt.Errorf("種別はincomeまたはexpenseで指定してください")
+	}
+	if len(req.TagIDs) > hardMaxAnalysisTagIDs {
+		return req, http.StatusBadRequest, fmt.Errorf("タグIDは%d件までです", hardMaxAnalysisTagIDs)
+	}
+	seenTags := make(map[int64]struct{}, len(req.TagIDs))
+	uniqueTags := make([]int64, 0, len(req.TagIDs))
+	for _, tagID := range req.TagIDs {
+		if tagID <= 0 {
+			return req, http.StatusBadRequest, fmt.Errorf("タグIDは正の整数で指定してください")
+		}
+		if _, exists := seenTags[tagID]; exists {
+			continue
+		}
+		seenTags[tagID] = struct{}{}
+		uniqueTags = append(uniqueTags, tagID)
+	}
+	req.TagIDs = uniqueTags
+
+	if req.IncludeMemo && !req.IncludeTransactions {
+		return req, http.StatusBadRequest, fmt.Errorf("メモを含めるには取引明細も要求してください")
+	}
+	if req.IncludeTransactions && !credential.HasScope(aicredentials.ScopeAnalysisTransactions) {
+		return req, http.StatusForbidden, fmt.Errorf("取引明細を取得する権限がありません")
+	}
+	if req.IncludeMemo && !credential.HasScope(aicredentials.ScopeAnalysisMemo) {
+		return req, http.StatusForbidden, fmt.Errorf("メモを取得する権限がありません")
+	}
+	if !req.IncludeTransactions {
+		if req.Cursor != "" || req.Limit != 0 {
+			return req, http.StatusBadRequest, fmt.Errorf("カーソルと件数は取引明細を要求する場合だけ指定できます")
+		}
+		return req, http.StatusOK, nil
+	}
+
+	maxResults := credential.MaxResults
+	if maxResults > hardMaxResults {
+		maxResults = hardMaxResults
+	}
+	if req.Limit == 0 {
+		req.Limit = 100
+		if req.Limit > maxResults {
+			req.Limit = maxResults
+		}
+	}
+	if req.Limit < 1 || req.Limit > maxResults {
+		return req, http.StatusForbidden, fmt.Errorf("取引明細の件数はこの資格情報に許可された%d件以内にしてください", maxResults)
+	}
+	return req, http.StatusOK, nil
 }

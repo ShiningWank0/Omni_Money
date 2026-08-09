@@ -13,9 +13,11 @@ LLMの出力は正しいとは限りません。AI専用入口はLLMの候補値
 | 項目 | 現在の状態 |
 | --- | --- |
 | AI待受 | 既定 `127.0.0.1:4001` |
-| 認証 | 32文字以上のBearer token |
+| 認証 | 最大90日のBearer資格情報（hash保存、scope・口座・期間・件数制約） |
+| 通信 | loopback限定HTTP、非loopbackはTLS 1.3 + mTLS必須 |
 | 取引追加 | `POST /api/v1/ai/transactions` |
 | 分析 | `POST /api/v1/ai/analysis` |
+| 分析結果 | 既定は単一許可口座・最大30日の集計のみ。明細・メモは追加scopeとpagination |
 | 編集・削除 | ルートを提供せず、POST以外は拒否 |
 | 公開Webとの分離 | 公開Webの4000番にはAIルートを登録しない |
 | AI専用入力検証 | 必須項目、種類、正の金額、日付範囲を検証 |
@@ -47,7 +49,7 @@ flowchart LR
 
 ## 4. AI Transaction Managerの将来API
 
-すべてPOSTとし、パスとtoken scopeを明示的に許可します。
+すべてPOSTとし、パスと資格情報scopeを明示的に許可します。
 
 | API案 | 用途 |
 | --- | --- |
@@ -118,10 +120,10 @@ Base64は元データより約33%大きくなるため、現在のHTTP body上�
 
 ## 9. セキュリティと監査
 
-- client別token、最小scope、rotation、revokeを導入する
-- token単位のrate limitを設ける
-- request ID、client ID、日時、検証結果、transaction IDを監査ログへ残す
-- token、provider key、Base64画像、レシート全文はログへ残さない
+- client別token、最小scope、rotation、revokeを維持し、90日以内に更新する
+- 資格情報と接続元単位のrate limitを維持する
+- credential ID、操作、接続元、mTLS証明書fingerprint、HMAC化した口座参照、期間、明細種別、該当／返却件数、日時、許否、HTTP statusを構造化監査ログへ残す
+- token、provider key、リクエスト本文、金額、メモ、Base64画像、レシート全文はログへ残さない
 - クラウドLLMへ画像を送る場合はUIで明示し、利用者のopt-inを必須にする
 - Manager障害時にDB直接書き込みへfallbackしない
 - Dockerでは最終的にManagerをprivate networkのみに置き、host portsを公開しない

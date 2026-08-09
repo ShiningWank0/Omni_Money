@@ -117,14 +117,14 @@ AIエージェントが外部から記帳を自動化し、データを統合的
 * **書き込みAPI**（`POST /api/v1/ai/transactions`）: AIエージェントが取引を新規追加するためのエンドポイント。画像添付にも対応する（Base64エンコード形式）。
 * **分析API**（`POST /api/v1/ai/analysis`）: AIエージェントが取引データを読み取り、統合的に分析するためのエンドポイント。期間・口座・タグ等の条件をPOSTリクエストのボディで指定し、集計結果を返す。
 * **厳格な権限管理**:
-  * AI用の静的な認証鍵（トークン）を発行し、この認証鍵を用いた接続では上記2つのエンドポイントへの「POST」のみを許可する。
+  * AI用資格情報は最大90日で失効し、操作scope、許可口座、分析可能な固定日付範囲、1リクエストの最大分析期間、最大明細件数を個別に制限する。保存ファイルにはトークンのSHA-256ハッシュだけを記録する。
   * 既存データの「変更（PUT）・削除（DELETE）」は、中間処理（ミドルウェア）で即座に遮断（HTTP 403）すること。
   * 取引の編集・削除は人間がGUI経由でのみ行えるものとし、AIエージェントには一切許可しない。
 * **公開Webとのネットワーク分離**:
   * 公開Web用HTTPリスナーにはAI APIのルートを登録しない。
   * AI APIは別のHTTPリスナーで提供し、既定では `127.0.0.1:4001` のみで待ち受ける。
-  * `AI_API_TOKEN` が未設定の場合は、AI専用リスナー自体を起動しない。
-  * Dockerでホスト上のAIプロセスへ提供する場合、コンテナ内では非ループバック待受を明示許可し、ホスト側は `127.0.0.1` に限定してポート公開する。
+  * `AI_CREDENTIALS_FILE` が未設定の場合は、AI専用リスナー自体を起動しない。
+  * 非ループバック待受は明示許可に加えてTLS 1.3とクライアント証明書認証（mTLS）を必須とし、Dockerホスト側は `127.0.0.1` に限定してポート公開する。
   * AI専用リスナーには通常API、ユーザー認証API、静的ファイルを登録しない。
 
 Discordレシート登録、AI Transaction Managerの別プロセス化、画像受け渡し、context/validate APIの段階計画は `docs/ai-integration-roadmap.md` を参照すること。
@@ -224,10 +224,16 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
 | `PORT` | 任意 | `4000` | 待受ポート |
 | `AUTH_PASSWORD_HASH` | サーバーモード時必須 | なし | ログインパスワードのbcryptハッシュ |
 | `SESSION_MAX_AGE_HOURS` | 任意 | `24` | セッション有効期間（時間） |
-| `AI_API_TOKEN` | 任意 | なし | AI用APIの認証トークン |
+| `AI_CREDENTIALS_FILE` | 任意 | なし | scope・口座・期限を持つAI資格情報JSON |
+| `AI_CONSOLE_TOKEN_FILE` | 任意 | なし | 管理画面中継用AIトークンsecret |
 | `AI_HOST_IP` | 任意 | `127.0.0.1` | AI専用リスナーの待受アドレス |
 | `AI_PORT` | 任意 | `4001` | AI専用リスナーのポート |
 | `AI_ALLOW_REMOTE` | 任意 | `false` | AI専用リスナーを非ループバックで待受する明示許可 |
+| `AI_TLS_CERT_FILE` / `AI_TLS_KEY_FILE` | 非ループバックAI時必須 | なし | AIサーバー証明書と秘密鍵 |
+| `AI_TLS_CLIENT_CA_FILE` | 非ループバックAI時必須 | なし | mTLSクライアントCA |
+| `AI_TLS_CA_FILE` | 管理画面TLS中継時必須 | なし | AIサーバー証明書を検証するCA |
+| `AI_TLS_CLIENT_CERT_FILE` / `AI_TLS_CLIENT_KEY_FILE` | mTLS中継時必須 | なし | 管理画面中継用クライアント証明書と鍵 |
+| `AI_TLS_SERVER_NAME` | TLS中継時必須 | なし | 証明書の検証名 |
 | `TRUSTED_PROXIES` | 任意 | なし | 信頼するプロキシIP（カンマ区切り） |
 | `FORCE_HTTPS` | 任意 | `false` | HTTPSリダイレクトの有効化 |
 | `HTTPS_REDIRECT_HOST` | `FORCE_HTTPS=true` 時は推奨 | なし | HTTPSリダイレクト先の固定ホスト |

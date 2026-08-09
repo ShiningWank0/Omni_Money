@@ -130,11 +130,28 @@ AUTH_PASSWORD_HASH='<bcrypt-hash>' go run -tags server ./server.go
 
 `<bcrypt-hash>` は実際に作成した bcrypt ハッシュへ置き換えてください。作成方法は[利用ガイド](docs/how-to-use.md#21-bcrypt-ハッシュを作成する)を参照してください。
 
-公開Webは標準で `0.0.0.0:4000` で待ち受けます。AI APIも利用する場合だけ、32文字以上のランダムなトークンを追加します。
+公開Webは標準で `0.0.0.0:4000` で待ち受けます。AI API は期限・権限・口座制約を持つ資格情報ファイルを指定した場合だけ有効になります。
 
 ```bash
+umask 077
+mkdir -p secrets
+go run ./cmd/ai-credential issue \
+  --file secrets/ai_credentials.json \
+  --id local-console \
+  --expires-at '<RFC3339-within-90-days>' \
+  --scope transactions:create \
+  --scope analysis:summary \
+  --scope analysis:transactions \
+  --scope console:relay \
+  --account '現金' \
+  --analysis-start-date '<YYYY-MM-DD>' \
+  --analysis-end-date '<YYYY-MM-DD>' \
+  --max-analysis-days 30 \
+  --max-results 100 > secrets/ai_console_token
+
 AUTH_PASSWORD_HASH='<bcrypt-hash>' \
-AI_API_TOKEN='<32文字以上のランダム値>' \
+AI_CREDENTIALS_FILE="$PWD/secrets/ai_credentials.json" \
+AI_CONSOLE_TOKEN_FILE="$PWD/secrets/ai_console_token" \
 go run -tags server ./server.go
 ```
 
@@ -142,8 +159,10 @@ go run -tags server ./server.go
 
 - 公開WebポートにはAI APIルートを登録しません。
 - AI専用ポートには通常API、ログインAPI、静的ファイルを登録しません。
-- `AI_API_TOKEN` 未設定時はAI専用リスナー自体を起動しません。
+- `AI_CREDENTIALS_FILE` 未設定時はAI専用リスナー自体を起動しません。
 - AI専用リスナーは既定でlocalhost以外へバインドできません。
+- 非ループバック待受はTLS 1.3とクライアント証明書認証（mTLS）が必須です。
+- 資格情報は最大90日で失効し、scope、口座、分析可能な固定日付範囲、1リクエストの期間、明細件数を個別に制限します。
 
 主な環境変数:
 
@@ -157,10 +176,16 @@ go run -tags server ./server.go
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | なし | 直接TLSで公開する場合の証明書と秘密鍵 |
 | `AUTH_PASSWORD_HASH` | なし（必須） | ログインパスワードの bcrypt ハッシュ |
 | `SESSION_MAX_AGE_HOURS` | `24` | セッション有効期間（時間） |
-| `AI_API_TOKEN` | なし | 32文字以上のAI API Bearerトークン。未設定ならAI API無効 |
+| `AI_CREDENTIALS_FILE` | なし | ハッシュ化済みAI資格情報JSON。未設定ならAI API無効 |
+| `AI_CONSOLE_TOKEN_FILE` | なし | 管理画面中継用の生トークンを格納したsecretファイル |
 | `AI_HOST_IP` | `127.0.0.1` | AI専用リスナーの待受アドレス |
 | `AI_PORT` | `4001` | AI専用リスナーのポート |
-| `AI_ALLOW_REMOTE` | `false` | AIを非ループバックで待受する明示許可。Docker内の待受時のみ利用 |
+| `AI_ALLOW_REMOTE` | `false` | AIを非ループバックで待受する明示許可。mTLS設定も必須 |
+| `AI_TLS_CERT_FILE` / `AI_TLS_KEY_FILE` | なし | AIリスナーのサーバー証明書と秘密鍵 |
+| `AI_TLS_CLIENT_CA_FILE` | なし | mTLSクライアント証明書を検証するCA |
+| `AI_TLS_CA_FILE` | なし | 管理画面中継がAIサーバー証明書を検証するCA |
+| `AI_TLS_CLIENT_CERT_FILE` / `AI_TLS_CLIENT_KEY_FILE` | なし | 管理画面中継用mTLSクライアント証明書と鍵 |
+| `AI_TLS_SERVER_NAME` | なし | AIサーバー証明書の検証名 |
 | `TRUSTED_PROXIES` | なし | 信頼するリバースプロキシIP/CIDR |
 | `FORCE_HTTPS` | `false` | 公開WebのHTTPSリダイレクト |
 | `HTTPS_REDIRECT_HOST` | なし | HTTPSリダイレクト先 |
@@ -185,36 +210,22 @@ docker run --rm \
 起動後、ブラウザで `http://localhost:4000` を開きます。
 Colima、LAN 公開、TrueNAS Custom App の手順は[利用ガイド](docs/how-to-use.md)を参照してください。
 
-AI APIも利用する場合は、コンテナ内部では全インターフェースで待ち受けさせつつ、
-Dockerホスト側では必ずlocalhostに限定して公開します。
-
-```bash
-export AI_API_TOKEN='<32文字以上のランダム値>'
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  -p 127.0.0.1:4000:4000 \
-  -p 127.0.0.1:4001:4001 \
-  -e AUTH_PASSWORD_HASH \
-  -e WEB_EXTERNAL_HOST=127.0.0.1 \
-  -e AI_API_TOKEN \
-  -e AI_HOST_IP=0.0.0.0 \
-  -e AI_ALLOW_REMOTE=true \
-  -v "$(pwd)/data:/app/data" \
-  omni-money
-```
-
-`-p 4001:4001` のようにホストIPを省略してAIポートを公開しないでください。
-AIを利用しない場合は `AI_API_TOKEN` と4001番ポートの公開を両方省略します。
+AI APIも利用する場合は、資格情報・CA・サーバー証明書・クライアント証明書をリポジトリ外の `secrets/` に準備し、後述の `compose.ai.yaml` を重ねてください。非ループバックのコンテナ内待受ではmTLSなしの起動を拒否します。ホスト側の4001番もlocalhostにだけ公開されます。
 
 ### Docker Compose / TrueNAS
 
-同梱の `compose.yaml` は、家計簿Webを4000番、AI APIをDockerホストのlocalhost:4001へ分離して、
-1コンテナで起動します。
+同梱の `compose.yaml` は家計簿Webだけを起動し、AI APIを既定で無効にします。
 
 ```bash
 cp .env.example .env
-# .env の AUTH_PASSWORD_HASH、AI_API_TOKEN、OMNI_DATA_DIR を編集
+# .env の AUTH_PASSWORD_HASH、OMNI_DATA_DIR を編集
 docker compose up -d --build
+```
+
+AI APIを有効にする場合だけ、秘密ファイルを準備して次のoverlayを追加します。
+
+```bash
+docker compose -f compose.yaml -f compose.ai.yaml up -d --build
 ```
 
 bcryptハッシュは `$` を含むため、`.env` では例のとおり値全体をシングルクォートで囲んでください。
@@ -223,28 +234,26 @@ TrueNAS Custom Appでは `compose.yaml` 相当の設定を使い、次を守っ�
 
 - `/app/data` を `/mnt/<pool>/apps/omni-money` 等の永続Datasetへ割り当てる
 - Webのコンテナポート4000だけをLANまたはリバースプロキシへ公開する
+- AIを有効にする場合、資格情報とmTLS鍵はDocker Secretsで読み取り専用mountする
 - AIのコンテナポート4001はホストIP `127.0.0.1` に限定する
 - TrueNAS UIでホストIPを限定できない場合は4001を公開しない
 - 外部公開はCaddy/Nginx等でTLS終端し、`TRUSTED_PROXIES`を限定設定する
 
-設定値は次のように生成できます。bcrypt生成はパスワードを対話入力するため、シェル履歴へ平文を残しません。
+bcryptハッシュは次のように生成できます。パスワードを対話入力するため、シェル履歴へ平文を残しません。
 
 ```bash
 docker run -it --rm httpd:2.4-alpine htpasswd -nBC 12 omni
-openssl rand -hex 32
 ```
 
-1つ目の出力は `omni:` より後ろのbcryptハッシュだけを `AUTH_PASSWORD_HASH` に設定し、
-2つ目の出力を `AI_API_TOKEN` に設定します。
+出力は `omni:` より後ろのbcryptハッシュだけを `AUTH_PASSWORD_HASH` に設定します。
 
 ## AI API
 
-AI API は `AI_API_TOKEN` を設定した場合のみ、公開Webとは別のAI専用リスナーで利用できます。
-リクエストには `Authorization: Bearer <AI_API_TOKEN>` を付与してください。
+AI API は `AI_CREDENTIALS_FILE` を設定した場合のみ、公開Webとは別のAI専用リスナーで利用できます。`ai-credential issue` が一度だけ標準出力へ返す生トークンを安全なsecretへ保存し、リクエストのBearer認証に使います。JSONにはSHA-256ハッシュしか保存されません。
 
 ```bash
 curl -X POST http://127.0.0.1:4001/api/v1/ai/analysis \
-  -H 'Authorization: Bearer <AI_API_TOKEN>' \
+  -H 'Authorization: Bearer <AI_CREDENTIAL>' \
   -H 'Content-Type: application/json' \
   -d '{}'
 ```
@@ -258,6 +267,10 @@ curl -X POST http://127.0.0.1:4001/api/v1/ai/analysis \
 
 AI API では `POST` のみ許可され、`GET`、`PUT`、`DELETE` などは拒否されます。
 公開Webポート `:4000/api/v1/ai/*` ではAIトークンを受け付けません。
+
+資格情報のscopeは `transactions:create`、`analysis:summary`、`analysis:transactions`、`analysis:memo`、`console:relay` です。分析は既定で集計だけを返し、資格情報で許可された単一口座・固定日付範囲の中で最大30日（資格情報の上限が短ければその日数）へ自動的に絞ります。日付窓をずらして資格情報の固定範囲外を読むことはできません。明細は `include_transactions: true`、メモはさらに `include_memo: true` と対応scopeが必要で、最大500件のカーソルページングです。
+
+資格情報の更新は、ホスト上の通常ファイルを直接参照する構成では `rotate` / `revoke` 後に `SIGHUP` を送ると無停止で反映されます。不正な置換ファイルは拒否され、直前の有効な設定を維持します。Compose Secretsは実行中コンテナ内で置換内容が見えない場合があるため、更新後に `docker compose -f compose.yaml -f compose.ai.yaml up -d --force-recreate omni-money` を実行してください。APIアクセスはcredential ID、mTLS証明書fingerprint、HMAC化した口座参照、期間、明細種別、該当／返却件数を、Web中継は実クライアントIPを構造化監査ログへ残します。資格情報操作も構造化監査し、トークン・本文・項目・メモ・金額は記録しません。運用環境では標準出力をアクセス制限された永続ログへ転送してください。
 
 サーバーモードのメニューには「クレジットカード設定」の直下に「AI API操作」が表示されます。この画面は通常のセッション認証を通過し、サーバー内部からAI専用リスナーへ固定された分析・取引追加だけを中継します。AI用Bearer tokenはブラウザへ返しません。
 

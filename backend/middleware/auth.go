@@ -1,58 +1,354 @@
-// Package middleware は認証、AI用APIの接続制御を提供する
+// Package middleware は認証、AI用APIの接続制御を提供する。
 package middleware
 
 import (
-	"crypto/subtle"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"log"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
+	"unicode"
+
+	"omni_money/backend/aicredentials"
 )
 
-// AIAPIMiddleware はAI用APIの接続制御ミドルウェア
-// AI用の認証鍵（トークン）を検証し、POSTのみを許可する。
-// Agent.md §6.3: 変更（PUT）・削除（DELETE）が要求された場合はHTTP 403で遮断。
-// 許可パス: POST /api/v1/ai/transactions, POST /api/v1/ai/analysis
-func AIAPIMiddleware(apiToken string, next http.Handler) http.Handler {
+const (
+	maxAuthorizationHeaderBytes    = 1024
+	minAITokenBytes                = 43
+	maxAITokenBytes                = 512
+	aiAnalysisRequestsPerMinute    = 120
+	aiTransactionRequestsPerMinute = 30
+	aiFailedAuthRequestsPerMinute  = 30
+)
+
+type aiCredentialContextKey struct{}
+type aiAuditScopeContextKey struct{}
+
+type aiRequestAuditScope struct {
+	hmacKey          [sha256.Size]byte
+	accountReference string
+	startDate        string
+	endDate          string
+	includeDetails   bool
+	includeMemo      bool
+	matchedCount     *int
+	returnedCount    *int
+}
+
+// AICredentialFromContext returns the authenticated AI credential attached by
+// AIAPIMiddleware. The returned value is a defensive copy owned by the request.
+func AICredentialFromContext(ctx context.Context) (*aicredentials.Credential, bool) {
+	credential, ok := ctx.Value(aiCredentialContextKey{}).(*aicredentials.Credential)
+	return credential, ok && credential != nil
+}
+
+// RecordAIRequestAudit attaches only bounded, non-content metadata to the
+// current AI request's audit event. Account names are HMAC-pseudonymized with
+// the credential hash; amounts, item text, memos, and bodies are never stored.
+func RecordAIRequestAudit(ctx context.Context, account, startDate, endDate string, includeDetails, includeMemo bool, matchedCount, returnedCount *int) {
+	scope, ok := ctx.Value(aiAuditScopeContextKey{}).(*aiRequestAuditScope)
+	if !ok || scope == nil {
+		return
+	}
+	mac := hmac.New(sha256.New, scope.hmacKey[:])
+	_, _ = mac.Write([]byte(account))
+	scope.accountReference = hex.EncodeToString(mac.Sum(nil))
+	scope.startDate = startDate
+	scope.endDate = endDate
+	scope.includeDetails = includeDetails
+	scope.includeMemo = includeMemo
+	if matchedCount != nil {
+		value := *matchedCount
+		scope.matchedCount = &value
+	}
+	if returnedCount != nil {
+		value := *returnedCount
+		scope.returnedCount = &value
+	}
+}
+
+type aiRateWindow struct {
+	started time.Time
+	count   int
+}
+
+type aiCredentialRateLimiter struct {
+	mu      sync.Mutex
+	windows map[string]aiRateWindow
+}
+
+func newAICredentialRateLimiter() *aiCredentialRateLimiter {
+	return &aiCredentialRateLimiter{windows: make(map[string]aiRateWindow)}
+}
+
+func (limiter *aiCredentialRateLimiter) allow(key string, limit int, now time.Time) bool {
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+
+	if _, exists := limiter.windows[key]; !exists && len(limiter.windows) >= 4096 {
+		for candidate, candidateWindow := range limiter.windows {
+			if now.Sub(candidateWindow.started) >= time.Minute {
+				delete(limiter.windows, candidate)
+			}
+		}
+		if len(limiter.windows) >= 4096 {
+			return false
+		}
+	}
+
+	window := limiter.windows[key]
+	if window.started.IsZero() || now.Sub(window.started) >= time.Minute {
+		limiter.windows[key] = aiRateWindow{started: now, count: 1}
+		return true
+	}
+	if window.count >= limit {
+		return false
+	}
+	window.count++
+	limiter.windows[key] = window
+
+	return true
+}
+
+func (limiter *aiCredentialRateLimiter) blocked(key string, limit int, now time.Time) bool {
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	window, exists := limiter.windows[key]
+	if !exists {
+		return false
+	}
+	if now.Sub(window.started) >= time.Minute {
+		delete(limiter.windows, key)
+		return false
+	}
+	return window.count >= limit
+}
+
+type aiAuditRecord struct {
+	Timestamp        string `json:"timestamp"`
+	CredentialID     string `json:"credential_id,omitempty"`
+	Operation        string `json:"operation"`
+	RemoteIP         string `json:"remote_ip,omitempty"`
+	Allowed          bool   `json:"allowed"`
+	Status           int    `json:"status"`
+	DurationMS       int64  `json:"duration_ms"`
+	Reason           string `json:"reason,omitempty"`
+	MTLSClientSHA256 string `json:"mtls_client_sha256,omitempty"`
+	AccountReference string `json:"account_hmac_sha256,omitempty"`
+	StartDate        string `json:"start_date,omitempty"`
+	EndDate          string `json:"end_date,omitempty"`
+	IncludeDetails   bool   `json:"include_details,omitempty"`
+	IncludeMemo      bool   `json:"include_memo,omitempty"`
+	MatchedCount     *int   `json:"matched_count,omitempty"`
+	ReturnedCount    *int   `json:"returned_count,omitempty"`
+}
+
+// AIAPIMiddleware authenticates scoped, expiring credentials for the isolated
+// AI listener. It never logs bearer tokens, request bodies, memos, or amounts.
+func AIAPIMiddleware(store *aicredentials.Store, next http.Handler) http.Handler {
+	limiter := newAICredentialRateLimiter()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// AI用エンドポイントのみチェック
 		if !strings.HasPrefix(r.URL.Path, "/api/v1/ai/") {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// トークン未設定の場合は拒否
-		if apiToken == "" {
-			writeJSONError(w, "AI用APIトークンが設定されていません", http.StatusUnauthorized)
-			return
+		started := time.Now()
+		operation := aiOperation(r.URL.Path)
+		remoteIP := remoteHost(r.RemoteAddr)
+		credentialID := ""
+		mtlsClientFingerprint := peerCertificateFingerprint(r)
+		var requestScope *aiRequestAuditScope
+		audit := func(allowed bool, status int, reason string) {
+			record := aiAuditRecord{
+				Timestamp:        time.Now().UTC().Format(time.RFC3339Nano),
+				CredentialID:     credentialID,
+				Operation:        operation,
+				RemoteIP:         remoteIP,
+				Allowed:          allowed,
+				Status:           status,
+				DurationMS:       time.Since(started).Milliseconds(),
+				Reason:           reason,
+				MTLSClientSHA256: mtlsClientFingerprint,
+			}
+			if requestScope != nil {
+				record.AccountReference = requestScope.accountReference
+				record.StartDate = requestScope.startDate
+				record.EndDate = requestScope.endDate
+				record.IncludeDetails = requestScope.includeDetails
+				record.IncludeMemo = requestScope.includeMemo
+				record.MatchedCount = requestScope.matchedCount
+				record.ReturnedCount = requestScope.returnedCount
+			}
+			if encoded, err := json.Marshal(record); err == nil {
+				log.Printf("AI_API_AUDIT %s", encoded)
+			}
 		}
 
-		// トークン検証。比較時間からトークン内容を推測されにくいよう定数時間比較を使う。
-		authorization := strings.TrimSpace(r.Header.Get("Authorization"))
-		const bearerPrefix = "Bearer "
-		if !strings.HasPrefix(authorization, bearerPrefix) {
-			writeJSONError(w, "認証が必要です", http.StatusUnauthorized)
+		failedAuthenticationKey := "authentication-failed\x00" + remoteIP
+		if limiter.blocked(failedAuthenticationKey, aiFailedAuthRequestsPerMinute, time.Now()) {
+			w.Header().Set("Retry-After", "60")
+			writeJSONError(w, "リクエストが多すぎます", http.StatusTooManyRequests)
+			audit(false, http.StatusTooManyRequests, "authentication_rate_limited")
 			return
 		}
-		providedToken := strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix))
-		if len(providedToken) != len(apiToken) || subtle.ConstantTimeCompare([]byte(providedToken), []byte(apiToken)) != 1 {
+		providedToken, ok := bearerToken(r.Header.Get("Authorization"))
+		if !ok || store == nil {
+			if !limiter.allow(failedAuthenticationKey, aiFailedAuthRequestsPerMinute, time.Now()) {
+				w.Header().Set("Retry-After", "60")
+				writeJSONError(w, "リクエストが多すぎます", http.StatusTooManyRequests)
+				audit(false, http.StatusTooManyRequests, "authentication_rate_limited")
+				return
+			}
 			writeJSONError(w, "認証が必要です", http.StatusUnauthorized)
+			audit(false, http.StatusUnauthorized, "authentication_failed")
 			return
 		}
+		credential, err := store.Authenticate(providedToken, time.Now())
+		if err != nil {
+			if !limiter.allow(failedAuthenticationKey, aiFailedAuthRequestsPerMinute, time.Now()) {
+				w.Header().Set("Retry-After", "60")
+				writeJSONError(w, "リクエストが多すぎます", http.StatusTooManyRequests)
+				audit(false, http.StatusTooManyRequests, "authentication_rate_limited")
+				return
+			}
+			writeJSONError(w, "認証が必要です", http.StatusUnauthorized)
+			audit(false, http.StatusUnauthorized, "authentication_failed")
+			return
+		}
+		credentialID = credential.ID
+		auditKey := sha256.Sum256([]byte(providedToken))
+		requestScope = &aiRequestAuditScope{hmacKey: auditKey}
 
-		// POSTのみ許可。GET/PUT/DELETE等はHTTP 403で即座に遮断（Agent.md §6.3）
 		if r.Method != http.MethodPost {
 			writeJSONError(w, "AI用APIは新規追加(POST)と分析(POST)のみ許可されています", http.StatusForbidden)
+			audit(false, http.StatusForbidden, "method_forbidden")
+			return
+		}
+		requiredScope := aiRequiredScope(r.URL.Path)
+		if requiredScope == "" {
+			writeJSONError(w, "Not Found", http.StatusNotFound)
+			audit(false, http.StatusNotFound, "path_not_allowed")
+			return
+		}
+		if !credential.HasScope(requiredScope) {
+			writeJSONError(w, "この操作を行う権限がありません", http.StatusForbidden)
+			audit(false, http.StatusForbidden, "scope_forbidden")
+			return
+		}
+		if r.Header.Get("X-Omni-AI-Console-Relay") == "1" && !credential.AllowConsoleRelay {
+			writeJSONError(w, "管理画面から中継する権限がありません", http.StatusForbidden)
+			audit(false, http.StatusForbidden, "console_relay_forbidden")
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		if !limiter.allow(credential.ID+"\x00"+remoteIP+"\x00"+operation, aiRequestLimit(r.URL.Path), time.Now()) {
+			w.Header().Set("Retry-After", "60")
+			writeJSONError(w, "リクエストが多すぎます", http.StatusTooManyRequests)
+			audit(false, http.StatusTooManyRequests, "rate_limited")
+			return
+		}
+
+		recorder := &auditResponseWriter{ResponseWriter: w, status: http.StatusOK}
+		ctx := context.WithValue(r.Context(), aiCredentialContextKey{}, credential)
+		ctx = context.WithValue(ctx, aiAuditScopeContextKey{}, requestScope)
+		next.ServeHTTP(recorder, r.WithContext(ctx))
+		audit(recorder.status < http.StatusBadRequest, recorder.status, "")
 	})
 }
 
-// writeJSONError はJSON形式のエラーレスポンスを返す
-// Content-Type: application/json を設定し、構造化されたエラーを返す
+func peerCertificateFingerprint(r *http.Request) string {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return ""
+	}
+	digest := sha256.Sum256(r.TLS.PeerCertificates[0].Raw)
+	return hex.EncodeToString(digest[:])
+}
+
+func aiRequestLimit(path string) int {
+	if path == "/api/v1/ai/transactions" {
+		return aiTransactionRequestsPerMinute
+	}
+	return aiAnalysisRequestsPerMinute
+}
+
+func bearerToken(header string) (string, bool) {
+	if len(header) > maxAuthorizationHeaderBytes || !strings.HasPrefix(header, "Bearer ") {
+		return "", false
+	}
+	token := strings.TrimPrefix(header, "Bearer ")
+	if len(token) < minAITokenBytes || len(token) > maxAITokenBytes || strings.TrimSpace(token) != token {
+		return "", false
+	}
+	for _, r := range token {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return "", false
+		}
+	}
+	return token, true
+}
+
+func aiRequiredScope(path string) string {
+	switch path {
+	case "/api/v1/ai/transactions":
+		return aicredentials.ScopeTransactionsCreate
+	case "/api/v1/ai/analysis":
+		return aicredentials.ScopeAnalysisSummary
+	default:
+		return ""
+	}
+}
+
+func aiOperation(path string) string {
+	switch path {
+	case "/api/v1/ai/transactions":
+		return "transactions.create"
+	case "/api/v1/ai/analysis":
+		return "analysis"
+	default:
+		return "unknown"
+	}
+}
+
+func remoteHost(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil {
+		return host
+	}
+	return strings.TrimSpace(remoteAddr)
+}
+
+type auditResponseWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *auditResponseWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.status = status
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *auditResponseWriter) Write(body []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+// writeJSONError はJSON形式のエラーレスポンスを返す。
 func writeJSONError(w http.ResponseWriter, message string, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }

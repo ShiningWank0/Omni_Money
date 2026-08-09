@@ -9,6 +9,7 @@
       <div class="security-note">
         <strong>管理者向けAPI入力画面</strong>
         <p>送信内容は、通常Webのセッション認証を通過した後、サーバー内部からAI専用リスナーへ転送されます。AI用Bearer tokenはブラウザへ渡されません。</p>
+        <p>分析は既定で許可口座・期間内の集計だけを返します。取引明細やメモを含めるには、資格情報側の追加scopeが必要です。</p>
         <p>ローカルLLMやクラウドLLMは、この画面へAPIキーを入力せず、別のローカル仲介プロセスからAI専用ポートを呼び出してください。</p>
       </div>
 
@@ -69,7 +70,11 @@ function defaultBody(value) {
       end_date: '',
       account: '',
       tag_ids: [],
-      type: ''
+      type: '',
+      include_transactions: false,
+      include_memo: false,
+      limit: 0,
+      cursor: ''
     }, null, 2)
   }
 

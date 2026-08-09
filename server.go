@@ -3,16 +3,21 @@
 package main
 
 import (
+	"crypto/tls"
 	"errors"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
+	"omni_money/backend/aicredentials"
+	"omni_money/backend/aitransport"
 	"omni_money/backend/api"
 	"omni_money/backend/config"
 	"omni_money/backend/database"
@@ -71,11 +76,12 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      api.NewRouter(),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:              addr,
+		Handler:           api.NewRouter(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	errCh := make(chan error, 2)
@@ -89,13 +95,16 @@ func main() {
 		errCh <- srv.ListenAndServe()
 	}()
 
-	// AI APIは別リスナーで提供する。トークン未設定時はリスナー自体を起動しない。
-	aiToken := strings.TrimSpace(os.Getenv("AI_API_TOKEN"))
-	if aiToken != "" {
-		if len(aiToken) < 32 {
-			log.Fatal("AI_API_TOKEN は32文字以上のランダムな値を設定してください")
+	// AI APIは別リスナーで提供する。資格情報ファイル未設定時はリスナー自体を起動しない。
+	if strings.TrimSpace(os.Getenv("AI_API_TOKEN")) != "" {
+		log.Fatal("AI_API_TOKEN は廃止されました。期限・権限・口座制約を持つ AI_CREDENTIALS_FILE を使用してください")
+	}
+	aiCredentialsFile := strings.TrimSpace(os.Getenv("AI_CREDENTIALS_FILE"))
+	if aiCredentialsFile != "" {
+		credentialStore, err := aicredentials.NewStore(aiCredentialsFile)
+		if err != nil {
+			log.Fatalf("AI資格情報ファイルが無効です: %v", err)
 		}
-
 		aiHost := strings.TrimSpace(os.Getenv("AI_HOST_IP"))
 		if aiHost == "" {
 			aiHost = "127.0.0.1"
@@ -105,30 +114,76 @@ func main() {
 			aiPort = "4001"
 		}
 		allowRemoteAI := strings.EqualFold(strings.TrimSpace(os.Getenv("AI_ALLOW_REMOTE")), "true")
-		if !config.IsLoopbackHost(aiHost) && !allowRemoteAI {
-			log.Fatal("AI_HOST_IP がループバック以外です。Dockerのlocalhost限定ポート公開などを確認し、明示的に AI_ALLOW_REMOTE=true を設定してください")
+		if !isLoopbackHost(aiHost) && !allowRemoteAI {
+			log.Fatal("AI_HOST_IP がループバック以外です。mTLS設定を確認し、明示的に AI_ALLOW_REMOTE=true を設定してください")
 		}
 
 		aiAddr := net.JoinHostPort(aiHost, aiPort)
-		if !config.IsLoopbackHost(aiHost) {
-			log.Printf("警告: AI専用APIを非ループバックアドレス %s にTLSなしで公開します。BearerトークンとAI送受信データが平文で流れるため、Dockerのlocalhost限定ポート公開やリバースプロキシでのTLS終端で必ず保護してください", aiAddr)
+		aiTLSConfig, err := aitransport.BuildServerTLSConfig(
+			aiHost,
+			os.Getenv("AI_TLS_CERT_FILE"),
+			os.Getenv("AI_TLS_KEY_FILE"),
+			os.Getenv("AI_TLS_CLIENT_CA_FILE"),
+		)
+		if err != nil {
+			log.Fatalf("AI専用APIのTLS設定が無効です: %v", err)
 		}
 		aiServer := &http.Server{
-			Addr:         aiAddr,
-			Handler:      api.NewAIRouter(aiToken),
-			ReadTimeout:  15 * time.Second,
-			WriteTimeout: 60 * time.Second,
-			IdleTimeout:  120 * time.Second,
+			Addr:              aiAddr,
+			Handler:           api.NewAIRouter(credentialStore),
+			TLSConfig:         aiTLSConfig,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       120 * time.Second,
 		}
+		watchAICredentialReload(credentialStore)
 		go func() {
-			log.Printf("Omni Money v%s AI専用API起動: %s", version, aiAddr)
-			errCh <- aiServer.ListenAndServe()
+			listener, err := net.Listen("tcp", aiAddr)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if aiTLSConfig != nil {
+				transportLabel := "TLS 1.3"
+				if aiTLSConfig.ClientAuth == tls.RequireAndVerifyClientCert {
+					transportLabel += "/mTLS"
+				}
+				log.Printf("Omni Money v%s AI専用API起動 (%s): %s", version, transportLabel, aiAddr)
+				listener = tls.NewListener(listener, aiTLSConfig)
+			} else {
+				log.Printf("Omni Money v%s AI専用API起動 (loopback HTTP): %s", version, aiAddr)
+			}
+			errCh <- aiServer.Serve(listener)
 		}()
 	} else {
-		log.Printf("AI_API_TOKEN 未設定のためAI専用APIは無効です")
+		log.Printf("AI_CREDENTIALS_FILE 未設定のためAI専用APIは無効です")
 	}
 
 	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("サーバー停止: %v", err)
 	}
+}
+
+func isLoopbackHost(host string) bool {
+	return aitransport.IsLoopbackHost(host)
+}
+
+func watchAICredentialReload(store *aicredentials.Store) {
+	reload := make(chan os.Signal, 1)
+	// Signal 1 is SIGHUP on the Unix platforms used by the server image. Using
+	// the numeric syscall.Signal keeps the server source buildable on Windows;
+	// Windows operators restart the process after atomic credential replacement.
+	signal.Notify(reload, syscall.Signal(1))
+	go func() {
+		for range reload {
+			if err := store.Reload(); err != nil {
+				// Reload is atomic: an invalid replacement never displaces the
+				// last valid snapshot. Do not log credential contents.
+				log.Printf("AI資格情報の再読込を拒否しました。直前の有効な設定を維持します: %v", err)
+				continue
+			}
+			log.Printf("AI資格情報を安全に再読込しました (%d件)", len(store.List()))
+		}
+	}()
 }

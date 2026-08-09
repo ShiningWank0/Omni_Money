@@ -2,6 +2,7 @@
 package core
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/base64"
 	"encoding/csv"
@@ -1725,71 +1726,33 @@ func getTagSummaryFiltered(txType, startDate, endDate, account string, tagIDs []
 
 // --- AI分析 (Agent.md §6.3) ---
 
+const (
+	defaultAIAnalysisLimit = 100
+	maxAIAnalysisLimit     = 500
+	maxAIAnalysisTagIDs    = 20
+)
+
+type aiAnalysisCursor struct {
+	Date string `json:"date"`
+	ID   int64  `json:"id"`
+}
+
 // AnalyzeTransactions はAIエージェント向けの取引分析を行う
 func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, error) {
 	db := database.GetDB()
-
-	query := "SELECT id, account, date, item, type, amount, balance, memo FROM transactions WHERE 1=1"
-	args := []interface{}{}
-
-	if req.Account != "" {
-		query += " AND account = ?"
-		args = append(args, req.Account)
-	}
-	if req.Type != "" {
-		query += " AND type = ?"
-		args = append(args, req.Type)
-	}
-	if req.StartDate != "" {
-		query += " AND date >= ?"
-		args = append(args, req.StartDate)
-	}
-	if req.EndDate != "" {
-		query += " AND date <= ?"
-		args = append(args, req.EndDate+" 23:59:59")
-	}
-
-	// タグフィルタ
-	if len(req.TagIDs) > 0 {
-		placeholders := make([]string, len(req.TagIDs))
-		for i, id := range req.TagIDs {
-			placeholders[i] = "?"
-			args = append(args, id)
-		}
-		query += fmt.Sprintf(" AND id IN (SELECT transaction_id FROM transaction_tags WHERE tag_id IN (%s))",
-			strings.Join(placeholders, ","))
-	}
-
-	query += " ORDER BY date, id"
-
-	rows, err := db.Query(query, args...)
+	where, args, err := buildAIAnalysisFilter(req)
 	if err != nil {
-		return nil, fmt.Errorf("分析クエリエラー: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
 
 	resp := &models.AnalysisResponse{}
-	for rows.Next() {
-		var t models.Transaction
-		var dateStr string
-		if err := rows.Scan(&t.ID, &t.Account, &dateStr, &t.Item, &t.Type, &t.Amount, &t.Balance, &t.Memo); err != nil {
-			return nil, err
-		}
-		t.Date = parseDate(dateStr)
-		txResp := t.ToResponse()
-		resp.Transactions = append(resp.Transactions, txResp)
-		resp.Count++
-		if t.Type == "income" {
-			resp.TotalIncome, err = validation.CheckedAddInt64(resp.TotalIncome, t.Amount)
-		} else {
-			resp.TotalExpense, err = validation.CheckedAddInt64(resp.TotalExpense, t.Amount)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("分析金額集計オーバーフロー: %w", err)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("分析行取得エラー: %w", err)
+	aggregateQuery := `SELECT
+		COUNT(*),
+		COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0)
+		FROM transactions` + where
+	if err := db.QueryRow(aggregateQuery, args...).Scan(&resp.Count, &resp.TotalIncome, &resp.TotalExpense); err != nil {
+		return nil, fmt.Errorf("分析集計エラー: %w", err)
 	}
 	resp.NetAmount, err = validation.CheckedSubInt64(resp.TotalIncome, resp.TotalExpense)
 	if err != nil {
@@ -1801,13 +1764,168 @@ func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, 
 	if err != nil {
 		return nil, fmt.Errorf("タグ別分析エラー: %w", err)
 	}
+	if req.MaxTagSummaries > 0 {
+		var total int
+		countTagSummaries(tagSummaries, &total)
+		if total > req.MaxTagSummaries {
+			remaining := req.MaxTagSummaries
+			tagSummaries = truncateTagSummaries(tagSummaries, &remaining)
+			resp.TagSummariesTruncated = true
+		}
+	}
 	resp.TagSummaries = tagSummaries
 
-	if resp.Transactions == nil {
-		resp.Transactions = []models.TransactionResponse{}
+	if !req.IncludeTransactions {
+		return resp, nil
 	}
 
+	limit := req.Limit
+	if limit == 0 {
+		limit = defaultAIAnalysisLimit
+	}
+	if limit < 1 || limit > maxAIAnalysisLimit {
+		return nil, fmt.Errorf("分析明細のlimitは1から%dまでです", maxAIAnalysisLimit)
+	}
+
+	detailWhere := where
+	detailArgs := append([]interface{}{}, args...)
+	if req.Cursor != "" {
+		cursor, err := decodeAIAnalysisCursor(req.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		detailWhere += " AND (datetime(date) < ? OR (datetime(date) = ? AND id < ?))"
+		detailArgs = append(detailArgs, cursor.Date, cursor.Date, cursor.ID)
+	}
+	detailArgs = append(detailArgs, limit+1)
+	rows, err := db.Query(`SELECT id, account, datetime(date), item, type, amount, memo
+		FROM transactions`+detailWhere+`
+		ORDER BY datetime(date) DESC, id DESC
+		LIMIT ?`, detailArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("分析明細クエリエラー: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var detail models.AITransactionDetail
+		var memo string
+		if err := rows.Scan(&detail.ID, &detail.Account, &detail.Date, &detail.Item, &detail.Type, &detail.Amount, &memo); err != nil {
+			return nil, fmt.Errorf("分析明細スキャンエラー: %w", err)
+		}
+		if req.IncludeMemo {
+			detail.Memo = memo
+		}
+		resp.Transactions = append(resp.Transactions, detail)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("分析明細取得エラー: %w", err)
+	}
+	if len(resp.Transactions) > limit {
+		lastReturned := resp.Transactions[limit-1]
+		cursor, err := encodeAIAnalysisCursor(lastReturned.Date, lastReturned.ID)
+		if err != nil {
+			return nil, err
+		}
+		resp.NextCursor = cursor
+		resp.Transactions = resp.Transactions[:limit]
+	}
+	resp.ReturnedCount = len(resp.Transactions)
+
 	return resp, nil
+}
+
+func countTagSummaries(summaries []models.TagSummary, total *int) {
+	for i := range summaries {
+		(*total)++
+		countTagSummaries(summaries[i].Children, total)
+	}
+}
+
+func truncateTagSummaries(summaries []models.TagSummary, remaining *int) []models.TagSummary {
+	if *remaining <= 0 {
+		return nil
+	}
+	result := make([]models.TagSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		if *remaining <= 0 {
+			break
+		}
+		(*remaining)--
+		summary.Children = truncateTagSummaries(summary.Children, remaining)
+		result = append(result, summary)
+	}
+	return result
+}
+
+func buildAIAnalysisFilter(req models.AnalysisRequest) (string, []interface{}, error) {
+	where := " WHERE 1=1"
+	args := []interface{}{}
+	if req.Account != "" {
+		where += " AND account = ?"
+		args = append(args, req.Account)
+	}
+	if req.Type != "" {
+		where += " AND type = ?"
+		args = append(args, req.Type)
+	}
+	if req.StartDate != "" {
+		where += " AND date >= ?"
+		args = append(args, req.StartDate)
+	}
+	if req.EndDate != "" {
+		where += " AND date <= ?"
+		args = append(args, req.EndDate+" 23:59:59")
+	}
+	if len(req.TagIDs) > maxAIAnalysisTagIDs {
+		return "", nil, fmt.Errorf("タグIDは%d件までです", maxAIAnalysisTagIDs)
+	}
+	if len(req.TagIDs) > 0 {
+		placeholders := make([]string, len(req.TagIDs))
+		for i, id := range req.TagIDs {
+			if id <= 0 {
+				return "", nil, fmt.Errorf("タグIDは正の整数で指定してください")
+			}
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		where += fmt.Sprintf(" AND id IN (SELECT transaction_id FROM transaction_tags WHERE tag_id IN (%s))", strings.Join(placeholders, ","))
+	}
+	return where, args, nil
+}
+
+func encodeAIAnalysisCursor(date string, id int64) (string, error) {
+	payload, err := json.Marshal(aiAnalysisCursor{Date: date, ID: id})
+	if err != nil {
+		return "", fmt.Errorf("分析カーソル作成エラー: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(payload), nil
+}
+
+func decodeAIAnalysisCursor(raw string) (aiAnalysisCursor, error) {
+	if len(raw) > 512 {
+		return aiAnalysisCursor{}, fmt.Errorf("分析カーソルが無効です")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return aiAnalysisCursor{}, fmt.Errorf("分析カーソルが無効です")
+	}
+	var cursor aiAnalysisCursor
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cursor); err != nil {
+		return aiAnalysisCursor{}, fmt.Errorf("分析カーソルが無効です")
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return aiAnalysisCursor{}, fmt.Errorf("分析カーソルが無効です")
+	}
+	if cursor.ID <= 0 {
+		return aiAnalysisCursor{}, fmt.Errorf("分析カーソルが無効です")
+	}
+	if _, err := time.Parse("2006-01-02 15:04:05", cursor.Date); err != nil {
+		return aiAnalysisCursor{}, fmt.Errorf("分析カーソルが無効です")
+	}
+	return cursor, nil
 }
 
 // --- 取引紐付け（リンク）機能 (Agent.md §6.2) ---

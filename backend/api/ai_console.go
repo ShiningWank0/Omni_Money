@@ -2,14 +2,22 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"omni_money/backend/aitransport"
+	"omni_money/backend/middleware"
 )
 
 const maxAIConsoleResponseSize = 10 * 1024 * 1024
@@ -21,9 +29,32 @@ var aiConsoleHTTPClient = &http.Client{Timeout: 60 * time.Second}
 // ブラウザへ渡さず、任意URLへの転送も許可しない。
 func handleAIConsoleProxy(aiPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		auditWriter := &aiConsoleAuditWriter{ResponseWriter: w, status: http.StatusOK}
+		w = auditWriter
+		defer func() {
+			record := struct {
+				Timestamp     string `json:"timestamp"`
+				Operation     string `json:"operation"`
+				ClientIP      string `json:"client_ip,omitempty"`
+				SessionSHA256 string `json:"session_sha256,omitempty"`
+				Status        int    `json:"status"`
+				DurationMS    int64  `json:"duration_ms"`
+			}{
+				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+				Operation:     aiPath,
+				ClientIP:      middleware.ClientIPFromRequest(r),
+				SessionSHA256: sessionAuditReference(r),
+				Status:        auditWriter.status,
+				DurationMS:    time.Since(started).Milliseconds(),
+			}
+			if encoded, err := json.Marshal(record); err == nil {
+				log.Printf("AI_CONSOLE_AUDIT %s", encoded)
+			}
+		}()
 		w.Header().Set("Cache-Control", "no-store")
-		token := strings.TrimSpace(os.Getenv("AI_API_TOKEN"))
-		if token == "" {
+		token, err := readAIConsoleToken()
+		if err != nil {
 			jsonError(w, "AI専用APIが有効化されていません", http.StatusServiceUnavailable)
 			return
 		}
@@ -38,9 +69,108 @@ func handleAIConsoleProxy(aiPath string) http.HandlerFunc {
 			return
 		}
 
-		targetURL := "http://" + net.JoinHostPort(aiConsoleRelayHost(), port) + aiPath
-		forwardAIConsoleRequest(w, r, targetURL, token, aiConsoleHTTPClient)
+		scheme := "http"
+		client := aiConsoleHTTPClient
+		if strings.TrimSpace(os.Getenv("AI_TLS_CERT_FILE")) != "" || strings.TrimSpace(os.Getenv("AI_TLS_CA_FILE")) != "" {
+			scheme = "https"
+			client, err = newAIConsoleTLSClient()
+			if err != nil {
+				jsonError(w, "AI専用APIのTLSクライアント設定が無効です", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		targetURL := scheme + "://" + net.JoinHostPort(aiConsoleRelayHost(), port) + aiPath
+		forwardAIConsoleRequest(w, r, targetURL, token, client)
 	}
+}
+
+func sessionAuditReference(r *http.Request) string {
+	session, ok := middleware.SessionFromContext(r.Context())
+	if !ok || session == nil || session.ID == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(session.ID))
+	return hex.EncodeToString(digest[:])
+}
+
+type aiConsoleAuditWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *aiConsoleAuditWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.status = status
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *aiConsoleAuditWriter) Write(body []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func readAIConsoleToken() (string, error) {
+	path := strings.TrimSpace(os.Getenv("AI_CONSOLE_TOKEN_FILE"))
+	if path == "" {
+		return "", fmt.Errorf("AI_CONSOLE_TOKEN_FILE is not configured")
+	}
+	before, err := os.Lstat(path)
+	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("AI console token must be a regular file")
+	}
+	if before.Size() <= 0 || before.Size() > 4096 || !safeAIConsoleTokenPermissions(path, before.Mode().Perm()) {
+		return "", fmt.Errorf("AI console token file permissions or size are invalid")
+	}
+	handle, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer handle.Close()
+	after, err := handle.Stat()
+	if err != nil || !os.SameFile(before, after) || !after.Mode().IsRegular() || after.Size() <= 0 || after.Size() > 4096 || !safeAIConsoleTokenPermissions(path, after.Mode().Perm()) {
+		return "", fmt.Errorf("AI console token file changed or became unsafe while opening")
+	}
+	data, err := io.ReadAll(io.LimitReader(handle, 4097))
+	if err != nil || len(data) > 4096 {
+		return "", fmt.Errorf("AI console token could not be read safely")
+	}
+	token := strings.TrimSpace(string(data))
+	if len(token) < 43 || len(token) > 512 || strings.ContainsAny(token, " \t\r\n") {
+		return "", fmt.Errorf("AI console token is invalid")
+	}
+	return token, nil
+}
+
+func safeAIConsoleTokenPermissions(path string, permissions os.FileMode) bool {
+	cleaned := filepath.ToSlash(filepath.Clean(path))
+	if strings.HasPrefix(cleaned, "/run/secrets/") {
+		// Docker Compose secrets are commonly 0444. They are only mounted into
+		// the explicitly authorized service, but must never be writable/executable.
+		return permissions&0o133 == 0
+	}
+	// A host-side raw bearer token must be private to its owner.
+	return permissions&0o177 == 0
+}
+
+func newAIConsoleTLSClient() (*http.Client, error) {
+	config, err := aitransport.BuildClientTLSConfig(
+		os.Getenv("AI_TLS_CA_FILE"),
+		os.Getenv("AI_TLS_CLIENT_CERT_FILE"),
+		os.Getenv("AI_TLS_CLIENT_KEY_FILE"),
+		os.Getenv("AI_TLS_SERVER_NAME"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = config
+	return &http.Client{Transport: transport, Timeout: 60 * time.Second}, nil
 }
 
 // aiConsoleRelayHost は中継先ホストを返す。AI_HOST_IPが::1などのループバック
@@ -68,6 +198,7 @@ func forwardAIConsoleRequest(w http.ResponseWriter, r *http.Request, targetURL, 
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Omni-AI-Console-Relay", "1")
 
 	response, err := client.Do(request)
 	if err != nil {

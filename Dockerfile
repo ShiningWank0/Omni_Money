@@ -4,7 +4,8 @@ FROM node:24.18.0-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
 RUN npm ci --include=dev
-COPY frontend/ ./
+COPY frontend/index.html frontend/vite.config.js ./
+COPY frontend/src ./src
 RUN npm run build
 
 # ===== Stage 2: バックエンドのビルド =====
@@ -17,10 +18,10 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
-# サーバーバイナリに必要なGoソースだけをコピーする。
-# UIだけの変更でバックエンドビルドキャッシュが無効になることを避ける。
+# サーバービルドに必要なソースだけをallow-listでコピーする。
+# ランタイムDB、WAL、secret、任意の作業ファイルをbuilder layerへ持ち込まない。
 COPY server.go ./
-COPY backend/ ./backend/
+COPY backend ./backend
 
 # バージョン情報
 ARG VERSION=dev
