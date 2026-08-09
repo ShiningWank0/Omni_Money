@@ -116,7 +116,9 @@ func writeStringSliceSetting(t *testing.T, key string, items []string) {
 
 func waitForSnapshotCount(t *testing.T, want int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	// FULL synchronous durability and the race detector can make consecutive
+	// WAL checkpoints materially slower than the previous NORMAL default.
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		snapshots, err := database.ListSnapshots("")
 		if err == nil && len(snapshots) >= want {

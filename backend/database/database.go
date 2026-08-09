@@ -74,14 +74,9 @@ func initDBLocked(path string) error {
 	}
 
 	var err error
-	db, err = sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON")
+	db, err = openDurableSQLite(path)
 	if err != nil {
 		return fmt.Errorf("データベース接続エラー: %w", err)
-	}
-
-	// 接続テスト
-	if err := db.Ping(); err != nil {
-		return fmt.Errorf("データベースping失敗: %w", err)
 	}
 
 	// テーブル作成
@@ -540,7 +535,7 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	}
 
 	// --- 手順5: 再接続と現行スキーマの再適用 ---
-	newDB, err := sql.Open("sqlite3", currentPath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON")
+	newDB, err := openDurableSQLite(currentPath)
 	if err != nil {
 		return fmt.Errorf("復元後のDB接続エラー: %w", err)
 	}
@@ -569,6 +564,32 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 
 	log.Printf("スナップショット復元完了: %s (integrity_check: ok)", snapshotName)
 	return nil
+}
+
+const durableSQLiteParameters = "?_journal_mode=WAL&_synchronous=FULL&_busy_timeout=5000&_foreign_keys=ON"
+
+// openDurableSQLite opens every writable application connection with FULL
+// durability. WAL+NORMAL may acknowledge a commit before its WAL frames are
+// synced, which is not acceptable for financial records.
+func openDurableSQLite(path string) (*sql.DB, error) {
+	target, err := sql.Open("sqlite3", path+durableSQLiteParameters)
+	if err != nil {
+		return nil, err
+	}
+	if err := target.Ping(); err != nil {
+		_ = target.Close()
+		return nil, fmt.Errorf("データベースping失敗: %w", err)
+	}
+	var synchronous int
+	if err := target.QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil {
+		_ = target.Close()
+		return nil, fmt.Errorf("SQLite同期設定検証エラー: %w", err)
+	}
+	if synchronous != 2 {
+		_ = target.Close()
+		return nil, fmt.Errorf("SQLite同期設定がFULLではありません: %d", synchronous)
+	}
+	return target, nil
 }
 
 func checkIntegrity(target *sql.DB) error {
