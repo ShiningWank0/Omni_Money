@@ -3,7 +3,6 @@ package middleware
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +15,7 @@ import (
 	"unicode"
 
 	"omni_money/backend/aicredentials"
+	"omni_money/backend/audithmac"
 )
 
 const (
@@ -31,15 +31,18 @@ type aiCredentialContextKey struct{}
 type aiAuditScopeContextKey struct{}
 
 type aiRequestAuditScope struct {
-	hmacKey             [sha256.Size]byte
-	accountReference    string
-	startDate           string
-	endDate             string
-	includeDetails      bool
-	includeMemo         bool
-	matchedCount        *int
-	returnedCount       *int
-	idempotencyReplayed bool
+	auditKeys                audithmac.Snapshot
+	accountReference         string
+	accountReferenceKeyID    string
+	previousAccountReference string
+	previousAccountKeyID     string
+	startDate                string
+	endDate                  string
+	includeDetails           bool
+	includeMemo              bool
+	matchedCount             *int
+	returnedCount            *int
+	idempotencyReplayed      bool
 }
 
 // RecordAIIdempotencyReplay marks a successful write as a replay without
@@ -59,16 +62,22 @@ func AICredentialFromContext(ctx context.Context) (*aicredentials.Credential, bo
 }
 
 // RecordAIRequestAudit attaches only bounded, non-content metadata to the
-// current AI request's audit event. Account names are HMAC-pseudonymized with
-// the credential hash; amounts, item text, memos, and bodies are never stored.
+// current AI request's audit event. Account names are pseudonymized with the
+// dedicated audit keyring; amounts, item text, memos, and bodies are never stored.
 func RecordAIRequestAudit(ctx context.Context, account, startDate, endDate string, includeDetails, includeMemo bool, matchedCount, returnedCount *int) {
 	scope, ok := ctx.Value(aiAuditScopeContextKey{}).(*aiRequestAuditScope)
 	if !ok || scope == nil {
 		return
 	}
-	mac := hmac.New(sha256.New, scope.hmacKey[:])
-	_, _ = mac.Write([]byte(account))
-	scope.accountReference = hex.EncodeToString(mac.Sum(nil))
+	references := scope.auditKeys.AccountReferences(account, time.Now().UTC())
+	scope.accountReference = references.Current.HMACSHA256
+	scope.accountReferenceKeyID = references.Current.KeyID
+	scope.previousAccountReference = ""
+	scope.previousAccountKeyID = ""
+	if references.Previous != nil {
+		scope.previousAccountReference = references.Previous.HMACSHA256
+		scope.previousAccountKeyID = references.Previous.KeyID
+	}
 	scope.startDate = startDate
 	scope.endDate = endDate
 	scope.includeDetails = includeDetails
@@ -141,28 +150,31 @@ func (limiter *aiCredentialRateLimiter) blocked(key string, limit int, now time.
 }
 
 type aiAuditRecord struct {
-	Timestamp           string `json:"timestamp"`
-	CredentialID        string `json:"credential_id,omitempty"`
-	Operation           string `json:"operation"`
-	RemoteIP            string `json:"remote_ip,omitempty"`
-	Allowed             bool   `json:"allowed"`
-	Status              int    `json:"status"`
-	DurationMS          int64  `json:"duration_ms"`
-	Reason              string `json:"reason,omitempty"`
-	MTLSClientSHA256    string `json:"mtls_client_sha256,omitempty"`
-	AccountReference    string `json:"account_hmac_sha256,omitempty"`
-	StartDate           string `json:"start_date,omitempty"`
-	EndDate             string `json:"end_date,omitempty"`
-	IncludeDetails      bool   `json:"include_details,omitempty"`
-	IncludeMemo         bool   `json:"include_memo,omitempty"`
-	MatchedCount        *int   `json:"matched_count,omitempty"`
-	ReturnedCount       *int   `json:"returned_count,omitempty"`
-	IdempotencyReplayed bool   `json:"idempotency_replayed,omitempty"`
+	Timestamp                     string `json:"timestamp"`
+	CredentialID                  string `json:"credential_id,omitempty"`
+	Operation                     string `json:"operation"`
+	RemoteIP                      string `json:"remote_ip,omitempty"`
+	Allowed                       bool   `json:"allowed"`
+	Status                        int    `json:"status"`
+	DurationMS                    int64  `json:"duration_ms"`
+	Reason                        string `json:"reason,omitempty"`
+	MTLSClientSHA256              string `json:"mtls_client_sha256,omitempty"`
+	AccountReference              string `json:"account_hmac_sha256,omitempty"`
+	AccountReferenceKeyID         string `json:"account_hmac_key_id,omitempty"`
+	PreviousAccountReference      string `json:"account_hmac_previous_sha256,omitempty"`
+	PreviousAccountReferenceKeyID string `json:"account_hmac_previous_key_id,omitempty"`
+	StartDate                     string `json:"start_date,omitempty"`
+	EndDate                       string `json:"end_date,omitempty"`
+	IncludeDetails                bool   `json:"include_details,omitempty"`
+	IncludeMemo                   bool   `json:"include_memo,omitempty"`
+	MatchedCount                  *int   `json:"matched_count,omitempty"`
+	ReturnedCount                 *int   `json:"returned_count,omitempty"`
+	IdempotencyReplayed           bool   `json:"idempotency_replayed,omitempty"`
 }
 
 // AIAPIMiddleware authenticates scoped, expiring credentials for the isolated
 // AI listener. It never logs bearer tokens, request bodies, memos, or amounts.
-func AIAPIMiddleware(store *aicredentials.Store, next http.Handler) http.Handler {
+func AIAPIMiddleware(store *aicredentials.Store, auditStore *audithmac.Store, next http.Handler) http.Handler {
 	limiter := newAICredentialRateLimiter()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/v1/ai/") {
@@ -190,6 +202,9 @@ func AIAPIMiddleware(store *aicredentials.Store, next http.Handler) http.Handler
 			}
 			if requestScope != nil {
 				record.AccountReference = requestScope.accountReference
+				record.AccountReferenceKeyID = requestScope.accountReferenceKeyID
+				record.PreviousAccountReference = requestScope.previousAccountReference
+				record.PreviousAccountReferenceKeyID = requestScope.previousAccountKeyID
 				record.StartDate = requestScope.startDate
 				record.EndDate = requestScope.endDate
 				record.IncludeDetails = requestScope.includeDetails
@@ -204,6 +219,11 @@ func AIAPIMiddleware(store *aicredentials.Store, next http.Handler) http.Handler
 		}
 
 		failedAuthenticationKey := "authentication-failed\x00" + remoteIP
+		if auditStore == nil || auditStore.CurrentKeyID() == "" {
+			writeJSONError(w, "AI監査設定が利用できません", http.StatusServiceUnavailable)
+			audit(false, http.StatusServiceUnavailable, "audit_key_unavailable")
+			return
+		}
 		if limiter.blocked(failedAuthenticationKey, aiFailedAuthRequestsPerMinute, time.Now()) {
 			w.Header().Set("Retry-After", "60")
 			writeJSONError(w, "リクエストが多すぎます", http.StatusTooManyRequests)
@@ -235,8 +255,7 @@ func AIAPIMiddleware(store *aicredentials.Store, next http.Handler) http.Handler
 			return
 		}
 		credentialID = credential.ID
-		auditKey := sha256.Sum256([]byte(providedToken))
-		requestScope = &aiRequestAuditScope{hmacKey: auditKey}
+		requestScope = &aiRequestAuditScope{auditKeys: auditStore.Snapshot()}
 
 		if r.Method != http.MethodPost {
 			writeJSONError(w, "AI用APIは新規追加(POST)と分析(POST)のみ許可されています", http.StatusForbidden)

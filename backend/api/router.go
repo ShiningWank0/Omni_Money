@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"omni_money/backend/aicredentials"
+	"omni_money/backend/audithmac"
 	"omni_money/backend/core"
 	"omni_money/backend/database"
 	"omni_money/backend/middleware"
@@ -95,13 +96,13 @@ func NewRouter() http.Handler {
 
 // NewAIRouter はAI専用リスナー用のルーターを作成する。
 // 通常の家計簿API、静的ファイル、ユーザー認証APIは一切登録しない。
-func NewAIRouter(credentialStore *aicredentials.Store) http.Handler {
+func NewAIRouter(credentialStore *aicredentials.Store, auditStore *audithmac.Store) http.Handler {
 	aiMux := http.NewServeMux()
 	aiMux.HandleFunc("/api/v1/ai/transactions", handleAITransactions)
 	aiMux.HandleFunc("/api/v1/ai/analysis", handleAIAnalysis)
 
 	var handler http.Handler = middleware.MaxBodySizeMiddleware(aiMux)
-	handler = middleware.AIAPIMiddleware(credentialStore, handler)
+	handler = middleware.AIAPIMiddleware(credentialStore, auditStore, handler)
 	handler = middleware.SecurityHeadersMiddleware(handler)
 	handler = middleware.CacheControlMiddleware(handler)
 	return handler
