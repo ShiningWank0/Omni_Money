@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": "^24.18.0 || ^26.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -11,11 +14,12 @@
   "dependencies": {
     "chart.js": "^4.5.1",
     "pinia": "^3.0.4",
-    "vue": "^3.2.37",
+    "vue": "^3.5.41",
     "vue-chartjs": "^5.3.3"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^3.0.3",
-    "vite": "^3.0.7"
+    "@vitejs/plugin-vue": "^6.0.8",
+    "postcss": "^8.5.26",
+    "vite": "^8.2.1"
   }
 }

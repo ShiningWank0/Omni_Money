@@ -59,7 +59,7 @@ jobs:
         if: steps.check_release.outputs.exists == 'false'
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24.18.0'
 
       # Linux: WebKitGTK 依存パッケージ（Ubuntu 24.04+ は 4.1）
       - name: Install Linux dependencies
