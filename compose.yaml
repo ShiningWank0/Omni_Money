@@ -7,13 +7,16 @@ services:
     restart: unless-stopped
     ports:
       # 家計簿Web。外部公開時はリバースプロキシとTLSを使用する。
-      - "${OMNI_WEB_BIND_IP:-0.0.0.0}:${OMNI_WEB_PORT:-4000}:4000"
+      - "${OMNI_WEB_BIND_IP:-127.0.0.1}:${OMNI_WEB_PORT:-4000}:4000"
       # AI APIはDockerホストのlocalhostにだけ公開する。
       - "127.0.0.1:${OMNI_AI_PORT:-4001}:4001"
     environment:
       DB_PATH: /app/data/omni_money.db
       HOST_IP: 0.0.0.0
       PORT: 4000
+      # アプリ内部の待受先とは別に、Dockerホストでの実効公開先を検証する。
+      WEB_EXTERNAL_HOST: "${OMNI_WEB_BIND_IP:-127.0.0.1}"
+      ALLOW_INSECURE_HTTP: "${ALLOW_INSECURE_HTTP:-false}"
       AUTH_PASSWORD_HASH: "${AUTH_PASSWORD_HASH:?AUTH_PASSWORD_HASH is required}"
       AI_API_TOKEN: "${AI_API_TOKEN:-}"
       # コンテナ内ではDockerのポート転送を受けるため全IFで待ち受ける。

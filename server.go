@@ -14,6 +14,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"omni_money/backend/api"
+	"omni_money/backend/config"
 	"omni_money/backend/database"
 )
 
@@ -42,7 +43,7 @@ func main() {
 	// 公開Web用ホストIPとポートの設定
 	host := os.Getenv("HOST_IP")
 	if host == "" {
-		host = "0.0.0.0"
+		host = "127.0.0.1"
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -52,8 +53,21 @@ func main() {
 	addr := net.JoinHostPort(host, port)
 	certFile := strings.TrimSpace(os.Getenv("TLS_CERT_FILE"))
 	keyFile := strings.TrimSpace(os.Getenv("TLS_KEY_FILE"))
-	if (certFile == "") != (keyFile == "") {
-		log.Fatal("TLS_CERT_FILE と TLS_KEY_FILE は両方指定してください")
+	allowInsecureHTTP := strings.EqualFold(strings.TrimSpace(os.Getenv("ALLOW_INSECURE_HTTP")), "true")
+	transportConfig := config.WebTransportConfig{
+		ListenHost:        host,
+		ExternalHost:      os.Getenv("WEB_EXTERNAL_HOST"),
+		TLSCertFile:       certFile,
+		TLSKeyFile:        keyFile,
+		ForceHTTPS:        strings.EqualFold(strings.TrimSpace(os.Getenv("FORCE_HTTPS")), "true"),
+		TrustedProxies:    os.Getenv("TRUSTED_PROXIES"),
+		AllowInsecureHTTP: allowInsecureHTTP,
+	}
+	if err := config.ValidateWebTransport(transportConfig); err != nil {
+		log.Fatalf("公開Web設定エラー: %v", err)
+	}
+	if certFile == "" && allowInsecureHTTP {
+		log.Printf("警告: ALLOW_INSECURE_HTTP=true により平文HTTPの外部公開を許可しています。認証情報と財務データは暗号化されません")
 	}
 
 	srv := &http.Server{
@@ -91,12 +105,12 @@ func main() {
 			aiPort = "4001"
 		}
 		allowRemoteAI := strings.EqualFold(strings.TrimSpace(os.Getenv("AI_ALLOW_REMOTE")), "true")
-		if !isLoopbackHost(aiHost) && !allowRemoteAI {
+		if !config.IsLoopbackHost(aiHost) && !allowRemoteAI {
 			log.Fatal("AI_HOST_IP がループバック以外です。Dockerのlocalhost限定ポート公開などを確認し、明示的に AI_ALLOW_REMOTE=true を設定してください")
 		}
 
 		aiAddr := net.JoinHostPort(aiHost, aiPort)
-		if !isLoopbackHost(aiHost) {
+		if !config.IsLoopbackHost(aiHost) {
 			log.Printf("警告: AI専用APIを非ループバックアドレス %s にTLSなしで公開します。BearerトークンとAI送受信データが平文で流れるため、Dockerのlocalhost限定ポート公開やリバースプロキシでのTLS終端で必ず保護してください", aiAddr)
 		}
 		aiServer := &http.Server{
@@ -117,13 +131,4 @@ func main() {
 	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("サーバー停止: %v", err)
 	}
-}
-
-func isLoopbackHost(host string) bool {
-	host = strings.Trim(strings.TrimSpace(host), "[]")
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }

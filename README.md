@@ -136,8 +136,11 @@ go run -tags server ./server.go
 | 変数 | 既定値 | 説明 |
 | --- | --- | --- |
 | `DB_PATH` | `omni_money.db` | SQLite データベースの保存先 |
-| `HOST_IP` | `0.0.0.0` | 待受アドレス |
+| `HOST_IP` | `127.0.0.1` | 待受アドレス。Docker内では `0.0.0.0` を使用 |
 | `PORT` | `4000` | 待受ポート |
+| `WEB_EXTERNAL_HOST` | `HOST_IP` と同じ | Docker等で実際に外部公開するホストIP |
+| `ALLOW_INSECURE_HTTP` | `false` | 非TLS・非ループバック公開の明示許可（閉域網の移行用途のみ） |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | なし | 直接TLSで公開する場合の証明書と秘密鍵 |
 | `AUTH_PASSWORD_HASH` | なし（必須） | ログインパスワードの bcrypt ハッシュ |
 | `SESSION_MAX_AGE_HOURS` | `24` | セッション有効期間（時間） |
 | `AI_API_TOKEN` | なし | 32文字以上のAI API Bearerトークン。未設定ならAI API無効 |
@@ -159,6 +162,7 @@ export AUTH_PASSWORD_HASH='<bcrypt-hash>'
 docker run --rm \
   --user "$(id -u):$(id -g)" \
   -e AUTH_PASSWORD_HASH \
+  -e WEB_EXTERNAL_HOST=127.0.0.1 \
   -p 127.0.0.1:4000:4000 \
   -v "$(pwd)/data:/app/data" \
   omni-money
@@ -177,6 +181,7 @@ docker run --rm \
   -p 127.0.0.1:4000:4000 \
   -p 127.0.0.1:4001:4001 \
   -e AUTH_PASSWORD_HASH \
+  -e WEB_EXTERNAL_HOST=127.0.0.1 \
   -e AI_API_TOKEN \
   -e AI_HOST_IP=0.0.0.0 \
   -e AI_ALLOW_REMOTE=true \
