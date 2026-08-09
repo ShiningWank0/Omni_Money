@@ -373,6 +373,19 @@ http://192.168.1.20:4000
 - 同じアクセス元から 5 回連続でログインに失敗すると、15 分間ロックされます。
 - コンテナを再起動すると、メモリ上のログインセッションは失われるため再ログインが必要です。
 
+### 5.1 AI API操作画面
+
+サーバーモードでは、メニューの「クレジットカード設定」の直下に「AI API操作」が表示されます。`AI_API_TOKEN` が未設定の場合、送信時にAI専用APIが無効であることを表示します。
+
+1. 「AI API操作」を開きます。
+2. 「取引追加」または「分析」を選びます。
+3. JSONリクエストを編集します。
+4. 「AI専用入口へ送信」を押し、HTTP statusとJSONレスポンスを確認します。
+
+ブラウザはAI用Bearer tokenを保持しません。通常Webのセッション認証を通過したリクエストを、サーバー側が固定されたAI専用リスナーへ転送します。任意URLへの転送はできません。
+
+この画面はサーバーモード専用です。デスクトップ版では表示されません。また、LLM providerのAPIキーを入力する画面ではありません。ローカルLLM・クラウドLLMとの自動連携は、[AI連携ロードマップ](ai-integration-roadmap.md)に記載した別プロセスのAdapterから行います。
+
 ## 6. トラブルシューティング
 
 | 症状 | 確認すること |
@@ -403,3 +416,36 @@ http://192.168.1.20:4000
 - [TrueNAS: Installing Custom Apps](https://apps.truenas.com/managing-apps/installing-custom-apps/)
 - [TrueNAS: Custom App Screens](https://www.truenas.com/docs/scale/apps/installcustomappscreens/)
 - [TrueNAS: App Storage](https://apps.truenas.com/getting-started/app-storage/)
+
+## 9. 開発用Dockerテスト環境の確認と削除
+
+以下は手動で実行する運用コマンドです。このガイド追加時にはコンテナの停止・削除を自動実行していません。
+
+現在の状態、公開ポート、ヘルスチェックを確認します。
+
+```bash
+docker --context colima compose ps
+docker --context colima port omni-money
+docker --context colima inspect --format '{{.State.Health.Status}}' omni-money
+docker --context colima logs --tail 100 omni-money
+```
+
+テスト用Composeコンテナとネットワークを終了・削除します。bind mountしたデータはこのコマンドだけでは削除されません。
+
+```bash
+docker --context colima compose down
+```
+
+今回のテストで `/tmp/omni-pr54-compose-data` を使用した場合、内容が不要であることを確認してから利用者自身で削除します。
+
+```bash
+rm -rf /tmp/omni-pr54-compose-data
+```
+
+他のコンテナを使っていない場合だけ、必要に応じてColimaを停止します。
+
+```bash
+colima stop
+```
+
+`docker compose down -v` は名前付きvolumeも削除するため、データ保持が必要な環境では使用しないでください。
