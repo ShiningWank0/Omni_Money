@@ -84,6 +84,7 @@ func NewRouter() http.Handler {
 	handler = middleware.CORSMiddleware(handler)
 	handler = middleware.SecurityHeadersMiddleware(handler)
 	handler = middleware.ProxyMiddleware(middleware.NewProxyConfigFromEnv(), handler)
+	handler = middleware.CacheControlMiddleware(handler)
 	return handler
 }
 
@@ -98,13 +99,7 @@ func NewAIRouter(apiToken string) http.Handler {
 	handler = middleware.MaxBodySizeMiddleware(handler)
 	handler = middleware.RateLimitMiddleware(handler)
 	handler = middleware.SecurityHeadersMiddleware(handler)
-
-	// 分析レスポンスや家計簿データを中間キャッシュへ保存させない。
-	inner := handler
-	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		inner.ServeHTTP(w, r)
-	})
+	handler = middleware.CacheControlMiddleware(handler)
 	return handler
 }
 

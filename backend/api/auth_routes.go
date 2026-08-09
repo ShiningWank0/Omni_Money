@@ -81,6 +81,7 @@ func handleAuthLogout(authManager *middleware.AuthSessionManager) http.HandlerFu
 			authManager.SessionManager().DeleteSession(cookie.Value)
 		}
 		authManager.SessionManager().ClearSessionCookie(w, r)
+		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
 
 		jsonResponse(w, map[string]interface{}{
 			"success": true,

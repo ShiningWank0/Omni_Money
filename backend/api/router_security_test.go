@@ -103,7 +103,7 @@ func TestAIRouterRequiresBearerToken(t *testing.T) {
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("AI専用ポートの未認証アクセス status = %d, want %d", recorder.Code, http.StatusUnauthorized)
 	}
-	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+	if got := recorder.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
 		t.Fatalf("Cache-Control = %q, want no-store", got)
 	}
 }
@@ -151,6 +151,69 @@ func TestHealthEndpointDoesNotExposeData(t *testing.T) {
 	}
 }
 
+func TestPublicRouterPreventsCachingPrivateAndHTMLResponses(t *testing.T) {
+	handler := NewRouter()
+
+	apiRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(apiRecorder, httptest.NewRequest(http.MethodGet, "/api/accounts", nil))
+	if apiRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated API status = %d, want %d", apiRecorder.Code, http.StatusUnauthorized)
+	}
+	if got := apiRecorder.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
+		t.Fatalf("API Cache-Control = %q, want no-store", got)
+	}
+	if got := apiRecorder.Header().Get("Surrogate-Control"); got != "no-store" {
+		t.Fatalf("API Surrogate-Control = %q, want no-store", got)
+	}
+
+	htmlRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(htmlRecorder, httptest.NewRequest(http.MethodGet, "/login", nil))
+	if got := htmlRecorder.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("HTML Cache-Control = %q, want no-cache", got)
+	}
+}
+
+func TestLogoutClearsBrowserDataAndInvalidatesSession(t *testing.T) {
+	t.Setenv("AUTH_PASSWORD_HASH", testPasswordHash)
+	handler := NewRouter()
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"test-password"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(loginRecorder, loginReq)
+	if loginRecorder.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d; body=%s", loginRecorder.Code, http.StatusOK, loginRecorder.Body.String())
+	}
+	cookies := loginRecorder.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("login did not issue a session cookie")
+	}
+
+	logoutReq := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	for _, cookie := range cookies {
+		logoutReq.AddCookie(cookie)
+	}
+	logoutRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(logoutRecorder, logoutReq)
+	if logoutRecorder.Code != http.StatusOK {
+		t.Fatalf("logout status = %d, want %d", logoutRecorder.Code, http.StatusOK)
+	}
+	if got := logoutRecorder.Header().Get("Clear-Site-Data"); got != `"cache", "cookies", "storage"` {
+		t.Fatalf("Clear-Site-Data = %q", got)
+	}
+	if got := logoutRecorder.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
+		t.Fatalf("logout Cache-Control = %q, want no-store", got)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	statusReq.AddCookie(cookies[0])
+	statusRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(statusRecorder, statusReq)
+	if statusRecorder.Code != http.StatusOK || !strings.Contains(statusRecorder.Body.String(), `"authenticated":false`) {
+		t.Fatalf("status after logout = %d body=%s", statusRecorder.Code, statusRecorder.Body.String())
+	}
+}
+
 func TestAIRouterAuthorizedTransactionAndAnalysis(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "omni_money_test.db")
 	if err := database.InitDB(dbPath); err != nil {
@@ -185,7 +248,7 @@ func TestAIRouterAuthorizedTransactionAndAnalysis(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("AI analysis status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
-	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+	if got := recorder.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
 		t.Fatalf("Cache-Control = %q, want no-store", got)
 	}
 

@@ -239,6 +239,7 @@ import {
   saveCreditCardSettings as apiSaveCreditCardSettings,
   saveBankAccountSettings as apiSaveBankAccountSettings,
   getBalanceHistoryFiltered,
+  getAuthStatus,
   isWailsMode,
   logout as apiLogout
 } from './utils/api'
@@ -525,10 +526,56 @@ async function logout() {
   showMenu.value = false
   try {
     await apiLogout()
-    window.location.href = '/login'
   } catch (e) {
     console.error('ログアウトエラー:', e)
-    showToast('ログアウトに失敗しました', 'error', 5000)
+  } finally {
+    clearSensitiveClientState()
+    window.location.replace('/login')
+  }
+}
+
+function clearSensitiveClientState() {
+  clearTimeout(searchTimeout)
+  clearTimeout(toastTimer)
+  store.resetState()
+  editingTransaction.value = null
+  selectedCreditCardItems.value = []
+  selectedBankAccountItems.value = []
+  balanceHistoryData.value = null
+  showMenu.value = false
+  showAccountDropdown.value = false
+  showAddTransactionModal.value = false
+  showImportCSVModal.value = false
+  showCreditCardModal.value = false
+  showBankAccountModal.value = false
+  showGraph.value = false
+  showSnapshotModal.value = false
+  showTagChart.value = false
+  showAIAPIConsole.value = false
+  toast.value = { visible: false, message: '', type: 'success' }
+}
+
+async function fetchPrivateData() {
+  await store.fetchAccounts()
+  await store.fetchCreditCardSettings()
+  await store.fetchBankAccountSettings()
+  await store.fetchTransactions()
+}
+
+async function handlePageShow(event) {
+  if (isWailsMode || !event.persisted) return
+
+  clearSensitiveClientState()
+  try {
+    const auth = await getAuthStatus()
+    if (!auth?.authenticated) {
+      window.location.replace('/login')
+      return
+    }
+    await fetchPrivateData()
+  } catch (e) {
+    console.error('キャッシュ復元後の再認証エラー:', e)
+    window.location.replace('/login')
   }
 }
 
@@ -556,11 +603,12 @@ function handleGlobalClick() {
 // 初期化
 onMounted(async () => {
   document.addEventListener('click', handleGlobalClick)
-  await store.fetchAccounts()
-  await store.fetchCreditCardSettings()
-  await store.fetchBankAccountSettings()
-  await store.fetchTransactions()
-  isInitialLoading.value = false
+  window.addEventListener('pageshow', handlePageShow)
+  try {
+    await fetchPrivateData()
+  } finally {
+    isInitialLoading.value = false
+  }
 
   // スナップショット復元後のリロードならトースト通知を表示
   const restoreResult = localStorage.getItem('snapshot_restored')
@@ -576,6 +624,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', handleGlobalClick)
+  window.removeEventListener('pageshow', handlePageShow)
   clearTimeout(searchTimeout)
   clearTimeout(toastTimer)
 })

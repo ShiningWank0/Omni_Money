@@ -17,14 +17,15 @@ async function apiFetch(url, options = {}, config = {}) {
   const { skipAuthRedirect = false } = config
   const response = await fetch(url, {
     credentials: 'include',
-    ...options
+    ...options,
+    cache: 'no-store'
   })
 
   if (!isWailsMode && !skipAuthRedirect && response.status === 401) {
     const path = getPathname(url)
     const skipPaths = new Set(['/api/auth/login', '/api/auth/status'])
     if (!skipPaths.has(path) && window.location.pathname !== '/login') {
-      window.location.href = '/login'
+      window.location.replace('/login')
     }
     throw new Error('認証が必要です')
   }
