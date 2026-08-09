@@ -17,9 +17,13 @@ import (
 )
 
 var (
-	db     *sql.DB
-	dbPath string
-	mu     sync.RWMutex
+	db         *sql.DB
+	dbPath     string
+	mu         sync.RWMutex
+	snapshotMu sync.Mutex
+
+	autoSnapshotOnce   sync.Once
+	autoSnapshotWorker *snapshotWorker
 )
 
 // InitDB はSQLiteデータベースを初期化する。
@@ -147,9 +151,11 @@ func createTables() error {
 		)`,
 		// インデックス
 		`CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account)`,
+		`CREATE INDEX IF NOT EXISTS idx_transactions_account_date_id ON transactions(account, date, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date)`,
 		`CREATE INDEX IF NOT EXISTS idx_transactions_item ON transactions(item)`,
 		`CREATE INDEX IF NOT EXISTS idx_transactions_memo ON transactions(memo)`,
+		`CREATE INDEX IF NOT EXISTS idx_transaction_links_child_id ON transaction_links(child_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_images_txid ON transaction_images(transaction_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_txid ON transaction_tags(transaction_id)`,
@@ -182,6 +188,12 @@ func getSnapshotDir() string {
 // CreateSnapshot は現在のDBファイルのスナップショットを作成する。
 // snapshotDir にタイムスタンプ付きのコピーを保存する。
 func CreateSnapshot(snapshotDir string) (string, error) {
+	// 手動作成と自動作成を含むスナップショット処理を直列化する。
+	// 同じDBファイルに対するcheckpointとコピーが重ならないようにしつつ、
+	// 手動呼び出しは従来どおり作成完了まで同期的に待つ。
+	snapshotMu.Lock()
+	defer snapshotMu.Unlock()
+
 	mu.RLock()
 	currentPath := dbPath
 	currentDB := db
@@ -260,6 +272,10 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if err := validateSnapshotName(snapshotName); err != nil {
 		return err
 	}
+
+	// 復元中に自動・手動スナップショットがDBファイルをコピーしないようにする。
+	snapshotMu.Lock()
+	defer snapshotMu.Unlock()
 
 	if snapshotDir == "" {
 		snapshotDir = getSnapshotDir()
@@ -387,18 +403,88 @@ func CleanOldSnapshots(snapshotDir string, maxKeep int) error {
 	return nil
 }
 
-// AutoSnapshot は操作ごとに自動スナップショットを作成し、30世代を維持する
-func AutoSnapshot() {
-	go func() {
-		_, err := CreateSnapshot("")
-		if err != nil {
-			log.Printf("自動スナップショット作成エラー: %v", err)
+// snapshotWorker は自動スナップショット要求を単一goroutineで処理する。
+// requestsは容量1のため、実行中に複数回変更されても次回実行1件へまとめられる。
+// 実行中に届いた要求は現在の実行終了後に必ずもう一度処理される。
+type snapshotWorker struct {
+	requests  chan struct{}
+	stop      chan struct{}
+	stopped   chan struct{}
+	closeOnce sync.Once
+	run       func()
+}
+
+func newSnapshotWorker(run func()) *snapshotWorker {
+	w := &snapshotWorker{
+		requests: make(chan struct{}, 1),
+		stop:     make(chan struct{}),
+		stopped:  make(chan struct{}),
+		run:      run,
+	}
+	go w.loop()
+	return w
+}
+
+func (w *snapshotWorker) loop() {
+	defer close(w.stopped)
+
+	for {
+		select {
+		case <-w.stop:
 			return
+		case <-w.requests:
 		}
-		if err := CleanOldSnapshots("", 30); err != nil {
-			log.Printf("スナップショットクリーンアップエラー: %v", err)
+
+	processPending:
+		for {
+			w.run()
+			select {
+			case <-w.stop:
+				return
+			case <-w.requests:
+				// 実行中に変更があったため、最新状態をもう一度保存する。
+				continue processPending
+			default:
+				break processPending
+			}
 		}
-	}()
+	}
+}
+
+func (w *snapshotWorker) request() {
+	select {
+	case <-w.stop:
+	case w.requests <- struct{}{}:
+	default:
+		// 未処理要求が既にあれば、その1件が最新状態を保存する役割を担う。
+	}
+}
+
+func (w *snapshotWorker) close() {
+	w.closeOnce.Do(func() {
+		close(w.stop)
+		<-w.stopped
+	})
+}
+
+func runAutoSnapshot() {
+	_, err := CreateSnapshot("")
+	if err != nil {
+		log.Printf("自動スナップショット作成エラー: %v", err)
+		return
+	}
+	if err := CleanOldSnapshots("", 30); err != nil {
+		log.Printf("スナップショットクリーンアップエラー: %v", err)
+	}
+}
+
+// AutoSnapshot は変更通知を単一workerへ送り、最新30世代を維持する。
+// worker実行中の連続通知は、最後の状態を保存する次回実行1件へまとめる。
+func AutoSnapshot() {
+	autoSnapshotOnce.Do(func() {
+		autoSnapshotWorker = newSnapshotWorker(runAutoSnapshot)
+	})
+	autoSnapshotWorker.request()
 }
 
 // copyFile はファイルをコピーする

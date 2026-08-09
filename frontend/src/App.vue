@@ -4,18 +4,35 @@
     <div class="card header">
       <div class="header-top">
         <div class="header-left">
-          <div class="hamburger-menu" :class="{ 'menu-open': showMenu }" @click="toggleMenu">
-            <span class="material-icons">menu</span>
-          </div>
-          <div class="project-selector" @click.stop="toggleAccountDropdown">
-            <span class="chevron-anim">
-              <span v-if="showAccountDropdown" key="down">▼</span>
-              <span v-else key="up">▶</span>
-            </span>
-            <span>{{ store.selectedFundItemDisplay }}</span>
-            <div v-if="showAccountDropdown" class="account-dropdown" @click.stop>
+          <button
+            type="button"
+            class="hamburger-menu"
+            :class="{ 'menu-open': showMenu }"
+            :aria-label="showMenu ? 'メニューを閉じる' : 'メニューを開く'"
+            :aria-expanded="showMenu"
+            aria-controls="side-menu"
+            @click="toggleMenu"
+          >
+            <span class="menu-glyph" aria-hidden="true"></span>
+          </button>
+          <div class="project-selector" @click.stop>
+            <button
+              type="button"
+              class="project-selector-button"
+              :aria-expanded="showAccountDropdown"
+              aria-controls="account-dropdown"
+              aria-haspopup="true"
+              @click="toggleAccountDropdown"
+            >
+              <span class="chevron-anim" aria-hidden="true">
+                <span v-if="showAccountDropdown" key="down">▼</span>
+                <span v-else key="up">▶</span>
+              </span>
+              <span>{{ store.selectedFundItemDisplay }}</span>
+            </button>
+            <div v-if="showAccountDropdown" id="account-dropdown" class="account-dropdown" @click.stop>
               <div class="fund-item-header">
-                <button @click="store.toggleAllFundItems(); refreshData()" class="toggle-all-btn">
+                <button type="button" @click="store.toggleAllFundItems(); refreshData()" class="toggle-all-btn">
                   {{ store.selectedFundItems.length === store.actualFundItems.length ? '全解除' : '全選択' }}
                 </button>
               </div>
@@ -34,63 +51,82 @@
           </div>
         </div>
         <div class="header-add-btn">
-          <button class="add-btn" @click="showAddModal" title="新しい取引を追加">+</button>
+          <button type="button" class="add-btn" @click="showAddModal" title="新しい取引を追加" aria-label="新しい取引を追加">+</button>
         </div>
       </div>
       <div class="header-search">
         <div class="search-container">
-          <input type="text" class="search-box" placeholder="項目名・メモで検索" v-model="store.searchQuery" @input="onSearchInput">
-          <span class="search-icon">🔍</span>
+          <label for="transaction-search" class="sr-only">取引を項目名またはメモで検索</label>
+          <input id="transaction-search" type="search" class="search-box" placeholder="項目名・メモで検索" v-model="store.searchQuery" @input="onSearchInput">
+          <span class="search-icon" aria-hidden="true">🔍</span>
         </div>
-        <button class="add-btn add-btn-desktop" @click="showAddModal" title="新しい取引を追加">+</button>
+        <button type="button" class="add-btn add-btn-desktop" @click="showAddModal" title="新しい取引を追加" aria-label="新しい取引を追加">+</button>
       </div>
     </div>
 
     <!-- メニューのドロワー -->
     <div v-if="showMenu" class="side-menu-overlay" @click.self="toggleMenu">
-      <div class="side-menu">
+      <nav id="side-menu" class="side-menu" aria-label="アプリケーションメニュー">
         <button class="menu-btn" @click="backupToCSV">CSVバックアップ</button>
         <button class="menu-btn" @click="showImportCSVModalMethod">CSVインポート</button>
-        <button class="menu-btn" @click="openCreditCardSettings">クレジットカード設定</button>
+        <button class="menu-btn menu-group-start" @click="openCreditCardSettings">クレジットカード設定</button>
         <button v-if="!isWailsMode" class="menu-btn" @click="openAIAPIConsole">AI API操作</button>
         <button class="menu-btn" @click="openBankAccountSettings">銀行口座設定</button>
-        <button class="menu-btn" @click="showGraphModal">残高推移グラフ表示</button>
+        <button class="menu-btn menu-group-start" @click="showGraphModal">残高推移グラフ表示</button>
         <button class="menu-btn" @click="openTagChart">タグ別分析</button>
-        <button class="menu-btn" @click="openSnapshotManager">スナップショット管理</button>
+        <button class="menu-btn menu-group-start" @click="openSnapshotManager">スナップショット管理</button>
         <button v-if="!isWailsMode" class="menu-btn logout-btn" @click="logout">ログアウト</button>
-      </div>
+      </nav>
     </div>
 
     <!-- 残高表示と取引履歴を統合したカード -->
     <div class="card content-card">
       <div class="balance-section">
         <div class="balance-label">現在の残高</div>
-        <div class="balance-amount">{{ formatCurrency(store.currentBalance) }}</div>
+        <div class="balance-amount" aria-live="polite">{{ formatCurrency(store.currentBalance) }}</div>
       </div>
 
-      <div class="transaction-section">
+      <div class="transaction-section" :aria-busy="isTableLoading">
         <table class="transaction-table">
+          <caption class="sr-only">取引履歴</caption>
           <thead>
             <tr>
-              <th @click="toggleDateSort" style="cursor: pointer;">
-                日付
-                <span v-if="dateSortOrder === 'asc'">▲</span>
-                <span v-if="dateSortOrder === 'desc'">▼</span>
+              <th scope="col" :aria-sort="dateSortOrder === 'asc' ? 'ascending' : 'descending'">
+                <button type="button" class="sort-button" @click="toggleDateSort">
+                  日付
+                  <span aria-hidden="true">{{ dateSortOrder === 'asc' ? '▲' : '▼' }}</span>
+                </button>
               </th>
-              <th v-if="store.shouldShowFundItemColumn">資金項目</th>
-              <th>項目</th>
-              <th>金額</th>
-              <th>残高</th>
+              <th v-if="store.shouldShowFundItemColumn" scope="col">資金項目</th>
+              <th scope="col">項目</th>
+              <th scope="col" class="numeric-column">金額</th>
+              <th scope="col" class="numeric-column">残高</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="transaction in sortedTransactions" :key="transaction.id" @click="onEditTransaction(transaction)">
-              <td>{{ formatDateTime(transaction.date) }}</td>
-              <td v-if="store.shouldShowFundItemColumn">{{ transaction.fundItem || transaction.account }}</td>
-              <td>{{ transaction.item }}</td>
-              <td :class="getAmountCellClass(transaction.type)">{{ formatAmount(transaction.amount, transaction.type) }}</td>
-              <td>{{ isCreditCardItem(transaction.account || transaction.fundItem) ? '-' : formatCurrency(transaction.balance) }}</td>
+            <tr v-if="isTableLoading" class="table-status-row">
+              <td :colspan="transactionColumnCount"><span role="status">取引を読み込んでいます…</span></td>
             </tr>
+            <tr v-else-if="sortedTransactions.length === 0" class="table-status-row">
+              <td :colspan="transactionColumnCount">{{ store.searchQuery ? '検索条件に一致する取引はありません' : '取引はまだありません' }}</td>
+            </tr>
+            <template v-else>
+              <tr
+                v-for="transaction in sortedTransactions"
+                :key="transaction.id"
+                tabindex="0"
+                :aria-label="getTransactionAriaLabel(transaction)"
+                @click="onEditTransaction(transaction)"
+                @keydown.enter="onEditTransaction(transaction)"
+                @keydown.space.prevent="onEditTransaction(transaction)"
+              >
+                <td class="date-cell">{{ formatDateTime(transaction.date) }}</td>
+                <td v-if="store.shouldShowFundItemColumn">{{ transaction.fundItem || transaction.account }}</td>
+                <td>{{ transaction.item }}</td>
+                <td class="numeric-cell" :class="getAmountCellClass(transaction.type)">{{ formatAmount(transaction.amount, transaction.type) }}</td>
+                <td class="numeric-cell">{{ isCreditCardItem(transaction.account || transaction.fundItem) ? '-' : formatCurrency(transaction.balance) }}</td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>
@@ -170,7 +206,13 @@
 
     <!-- トースト通知 -->
     <Transition name="toast-fade">
-      <div v-if="toast.visible" class="toast" :class="toast.type">
+      <div
+        v-if="toast.visible"
+        class="toast"
+        :class="toast.type"
+        :role="toast.type === 'error' ? 'alert' : 'status'"
+        :aria-live="toast.type === 'error' ? 'assertive' : 'polite'"
+      >
         {{ toast.message }}
       </div>
     </Transition>
@@ -178,15 +220,17 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, defineAsyncComponent, onMounted, onBeforeUnmount } from 'vue'
 import { useAppStore } from './store/index'
 import TransactionModal from './components/TransactionModal.vue'
-import CSVImportModal from './components/CSVImportModal.vue'
-import CreditCardSettingsModal from './components/CreditCardSettingsModal.vue'
-import BalanceChart from './components/BalanceChart.vue'
-import SnapshotManager from './components/SnapshotManager.vue'
-import TagPieChart from './components/TagPieChart.vue'
-import AIAPIConsoleModal from './components/AIAPIConsoleModal.vue'
+
+// 初期表示に不要な管理・分析モーダルは、開いた時だけ読み込む。
+const CSVImportModal = defineAsyncComponent(() => import('./components/CSVImportModal.vue'))
+const CreditCardSettingsModal = defineAsyncComponent(() => import('./components/CreditCardSettingsModal.vue'))
+const BalanceChart = defineAsyncComponent(() => import('./components/BalanceChart.vue'))
+const SnapshotManager = defineAsyncComponent(() => import('./components/SnapshotManager.vue'))
+const TagPieChart = defineAsyncComponent(() => import('./components/TagPieChart.vue'))
+const AIAPIConsoleModal = defineAsyncComponent(() => import('./components/AIAPIConsoleModal.vue'))
 import {
   addTransaction,
   updateTransaction,
@@ -215,6 +259,7 @@ const showAIAPIConsole = ref(false)
 const isEditMode = ref(false)
 const editingTransaction = ref(null)
 const dateSortOrder = ref('desc')
+const isInitialLoading = ref(true)
 const selectedCreditCardItems = ref([])
 const selectedBankAccountItems = ref([])
 const balanceHistoryData = ref(null)
@@ -248,6 +293,9 @@ const sortedTransactions = computed(() => {
   return txs
 })
 
+const isTableLoading = computed(() => isInitialLoading.value || store.loading)
+const transactionColumnCount = computed(() => store.shouldShowFundItemColumn ? 5 : 4)
+
 // 通貨フォーマット
 function formatCurrency(value) {
   if (value == null) return '¥0'
@@ -269,6 +317,11 @@ function formatDateTime(dateStr) {
 
 function getAmountCellClass(type) {
   return type === 'income' ? 'income-cell' : 'expense-cell'
+}
+
+function getTransactionAriaLabel(transaction) {
+  const account = transaction.fundItem || transaction.account || '資金項目なし'
+  return `${formatDateTime(transaction.date)}、${account}、${transaction.item}、${formatAmount(transaction.amount, transaction.type)}。編集する`
 }
 
 function isCreditCardItem(account) {
@@ -507,6 +560,7 @@ onMounted(async () => {
   await store.fetchCreditCardSettings()
   await store.fetchBankAccountSettings()
   await store.fetchTransactions()
+  isInitialLoading.value = false
 
   // スナップショット復元後のリロードならトースト通知を表示
   const restoreResult = localStorage.getItem('snapshot_restored')
@@ -518,5 +572,11 @@ onMounted(async () => {
       showToast('復元に失敗しました: ' + restoreResult.slice(6), 'error', 5000)
     }
   }
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', handleGlobalClick)
+  clearTimeout(searchTimeout)
+  clearTimeout(toastTimer)
 })
 </script>

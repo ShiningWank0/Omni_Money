@@ -17,11 +17,10 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
-# ソースコードをコピー
-COPY . .
-
-# フロントエンドのビルド成果物をコピー（go:embed用ではなくサーバーモード用）
-COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+# サーバーバイナリに必要なGoソースだけをコピーする。
+# UIだけの変更でバックエンドビルドキャッシュが無効になることを避ける。
+COPY server.go ./
+COPY backend/ ./backend/
 
 # バージョン情報
 ARG VERSION=dev

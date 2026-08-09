@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	cspHeaderValue = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:"
+	cspHeaderValue = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:"
 
 	// maxRequestBodySize はリクエストボディの最大サイズ（10MB）
 	maxRequestBodySize = 10 * 1024 * 1024
