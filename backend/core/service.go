@@ -15,11 +15,53 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"omni_money/backend/database"
 	"omni_money/backend/models"
 	"omni_money/backend/validation"
 )
+
+const (
+	csvVersionHeader = "omni_money_csv_version"
+	csvVersion2      = "2"
+)
+
+func encodeCSVTextCell(value string) string {
+	if needsCSVFormulaEscape(value) {
+		return "'" + value
+	}
+	return value
+}
+
+func decodeCSVTextCellV2(value string) (string, error) {
+	if strings.HasPrefix(value, "'") {
+		decoded := strings.TrimPrefix(value, "'")
+		if !needsCSVFormulaEscape(decoded) {
+			return "", fmt.Errorf("不要なCSVエスケープです")
+		}
+		return decoded, nil
+	}
+	if needsCSVFormulaEscape(value) {
+		return "", fmt.Errorf("危険なCSVセルがエスケープされていません")
+	}
+	return value, nil
+}
+
+func needsCSVFormulaEscape(value string) bool {
+	if value == "" {
+		return false
+	}
+	r, size := utf8.DecodeRuneInString(value)
+	if r == utf8.RuneError && size == 1 {
+		return true
+	}
+	if strings.ContainsRune("=+-@'", r) {
+		return true
+	}
+	return unicode.IsSpace(r) || unicode.IsControl(r) || unicode.In(r, unicode.Cf)
+}
 
 // GetAccounts はデータベースから口座名のリストを返す
 func GetAccounts() ([]string, error) {
@@ -514,7 +556,9 @@ func BackupToCSV() (string, error) {
 	writer := csv.NewWriter(&builder)
 
 	// ヘッダー
-	writer.Write([]string{"id", "account", "date", "item", "type", "amount", "balance", "memo"})
+	if err := writer.Write([]string{"id", "account", "date", "item", "type", "amount", "balance", "memo", csvVersionHeader}); err != nil {
+		return "", fmt.Errorf("CSVヘッダー書き出しエラー: %w", err)
+	}
 
 	for rows.Next() {
 		var id, amount, balance int64
@@ -522,18 +566,27 @@ func BackupToCSV() (string, error) {
 		if err := rows.Scan(&id, &account, &dateStr, &item, &txType, &amount, &balance, &memo); err != nil {
 			return "", fmt.Errorf("バックアップスキャンエラー: %w", err)
 		}
-		writer.Write([]string{
+		if err := writer.Write([]string{
 			fmt.Sprintf("%d", id),
-			account,
-			dateStr,
-			item,
-			txType,
+			encodeCSVTextCell(account),
+			encodeCSVTextCell(dateStr),
+			encodeCSVTextCell(item),
+			encodeCSVTextCell(txType),
 			fmt.Sprintf("%d", amount),
 			fmt.Sprintf("%d", balance),
-			memo,
-		})
+			encodeCSVTextCell(memo),
+			csvVersion2,
+		}); err != nil {
+			return "", fmt.Errorf("CSV行書き出しエラー: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("バックアップ行取得エラー: %w", err)
 	}
 	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return "", fmt.Errorf("CSV書き出しエラー: %w", err)
+	}
 
 	return builder.String(), nil
 }
@@ -651,6 +704,7 @@ func ImportCSV(content string, mode string) (int, error) {
 	for i, h := range headers {
 		headerMap[strings.TrimSpace(h)] = i
 	}
+	versionIndex, versionedCSV := headerMap[csvVersionHeader]
 
 	requiredHeaders := []string{"account", "date", "item", "type", "amount"}
 	for _, h := range requiredHeaders {
@@ -687,8 +741,18 @@ func ImportCSV(content string, mode string) (int, error) {
 			if idx >= len(record) {
 				return "", fmt.Errorf("%s列が不足しています (行%d)", name, rowNumber)
 			}
-			return strings.TrimSpace(record[idx]), nil
+			return record[idx], nil
 		}
+
+		if versionedCSV {
+			if versionIndex >= len(record) {
+				return 0, fmt.Errorf("CSVバージョン列が不足しています (行%d)", rowNumber)
+			}
+			if version := strings.TrimSpace(record[versionIndex]); version != csvVersion2 {
+				return 0, fmt.Errorf("未対応のCSVバージョンです (行%d): %q", rowNumber, version)
+			}
+		}
+
 		account, err := field("account")
 		if err != nil {
 			return 0, err
@@ -701,20 +765,46 @@ func ImportCSV(content string, mode string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		txTypeRaw, err := field("type")
+		txType, err := field("type")
 		if err != nil {
 			return 0, err
 		}
-		txType := strings.ToLower(txTypeRaw)
 		amountStr, err := field("amount")
 		if err != nil {
 			return 0, err
 		}
 
-		if account == "" {
+		memo := ""
+		if idx, ok := headerMap["memo"]; ok && idx < len(record) {
+			memo = record[idx]
+		}
+		if versionedCSV {
+			for name, value := range map[string]*string{
+				"account": &account,
+				"date":    &dateStr,
+				"item":    &item,
+				"type":    &txType,
+				"memo":    &memo,
+			} {
+				decoded, decodeErr := decodeCSVTextCellV2(*value)
+				if decodeErr != nil {
+					return 0, fmt.Errorf("%s列のCSVエスケープが不正です (行%d): %w", name, rowNumber, decodeErr)
+				}
+				*value = decoded
+			}
+		} else {
+			account = strings.TrimSpace(account)
+			item = strings.TrimSpace(item)
+			memo = strings.TrimSpace(memo)
+		}
+		dateStr = strings.TrimSpace(dateStr)
+		txType = strings.ToLower(strings.TrimSpace(txType))
+		amountStr = strings.TrimSpace(amountStr)
+
+		if strings.TrimSpace(account) == "" {
 			return 0, fmt.Errorf("口座名は必須です (行%d)", rowNumber)
 		}
-		if item == "" {
+		if strings.TrimSpace(item) == "" {
 			return 0, fmt.Errorf("項目は必須です (行%d)", rowNumber)
 		}
 		if txType != "income" && txType != "expense" {
@@ -729,11 +819,6 @@ func ImportCSV(content string, mode string) (int, error) {
 		}
 		if err := validation.ValidateTransactionAmount(amount); err != nil {
 			return 0, fmt.Errorf("金額が不正です (行%d): %w", rowNumber, err)
-		}
-
-		memo := ""
-		if idx, ok := headerMap["memo"]; ok && idx < len(record) {
-			memo = strings.TrimSpace(record[idx])
 		}
 
 		date, err := parseDateStrict(dateStr)
