@@ -13,6 +13,7 @@ import (
 
 	"omni_money/backend/database"
 	"omni_money/backend/models"
+	"omni_money/backend/validation"
 )
 
 const testAIToken = "0123456789abcdef0123456789abcdef"
@@ -253,7 +254,7 @@ func TestAITransactionRequiresFields(t *testing.T) {
 		{name: "item", mutate: func(req *models.TransactionRequest) { req.Item = " " }},
 		{name: "type", mutate: func(req *models.TransactionRequest) { req.Type = "other" }},
 		{name: "amount", mutate: func(req *models.TransactionRequest) { req.Amount = 0 }},
-		{name: "amount上限超過", mutate: func(req *models.TransactionRequest) { req.Amount = maxAITransactionAmount + 1 }},
+		{name: "amount上限超過", mutate: func(req *models.TransactionRequest) { req.Amount = validation.MaxTransactionAmount + 1 }},
 	}
 
 	for _, tt := range tests {
