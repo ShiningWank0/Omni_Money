@@ -52,8 +52,8 @@ WORKDIR /app
 COPY --from=backend-builder /omni_money_server ./omni_money_server
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-# スナップショット・データベース用ディレクトリ
-RUN mkdir -p /app/data /app/snapshots && chown -R omni:omni /app
+# DB、WAL、復元用backup、snapshotはすべてこの永続directory配下へ保存する。
+RUN mkdir -p /app/data && chown -R omni:omni /app
 
 USER omni
 

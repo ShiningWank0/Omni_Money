@@ -231,6 +231,8 @@ docker compose -f compose.yaml -f compose.ai.yaml up -d --build
 
 bcryptハッシュは `$` を含むため、`.env` では例のとおり値全体をシングルクォートで囲んでください。
 
+Composeはコンテナのroot filesystemをread-onlyにし、Linux capabilityをすべて削除して、権限昇格を禁止します。永続的に書き込めるアプリ領域は `/app/data` だけです。SQLiteの一時ファイルには再起動で消える `/tmp` tmpfsを使い、CPU・memory・PIDにも上限を設定します。既定値は `.env.example` の `OMNI_CPU_LIMIT`、`OMNI_MEMORY_LIMIT`、`OMNI_PIDS_LIMIT`、`OMNI_TMPFS_SIZE` で調整できます。上限を下げる場合は、最大サイズの画像処理、snapshot作成・復元、CSV取込を実データ量で検証してください。
+
 TrueNAS Custom Appでは `compose.yaml` 相当の設定を使い、次を守ってください。
 
 - `/app/data` を `/mnt/<pool>/apps/omni-money` 等の永続Datasetへ割り当てる

@@ -37,3 +37,37 @@ func TestDockerBaseImagesUsePinnedSupportedVersions(t *testing.T) {
 		t.Errorf("runtime must use the reviewed Alpine 3.24.1 image: %s", images[2])
 	}
 }
+
+func TestComposeAppliesRuntimeSandbox(t *testing.T) {
+	contents, err := os.ReadFile("compose.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(contents)
+	for _, required := range []string{
+		"read_only: true",
+		"cap_drop:\n      - ALL",
+		"security_opt:\n      - no-new-privileges:true",
+		`cpus: "${OMNI_CPU_LIMIT:-2.0}"`,
+		`mem_limit: "${OMNI_MEMORY_LIMIT:-1g}"`,
+		`pids_limit: "${OMNI_PIDS_LIMIT:-256}"`,
+		"TMPDIR: /tmp",
+		"SQLITE_TMPDIR: /tmp",
+		"target: /app/data\n        read_only: false",
+		"type: tmpfs\n        target: /tmp",
+		`size: "${OMNI_TMPFS_SIZE:-128m}"`,
+		"mode: 0o1777",
+	} {
+		if !strings.Contains(compose, required) {
+			t.Errorf("compose runtime sandbox is missing %q", required)
+		}
+	}
+
+	dockerfile, err := os.ReadFile("Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(dockerfile), "/app/snapshots") {
+		t.Error("Dockerfile must not create the unused root-filesystem snapshot directory")
+	}
+}

@@ -204,6 +204,8 @@ chmod 600 "$HOME/.config/omni-money/server.env"
 
 まずは Mac からだけアクセスできる設定で起動します。
 
+同梱のCompose構成ではroot filesystemをread-onlyにし、`/app/data` だけを永続書き込み可能にします。`/tmp` は128 MiBのtmpfsで、CPU 2、memory 1 GiB、PID 256を既定上限にします。変更する場合は `.env` の `OMNI_CPU_LIMIT`、`OMNI_MEMORY_LIMIT`、`OMNI_PIDS_LIMIT`、`OMNI_TMPFS_SIZE` を設定し、画像・snapshot・CSVを含む動作確認を行ってください。
+
 ```bash
 docker pull ghcr.io/shiningwank0/omni_money:latest
 
