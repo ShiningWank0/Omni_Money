@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths: ['VERSION']
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   build:
+    permissions:
+      contents: read
+
     strategy:
       matrix:
         include:
@@ -27,7 +29,9 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Read version
         id: version
@@ -51,13 +55,13 @@ jobs:
 
       - name: Setup Go
         if: steps.check_release.outputs.exists == 'false'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: '1.25.12'
 
       - name: Setup Node.js
         if: steps.check_release.outputs.exists == 'false'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24.18.0'
 
@@ -70,7 +74,7 @@ jobs:
 
       - name: Install Wails CLI
         if: steps.check_release.outputs.exists == 'false'
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
 
       - name: Build application
         if: steps.check_release.outputs.exists == 'false'
@@ -84,7 +88,7 @@ jobs:
             $TAGS \
             -ldflags "-X main.version=${{ env.APP_VERSION }}"
 
-      # macOSの場合: ad-hoc署名 + dittoでバンドル構造保持ZIP
+      # ad-hoc署名はバンドル整合性のためで、Developer IDによる配布元証明ではない。
       - name: Package macOS app
         if: runner.os == 'macOS' && steps.check_release.outputs.exists == 'false'
         run: |
@@ -109,7 +113,7 @@ jobs:
 
       - name: Upload artifact
         if: steps.check_release.outputs.exists == 'false'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_name }}-v${{ env.APP_VERSION }}.*
@@ -119,10 +123,16 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: needs.build.result == 'success'
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Read version
         run: |
@@ -142,9 +152,25 @@ jobs:
 
       - name: Download all artifacts
         if: steps.check_release.outputs.exists == 'false'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist/
+
+      - name: Generate checksums
+        if: steps.check_release.outputs.exists == 'false'
+        shell: bash
+        run: |
+          CHECKSUM_FILE="$(mktemp)"
+          (cd dist && find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$CHECKSUM_FILE"
+          mv "$CHECKSUM_FILE" dist/SHA256SUMS
+
+      - name: Attest release artifacts
+        if: steps.check_release.outputs.exists == 'false'
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            dist/**/*
+            dist/SHA256SUMS
 
       - name: Create GitHub Release
         if: steps.check_release.outputs.exists == 'false'
@@ -165,12 +191,10 @@ jobs:
           - **Windows**: `omni-money-windows-v${{ env.APP_VERSION }}.zip`
           - **Linux**: `omni-money-linux-v${{ env.APP_VERSION }}.tar.gz`
 
-          ### macOS で初回起動する場合
-          zipを解凍後、ターミナルで以下を実行してから起動してください：
-          ```bash
-          xattr -cr "Omni Money.app"
-          ```
-          または、右クリック →「開く」→「システム設定 > プライバシーとセキュリティ > このまま開く」でも起動できます。
+          ### 署名と検証
+          現在のmacOS／Windows成果物には、Developer ID／Authenticodeによる配布元署名がありません。
+          `SHA256SUMS` とGitHub artifact attestationを検証し、出所を確認できない成果物は実行しないでください。
+          macOSの隔離属性を削除するコマンドは推奨しません。
 
           ### Docker
           ```bash
