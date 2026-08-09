@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -761,6 +762,8 @@ func handleTransactionLinksAPI(w http.ResponseWriter, r *http.Request) {
 
 // --- AI分析API ハンドラー (Agent.md §6.3) ---
 
+const aiAnalysisTimeout = 10 * time.Second
+
 func handleAIAnalysis(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -786,14 +789,27 @@ func handleAIAnalysis(w http.ResponseWriter, r *http.Request) {
 	}
 	middleware.RecordAIRequestAudit(r.Context(), req.Account, req.StartDate, req.EndDate, req.IncludeTransactions, req.IncludeMemo, nil, nil)
 
-	resp, err := core.AnalyzeTransactions(req)
+	analysisContext, cancel := context.WithTimeout(r.Context(), aiAnalysisTimeout)
+	defer cancel()
+	resp, err := core.AnalyzeTransactionsContext(analysisContext, req)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		writeAIAnalysisError(w, err)
 		return
 	}
 	middleware.RecordAIRequestAudit(r.Context(), req.Account, req.StartDate, req.EndDate, req.IncludeTransactions, req.IncludeMemo, &resp.Count, &resp.ReturnedCount)
 
 	jsonResponse(w, resp, http.StatusOK)
+}
+
+func writeAIAnalysisError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		jsonError(w, "AI分析がタイムアウトしました", http.StatusGatewayTimeout)
+	case errors.Is(err, context.Canceled):
+		jsonError(w, "AI分析リクエストがキャンセルされました", http.StatusRequestTimeout)
+	default:
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func decodeStrictAIJSON(r *http.Request, destination any) error {
