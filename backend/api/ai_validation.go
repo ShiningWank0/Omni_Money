@@ -9,11 +9,8 @@ import (
 
 	"omni_money/backend/database"
 	"omni_money/backend/models"
+	"omni_money/backend/validation"
 )
-
-// maxAITransactionAmount はAI経由で登録できる1取引あたりの金額上限。
-// 残高再計算や分析集計のint64加減算がオーバーフローしない範囲に制限する。
-const maxAITransactionAmount = 1_000_000_000
 
 // normalizeAndValidateAITransaction はAI専用入口だけに適用する入力境界。
 // 人間が通常UIから登録する取引には日付範囲制限を適用しない。
@@ -37,11 +34,8 @@ func normalizeAndValidateAITransaction(req models.TransactionRequest, now time.T
 	if req.Type != "income" && req.Type != "expense" {
 		return req, fmt.Errorf("種別はincomeまたはexpenseである必要があります")
 	}
-	if req.Amount <= 0 {
-		return req, fmt.Errorf("金額は正の数値である必要があります")
-	}
-	if req.Amount > maxAITransactionAmount {
-		return req, fmt.Errorf("AI経由の金額は%d円以下で指定してください", int64(maxAITransactionAmount))
+	if err := validation.ValidateTransactionAmount(req.Amount); err != nil {
+		return req, err
 	}
 
 	location := now.Location()

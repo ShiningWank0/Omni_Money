@@ -18,6 +18,7 @@ import (
 
 	"omni_money/backend/database"
 	"omni_money/backend/models"
+	"omni_money/backend/validation"
 )
 
 // GetAccounts はデータベースから口座名のリストを返す
@@ -534,12 +535,13 @@ func getDownloadsDir() (string, error) {
 // replaceモードでは既存データのDELETEとINSERTをトランザクションで包み、
 // 途中失敗時にデータが消失しないようにする。
 func ImportCSV(content string, mode string) (int, error) {
-	db := database.GetDB()
-
 	reader := csv.NewReader(strings.NewReader(content))
 	headers, err := reader.Read()
 	if err != nil {
 		return 0, fmt.Errorf("CSVヘッダー読み取りエラー: %w", err)
+	}
+	if len(headers) > 0 {
+		headers[0] = strings.TrimPrefix(headers[0], "\ufeff")
 	}
 
 	// ヘッダーのインデックスを特定
@@ -554,44 +556,58 @@ func ImportCSV(content string, mode string) (int, error) {
 			return 0, fmt.Errorf("必須ヘッダーが不足: %s", h)
 		}
 	}
-
-	// トランザクション開始
-	tx, err := db.Begin()
-	if err != nil {
-		return 0, fmt.Errorf("トランザクション開始エラー: %w", err)
-	}
-	defer tx.Rollback()
-
-	// replaceモード: トランザクション内でDELETE
-	if mode == "replace" {
-		if _, err := tx.Exec("DELETE FROM transactions"); err != nil {
-			return 0, fmt.Errorf("既存データ削除エラー: %w", err)
-		}
+	if mode != "append" && mode != "replace" {
+		return 0, fmt.Errorf("インポートモードはappendまたはreplaceで指定してください")
 	}
 
-	stmt, err := tx.Prepare(
-		"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, ?)")
-	if err != nil {
-		return 0, fmt.Errorf("プリペアドステートメントエラー: %w", err)
+	// 永続化前に全行を検証し、後半行の不正でreplace済みデータを失わないようにする。
+	type importRow struct {
+		account string
+		date    time.Time
+		item    string
+		txType  string
+		amount  int64
+		memo    string
 	}
-	defer stmt.Close()
-
-	imported := 0
+	var parsedRows []importRow
 	for {
 		record, err := reader.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return 0, fmt.Errorf("CSV行読み取りエラー (行%d): %w", imported+2, err)
+			return 0, fmt.Errorf("CSV行読み取りエラー (行%d): %w", len(parsedRows)+2, err)
 		}
 
-		account := strings.TrimSpace(record[headerMap["account"]])
-		dateStr := strings.TrimSpace(record[headerMap["date"]])
-		item := strings.TrimSpace(record[headerMap["item"]])
-		txType := strings.ToLower(strings.TrimSpace(record[headerMap["type"]]))
-		amountStr := strings.TrimSpace(record[headerMap["amount"]])
-		rowNumber := imported + 2
+		rowNumber := len(parsedRows) + 2
+		field := func(name string) (string, error) {
+			idx := headerMap[name]
+			if idx >= len(record) {
+				return "", fmt.Errorf("%s列が不足しています (行%d)", name, rowNumber)
+			}
+			return strings.TrimSpace(record[idx]), nil
+		}
+		account, err := field("account")
+		if err != nil {
+			return 0, err
+		}
+		dateStr, err := field("date")
+		if err != nil {
+			return 0, err
+		}
+		item, err := field("item")
+		if err != nil {
+			return 0, err
+		}
+		txTypeRaw, err := field("type")
+		if err != nil {
+			return 0, err
+		}
+		txType := strings.ToLower(txTypeRaw)
+		amountStr, err := field("amount")
+		if err != nil {
+			return 0, err
+		}
 
 		if account == "" {
 			return 0, fmt.Errorf("口座名は必須です (行%d)", rowNumber)
@@ -603,8 +619,14 @@ func ImportCSV(content string, mode string) (int, error) {
 			return 0, fmt.Errorf("種別はincomeまたはexpenseである必要があります (行%d)", rowNumber)
 		}
 		amount, err := strconv.ParseInt(amountStr, 10, 64)
-		if err != nil || amount <= 0 {
+		if err != nil {
 			return 0, fmt.Errorf("金額は正の整数である必要があります (行%d)", rowNumber)
+		}
+		if amount <= 0 {
+			return 0, fmt.Errorf("金額は正の整数である必要があります (行%d)", rowNumber)
+		}
+		if err := validation.ValidateTransactionAmount(amount); err != nil {
+			return 0, fmt.Errorf("金額が不正です (行%d): %w", rowNumber, err)
 		}
 
 		memo := ""
@@ -617,27 +639,52 @@ func ImportCSV(content string, mode string) (int, error) {
 			return 0, fmt.Errorf("日付形式が正しくありません (行%d): %w", rowNumber, err)
 		}
 
-		_, err = stmt.Exec(account, date, item, txType, amount, memo)
-		if err != nil {
-			return 0, fmt.Errorf("CSVインポートエラー (行%d): %w", imported+2, err)
+		parsedRows = append(parsedRows, importRow{account: account, date: date, item: item, txType: txType, amount: amount, memo: memo})
+	}
+
+	db := database.GetDB()
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("トランザクション開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+
+	if mode == "replace" {
+		if _, err := tx.Exec("DELETE FROM transactions"); err != nil {
+			return 0, fmt.Errorf("既存データ削除エラー: %w", err)
 		}
-		imported++
+	}
+
+	stmt, err := tx.Prepare(
+		"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, ?)")
+	if err != nil {
+		return 0, fmt.Errorf("プリペアドステートメントエラー: %w", err)
+	}
+	affectedAccounts := make(map[string]struct{})
+	for index, row := range parsedRows {
+		if _, err := stmt.Exec(row.account, row.date, row.item, row.txType, row.amount, row.memo); err != nil {
+			_ = stmt.Close()
+			return 0, fmt.Errorf("CSVインポートエラー (行%d): %w", index+2, err)
+		}
+		affectedAccounts[row.account] = struct{}{}
+	}
+	if err := stmt.Close(); err != nil {
+		return 0, fmt.Errorf("CSVステートメントクローズエラー: %w", err)
+	}
+
+	// INSERTと残高再計算を同じSQLトランザクションで完了させる。
+	for account := range affectedAccounts {
+		if err := recalculateBalanceIn(tx, account); err != nil {
+			return 0, fmt.Errorf("残高再計算エラー (%s): %w", account, err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("インポートコミットエラー: %w", err)
 	}
 
-	// 全口座の残高を再計算
-	accounts, _ := GetAccounts()
-	for _, acc := range accounts {
-		if err := recalculateBalance(acc); err != nil {
-			return imported, fmt.Errorf("残高再計算エラー (%s): %w", acc, err)
-		}
-	}
-
 	database.AutoSnapshot()
-	return imported, nil
+	return len(parsedRows), nil
 }
 
 // --- ヘルパー関数 ---
@@ -675,9 +722,12 @@ func recalculateBalanceIn(q sqlExecutor, account string) error {
 			return fmt.Errorf("残高再計算スキャンエラー: %w", err)
 		}
 		if txType == "income" {
-			runningBalance += amount
+			runningBalance, err = validation.CheckedAddInt64(runningBalance, amount)
 		} else {
-			runningBalance -= amount
+			runningBalance, err = validation.CheckedSubInt64(runningBalance, amount)
+		}
+		if err != nil {
+			return fmt.Errorf("残高計算オーバーフロー (id=%d): %w", id, err)
 		}
 		updates = append(updates, balanceUpdate{id: id, balance: runningBalance})
 	}
@@ -778,8 +828,8 @@ func validateTransactionData(req models.TransactionRequest) error {
 	if req.Type != "income" && req.Type != "expense" {
 		return fmt.Errorf("種別はincomeまたはexpenseである必要があります")
 	}
-	if req.Amount <= 0 {
-		return fmt.Errorf("金額は正の数値である必要があります")
+	if err := validation.ValidateTransactionAmount(req.Amount); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1272,10 +1322,13 @@ func getTagSummaryFiltered(txType, startDate, endDate, account string, tagIDs []
 		}
 		allData = append(allData, td)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("タグ集計行取得エラー: %w", err)
+	}
 
 	// ツリー構造を構築し、子タグの金額を親タグに集約する
-	var buildSummary func(parentID *int64) []models.TagSummary
-	buildSummary = func(parentID *int64) []models.TagSummary {
+	var buildSummary func(parentID *int64) ([]models.TagSummary, error)
+	buildSummary = func(parentID *int64) ([]models.TagSummary, error) {
 		var summaries []models.TagSummary
 		for _, td := range allData {
 			match := false
@@ -1285,12 +1338,18 @@ func getTagSummaryFiltered(txType, startDate, endDate, account string, tagIDs []
 				match = true
 			}
 			if match {
-				children := buildSummary(&td.id)
+				children, err := buildSummary(&td.id)
+				if err != nil {
+					return nil, err
+				}
 				// 子タグの金額・件数を親に集約
 				amount := td.amount
 				count := td.count
 				for _, child := range children {
-					amount += child.Amount
+					amount, err = validation.CheckedAddInt64(amount, child.Amount)
+					if err != nil {
+						return nil, fmt.Errorf("タグ金額集計オーバーフロー (tag_id=%d): %w", td.id, err)
+					}
 					count += child.Count
 				}
 				s := models.TagSummary{
@@ -1313,15 +1372,21 @@ func getTagSummaryFiltered(txType, startDate, endDate, account string, tagIDs []
 		sort.Slice(filtered, func(i, j int) bool {
 			return filtered[i].Amount > filtered[j].Amount
 		})
-		return filtered
+		return filtered, nil
 	}
 
-	result := buildSummary(nil)
+	result, err := buildSummary(nil)
+	if err != nil {
+		return nil, err
+	}
 
 	// トップレベルの合計金額からratioを算出
 	var totalAmount int64
 	for _, s := range result {
-		totalAmount += s.Amount
+		totalAmount, err = validation.CheckedAddInt64(totalAmount, s.Amount)
+		if err != nil {
+			return nil, fmt.Errorf("タグ合計オーバーフロー: %w", err)
+		}
 	}
 	var setRatios func([]models.TagSummary)
 	setRatios = func(summaries []models.TagSummary) {
@@ -1397,12 +1462,21 @@ func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, 
 		resp.Transactions = append(resp.Transactions, txResp)
 		resp.Count++
 		if t.Type == "income" {
-			resp.TotalIncome += t.Amount
+			resp.TotalIncome, err = validation.CheckedAddInt64(resp.TotalIncome, t.Amount)
 		} else {
-			resp.TotalExpense += t.Amount
+			resp.TotalExpense, err = validation.CheckedAddInt64(resp.TotalExpense, t.Amount)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("分析金額集計オーバーフロー: %w", err)
 		}
 	}
-	resp.NetAmount = resp.TotalIncome - resp.TotalExpense
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("分析行取得エラー: %w", err)
+	}
+	resp.NetAmount, err = validation.CheckedSubInt64(resp.TotalIncome, resp.TotalExpense)
+	if err != nil {
+		return nil, fmt.Errorf("分析純額オーバーフロー: %w", err)
+	}
 
 	// タグ別集計にも取引一覧と同じフィルターを適用する。
 	tagSummaries, err := getTagSummaryFiltered(req.Type, req.StartDate, req.EndDate, req.Account, req.TagIDs)

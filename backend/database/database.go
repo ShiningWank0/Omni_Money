@@ -14,6 +14,8 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"omni_money/backend/validation"
 )
 
 var (
@@ -95,16 +97,16 @@ func CloseDB() {
 func createTables() error {
 	statements := []string{
 		// 取引テーブル
-		`CREATE TABLE IF NOT EXISTS transactions (
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS transactions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			account TEXT NOT NULL,
 			date DATETIME NOT NULL,
 			item TEXT NOT NULL,
 			type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
-			amount INTEGER NOT NULL,
+			amount INTEGER NOT NULL CHECK(amount BETWEEN 1 AND %d),
 			balance INTEGER NOT NULL DEFAULT 0,
 			memo TEXT DEFAULT ''
-		)`,
+		)`, validation.MaxTransactionAmount),
 		// 取引紐付けテーブル
 		`CREATE TABLE IF NOT EXISTS transaction_links (
 			parent_id INTEGER NOT NULL,
@@ -154,6 +156,19 @@ func createTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_txid ON transaction_tags(transaction_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_tagid ON transaction_tags(tag_id)`,
+		// 既存DBにも共通金額上限を適用する防御的トリガー。
+		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS validate_transactions_amount_insert
+			BEFORE INSERT ON transactions
+			WHEN NEW.amount < 1 OR NEW.amount > %d
+			BEGIN
+				SELECT RAISE(ABORT, 'transaction amount out of range');
+			END`, validation.MaxTransactionAmount),
+		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS validate_transactions_amount_update
+			BEFORE UPDATE OF amount ON transactions
+			WHEN NEW.amount < 1 OR NEW.amount > %d
+			BEGIN
+				SELECT RAISE(ABORT, 'transaction amount out of range');
+			END`, validation.MaxTransactionAmount),
 	}
 
 	for _, stmt := range statements {
