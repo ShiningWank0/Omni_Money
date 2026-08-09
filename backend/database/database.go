@@ -21,6 +21,7 @@ var (
 	dbPath     string
 	mu         sync.RWMutex
 	snapshotMu sync.Mutex
+	umask      sync.Once
 
 	autoSnapshotOnce   sync.Once
 	autoSnapshotWorker *snapshotWorker
@@ -38,6 +39,10 @@ func InitDB(path string) error {
 // initDBLocked は mu.Lock() を保持した状態で呼び出す前提の初期化本体。
 // RestoreSnapshot のようにロックを保持したまま再初期化する経路と共有する。
 func initDBLocked(path string) error {
+	// SQLiteが後から作成するWAL/SHM/rollback journalも所有者だけが読めるよう、
+	// プロセスのファイル作成マスクを一度だけ制限する。
+	umask.Do(setRestrictiveUmask)
+
 	// 既存の接続があればまず閉じる
 	if db != nil {
 		db.Close()
@@ -52,9 +57,12 @@ func initDBLocked(path string) error {
 	// データベースディレクトリが存在しない場合は作成
 	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := ensurePrivateDir(dir); err != nil {
 			return fmt.Errorf("データベースディレクトリ作成エラー: %w", err)
 		}
+	}
+	if err := preparePrivateDatabaseFile(path); err != nil {
+		return fmt.Errorf("データベースファイル準備エラー: %w", err)
 	}
 
 	var err error
@@ -71,6 +79,9 @@ func initDBLocked(path string) error {
 	// テーブル作成
 	if err := createTables(); err != nil {
 		return fmt.Errorf("テーブル作成エラー: %w", err)
+	}
+	if err := hardenSQLiteFiles(path); err != nil {
+		return fmt.Errorf("データベース権限設定エラー: %w", err)
 	}
 
 	log.Printf("データベース初期化完了: %s", path)
@@ -210,22 +221,43 @@ func CreateSnapshot(snapshotDir string) (string, error) {
 		}
 	}
 
-	if snapshotDir == "" {
+	defaultSnapshotDir := snapshotDir == ""
+	if defaultSnapshotDir {
 		snapshotDir = getSnapshotDir()
 	}
 
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := ensurePrivateDir(snapshotDir); err != nil {
 		return "", fmt.Errorf("スナップショットディレクトリ作成エラー: %w", err)
+	}
+	if defaultSnapshotDir {
+		if err := os.Chmod(snapshotDir, 0700); err != nil {
+			return "", fmt.Errorf("スナップショットディレクトリ権限設定エラー: %w", err)
+		}
 	}
 
 	timestamp := time.Now().Format("20060102_150405.000")
 	// ドットをアンダースコアに置換してファイル名に安全な形式にする
 	timestamp = strings.ReplaceAll(timestamp, ".", "_")
-	snapshotPath := filepath.Join(snapshotDir, fmt.Sprintf("omni_money_%s.db", timestamp))
-
-	// ファイルコピー
-	if err := copyFile(currentPath, snapshotPath); err != nil {
-		return "", fmt.Errorf("スナップショット作成エラー: %w", err)
+	baseName := fmt.Sprintf("omni_money_%s", timestamp)
+	var snapshotPath string
+	copied := false
+	for attempt := 0; attempt < 100; attempt++ {
+		name := baseName + ".db"
+		if attempt > 0 {
+			name = fmt.Sprintf("%s_%d.db", baseName, attempt)
+		}
+		snapshotPath = filepath.Join(snapshotDir, name)
+		if err := copyFile(currentPath, snapshotPath); err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return "", fmt.Errorf("スナップショット作成エラー: %w", err)
+		}
+		copied = true
+		break
+	}
+	if !copied {
+		return "", fmt.Errorf("スナップショット作成エラー: 一意なファイル名を確保できませんでした")
 	}
 
 	log.Printf("スナップショット作成完了: %s", snapshotPath)
@@ -489,20 +521,96 @@ func AutoSnapshot() {
 
 // copyFile はファイルをコピーする
 func copyFile(src, dst string) error {
+	sourceInfo, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if !sourceInfo.Mode().IsRegular() {
+		return fmt.Errorf("コピー元が通常ファイルではありません")
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
 
-	out, err := os.Create(dst)
+	// 既存ファイルやsymlinkを追従して上書きしない。機密コピーは最初から0600で作成する。
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	completed := false
+	defer func() {
+		_ = out.Close()
+		if !completed {
+			_ = os.Remove(dst)
+		}
+	}()
 
 	if _, err := io.Copy(out, in); err != nil {
 		return err
 	}
-	return out.Sync()
+	if err := out.Sync(); err != nil {
+		return err
+	}
+	if err := os.Chmod(dst, 0600); err != nil {
+		return err
+	}
+	completed = true
+	return nil
+}
+
+func ensurePrivateDir(path string) error {
+	info, err := os.Stat(path)
+	if err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("ディレクトリではありません")
+		}
+		// 既存ディレクトリのACL/共有設定はアプリから変更しない。
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0700)
+}
+
+func preparePrivateDatabaseFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		file, createErr := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if createErr != nil {
+			return createErr
+		}
+		return file.Close()
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("データベースパスが通常ファイルではありません")
+	}
+	return os.Chmod(path, 0600)
+}
+
+func hardenSQLiteFiles(path string) error {
+	for _, candidate := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		info, err := os.Lstat(candidate)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("SQLite関連パスが通常ファイルではありません: %s", candidate)
+		}
+		if err := os.Chmod(candidate, 0600); err != nil {
+			return err
+		}
+	}
+	return nil
 }
