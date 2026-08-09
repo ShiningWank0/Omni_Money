@@ -57,15 +57,22 @@ func TestDesktopReleaseUsesLeastPrivilegeAndReproducibleTools(t *testing.T) {
 	workflow := string(contents)
 	for _, required := range []string{
 		"permissions: {}",
-		"build:\n    permissions:\n      contents: read",
-		"contents: write\n      id-token: write\n      attestations: write",
-		"github.com/wailsapp/wails/v2/cmd/wails@v2.11.0",
+		"prepare:\n    permissions:\n      contents: read",
+		"build:\n    needs: prepare",
+		"attestations: write\n      artifact-metadata: write",
+		"release:\n    needs: [prepare, build, attest]",
+		"actions: read\n      contents: write",
+		"WAILS_VERSION: v2.11.0",
+		"github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION",
 		"SHA256SUMS",
-		"actions/attest-build-provenance@",
+		"actions/attest@",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("release workflow is missing security control %q", required)
 		}
+	}
+	if strings.Count(workflow, "contents: read") < 3 {
+		t.Error("prepare, build, and attest jobs must retain read-only contents access")
 	}
 	for _, forbidden := range []string{"cmd/wails@latest", `xattr -cr`} {
 		if strings.Contains(workflow, forbidden) {
