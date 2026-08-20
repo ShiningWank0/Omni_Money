@@ -170,12 +170,12 @@ jobs:
       - name: Build application
         shell: bash
         run: |
-          TAGS=""
+          WAILS_ARGS=()
           if [ "$RUNNER_OS" = "Linux" ]; then
-            TAGS="-tags webkit2_41"
+            WAILS_ARGS+=("-tags" "webkit2_41")
           fi
           wails build -platform "$BUILD_PLATFORM" \
-            $TAGS \
+            "${WAILS_ARGS[@]}" \
             -ldflags "-X main.version=${APP_VERSION}"
 
       # macOSの場合: ad-hoc署名 + dittoでバンドル構造保持ZIP
