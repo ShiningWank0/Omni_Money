@@ -112,7 +112,49 @@ omni:$2y$12$...
 
 `omni:` より後ろの `$2y$12$...` 全体が `AUTH_PASSWORD_HASH` です。これはログイン時に入力するパスワードそのものではなく、パスワードの検証に使うハッシュです。
 
-### 2.2 Docker 版の公開範囲
+### 2.2 Omni Money側のTOTPを任意で登録する
+
+Omni Money側のTOTPはオプションです。`AUTH_TOTP_SECRET_FILE` を設定しなければ、パスワードだけでログインでき、TOTPの未設定を理由に起動失敗することもありません。Pangolin突破後の防御を一段増やしたい場合だけ、以下の手順でOmni Money専用TOTPを有効にしてください。有効化する場合も、PangolinとOmni Moneyで同じseedを使わないでください。
+
+リポジトリのルートで、秘密ファイルを新規作成します。`--out` は必須で、既存ファイルやシンボリックリンクは上書きされません。
+
+```bash
+mkdir -p "$HOME/.config/omni-money"
+go run ./cmd/omni-totp \
+  --out "$HOME/.config/omni-money/omni-money-totp.secret" \
+  --issuer "Omni Money" \
+  --account "admin"
+chmod 600 "$HOME/.config/omni-money/omni-money-totp.secret"
+```
+
+コマンドは暗号学的乱数から20バイトを生成し、認証アプリへ登録するためのBase32セットアップキーと `otpauth://` URIを一度だけ表示します。Google Authenticator、1Password、Aegis等へ登録したら、ターミナル出力を消去し、キー・URIをパスワードと同じ機密情報として保管してください。`AUTH_TOTP_SECRET_FILE` にはキーそのものではなく、秘密ファイルのパスだけを設定します。
+
+サーバーを直接起動する場合:
+
+```bash
+export AUTH_PASSWORD_HASH='$2y$12$...'
+export AUTH_TOTP_SECRET_FILE="$HOME/.config/omni-money/omni-money-totp.secret"
+export AUTH_REQUIRE_TOTP=true
+go run -tags server ./server.go
+```
+
+Dockerでは、秘密ファイルを読み取り専用でコンテナへ渡し、コンテナ内のパスを指定します。`--user` を使う場合は、ホスト側ファイルをそのUIDだけが読める所有者・`0600`にしてください。
+
+```bash
+docker run -d \
+  --user "$(id -u):$(id -g)" \
+  --env AUTH_PASSWORD_HASH \
+  --env AUTH_TOTP_SECRET_FILE=/run/secrets/omni-money-totp \
+  --env AUTH_REQUIRE_TOTP=true \
+  --mount "type=bind,src=$HOME/.config/omni-money/omni-money-totp.secret,dst=/run/secrets/omni-money-totp,ro" \
+  -p 127.0.0.1:4000:4000 \
+  -v "$HOME/OmniMoneyServer/data:/app/data" \
+  omni-money
+```
+
+`AUTH_TOTP_SECRET_FILE` を設定すると、その環境の全ログインと再認証でTOTPが必須になります。未設定ならTOTPは無効で、パスワード認証だけを使用します。`AUTH_REQUIRE_TOTP=true` はTOTPを有効化するスイッチではなく、「この環境では設定漏れによる無効化を許さない」という起動時の安全確認です。TOTPを採用した本番環境では併用を推奨します。秘密ファイルをローテーションする場合は、サービスを停止してから新しいファイルを別名で生成し、所有者・`0600`・マウント先を確認して再起動してください。CLIは既存ファイルを上書きしないため、誤操作によるseed交換を防ぎます。
+
+### 2.3 Docker 版の公開範囲
 
 Docker の `4000:4000` は、通常すべてのホスト側ネットワークインターフェースにポートを公開します。Mac だけから使う場合は `127.0.0.1:4000:4000` とし、LAN 内の別端末から使う場合だけ `4000:4000` を使います。
 
@@ -120,7 +162,7 @@ Docker の `4000:4000` は、通常すべてのホスト側ネットワークイ
 
 通常の利用では `AI_API_TOKEN` を設定しません。未設定なら AI 専用リスナー自体が起動しません。
 
-### 2.3 AI APIを利用する場合の境界
+### 2.4 AI APIを利用する場合の境界
 
 AI APIを有効にすると、公開Webの4000番とは別にAI専用の4001番が使われます。
 
@@ -178,7 +220,7 @@ export AUTH_PASSWORD_HASH='$2y$12$ここを作成したハッシュに置き換�
 再起動や更新時に同じハッシュを使えるよう、次のファイルへ保存します。保存されるのは平文パスワードではなく bcrypt ハッシュですが、ファイルは共有しないでください。
 
 ```bash
-printf 'AUTH_PASSWORD_HASH=%s\nSESSION_MAX_AGE_HOURS=24\n' "$AUTH_PASSWORD_HASH" \
+printf 'AUTH_PASSWORD_HASH=%s\nSESSION_MAX_AGE_HOURS=8\nSESSION_IDLE_TIMEOUT_MINUTES=30\nSESSION_REAUTH_MAX_AGE_MINUTES=5\nSESSION_MAX_CONCURRENT=3\n' "$AUTH_PASSWORD_HASH" \
   > "$HOME/.config/omni-money/server.env"
 chmod 600 "$HOME/.config/omni-money/server.env"
 ```
@@ -283,6 +325,17 @@ docker rm omni-money
 
 アプリでは Custom User `568:568` を明示して、このデータセットへ非 root で書き込みます。権限エラーが起きても `chmod 777` や Privileged モードで回避せず、データセットの ACL を修正してください。
 
+TOTPを使う場合は、TrueNAS上のShell（または同じACLを持つ安全な管理端末）で秘密ファイルをデータセット直下へ新規作成します。Composeから見えるコンテナ内パスは `/app/data/omni-money-totp.secret` です。Pangolinのseedと同じファイルを指定しないでください。
+
+```bash
+go run ./cmd/omni-totp \
+  --out /mnt/tank/apps/omni-money/omni-money-totp.secret \
+  --issuer "Omni Money" --account "admin"
+chmod 600 /mnt/tank/apps/omni-money/omni-money-totp.secret
+```
+
+TrueNASのACLで、ファイルを読むアプリUID/GID 568だけに読み取り権限を付与します。CLIは既存ファイルを上書きしないため、再生成時はサービスを停止し、新しい別名ファイルを作成してから設定を切り替えます。
+
 ### 4.2 TrueNAS 用のハッシュ表記に変換する
 
 2.1 で作成した bcrypt ハッシュ内のすべての `$` を `$$` にします。Docker Compose が `$` を変数展開に使うためです。
@@ -311,8 +364,13 @@ services:
       DB_PATH: /app/data/omni_money.db
       HOST_IP: 0.0.0.0
       PORT: "4000"
-      SESSION_MAX_AGE_HOURS: "24"
+      SESSION_MAX_AGE_HOURS: "8"
+      SESSION_IDLE_TIMEOUT_MINUTES: "30"
+      SESSION_REAUTH_MAX_AGE_MINUTES: "5"
+      SESSION_MAX_CONCURRENT: "3"
       AUTH_PASSWORD_HASH: '$$2y$$12$$ここを変換済みハッシュの残りに置き換える'
+      AUTH_TOTP_SECRET_FILE: /app/data/omni-money-totp.secret
+      AUTH_REQUIRE_TOTP: "true"
     ports:
       - "4000:4000"
     volumes:
@@ -369,9 +427,13 @@ http://192.168.1.20:4000
 
 認証には次の制御があります。
 
-- 認証済みセッションの既定有効期間は 24 時間です。
+- 認証済みセッションの既定の絶対有効期間は 8 時間、無操作タイムアウトは 30 分です。同時セッションは1ユーザーあたり3件までです。
+- バックアップ、CSVインポート、手動スナップショット作成・復元、AI API操作、全セッションログアウトは、直近5分以内の再認証を要求します。Pangolinを通過済みでも、これらの操作にはOmni Moneyのパスワードと、設定時はTOTPが必要です。
 - 同じアクセス元から 5 回連続でログインに失敗すると、15 分間ロックされます。
+- bcryptパスワードハッシュはコスト12〜16が必要です（低すぎるハッシュと、CPU枯渇を招く過大なハッシュは起動時に拒否します）。TOTPコードは30秒単位で検証され、同一プロセス内では受理済みタイムステップを再利用できません。
 - コンテナを再起動すると、メモリ上のログインセッションは失われるため再ログインが必要です。
+
+TOTPのリプレイ防止状態は現在のプロセスのメモリ上だけで管理されます。再起動後に過去のタイムステップを長期的に記録して照合する仕組みではないため、これは防御の限界です。TOTP秘密ファイルを持つ攻撃者、またはOmni Moneyのパスワードと認証アプリを同時に奪われた場合は、TOTPだけでは防げません。秘密ファイル・Pangolinのseed・パスワードを別々に管理し、侵害時はサービス停止、秘密のローテーション、Pangolin側のセッション失効を行ってください。
 
 ### 5.1 AI API操作画面
 
@@ -408,11 +470,25 @@ http://192.168.1.20:4000
 3. 長く推測されにくいパスワードを使用し、ルーターの不要なポート転送を削除する。
 4. データセットの定期スナップショットと別媒体へのバックアップを行う。
 
+リバースプロキシ経由で公開する場合は、ブラウザからPangolinまでのTLSを必須にし、Omni Money側で `FORCE_HTTPS=true`、実際の公開名だけを `ALLOWED_HOSTS`、最後にOmni Moneyへ接続するプロキシの固定IPまたは最小CIDRだけを `TRUSTED_PROXIES` に設定してください。Pangolinには公開FQDNの `Host` を維持させ、外部から届いた転送ヘッダーを破棄したうえで、単一の `X-Forwarded-Proto: https` と正規化済みの `X-Forwarded-For` を付けさせます。Omni Moneyは曖昧な複数値を拒否します。`CORS_ALLOWED_ORIGINS` は、別オリジンのフロントエンドを意図的に使う場合以外は空のままにします。`TRUSTED_PROXIES` を広いネットワークへ設定したり、外部由来の `X-Forwarded-*` をそのまま転送したりしないでください。
+
+PangolinではPublic ResourceにPlatform SSOが標準で有効ですが、対象ユーザーまたはRoleを明示的に割り当ててください。Omni MoneyのResourceには `Allow / Bypass Auth` ルール、認証不要のShareable Link、長期Access Tokenを作らず、例外ルールが必要なら `Pass to Auth` または `Deny` を使います。`Allow` ルールは一致したリクエストについてPangolin認証を完全に省略する機能です。
+
+NewtとOmni MoneyをDockerで動かす場合の最小露出構成は、両コンテナだけが参加する専用networkを作り、Pangolinのtargetを `http://omni-money:4000` のようなコンテナ名で手動設定し、Omni Moneyの `ports:` をホストへ公開しない形です。Docker自動検出が不要なら、NewtへDocker socketを渡さず、Docker Blueprintも無効にしてください。自動検出を使う場合、Docker socketは強い権限を持つため、可能なら許可APIを絞ったDocker Socket Proxyを使い、Newt側の `DOCKER_ENFORCE_NETWORK_VALIDATION=true` も有効にします。この検証機能は標準では `false` で、Newtとtargetが同じDocker network上にあることを検査します。Newtをhost network modeで動かすと、この検証は使えません。
+
+Pangolinの公開TLSとNewt tunnelはインターネット区間を保護しますが、targetをHTTPにした場合、NewtからOmni Moneyまでの専用Docker network内はHTTPです。そのローカルnetworkも信頼できない場合は、Omni Moneyの `TLS_CERT_FILE` / `TLS_KEY_FILE` とPangolin側のHTTPS target・証明書検証を構成してください。`FORCE_HTTPS=true` はブラウザ側schemeとSecure Cookieを強制する設定であり、内部target通信そのものを暗号化する機能ではありません。
+
+Pangolinの認証は外側のアクセス制御、Omni Moneyのパスワードは内側の独立した認証境界です。Omni Money側のTOTPを任意で有効にした場合は、さらに独立した要素が加わります。Pangolinの認証を突破されても、Omni Moneyの認証を省略できる構成にはなりません。ただし、Omni Money自体を直接インターネットへ公開すること、有効化した両方のseedを同じ場所へ保存すること、Omni Moneyの認証情報をログやLLMへ渡すことは避けてください。
+
 ## 8. 参照資料
 
 - [Colima Installation](https://github.com/abiosoft/colima/blob/main/docs/INSTALL.md)
 - [Colima README](https://github.com/abiosoft/colima/blob/main/README.md)
 - [Docker: Port publishing and mapping](https://docs.docker.com/engine/network/port-publishing/)
+- [Pangolin: Public Resource Authentication](https://docs.pangolin.net/manage/resources/public/authentication)
+- [Pangolin: Access Control Rules](https://docs.pangolin.net/manage/access-control/rules)
+- [Pangolin: Configure Sites / Docker Network Validation](https://docs.pangolin.net/manage/sites/configure-site)
+- [Pangolin: Multi-Factor Authentication](https://docs.pangolin.net/manage/access-control/mfa)
 - [TrueNAS: Installing Custom Apps](https://apps.truenas.com/managing-apps/installing-custom-apps/)
 - [TrueNAS: Custom App Screens](https://www.truenas.com/docs/scale/apps/installcustomappscreens/)
 - [TrueNAS: App Storage](https://apps.truenas.com/getting-started/app-storage/)

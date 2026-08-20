@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"omni_money/backend/authn"
 	"omni_money/backend/core"
 	"omni_money/backend/database"
 	"omni_money/backend/middleware"
@@ -21,8 +22,40 @@ import (
 // AI API は意図的にこのルーターへ登録しない。公開WebとAI APIの認証境界を
 // ポート単位で分離し、AIトークンが通常のセッション認証を迂回する経路を防ぐ。
 func NewRouter() http.Handler {
-	sessionManager := middleware.NewSessionManager(middleware.SessionMaxAgeFromEnv())
-	authManager := middleware.NewAuthSessionManager(sessionManager, os.Getenv("AUTH_PASSWORD_HASH"))
+	handler, err := NewRouterWithError()
+	if err == nil {
+		return handler
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		jsonError(w, "サーバーのセキュリティ設定が無効です", http.StatusServiceUnavailable)
+	})
+}
+
+// NewRouterWithError validates security-sensitive configuration before a
+// public listener starts. NewRouter remains as a fail-closed test-compatible
+// wrapper.
+func NewRouterWithError() (http.Handler, error) {
+	passwordHash := strings.TrimSpace(os.Getenv("AUTH_PASSWORD_HASH"))
+	if err := middleware.ValidatePasswordHash(passwordHash); err != nil {
+		return nil, err
+	}
+	sessionConfig, err := middleware.SessionConfigFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	totpVerifier, err := totpVerifierFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	proxyConfig := middleware.NewProxyConfigFromEnv()
+	if err := proxyConfig.Validate(); err != nil {
+		return nil, err
+	}
+
+	sessionManager := middleware.NewSessionManagerWithConfig(sessionConfig)
+	authManager := middleware.NewAuthSessionManager(sessionManager, passwordHash, totpVerifier)
 
 	mux := http.NewServeMux()
 
@@ -34,6 +67,8 @@ func NewRouter() http.Handler {
 	// 認証API（Agent.md §6.4.1）
 	mux.HandleFunc("/api/auth/login", handleAuthLogin(authManager))
 	mux.HandleFunc("/api/auth/logout", handleAuthLogout(authManager))
+	mux.HandleFunc("/api/auth/logout-all", handleAuthLogoutAll(authManager))
+	mux.HandleFunc("/api/auth/reauth", handleAuthReauthenticate(authManager))
 	mux.HandleFunc("/api/auth/status", handleAuthStatus(authManager))
 
 	// 認証済み管理UIから固定loopbackのAI専用リスナーへ中継する。
@@ -78,13 +113,41 @@ func NewRouter() http.Handler {
 
 	// サーバーモード用ミドルウェアの適用
 	var handler http.Handler = mux
+	handler = middleware.RecentAuthMiddleware(sessionManager, handler)
+	handler = middleware.CSRFMiddleware(sessionManager, handler)
 	handler = middleware.SessionAuthMiddleware(sessionManager, handler)
 	handler = middleware.MaxBodySizeMiddleware(handler)
 	handler = middleware.RateLimitMiddleware(handler)
 	handler = middleware.CORSMiddleware(handler)
+	handler = middleware.NoStoreAPIMiddleware(handler)
 	handler = middleware.SecurityHeadersMiddleware(handler)
-	handler = middleware.ProxyMiddleware(middleware.NewProxyConfigFromEnv(), handler)
-	return handler
+	handler = middleware.ProxyMiddleware(proxyConfig, handler)
+	return handler, nil
+}
+
+func totpVerifierFromEnv() (middleware.OneTimeCodeVerifier, error) {
+	requireRaw := strings.TrimSpace(os.Getenv("AUTH_REQUIRE_TOTP"))
+	requireTOTP := false
+	switch requireRaw {
+	case "":
+	case "true":
+		requireTOTP = true
+	case "false":
+	default:
+		return nil, fmt.Errorf("AUTH_REQUIRE_TOTP must be true or false")
+	}
+	secretPath := strings.TrimSpace(os.Getenv("AUTH_TOTP_SECRET_FILE"))
+	if secretPath == "" {
+		if requireTOTP {
+			return nil, fmt.Errorf("AUTH_TOTP_SECRET_FILE is required when AUTH_REQUIRE_TOTP=true")
+		}
+		return nil, nil
+	}
+	verifier, err := authn.LoadTOTPVerifier(secretPath)
+	if err != nil {
+		return nil, fmt.Errorf("load independent Omni TOTP secret: %w", err)
+	}
+	return verifier, nil
 }
 
 // NewAIRouter はAI専用リスナー用のルーターを作成する。
@@ -387,6 +450,12 @@ func handleSnapshots(w http.ResponseWriter, r *http.Request) {
 		path, err := database.CreateSnapshot("")
 		if err != nil {
 			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Manual snapshots use the same bounded retention as automatic ones so
+		// an authenticated browser cannot consume storage without limit.
+		if err := database.CleanOldSnapshots("", 30); err != nil {
+			jsonError(w, "スナップショットの世代管理に失敗しました", http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, map[string]string{"path": path, "message": "スナップショットを作成しました"}, http.StatusCreated)

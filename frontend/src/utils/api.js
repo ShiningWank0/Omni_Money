@@ -5,6 +5,42 @@
 export const isWailsMode = typeof window.go !== 'undefined'
 const isWails = isWailsMode
 
+// CSRF tokens are deliberately kept in memory only.  They are issued by the
+// server after authentication and are never persisted in localStorage or a
+// cookie that JavaScript can read.
+let csrfToken = null
+let pendingReauthentication = null
+
+function rememberAuthToken(data) {
+  if (typeof data?.csrf_token === 'string' && data.csrf_token.length > 0) {
+    csrfToken = data.csrf_token
+  } else if (data?.authenticated === false) {
+    csrfToken = null
+  }
+}
+
+function isUnsafeMethod(method) {
+  return !['GET', 'HEAD', 'OPTIONS'].includes(method)
+}
+
+function requestReauthentication() {
+  if (pendingReauthentication) return pendingReauthentication
+
+  pendingReauthentication = new Promise((resolve, reject) => {
+    // App.vue owns the modal and supplies credentials only when the user
+    // explicitly confirms re-authentication.  Keeping this bridge in the
+    // API layer lets any sensitive request (including future ones) resume
+    // without every component implementing its own retry logic.
+    window.dispatchEvent(new CustomEvent('omni-money:reauth-required', {
+      detail: { resolve, reject }
+    }))
+  }).finally(() => {
+    pendingReauthentication = null
+  })
+
+  return pendingReauthentication
+}
+
 function getPathname(url) {
   try {
     return new URL(url, window.location.origin).pathname
@@ -13,15 +49,33 @@ function getPathname(url) {
   }
 }
 
-async function apiFetch(url, options = {}, config = {}) {
-  const { skipAuthRedirect = false } = config
+export async function apiFetch(url, options = {}, config = {}) {
+  const { skipAuthRedirect = false, skipReauth = false } = config
+  const method = (options.method || 'GET').toUpperCase()
+  const headers = new Headers(options.headers || {})
+  if (isUnsafeMethod(method) && csrfToken) {
+    // Never let a caller accidentally replay a token that was rotated by a
+    // successful re-authentication.
+    headers.set('X-CSRF-Token', csrfToken)
+  }
+
   const response = await fetch(url, {
     credentials: 'include',
-    ...options
+    ...options,
+    headers
   })
 
+  const path = getPathname(url)
+
+  if (!isWailsMode && !skipReauth && response.status === 428 &&
+      !['/api/auth/login', '/api/auth/reauth', '/api/auth/status'].includes(path)) {
+    await requestReauthentication()
+    // The original request body is retained in `options` (all current API
+    // callers use replayable strings).  Retry exactly once after fresh auth.
+    return await apiFetch(url, options, { ...config, skipReauth: true })
+  }
+
   if (!isWailsMode && !skipAuthRedirect && response.status === 401) {
-    const path = getPathname(url)
     const skipPaths = new Set(['/api/auth/login', '/api/auth/status'])
     if (!skipPaths.has(path) && window.location.pathname !== '/login') {
       window.location.href = '/login'
@@ -57,15 +111,18 @@ export async function getAuthStatus() {
   }
 
   const res = await apiFetch('/api/auth/status', {}, { skipAuthRedirect: true })
-  return await res.json()
+  const data = await res.json()
+  rememberAuthToken(data)
+  return data
 }
 
 /**
  * ログイン
  * @param {string} password
+ * @param {string} totpCode
  * @returns {Promise<object>}
  */
-export async function login(password) {
+export async function login(password, totpCode = '') {
   if (isWails) {
     return { authenticated: true, message: 'デスクトップモードでは認証不要です' }
   }
@@ -73,17 +130,36 @@ export async function login(password) {
   const res = await apiFetch('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password })
+    body: JSON.stringify({ password, totp_code: totpCode })
   }, { skipAuthRedirect: true })
 
   const data = await res.json()
   if (!res.ok) {
-    const err = new Error(data?.error || 'ログインに失敗しました')
-    if (typeof data?.remaining_attempts === 'number') {
-      err.remainingAttempts = data.remaining_attempts
-    }
-    throw err
+    throw new Error(data?.error || 'ログインに失敗しました')
   }
+  rememberAuthToken(data)
+  return data
+}
+
+/**
+ * 最近の再認証を行い、サーバーが発行したCSRFトークンを更新する。
+ * @param {string} password
+ * @param {string} totpCode
+ * @returns {Promise<object>}
+ */
+export async function reauthenticate(password, totpCode = '') {
+  if (isWails) return { authenticated: true }
+
+  const res = await apiFetch('/api/auth/reauth', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password, totp_code: totpCode })
+  }, { skipAuthRedirect: true, skipReauth: true })
+  const data = await res.json()
+  if (!res.ok) {
+    throw new Error(data?.error || '再認証に失敗しました')
+  }
+  rememberAuthToken(data)
   return data
 }
 
@@ -100,6 +176,23 @@ export async function logout() {
   if (!res.ok) {
     throw new Error(await parseError(res, 'ログアウトに失敗しました'))
   }
+  csrfToken = null
+}
+
+/**
+ * 現在を含む全セッションを無効化する。
+ * @returns {Promise<void>}
+ */
+export async function logoutAll() {
+  if (isWails) return
+
+  const res = await apiFetch('/api/auth/logout-all', {
+    method: 'POST'
+  }, { skipAuthRedirect: true })
+  if (!res.ok) {
+    throw new Error(await parseError(res, '全セッションのログアウトに失敗しました'))
+  }
+  csrfToken = null
 }
 
 /**

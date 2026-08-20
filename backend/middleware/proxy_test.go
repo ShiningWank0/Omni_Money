@@ -96,3 +96,141 @@ func TestProxyMiddlewareForceHTTPSCanUseConfiguredRedirectHost(t *testing.T) {
 		t.Fatalf("redirect location = %q, want %q", got, want)
 	}
 }
+
+func TestParseTrustedProxiesRejectsBroadAndMalformedEntries(t *testing.T) {
+	for _, raw := range []string{"0.0.0.0/0", "::/0", "not-an-ip", "10.0.0.0/33"} {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := parseTrustedProxiesStrict(raw); err == nil {
+				t.Fatalf("parseTrustedProxiesStrict(%q) unexpectedly succeeded", raw)
+			}
+		})
+	}
+}
+
+func TestNewProxyConfigFromEnvFailsClosedForInvalidTrustedProxy(t *testing.T) {
+	t.Setenv("TRUSTED_PROXIES", "0.0.0.0/0")
+	cfg := NewProxyConfigFromEnv()
+	if cfg.configErr == nil {
+		t.Fatal("invalid trusted proxy was not recorded")
+	}
+	handler := ProxyMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "http://money.local/", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("invalid config status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestNewProxyConfigFromEnvRequiresCanonicalBoolean(t *testing.T) {
+	for _, raw := range []string{"1", "TRUE", "t", "yes"} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("FORCE_HTTPS", raw)
+			cfg := NewProxyConfigFromEnv()
+			if cfg.configErr == nil {
+				t.Fatalf("FORCE_HTTPS=%q was accepted", raw)
+			}
+		})
+	}
+}
+
+func TestNewProxyConfigFromEnvRequiresAllowedHostsWithTrustedProxy(t *testing.T) {
+	t.Setenv("TRUSTED_PROXIES", "10.0.0.0/8")
+	t.Setenv("ALLOWED_HOSTS", "")
+	if cfg := NewProxyConfigFromEnv(); cfg.configErr == nil {
+		t.Fatal("trusted proxy without ALLOWED_HOSTS was accepted")
+	}
+}
+
+func TestProxyMiddlewareRejectsAmbiguousForwardedHeaders(t *testing.T) {
+	cfg := &ProxyConfig{trustedCIDRs: parseTrustedProxies("10.0.0.0/8")}
+	handler := ProxyMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	cases := []struct {
+		name   string
+		header string
+		value  string
+	}{
+		{name: "xff", header: "X-Forwarded-For", value: "198.51.100.1, not-an-ip"},
+		{name: "xff-empty-hop", header: "X-Forwarded-For", value: "198.51.100.1, "},
+		{name: "proto-list", header: "X-Forwarded-Proto", value: "https, http"},
+		{name: "proto-invalid", header: "X-Forwarded-Proto", value: "ftp"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://money.local/", nil)
+			req.RemoteAddr = "10.0.0.1:12345"
+			req.Header.Set(tc.header, tc.value)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+func TestProxyMiddlewareRejectsMultipleForwardedHeaderValues(t *testing.T) {
+	cfg := &ProxyConfig{trustedCIDRs: parseTrustedProxies("10.0.0.0/8")}
+	handler := ProxyMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "http://money.local/", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	req.Header["X-Forwarded-Proto"] = []string{"https", "http"}
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestProxyMiddlewareRemovesForwardedHeadersFromUntrustedRemote(t *testing.T) {
+	cfg := &ProxyConfig{trustedCIDRs: parseTrustedProxies("10.0.0.0/8")}
+	var got http.Header
+	handler := ProxyMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "http://money.local/", nil)
+	req.RemoteAddr = "203.0.113.10:12345"
+	for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Proto", "X-Real-IP"} {
+		req.Header.Set(name, "198.51.100.23")
+	}
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Proto", "X-Real-IP"} {
+		if got.Get(name) != "" {
+			t.Errorf("untrusted %s header remained: %q", name, got.Get(name))
+		}
+	}
+}
+
+func TestProxyMiddlewareValidatesAllowedHostOnHTTPSRequests(t *testing.T) {
+	cfg := &ProxyConfig{allowedHosts: parseAllowedHosts("money.example.com")}
+	handler := ProxyMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "https://evil.example/", nil)
+	req.RemoteAddr = "203.0.113.10:12345"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestProxyMiddlewareRejectsInvalidRedirectHostConfiguration(t *testing.T) {
+	t.Setenv("HTTPS_REDIRECT_HOST", "https://evil.example")
+	cfg := NewProxyConfigFromEnv()
+	if cfg.configErr == nil {
+		t.Fatal("invalid redirect host was not recorded")
+	}
+}

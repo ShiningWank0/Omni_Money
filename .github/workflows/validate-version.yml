@@ -2,50 +2,120 @@ name: Validate VERSION
 
 on:
   pull_request:
-    branches: [main]
     paths: ['VERSION']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-version-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
+    name: Validate version progression
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Validate version is not downgraded
         run: |
-          # PR側のバージョンを読み取り
-          NEW_VERSION=$(cat VERSION | tr -d '[:space:]')
-          echo "PR version: $NEW_VERSION"
+          set -euo pipefail
 
-          # mainブランチからVERSIONを取得
-          OLD_VERSION=$(git show origin/main:VERSION 2>/dev/null | tr -d '[:space:]' || echo "0.0.0")
-          echo "Main version: $OLD_VERSION"
+          # VERSION accepts an optional v prefix, exactly three numeric core
+          # components, an optional SemVer pre-release (including numeric
+          # identifier rules). Build metadata is rejected below because the
+          # Docker and desktop release artifacts must share one tag.
+          semver_re='^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))(\.((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 
-          # セマンティックバージョンの各部分を分割して数値比較する関数
-          version_to_num() {
-            local ver="$1"
-            local major minor patch
-            IFS='.' read -r major minor patch <<< "$ver"
-            # 先頭の非数字（v接頭辞等）を除去
-            major="${major#v}"
-            # 数値化（空なら0）
-            major=$((${major:-0}))
-            minor=$((${minor:-0}))
-            patch=$((${patch:-0}))
-            echo $(( major * 1000000 + minor * 1000 + patch ))
+          read_version_file() {
+            local path="$1"
+            local line_count
+            line_count=$(awk 'END { print NR }' "$path")
+            if [ "$line_count" != 1 ]; then
+              echo "::error::$path must contain exactly one VERSION line" >&2
+              return 1
+            fi
+            sed -n '1p' "$path"
           }
 
-          OLD_NUM=$(version_to_num "$OLD_VERSION")
-          NEW_NUM=$(version_to_num "$NEW_VERSION")
+          NEW_VERSION=$(read_version_file VERSION)
+          if [[ ! "$NEW_VERSION" =~ $semver_re ]]; then
+            echo "::error::VERSION is not a valid SemVer: $NEW_VERSION"
+            exit 1
+          fi
+          if [[ "$NEW_VERSION" == *+* ]]; then
+            echo "::error::VERSION must not contain SemVer build metadata (+...); Docker and desktop releases share one version"
+            exit 1
+          fi
+          echo "PR version: $NEW_VERSION"
 
-          echo "Old numeric: $OLD_NUM"
-          echo "New numeric: $NEW_NUM"
+          if ! OLD_VERSION=$(git show origin/main:VERSION 2>/dev/null); then
+            OLD_VERSION='0.0.0'
+          fi
+          if [[ "$OLD_VERSION" == *$'\n'* || ! "$OLD_VERSION" =~ $semver_re ]]; then
+            echo "::error::origin/main VERSION is not a valid SemVer: $OLD_VERSION"
+            exit 1
+          fi
+          echo "Main version: $OLD_VERSION"
 
-          if [ "$NEW_NUM" -le "$OLD_NUM" ]; then
+          # Compare SemVer precedence without shell arithmetic. The awk
+          # comparator handles arbitrarily long numeric identifiers and the
+          # numeric-vs-text pre-release ordering defined by SemVer 2.0.0.
+          old_normalized="${OLD_VERSION#v}"
+          new_normalized="${NEW_VERSION#v}"
+          comparison=$(printf '%s\t%s\n' "$old_normalized" "$new_normalized" | awk -F '\t' '
+            function cmp_num(a, b, la, lb) {
+              if ("x" a == "x" b) return 0
+              sub(/^0+/, "", a); sub(/^0+/, "", b)
+              if (a == "") a = "0"
+              if (b == "") b = "0"
+              la = length(a); lb = length(b)
+              if (la != lb) return la < lb ? -1 : 1
+              return ("x" a < "x" b) ? -1 : 1
+            }
+            function cmp_text(a, b) {
+              if ("x" a == "x" b) return 0
+              return ("x" a < "x" b) ? -1 : 1
+            }
+            function cmp(a, b, ca, cb, ia, ib, i, na, nb, an, bn, result, dash_a, dash_b, has_a, has_b, core_a, core_b, pre_a, pre_b) {
+              sub(/\+.*/, "", a); sub(/\+.*/, "", b)
+              dash_a = index(a, "-"); dash_b = index(b, "-")
+              has_a = dash_a > 0; has_b = dash_b > 0
+              core_a = has_a ? substr(a, 1, dash_a - 1) : a
+              core_b = has_b ? substr(b, 1, dash_b - 1) : b
+              pre_a = has_a ? substr(a, dash_a + 1) : ""
+              pre_b = has_b ? substr(b, dash_b + 1) : ""
+              split(core_a, ca, /\./); split(core_b, cb, /\./)
+              for (i = 1; i <= 3; i++) {
+                result = cmp_num(ca[i], cb[i])
+                if (result != 0) return result
+              }
+              if (!has_a && !has_b) return 0
+              if (!has_a) return 1
+              if (!has_b) return -1
+              na = split(pre_a, ia, /\./); nb = split(pre_b, ib, /\./)
+              for (i = 1; i <= (na > nb ? na : nb); i++) {
+                if (i > na) return -1
+                if (i > nb) return 1
+                an = ia[i] ~ /^[0-9]+$/; bn = ib[i] ~ /^[0-9]+$/
+                if (an && bn) result = cmp_num(ia[i], ib[i])
+                else if (an != bn) result = an ? -1 : 1
+                else result = cmp_text(ia[i], ib[i])
+                if (result != 0) return result
+              }
+              return 0
+            }
+            { print cmp($1, $2) }
+          ')
+
+          if [ "$comparison" -ne 1 ]; then
             echo "::error::バージョンが後退しています！ $OLD_VERSION → $NEW_VERSION"
             echo "::error::VERSIONは現在の $OLD_VERSION より大きい値にしてください。"
             exit 1

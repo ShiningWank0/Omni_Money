@@ -1,36 +1,45 @@
 name: CI
 
 on:
+  # Stacked PRs use non-main base branches; run the same checks for every PR.
   pull_request:
-    branches: [main]
   push:
     branches:
       - main
       - 'codex/**'
       - 'update/**'
+  schedule:
+    - cron: '30 3 * * 0'
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   go:
     name: Go tests
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '1.24'
+          go-version: '1.26.7'
           cache: true
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: '20'
+          node-version: '24.19.0'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -42,11 +51,27 @@ jobs:
       - name: Build frontend assets for Go embed
         working-directory: frontend
         run: |
-          npm ci
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
           npm run build
 
       - name: Run Go tests
         run: go test ./...
+
+      - name: Run Go vet
+        run: go vet ./...
+
+      - name: Run Go security analyzer
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 -quiet -severity medium ./...
+
+      - name: Lint GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -no-color
+
+      - name: Run Go race tests
+        run: go test -race ./...
+
+      - name: Scan reachable Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
       - name: Build server entrypoint
         run: go build -tags server -o /tmp/omni_money_server ./server.go
@@ -60,23 +85,53 @@ jobs:
   frontend:
     name: Frontend build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: '20'
+          node-version: '24.19.0'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
 
       - name: Build frontend
         run: npm run build
+
+  docker:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Build pinned multi-stage image
+        run: docker build --build-arg VERSION=ci --tag omni-money:ci .
+
+      - name: Scan image for fixable high-severity vulnerabilities
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: omni-money:ci
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH

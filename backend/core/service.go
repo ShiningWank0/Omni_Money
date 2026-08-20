@@ -364,6 +364,8 @@ func GetBalanceHistoryFiltered(fundItems []string) (*models.BalanceHistoryRespon
 		args[i] = item
 	}
 
+	// #nosec G201 -- only generated "?" placeholders are interpolated; every
+	// account value remains a bound query argument.
 	query := fmt.Sprintf(
 		"SELECT account, date, balance FROM transactions WHERE account IN (%s) ORDER BY date, id",
 		strings.Join(placeholders, ","),
@@ -491,7 +493,7 @@ func BackupToCSVFile() (string, error) {
 		return "", err
 	}
 
-	if err := os.MkdirAll(downloadsDir, 0755); err != nil {
+	if err := os.MkdirAll(downloadsDir, 0700); err != nil {
 		return "", fmt.Errorf("ダウンロードフォルダ作成エラー: %w", err)
 	}
 
@@ -500,7 +502,7 @@ func BackupToCSVFile() (string, error) {
 
 	// BOMを付与してExcel互換にする
 	bom := "\xEF\xBB\xBF"
-	if err := os.WriteFile(filePath, []byte(bom+csvContent), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(bom+csvContent), 0600); err != nil {
 		return "", fmt.Errorf("CSVファイル書き出しエラー: %w", err)
 	}
 
@@ -1240,6 +1242,8 @@ func getTagSummaryFiltered(txType, startDate, endDate, account string, tagIDs []
 		))
 	}
 
+	// #nosec G202 -- joinConditions contains only fixed SQL fragments selected
+	// by code; all user values remain bound parameters.
 	query := `SELECT t.id, t.name, t.level, t.parent_id,
 		COALESCE(SUM(tr.amount), 0) as total_amount,
 		COUNT(tr.id) as tx_count
@@ -1373,6 +1377,7 @@ func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, 
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
+		// #nosec G202 -- interpolation contains only generated "?" placeholders.
 		query += fmt.Sprintf(" AND id IN (SELECT transaction_id FROM transaction_tags WHERE tag_id IN (%s))",
 			strings.Join(placeholders, ","))
 	}

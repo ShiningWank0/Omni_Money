@@ -61,8 +61,8 @@ macOS デスクトップアプリ、Mac + Colima、TrueNAS Custom App の詳し�
 
 ## 必要な環境
 
-- Go 1.23 以上
-- Node.js 20 以上
+- Go 1.26.6 以上（CI・リリースは 1.26.7）
+- Node.js 24.19 以上
 - npm
 - Wails CLI
 - Docker
@@ -116,13 +116,25 @@ AUTH_PASSWORD_HASH='<bcrypt-hash>' go run -tags server ./server.go
 
 `<bcrypt-hash>` は実際に作成した bcrypt ハッシュへ置き換えてください。作成方法は[利用ガイド](docs/how-to-use.md#21-bcrypt-ハッシュを作成する)を参照してください。
 
-公開Webは標準で `0.0.0.0:4000` で待ち受けます。AI APIも利用する場合だけ、32文字以上のランダムなトークンを追加します。
+直接起動した公開Webは標準で `127.0.0.1:4000` で待ち受けます。外部公開はPangolin等のゲートウェイまたはVPNを経由し、AI APIも利用する場合だけ32文字以上のランダムなトークンを追加します。Dockerコンテナ内部の待受はポート転送のため `0.0.0.0` ですが、Composeのホスト側既定公開先は `127.0.0.1` です。
 
 ```bash
 AUTH_PASSWORD_HASH='<bcrypt-hash>' \
 AI_API_TOKEN='<32文字以上のランダム値>' \
 go run -tags server ./server.go
 ```
+
+Omni Money側にも認証アプリのTOTPを追加する場合は、Pangolinとは必ず別のseedを生成します。秘密ファイルは環境変数へ直接書かず、ファイルパスだけを設定してください。
+
+```bash
+go run ./cmd/omni-totp --out ./data/omni-money-totp.secret
+chmod 600 ./data/omni-money-totp.secret
+export AUTH_TOTP_SECRET_FILE="$PWD/data/omni-money-totp.secret"
+export AUTH_REQUIRE_TOTP=true
+AUTH_PASSWORD_HASH='<bcrypt-cost-12-to-16-hash>' go run -tags server ./server.go
+```
+
+コマンドは初回だけセットアップキーと `otpauth://` URI を表示します。認証アプリへ登録した後、その出力を端末ログやチャットへ残さず、秘密ファイルもバックアップ時に暗号化して保管してください。
 
 この場合、AI専用APIは標準で `127.0.0.1:4001` で待ち受けます。公開WebとAI APIは同じGoプロセスとSQLiteを使用しますが、HTTPルーターと認証境界は分離されています。
 
@@ -136,11 +148,16 @@ go run -tags server ./server.go
 | 変数 | 既定値 | 説明 |
 | --- | --- | --- |
 | `DB_PATH` | `omni_money.db` | SQLite データベースの保存先 |
-| `HOST_IP` | `0.0.0.0` | 待受アドレス |
+| `HOST_IP` | `127.0.0.1` | 直接起動時の待受アドレス（Docker内部は `0.0.0.0`） |
 | `PORT` | `4000` | 待受ポート |
-| `AUTH_PASSWORD_HASH` | なし（必須） | ログインパスワードの bcrypt ハッシュ |
-| `SESSION_MAX_AGE_HOURS` | `24` | セッション有効期間（時間） |
+| `AUTH_PASSWORD_HASH` | なし（必須） | ログインパスワードの bcrypt ハッシュ（cost 12〜16） |
+| `SESSION_MAX_AGE_HOURS` | `8` | セッションの絶対有効期間（時間） |
+| `SESSION_IDLE_TIMEOUT_MINUTES` | `30` | 無操作セッションのタイムアウト（分） |
+| `SESSION_REAUTH_MAX_AGE_MINUTES` | `5` | 高リスク操作で要求する最近の再認証の有効期間（分） |
+| `SESSION_MAX_CONCURRENT` | `3` | 1ユーザーあたりの同時セッション上限 |
 | `AI_API_TOKEN` | なし | 32文字以上のAI API Bearerトークン。未設定ならAI API無効 |
+| `AUTH_TOTP_SECRET_FILE` | なし | Omni Money専用TOTPのBase32秘密ファイル。設定するとTOTPを有効化 |
+| `AUTH_REQUIRE_TOTP` | `false` | `true` の場合、秘密ファイルがないと起動失敗。TOTPを採用した本番環境では `true` を推奨 |
 | `AI_HOST_IP` | `127.0.0.1` | AI専用リスナーの待受アドレス |
 | `AI_PORT` | `4001` | AI専用リスナーのポート |
 | `AI_ALLOW_REMOTE` | `false` | AIを非ループバックで待受する明示許可。Docker内の待受時のみ利用 |
@@ -195,6 +212,11 @@ AIを利用しない場合は `AI_API_TOKEN` と4001番ポートの公開を両�
 ```bash
 cp .env.example .env
 # .env の AUTH_PASSWORD_HASH、AI_API_TOKEN、OMNI_DATA_DIR を編集
+# TOTPを有効にする場合は、先にデータディレクトリへ秘密ファイルを作成する。
+mkdir -p ./data
+go run ./cmd/omni-totp --out ./data/omni-money-totp.secret
+# .env に AUTH_TOTP_SECRET_FILE=/app/data/omni-money-totp.secret
+# と AUTH_REQUIRE_TOTP=true を設定する（ホスト側パスではなくコンテナ内パス）。
 docker compose up -d --build
 ```
 
@@ -208,7 +230,7 @@ TrueNAS Custom Appでは `compose.yaml` 相当の設定を使い、次を守っ�
 - TrueNAS UIでホストIPを限定できない場合は4001を公開しない
 - 外部公開はCaddy/Nginx等でTLS終端し、`TRUSTED_PROXIES`を限定設定する
 
-設定値は次のように生成できます。bcrypt生成はパスワードを対話入力するため、シェル履歴へ平文を残しません。
+設定値は次のように生成できます。bcrypt生成はパスワードを対話入力するため、シェル履歴へ平文を残しません。TOTP秘密は `omni-totp` で生成し、Pangolin側のTOTP秘密と共有しないでください。
 
 ```bash
 docker run -it --rm httpd:2.4-alpine htpasswd -nBC 12 omni

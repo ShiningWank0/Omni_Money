@@ -168,6 +168,48 @@
       @restored="handleSnapshotRestored"
     />
 
+    <!-- 最近の認証が必要な操作用の再認証ダイアログ -->
+    <div v-if="showReauthModal" class="reauth-overlay" @click.self="cancelReauthentication">
+      <div class="reauth-card" role="dialog" aria-modal="true" aria-labelledby="reauth-title">
+        <h3 id="reauth-title">操作を続けるには再認証が必要です</h3>
+        <p class="reauth-description">安全のため、もう一度Omni Moneyの認証情報を入力してください。</p>
+        <form @submit.prevent="submitReauthentication">
+          <label class="reauth-label" for="reauth-password">パスワード</label>
+          <input
+            id="reauth-password"
+            ref="reauthPasswordInput"
+            v-model="reauthPassword"
+            class="reauth-input"
+            type="password"
+            autocomplete="current-password"
+            maxlength="72"
+            required
+          >
+          <template v-if="totpRequired">
+            <label class="reauth-label" for="reauth-totp">認証アプリのコード</label>
+            <input
+              id="reauth-totp"
+              v-model="reauthTotpCode"
+              class="reauth-input"
+              type="text"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              pattern="[0-9]{6}"
+              maxlength="6"
+              required
+            >
+          </template>
+          <div v-if="reauthError" class="reauth-error">{{ reauthError }}</div>
+          <div class="reauth-actions">
+            <button type="button" class="reauth-cancel" :disabled="reauthLoading" @click="cancelReauthentication">キャンセル</button>
+            <button type="submit" class="reauth-submit" :disabled="reauthLoading">
+              {{ reauthLoading ? '確認中...' : '認証して続行' }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <!-- トースト通知 -->
     <Transition name="toast-fade">
       <div v-if="toast.visible" class="toast" :class="toast.type">
@@ -178,7 +220,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useAppStore } from './store/index'
 import TransactionModal from './components/TransactionModal.vue'
 import CSVImportModal from './components/CSVImportModal.vue'
@@ -196,7 +238,9 @@ import {
   saveBankAccountSettings as apiSaveBankAccountSettings,
   getBalanceHistoryFiltered,
   isWailsMode,
-  logout as apiLogout
+  logout as apiLogout,
+  getAuthStatus,
+  reauthenticate
 } from './utils/api'
 
 const store = useAppStore()
@@ -212,6 +256,15 @@ const showGraph = ref(false)
 const showSnapshotModal = ref(false)
 const showTagChart = ref(false)
 const showAIAPIConsole = ref(false)
+const showReauthModal = ref(false)
+const reauthLoading = ref(false)
+const reauthPassword = ref('')
+const reauthTotpCode = ref('')
+const totpRequired = ref(false)
+const reauthError = ref('')
+const reauthPasswordInput = ref(null)
+let reauthRequest = null
+let reauthListenerRegistered = false
 const isEditMode = ref(false)
 const editingTransaction = ref(null)
 const dateSortOrder = ref('desc')
@@ -479,6 +532,52 @@ async function logout() {
   }
 }
 
+function handleReauthRequired(event) {
+  // api.js coalesces simultaneous 428 responses, but ignore malformed or
+  // duplicate events so a stale page cannot create an unresolvable promise.
+  if (!event?.detail?.resolve || reauthRequest) return
+  reauthRequest = event.detail
+  reauthPassword.value = ''
+  reauthTotpCode.value = ''
+  reauthError.value = ''
+  showReauthModal.value = true
+  nextTick(() => reauthPasswordInput.value?.focus())
+}
+
+function cancelReauthentication() {
+  if (reauthRequest?.reject) {
+    reauthRequest.reject(new Error('再認証がキャンセルされました'))
+  }
+  reauthRequest = null
+  showReauthModal.value = false
+  reauthPassword.value = ''
+  reauthTotpCode.value = ''
+  reauthError.value = ''
+}
+
+async function submitReauthentication() {
+  if (!reauthRequest || reauthLoading.value) return
+  reauthLoading.value = true
+  reauthError.value = ''
+  try {
+    await reauthenticate(reauthPassword.value, reauthTotpCode.value)
+    reauthRequest.resolve(true)
+    reauthRequest = null
+    showReauthModal.value = false
+    reauthPassword.value = ''
+    reauthTotpCode.value = ''
+  } catch (error) {
+    reauthError.value = error?.message || '再認証に失敗しました'
+    // Never retain credentials after a failed attempt.
+    reauthPassword.value = ''
+    reauthTotpCode.value = ''
+    await nextTick()
+    reauthPasswordInput.value?.focus()
+  } finally {
+    reauthLoading.value = false
+  }
+}
+
 async function handleSnapshotRestored() {
   // 全状態をリセットしてから再取得
   store.resetState()
@@ -503,6 +602,16 @@ function handleGlobalClick() {
 // 初期化
 onMounted(async () => {
   document.addEventListener('click', handleGlobalClick)
+  window.addEventListener('omni-money:reauth-required', handleReauthRequired)
+  reauthListenerRegistered = true
+  try {
+    const authStatus = await getAuthStatus()
+    // The same server flag controls both the login form and the recent-auth
+    // dialog, so a TOTP field is never shown when TOTP is disabled.
+    totpRequired.value = Boolean(authStatus?.totp_required)
+  } catch {
+    // The normal API calls below provide the visible error/redirect behavior.
+  }
   await store.fetchAccounts()
   await store.fetchCreditCardSettings()
   await store.fetchBankAccountSettings()
@@ -519,4 +628,107 @@ onMounted(async () => {
     }
   }
 })
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', handleGlobalClick)
+  if (reauthListenerRegistered) {
+    window.removeEventListener('omni-money:reauth-required', handleReauthRequired)
+  }
+  if (reauthRequest?.reject) {
+    reauthRequest.reject(new Error('再認証ダイアログが終了しました'))
+  }
+})
 </script>
+
+<style scoped>
+.reauth-overlay {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.reauth-card {
+  width: min(420px, 100%);
+  padding: 1.5rem;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.28);
+}
+
+.reauth-card h3 {
+  margin: 0 0 0.6rem;
+  color: #333;
+}
+
+.reauth-description {
+  margin: 0 0 1.25rem;
+  color: #666;
+  font-size: 0.9rem;
+}
+
+.reauth-label {
+  display: block;
+  margin: 0.75rem 0 0.35rem;
+  color: #333;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.reauth-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.7rem 0.8rem;
+  border: 2px solid rgba(102, 126, 234, 0.2);
+  border-radius: 9px;
+}
+
+.reauth-input:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15);
+}
+
+.reauth-error {
+  margin-top: 0.8rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(255, 69, 58, 0.1);
+  color: #b00020;
+  font-size: 0.85rem;
+}
+
+.reauth-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 1.25rem;
+}
+
+.reauth-actions button {
+  padding: 0.65rem 0.9rem;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.reauth-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.reauth-cancel {
+  background: #eee;
+  color: #333;
+}
+
+.reauth-submit {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: #fff;
+}
+</style>

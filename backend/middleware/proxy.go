@@ -23,20 +23,77 @@ type ProxyConfig struct {
 	forceHTTPS   bool
 	allowedHosts map[string]struct{}
 	redirectHost string
+	// configErr makes malformed security-sensitive configuration fail closed.
+	// Keeping this on the config preserves the existing constructor API while
+	// allowing the router to surface a useful startup error in a later change.
+	configErr error
 }
 
 // NewProxyConfigFromEnv は環境変数からProxyConfigを作成する
 func NewProxyConfigFromEnv() *ProxyConfig {
+	trustedCIDRs, trustedErr := parseTrustedProxiesStrict(os.Getenv("TRUSTED_PROXIES"))
+	allowedHosts, allowedErr := parseAllowedHostsStrict(os.Getenv("ALLOWED_HOSTS"))
+	redirectHost := normalizeHost(os.Getenv("HTTPS_REDIRECT_HOST"))
+	forceHTTPS, forceErr := parseStrictBoolEnv("FORCE_HTTPS")
+	var configErr error
+	if trustedErr != nil {
+		configErr = trustedErr
+	} else if allowedErr != nil {
+		configErr = allowedErr
+	} else if forceErr != nil {
+		configErr = forceErr
+	} else if rawRedirect := strings.TrimSpace(os.Getenv("HTTPS_REDIRECT_HOST")); rawRedirect != "" && redirectHost == "" {
+		configErr = fmt.Errorf("invalid HTTPS_REDIRECT_HOST")
+	} else if redirectHost != "" && len(allowedHosts) > 0 && !hostInSet(redirectHost, allowedHosts) {
+		configErr = fmt.Errorf("HTTPS_REDIRECT_HOST is not present in ALLOWED_HOSTS")
+	} else if forceHTTPS && redirectHost == "" && len(allowedHosts) == 0 {
+		configErr = fmt.Errorf("FORCE_HTTPS requires HTTPS_REDIRECT_HOST or ALLOWED_HOSTS")
+	} else if len(trustedCIDRs) > 0 && len(allowedHosts) == 0 {
+		configErr = fmt.Errorf("ALLOWED_HOSTS is required when TRUSTED_PROXIES is configured")
+	}
+
 	cfg := &ProxyConfig{
-		trustedCIDRs: parseTrustedProxies(os.Getenv("TRUSTED_PROXIES")),
-		forceHTTPS:   strings.EqualFold(strings.TrimSpace(os.Getenv("FORCE_HTTPS")), "true"),
-		allowedHosts: parseAllowedHosts(os.Getenv("ALLOWED_HOSTS")),
-		redirectHost: normalizeHost(os.Getenv("HTTPS_REDIRECT_HOST")),
+		trustedCIDRs: trustedCIDRs,
+		forceHTTPS:   forceHTTPS,
+		allowedHosts: allowedHosts,
+		redirectHost: redirectHost,
+		configErr:    configErr,
 	}
 	return cfg
 }
 
+// Validate exposes startup configuration errors so the server can refuse to
+// listen instead of serving with weakened proxy assumptions.
+func (c *ProxyConfig) Validate() error {
+	if c == nil {
+		return fmt.Errorf("proxy configuration is required")
+	}
+	return c.configErr
+}
+
+func parseStrictBoolEnv(name string) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	switch raw {
+	case "":
+		return false, nil
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s must be true or false", name)
+	}
+}
+
 func parseTrustedProxies(raw string) []*net.IPNet {
+	result, err := parseTrustedProxiesStrict(raw)
+	if err != nil {
+		return nil
+	}
+	return result
+}
+
+func parseTrustedProxiesStrict(raw string) ([]*net.IPNet, error) {
 	var result []*net.IPNet
 	for _, token := range strings.Split(raw, ",") {
 		token = strings.TrimSpace(token)
@@ -47,16 +104,21 @@ func parseTrustedProxies(raw string) []*net.IPNet {
 		// CIDR
 		if strings.Contains(token, "/") {
 			_, ipNet, err := net.ParseCIDR(token)
-			if err == nil {
-				result = append(result, ipNet)
+			if err != nil {
+				return nil, fmt.Errorf("invalid TRUSTED_PROXIES entry %q", token)
 			}
+			ones, bits := ipNet.Mask.Size()
+			if ones == 0 || (bits != 32 && bits != 128) {
+				return nil, fmt.Errorf("TRUSTED_PROXIES entry %q is too broad", token)
+			}
+			result = append(result, ipNet)
 			continue
 		}
 
 		// 単一IPをCIDRに変換
 		ip := net.ParseIP(token)
 		if ip == nil {
-			continue
+			return nil, fmt.Errorf("invalid TRUSTED_PROXIES entry %q", token)
 		}
 		maskBits := 32
 		if ip.To4() == nil {
@@ -67,7 +129,7 @@ func parseTrustedProxies(raw string) []*net.IPNet {
 			Mask: net.CIDRMask(maskBits, maskBits),
 		})
 	}
-	return result
+	return result, nil
 }
 
 func (c *ProxyConfig) isTrustedProxy(ip net.IP) bool {
@@ -92,14 +154,28 @@ func (c *ProxyConfig) isAllowedHost(host string) bool {
 }
 
 func parseAllowedHosts(raw string) map[string]struct{} {
+	hosts, _ := parseAllowedHostsStrict(raw)
+	return hosts
+}
+
+func parseAllowedHostsStrict(raw string) (map[string]struct{}, error) {
 	hosts := make(map[string]struct{})
 	for _, token := range strings.Split(raw, ",") {
-		host := normalizeHost(token)
-		if host != "" {
-			hosts[host] = struct{}{}
+		if strings.TrimSpace(token) == "" {
+			continue
 		}
+		host := normalizeHost(token)
+		if host == "" {
+			return nil, fmt.Errorf("invalid ALLOWED_HOSTS entry %q", strings.TrimSpace(token))
+		}
+		hosts[host] = struct{}{}
 	}
-	return hosts
+	return hosts, nil
+}
+
+func hostInSet(host string, hosts map[string]struct{}) bool {
+	_, ok := hosts[host]
+	return ok
 }
 
 // ProxyMiddleware は信頼プロキシ経由時のみ Forwarded ヘッダーを反映し、
@@ -110,6 +186,19 @@ func ProxyMiddleware(config *ProxyConfig, next http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if config.configErr != nil {
+			jsonError(w, "Proxy configuration is invalid", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Host validation is an authentication boundary when ALLOWED_HOSTS is
+		// configured. It must happen for every request, including HTTPS requests
+		// and requests that are not redirected.
+		if r.URL.Path != "/healthz" && len(config.allowedHosts) > 0 && !config.isAllowedHost(r.Host) {
+			jsonError(w, "Invalid Host header", http.StatusBadRequest)
+			return
+		}
+
 		remoteIP := parseRemoteIP(r.RemoteAddr)
 		clientIP := ""
 		if remoteIP != nil {
@@ -122,32 +211,49 @@ func ProxyMiddleware(config *ProxyConfig, next http.Handler) http.Handler {
 		}
 
 		if config.isTrustedProxy(remoteIP) {
-			if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-				if resolved := config.resolveForwardedFor(forwarded, remoteIP); resolved != nil {
-					clientIP = resolved.String()
-				}
-			} else if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-				if parsed := net.ParseIP(realIP); parsed != nil {
-					clientIP = parsed.String()
-				}
+			resolved, err := config.resolveForwardedForStrict(r.Header.Values("X-Forwarded-For"), remoteIP)
+			if err != nil {
+				jsonError(w, "Invalid X-Forwarded-For header", http.StatusBadRequest)
+				return
+			}
+			if resolved != nil {
+				clientIP = resolved.String()
+			} else if realIP, err := parseSingleIPHeader(r.Header.Values("X-Real-IP")); err != nil {
+				jsonError(w, "Invalid X-Real-IP header", http.StatusBadRequest)
+				return
+			} else if realIP != nil {
+				clientIP = realIP.String()
 			}
 
-			if forwardedProto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); forwardedProto != "" {
-				parts := strings.Split(forwardedProto, ",")
-				p := strings.ToLower(strings.TrimSpace(parts[0]))
-				if p == "http" || p == "https" {
-					proto = p
-				}
+			forwardedProto, err := parseForwardedProto(r.Header.Values("X-Forwarded-Proto"))
+			if err != nil {
+				jsonError(w, "Invalid X-Forwarded-Proto header", http.StatusBadRequest)
+				return
 			}
+			if forwardedProto != "" {
+				proto = forwardedProto
+			}
+		} else {
+			// Do not leave attacker-controlled forwarding headers for downstream
+			// middleware to accidentally trust.
+			r.Header.Del("Forwarded")
+			r.Header.Del("X-Forwarded-For")
+			r.Header.Del("X-Forwarded-Proto")
+			r.Header.Del("X-Real-IP")
 		}
+		// The application does not consume RFC 7239 Forwarded. Remove it even
+		// from trusted requests to prevent ambiguity in downstream handlers.
+		r.Header.Del("Forwarded")
 
-		if config.forceHTTPS && proto == "http" {
+		if config.forceHTTPS && proto == "http" && r.URL.Path != "/healthz" {
 			redirectHost := config.redirectTargetHost(r.Host)
 			if redirectHost == "" {
 				jsonError(w, "Bad Request", http.StatusBadRequest)
 				return
 			}
 			targetURL := "https://" + redirectHost + r.URL.RequestURI()
+			// #nosec G710 -- redirectHost is either the fixed configured target or
+			// an exact member of the startup-validated ALLOWED_HOSTS set.
 			http.Redirect(w, r, targetURL, http.StatusMovedPermanently)
 			return
 		}
@@ -159,12 +265,29 @@ func ProxyMiddleware(config *ProxyConfig, next http.Handler) http.Handler {
 }
 
 func (c *ProxyConfig) resolveForwardedFor(header string, remoteIP net.IP) net.IP {
-	parts := strings.Split(header, ",")
+	resolved, _ := c.resolveForwardedForStrict([]string{header}, remoteIP)
+	return resolved
+}
+
+func (c *ProxyConfig) resolveForwardedForStrict(headers []string, remoteIP net.IP) (net.IP, error) {
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	if len(headers) != 1 {
+		return nil, fmt.Errorf("multiple X-Forwarded-For header values")
+	}
+	parts := strings.Split(headers[0], ",")
 	hops := make([]net.IP, 0, len(parts)+1)
 	for _, part := range parts {
-		if parsed := net.ParseIP(strings.TrimSpace(part)); parsed != nil {
-			hops = append(hops, parsed)
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("empty X-Forwarded-For hop")
 		}
+		parsed := net.ParseIP(part)
+		if parsed == nil {
+			return nil, fmt.Errorf("invalid X-Forwarded-For hop")
+		}
+		hops = append(hops, parsed)
 	}
 	if remoteIP != nil {
 		hops = append(hops, remoteIP)
@@ -172,13 +295,41 @@ func (c *ProxyConfig) resolveForwardedFor(header string, remoteIP net.IP) net.IP
 
 	for i := len(hops) - 1; i >= 0; i-- {
 		if !c.isTrustedProxy(hops[i]) {
-			return hops[i]
+			return hops[i], nil
 		}
 	}
 	if len(hops) > 0 {
-		return hops[0]
+		return hops[0], nil
 	}
-	return nil
+	return nil, nil
+}
+
+func parseSingleIPHeader(values []string) (net.IP, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	if len(values) != 1 {
+		return nil, fmt.Errorf("multiple header values")
+	}
+	ip := net.ParseIP(strings.TrimSpace(values[0]))
+	if ip == nil {
+		return nil, fmt.Errorf("invalid IP")
+	}
+	return ip, nil
+}
+
+func parseForwardedProto(values []string) (string, error) {
+	if len(values) == 0 {
+		return "", nil
+	}
+	if len(values) != 1 {
+		return "", fmt.Errorf("multiple header values")
+	}
+	p := strings.ToLower(strings.TrimSpace(values[0]))
+	if strings.Contains(p, ",") || (p != "http" && p != "https") {
+		return "", fmt.Errorf("invalid protocol")
+	}
+	return p, nil
 }
 
 func (c *ProxyConfig) redirectTargetHost(requestHost string) string {

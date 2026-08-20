@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -14,7 +16,14 @@ import (
 
 const maxAIConsoleResponseSize = 10 * 1024 * 1024
 
-var aiConsoleHTTPClient = &http.Client{Timeout: 60 * time.Second}
+var aiConsoleHTTPClient = &http.Client{
+	Timeout: 60 * time.Second,
+	// The relay is intentionally loopback-only. Never follow a response to a
+	// second destination, even if another local service returns a redirect.
+	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // handleAIConsoleProxy はセッション認証済みの管理UIから、固定された
 // loopback上のAI専用リスナーへリクエストを中継する。URLとBearer tokenは
@@ -22,6 +31,10 @@ var aiConsoleHTTPClient = &http.Client{Timeout: 60 * time.Second}
 func handleAIConsoleProxy(aiPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
+		if !isAllowedAIConsolePath(aiPath) {
+			jsonError(w, "AI専用APIの中継先が無効です", http.StatusInternalServerError)
+			return
+		}
 		token := strings.TrimSpace(os.Getenv("AI_API_TOKEN"))
 		if token == "" {
 			jsonError(w, "AI専用APIが有効化されていません", http.StatusServiceUnavailable)
@@ -55,13 +68,20 @@ func aiConsoleRelayHost() string {
 }
 
 func forwardAIConsoleRequest(w http.ResponseWriter, r *http.Request, targetURL, token string, client *http.Client) {
+	validatedTarget, err := validateAIConsoleTarget(targetURL)
+	if err != nil {
+		jsonError(w, "AI専用APIの中継先が無効です", http.StatusInternalServerError)
+		return
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		jsonError(w, "リクエストの読み取りに失敗しました", http.StatusBadRequest)
 		return
 	}
 
-	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, targetURL, bytes.NewReader(body))
+	// #nosec G704 -- validatedTarget is restricted to a literal loopback IP,
+	// an explicit port, and one of two fixed AI paths below.
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, validatedTarget, bytes.NewReader(body))
 	if err != nil {
 		jsonError(w, "AI専用APIリクエストの作成に失敗しました", http.StatusInternalServerError)
 		return
@@ -69,9 +89,12 @@ func forwardAIConsoleRequest(w http.ResponseWriter, r *http.Request, targetURL, 
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
 
+	// #nosec G704 -- the URL has passed validateAIConsoleTarget and the
+	// production client refuses redirects to any secondary destination.
 	response, err := client.Do(request)
 	if err != nil {
-		jsonError(w, fmt.Sprintf("AI専用APIへ接続できません: %v", err), http.StatusBadGateway)
+		log.Printf("AI console loopback relay failed: %v", err)
+		jsonError(w, "AI専用APIへ接続できません", http.StatusBadGateway)
 		return
 	}
 	defer response.Body.Close()
@@ -90,4 +113,25 @@ func forwardAIConsoleRequest(w http.ResponseWriter, r *http.Request, targetURL, 
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(response.StatusCode)
 	_, _ = w.Write(responseBody)
+}
+
+func isAllowedAIConsolePath(path string) bool {
+	return path == "/api/v1/ai/transactions" || path == "/api/v1/ai/analysis"
+}
+
+func validateAIConsoleTarget(raw string) (string, error) {
+	target, err := url.Parse(raw)
+	if err != nil || target.Scheme != "http" || target.User != nil || target.Opaque != "" ||
+		target.RawQuery != "" || target.ForceQuery || target.Fragment != "" || !isAllowedAIConsolePath(target.Path) {
+		return "", fmt.Errorf("invalid AI console target")
+	}
+	ip := net.ParseIP(target.Hostname())
+	if ip == nil || !ip.IsLoopback() {
+		return "", fmt.Errorf("AI console target must use a literal loopback IP")
+	}
+	port, err := strconv.Atoi(target.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return "", fmt.Errorf("invalid AI console target port")
+	}
+	return target.String(), nil
 }
