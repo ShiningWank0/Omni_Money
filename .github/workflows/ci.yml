@@ -80,7 +80,56 @@ jobs:
         env:
           AUTH_PASSWORD_HASH: '$2y$12$abcdefghijklmnopqrstuvabcdefghijklmnopqrstuv12'
           AI_API_TOKEN: '0123456789abcdef0123456789abcdef'
+          ALLOWED_HOSTS: 'money.example.com'
         run: docker compose config --quiet
+
+      - name: Assert Pangolin network isolation
+        env:
+          AUTH_PASSWORD_HASH: '$2y$12$abcdefghijklmnopqrstuvabcdefghijklmnopqrstuv12'
+          AI_API_TOKEN: '0123456789abcdef0123456789abcdef'
+          ALLOWED_HOSTS: 'money.example.com'
+        run: |
+          set -euo pipefail
+          base_config="$(mktemp)"
+          local_config="$(mktemp)"
+          trap 'rm -f "$base_config" "$local_config"' EXIT
+
+          docker compose config --format json > "$base_config"
+          docker compose -f compose.yaml -f compose.local.yaml config --format json > "$local_config"
+
+          # The default deployment must be reachable only through the shared
+          # Pangolin/Newt network and must not publish any host port.
+          jq -e '
+            .services["omni-money"].ports == null and
+            .services["omni-money"].expose == ["4000"] and
+            .services["omni-money"].environment.AI_HOST_IP == "127.0.0.1" and
+            .services["omni-money"].environment.AI_ALLOW_REMOTE == "false" and
+            .services["omni-money"].environment.FORCE_HTTPS == "true" and
+            .services["omni-money"].environment.ALLOW_INSECURE_HTTP == "false" and
+            .services["omni-money"].environment.TRUSTED_PROXIES == "172.30.240.3/32" and
+            .services["omni-money"].environment.ALLOWED_HOSTS == "money.example.com" and
+            (.services["omni-money"].networks | keys) == ["pangolin_target"] and
+            .services["omni-money"].networks.pangolin_target.ipv4_address == "172.30.240.2" and
+            .networks.pangolin_target.internal == true and
+            .networks.pangolin_target.name == "omni-money-pangolin" and
+            .networks.pangolin_target.ipam.config[0].subnet == "172.30.240.0/28" and
+            .services["omni-money"].read_only == true and
+            .services["omni-money"].cap_drop == ["ALL"] and
+            .services["omni-money"].security_opt == ["no-new-privileges:true"]
+          ' "$base_config"
+
+          # The local override may publish only the Web listener on IPv4
+          # loopback. It must never publish the AI listener.
+          jq -e '
+            .services["omni-money"].environment.FORCE_HTTPS == "false" and
+            .services["omni-money"].environment.ALLOW_INSECURE_HTTP == "true" and
+            .services["omni-money"].environment.TRUSTED_PROXIES == "" and
+            .services["omni-money"].environment.ALLOWED_HOSTS == "localhost:4000,127.0.0.1:4000" and
+            (.services["omni-money"].ports | length) == 1 and
+            .services["omni-money"].ports[0].target == 4000 and
+            .services["omni-money"].ports[0].published == "4000" and
+            .services["omni-money"].ports[0].host_ip == "127.0.0.1"
+          ' "$local_config"
 
   frontend:
     name: Frontend build
@@ -125,6 +174,65 @@ jobs:
 
       - name: Build pinned multi-stage image
         run: docker build --build-arg VERSION=ci --tag omni-money:ci .
+
+      - name: Assert non-root runtime and bundled TOTP helper
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /bin/sh omni-money:ci -c '
+            test "$(id -u)" = "10001"
+            test "$(id -g)" = "10001"
+            test -x /app/omni_money_server
+            test -x /app/omni-totp
+          '
+          docker image inspect omni-money:ci | jq -e '
+            .[0].Config.ExposedPorts == {"4000/tcp": {}} and
+            .[0].Config.User == "omni"
+          '
+
+      - name: Smoke test hardened runtime
+        run: |
+          set -euo pipefail
+          runtime_data="$(mktemp -d)"
+          container_id=""
+          cleanup() {
+            if [ -n "$container_id" ]; then
+              docker rm -f "$container_id" >/dev/null 2>&1 || true
+            fi
+            rm -rf "$runtime_data"
+          }
+          trap cleanup EXIT
+          sudo chown 10001:10001 "$runtime_data"
+          chmod 700 "$runtime_data"
+
+          container_id="$(docker run -d \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --health-interval 1s \
+            --health-start-period 1s \
+            --health-timeout 2s \
+            --health-retries 5 \
+            --mount "type=bind,src=$runtime_data,dst=/app/data" \
+            --env DB_PATH=/app/data/omni_money.db \
+            --env HOST_IP=127.0.0.1 \
+            --env ALLOWED_HOSTS=127.0.0.1:4000 \
+            --env 'AUTH_PASSWORD_HASH=$2y$12$TMw6R8z61SPOp1Y/4t3mLu/LVqe3.L5d5.H9piLwdDjKpSytNxaEi' \
+            omni-money:ci)"
+
+          for _ in $(seq 1 30); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
+            if [ "$health" = "healthy" ]; then
+              exit 0
+            fi
+            if [ "$health" = "unhealthy" ]; then
+              docker logs "$container_id"
+              exit 1
+            fi
+            sleep 1
+          done
+          docker logs "$container_id"
+          exit 1
 
       - name: Scan image for fixable high-severity vulnerabilities
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0

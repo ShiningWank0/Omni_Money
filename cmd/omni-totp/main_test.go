@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"omni_money/backend/authn"
 )
@@ -35,6 +37,33 @@ func TestWriteSecretFileCreatesConfidentialBase32File(t *testing.T) {
 	}
 	if string(decoded) != string(secret) {
 		t.Fatalf("decoded secret=%q, want %q", decoded, secret)
+	}
+}
+
+func TestConfirmTOTPEnrollmentRequiresWorkingAuthenticatorCode(t *testing.T) {
+	secret := []byte("12345678901234567890")
+	now := func() time.Time { return time.Unix(59, 0).UTC() }
+	var output bytes.Buffer
+	if err := confirmTOTPEnrollment(secret, strings.NewReader("000000\n287082\n"), &output, now); err != nil {
+		t.Fatalf("confirmation failed: %v", err)
+	}
+	if !strings.Contains(output.String(), "Code did not match") || !strings.Contains(output.String(), "confirmed") {
+		t.Fatalf("unexpected confirmation output: %q", output.String())
+	}
+}
+
+func TestConfirmTOTPEnrollmentFailsWithoutWritingAfterThreeBadCodes(t *testing.T) {
+	secret := []byte("12345678901234567890")
+	now := func() time.Time { return time.Unix(59, 0).UTC() }
+	if err := confirmTOTPEnrollment(secret, strings.NewReader("000000\n000001\n000002\n"), &bytes.Buffer{}, now); err == nil {
+		t.Fatal("three invalid confirmation codes were accepted")
+	}
+}
+
+func TestValidateNewSecretPathRejectsMissingParent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "totp.secret")
+	if err := validateNewSecretPath(path); err == nil {
+		t.Fatal("missing parent directory was accepted")
 	}
 }
 

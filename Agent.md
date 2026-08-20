@@ -164,7 +164,8 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
 * **認証方式**: セッションベース認証を基本とする。Cookieにセッション識別子を格納し、サーバー側でセッション状態を管理する。
 * **パスワード**: bcryptハッシュにより保管すること。平文での保存は絶対に行わない。パスワードの初期設定は環境変数 `AUTH_PASSWORD_HASH` で bcrypt ハッシュ値を渡す形とする。
 * **ログイン試行制限**: 同一IPアドレスからのログイン試行を制限する。5回連続失敗で15分間のロックアウトを実施すること（旧アプリの `check_login_attempts` / `record_login_attempt` の移植）。
-* **セッション有効期限**: セッションにはサーバー側で有効期限を設定する（既定: 24時間）。期限切れのセッションは自動で無効化すること。環境変数 `SESSION_MAX_AGE_HOURS` で調整可能とする。
+* **セッション有効期限**: セッションにはサーバー側で絶対有効期限（既定: 8時間）と無操作有効期限（既定: 15分）を設定する。期限切れのセッションは自動で無効化し、金融APIは直近5分以内のOmni Money再認証を要求する。環境変数で安全な範囲内に調整可能とする。
+* **任意の第2要素**: `AUTH_TOTP_SECRET_FILE`が未設定ならpassword-only、設定した場合はログインと再認証の両方でOmni Money専用TOTPを必須とする。Pangolinとはseedを共有しない。
 * **認証不要の例外パス**:
   - `POST /api/auth/login` — ログイン処理自体
   - `GET /api/auth/status` — 認証状態の確認
@@ -172,7 +173,7 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
 
 * **実装の技術的詳細**:
   - `backend/middleware/session.go` にセッション管理ミドルウェアを実装する。
-  - セッション格納先はインメモリの `sync.Map` を使用する（SQLiteへの永続化は不要）。
+  - セッション格納先はインメモリとし、lookup/touch/delete/rotationを同一mutex下で原子的に処理する（SQLiteへの永続化は不要）。
   - セッション識別子は `crypto/rand` で生成した32バイト以上のランダム値を16進数文字列に変換して使用する。
   - Cookie属性: `HttpOnly: true`, `SameSite: Strict`, `Secure: true`（HTTPS環境下）, `Path: /`。
   - `backend/middleware/auth_session.go` にログイン試行制限ロジックを実装する。
@@ -183,7 +184,7 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
 
 外部公開時はリバースプロキシ（Nginx, Caddy等）の背後で動作し、TLS終端はリバースプロキシ側で行うことを前提とする。
 
-* **リバースプロキシ信頼ヘッダー**: `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Real-IP` ヘッダーを信頼して処理する。ただし、リバースプロキシからのリクエストであることを確認するため、信頼するプロキシIPアドレスを環境変数 `TRUSTED_PROXIES`（カンマ区切り、例: `127.0.0.1,::1,192.168.1.0/24`）で指定可能とする。`X-Forwarded-For` は右から左へ辿り、最初の非信頼ホップをクライアントIPとして採用する。
+* **リバースプロキシ信頼ヘッダー**: `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Real-IP` は、接続元が`TRUSTED_PROXIES`の固定IPまたは十分に狭いCIDRに一致する場合だけ採用する。`X-Forwarded-For` は右から左へ辿り、最初の非信頼ホップをクライアントIPとして採用する。解決後は全転送系ヘッダーを下流へ残さない。
 * **HTTPS強制リダイレクト**: 環境変数 `FORCE_HTTPS=true` が設定されている場合、`X-Forwarded-Proto` が `http` のリクエストを `https` にリダイレクト（HTTP 301）する。リダイレクト先ホストは `HTTPS_REDIRECT_HOST` または `ALLOWED_HOSTS` で明示的に許可されたホストに限定し、任意の `Host` ヘッダーをそのまま使用してはならない。
 * **Go側でのTLS直接終端**: リバースプロキシなしで直接TLSを終端する場合に備え、環境変数 `TLS_CERT_FILE` と `TLS_KEY_FILE` が指定されていれば `http.ListenAndServeTLS` で起動する機能を `server.go` に追加する。
 * **実装の技術的詳細**:
@@ -223,7 +224,12 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
 | `HOST_IP` | 任意 | `0.0.0.0` | 待受アドレス |
 | `PORT` | 任意 | `4000` | 待受ポート |
 | `AUTH_PASSWORD_HASH` | サーバーモード時必須 | なし | ログインパスワードのbcryptハッシュ |
-| `SESSION_MAX_AGE_HOURS` | 任意 | `24` | セッション有効期間（時間） |
+| `SESSION_MAX_AGE_HOURS` | 任意 | `8` | セッションの絶対有効期間（時間） |
+| `SESSION_IDLE_TIMEOUT_MINUTES` | 任意 | `15` | 無操作セッション有効期間（分） |
+| `SESSION_REAUTH_MAX_AGE_MINUTES` | 任意 | `5` | 金融APIで許容する直近再認証時間（分） |
+| `SESSION_MAX_CONCURRENT` | 任意 | `3` | 同一ユーザーの同時セッション上限 |
+| `AUTH_TOTP_SECRET_FILE` | 任意 | なし | 設定時だけ有効になるOmni Money専用TOTP秘密ファイル |
+| `AUTH_REQUIRE_TOTP` | 任意 | `false` | `true`時は秘密ファイルの設定漏れを起動エラーにするassertion |
 | `AI_API_TOKEN` | 任意 | なし | AI用APIの認証トークン |
 | `AI_HOST_IP` | 任意 | `127.0.0.1` | AI専用リスナーの待受アドレス |
 | `AI_PORT` | 任意 | `4001` | AI専用リスナーのポート |
@@ -231,7 +237,8 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
 | `TRUSTED_PROXIES` | 任意 | なし | 信頼するプロキシIP（カンマ区切り） |
 | `FORCE_HTTPS` | 任意 | `false` | HTTPSリダイレクトの有効化 |
 | `HTTPS_REDIRECT_HOST` | `FORCE_HTTPS=true` 時は推奨 | なし | HTTPSリダイレクト先の固定ホスト |
-| `ALLOWED_HOSTS` | `FORCE_HTTPS=true` 時は推奨 | なし | HTTPSリダイレクトで許可するHostヘッダー（カンマ区切り） |
+| `ALLOWED_HOSTS` | 必須 | なし | 全リクエストで許可する正確なHostヘッダー（カンマ区切り） |
+| `ALLOW_INSECURE_HTTP` | 任意 | `false` | 非loopback平文HTTPの明示許可。loopbackだけへpublishするローカル構成以外は禁止 |
 | `TLS_CERT_FILE` | 任意 | なし | TLS証明書ファイルパス |
 | `TLS_KEY_FILE` | 任意 | なし | TLS秘密鍵ファイルパス |
 | `CORS_ALLOWED_ORIGINS` | 任意 | なし | 許可オリジン（カンマ区切り） |

@@ -211,13 +211,46 @@ func TestRecentAuthenticationGuardsSensitiveRoutes(t *testing.T) {
 		method string
 		path   string
 	}{
+		// Bulk and administrative operations.
 		{http.MethodGet, "/api/backup_csv"},
 		{http.MethodPost, "/api/import_csv"},
+		{http.MethodGet, "/api/snapshots"},
 		{http.MethodPost, "/api/snapshots"},
 		{http.MethodPost, "/api/snapshots/restore"},
 		{http.MethodPost, "/api/auth/logout-all"},
 		{http.MethodPost, "/api/ai-console/transactions"},
 		{http.MethodPost, "/api/ai-console/analysis"},
+		// Financial data reads.
+		{http.MethodGet, "/api/accounts"},
+		{http.MethodGet, "/api/items"},
+		{http.MethodGet, "/api/transactions"},
+		{http.MethodGet, "/api/balance_history"},
+		{http.MethodGet, "/api/balance_history_filtered"},
+		{http.MethodGet, "/api/credit_card_settings"},
+		{http.MethodGet, "/api/bank_account_settings"},
+		{http.MethodGet, "/api/transaction_images/123"},
+		{http.MethodGet, "/api/transaction_images/123/456"},
+		{http.MethodGet, "/api/tags"},
+		{http.MethodGet, "/api/tags/summary"},
+		{http.MethodGet, "/api/transaction_tags/123"},
+		{http.MethodGet, "/api/transaction_links/123"},
+		// Financial mutations.
+		{http.MethodPost, "/api/transactions"},
+		{http.MethodPut, "/api/transactions/123"},
+		{http.MethodPatch, "/api/transactions/123"},
+		{http.MethodDelete, "/api/transactions/123"},
+		{http.MethodPost, "/api/credit_card_settings"},
+		{http.MethodPost, "/api/bank_account_settings"},
+		{http.MethodPost, "/api/transaction_images/123"},
+		{http.MethodDelete, "/api/transaction_images/123/456"},
+		{http.MethodPost, "/api/tags"},
+		{http.MethodPost, "/api/tags/path"},
+		{http.MethodPut, "/api/tags/123"},
+		{http.MethodDelete, "/api/tags/123"},
+		{http.MethodPost, "/api/transaction_tags/123"},
+		{http.MethodDelete, "/api/transaction_tags/123/456"},
+		{http.MethodPost, "/api/transaction_links/123"},
+		{http.MethodDelete, "/api/transaction_links/123/456"},
 	}
 
 	for _, target := range targets {
@@ -257,11 +290,16 @@ func TestRecentAuthenticationDoesNotGuardOrdinaryOrWrongMethodRoutes(t *testing.
 		method string
 		path   string
 	}{
-		{http.MethodGet, "/api/accounts"},
+		{http.MethodGet, "/api/auth/status"},
+		{http.MethodPost, "/api/auth/logout"},
+		{http.MethodGet, "/healthz"},
 		{http.MethodGet, "/api/import_csv"},
 		{http.MethodPost, "/api/backup_csv"},
 		{http.MethodGet, "/api/snapshots/restore"},
 		{http.MethodGet, "/api/ai-console/analysis"},
+		{http.MethodDelete, "/api/transactions"},
+		{http.MethodPut, "/api/transaction_links/123"},
+		{http.MethodGet, "/api/transaction_notes/123"},
 	} {
 		t.Run(target.method+" "+target.path, func(t *testing.T) {
 			called := false

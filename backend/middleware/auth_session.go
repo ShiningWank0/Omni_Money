@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -21,7 +22,13 @@ const (
 	maxConcurrentPasswordChecks   = 4
 	MinimumBcryptCost             = 12
 	MaximumBcryptCost             = 16
+	bcryptHashLength              = 60
+	bcryptEncodedSaltLength       = 22
+	bcryptDecodedSaltLength       = 16
+	bcryptDecodedDigestLength     = 23
 )
+
+var bcryptBase64 = base64.NewEncoding("./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789").WithPadding(base64.NoPadding).Strict()
 
 type loginAttempt struct {
 	Count       int
@@ -69,6 +76,9 @@ func ValidatePasswordHash(passwordHash string) error {
 	if passwordHash == "" {
 		return errors.New("AUTH_PASSWORD_HASH is required")
 	}
+	if !hasValidBcryptEncoding(passwordHash) {
+		return errors.New("AUTH_PASSWORD_HASH must be a valid bcrypt hash")
+	}
 	cost, err := bcrypt.Cost([]byte(passwordHash))
 	if err != nil {
 		return errors.New("AUTH_PASSWORD_HASH must be a valid bcrypt hash")
@@ -80,6 +90,32 @@ func ValidatePasswordHash(passwordHash string) error {
 		return fmt.Errorf("AUTH_PASSWORD_HASH bcrypt cost must not exceed %d", MaximumBcryptCost)
 	}
 	return nil
+}
+
+// hasValidBcryptEncoding validates the complete modular-crypt representation
+// without performing an expensive password comparison. bcrypt.Cost validates
+// only the version and cost prefix, so it can otherwise accept truncated data,
+// trailing data, and invalid characters in the salt or digest.
+func hasValidBcryptEncoding(passwordHash string) bool {
+	if len(passwordHash) != bcryptHashLength {
+		return false
+	}
+	switch passwordHash[:4] {
+	case "$2a$", "$2b$", "$2y$":
+	default:
+		return false
+	}
+	if passwordHash[6] != '$' {
+		return false
+	}
+
+	payload := passwordHash[7:]
+	salt, err := bcryptBase64.DecodeString(payload[:bcryptEncodedSaltLength])
+	if err != nil || len(salt) != bcryptDecodedSaltLength {
+		return false
+	}
+	digest, err := bcryptBase64.DecodeString(payload[bcryptEncodedSaltLength:])
+	return err == nil && len(digest) == bcryptDecodedDigestLength
 }
 
 func (a *AuthSessionManager) SessionManager() *SessionManager { return a.sessionManager }

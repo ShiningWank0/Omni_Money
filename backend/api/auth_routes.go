@@ -166,11 +166,12 @@ func handleAuthStatus(authManager *middleware.AuthSessionManager) http.HandlerFu
 			return
 		}
 		jsonResponse(w, map[string]interface{}{
-			"authenticated": true,
-			"username":      session.Username,
-			"expires_at":    session.ExpiresAt.Format(time.RFC3339),
-			"csrf_token":    session.CSRFToken,
-			"totp_required": authManager.TOTPRequired(),
+			"authenticated":        true,
+			"username":             session.Username,
+			"expires_at":           session.ExpiresAt.Format(time.RFC3339),
+			"csrf_token":           session.CSRFToken,
+			"totp_required":        authManager.TOTPRequired(),
+			"idle_timeout_seconds": authManager.SessionManager().IdleTimeoutSeconds(),
 		}, http.StatusOK)
 	}
 }

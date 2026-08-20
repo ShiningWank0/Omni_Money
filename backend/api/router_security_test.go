@@ -27,6 +27,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 func newTestPublicRouter(t *testing.T) http.Handler {
 	t.Helper()
 	t.Setenv("AUTH_PASSWORD_HASH", testPasswordHash)
+	t.Setenv("ALLOWED_HOSTS", "example.com")
 	return NewRouter()
 }
 

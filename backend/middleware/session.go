@@ -24,8 +24,11 @@ const (
 	SecureSessionCookieName = "__Host-omni_money_session"
 	CSRFHeaderName          = "X-CSRF-Token"
 
-	DefaultSessionMaxAge        = 8 * time.Hour
-	DefaultSessionIdleTimeout   = 30 * time.Minute
+	DefaultSessionMaxAge = 8 * time.Hour
+	// Financial data is high-value personal information. Fifteen minutes keeps
+	// unattended browser sessions from remaining usable for the longer default
+	// while still avoiding an overly disruptive timeout for normal use.
+	DefaultSessionIdleTimeout   = 15 * time.Minute
 	DefaultRecentAuthAge        = 5 * time.Minute
 	DefaultMaxConcurrent        = 3
 	sessionCleanupInterval      = 5 * time.Minute
@@ -185,6 +188,19 @@ func minDuration(a, b time.Duration) time.Duration {
 
 func (m *SessionManager) Close() {
 	m.closeOnce.Do(func() { close(m.done) })
+}
+
+// IdleTimeoutSeconds returns the server-enforced inactivity timeout in whole
+// seconds for client-side screen-lock scheduling. The configuration is
+// immutable after construction; the mutex still makes this accessor safe if
+// the manager's lifecycle is inspected concurrently with cleanup.
+func (m *SessionManager) IdleTimeoutSeconds() int64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return int64(m.config.IdleTimeout / time.Second)
 }
 
 func (m *SessionManager) cleanupLoop() {

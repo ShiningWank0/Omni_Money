@@ -29,6 +29,25 @@ func securityTestSessionConfig() SessionConfig {
 	}
 }
 
+func TestDefaultSessionConfigUsesFifteenMinuteIdleTimeout(t *testing.T) {
+	cfg := DefaultSessionConfig()
+	if cfg.MaxAge != 8*time.Hour || cfg.IdleTimeout != 15*time.Minute ||
+		cfg.RecentAuthAge != 5*time.Minute || cfg.MaxConcurrent != 3 {
+		t.Fatalf("unexpected secure defaults: %+v", cfg)
+	}
+}
+
+func TestIdleTimeoutSecondsGetterIsBoundedAndSafe(t *testing.T) {
+	manager, _ := newClockedSessionManager(t, securityTestSessionConfig(), time.Now())
+	if got := manager.IdleTimeoutSeconds(); got != 600 {
+		t.Fatalf("IdleTimeoutSeconds() = %d, want 600", got)
+	}
+	var nilManager *SessionManager
+	if got := nilManager.IdleTimeoutSeconds(); got != 0 {
+		t.Fatalf("nil IdleTimeoutSeconds() = %d, want 0", got)
+	}
+}
+
 func TestSessionAbsoluteAndIdleExpiryBoundaries(t *testing.T) {
 	start := time.Date(2026, time.August, 20, 0, 0, 0, 0, time.UTC)
 

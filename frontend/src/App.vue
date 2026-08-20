@@ -1,5 +1,8 @@
 <template>
   <div id="app">
+    <div v-if="idleScreenLocked" class="idle-lock-curtain" role="status" aria-live="polite">
+      <div class="idle-lock-message">無操作タイムアウトのため画面をロックしました</div>
+    </div>
     <!-- ヘッダーエリア -->
     <div class="card header">
       <div class="header-top">
@@ -265,6 +268,12 @@ const reauthError = ref('')
 const reauthPasswordInput = ref(null)
 let reauthRequest = null
 let reauthListenerRegistered = false
+const idleTimeoutSeconds = ref(0)
+const idleScreenLocked = ref(false)
+let idleTimer = null
+let lastUserActivityAt = 0
+let idleLockInProgress = false
+let idleListenersRegistered = false
 const isEditMode = ref(false)
 const editingTransaction = ref(null)
 const dateSortOrder = ref('desc')
@@ -532,6 +541,127 @@ async function logout() {
   }
 }
 
+function clearIdleTimer() {
+  if (idleTimer !== null) {
+    clearTimeout(idleTimer)
+    idleTimer = null
+  }
+}
+
+function stopIdleLock() {
+  clearIdleTimer()
+  if (!idleListenersRegistered) return
+  document.removeEventListener('pointerdown', recordUserActivity)
+  document.removeEventListener('keydown', recordUserActivity)
+  document.removeEventListener('touchstart', recordUserActivity)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  idleListenersRegistered = false
+}
+
+// Drop every in-memory value that could reveal household financial data before
+// navigating away. The v-if guards also unmount open modals and clear their
+// component-local form state.
+function clearSensitiveStateForIdle() {
+  stopIdleLock()
+  store.resetState()
+  showMenu.value = false
+  showAccountDropdown.value = false
+  showAddTransactionModal.value = false
+  showImportCSVModal.value = false
+  showCreditCardModal.value = false
+  showBankAccountModal.value = false
+  showGraph.value = false
+  showSnapshotModal.value = false
+  showTagChart.value = false
+  showAIAPIConsole.value = false
+  showReauthModal.value = false
+  reauthLoading.value = false
+  reauthPassword.value = ''
+  reauthTotpCode.value = ''
+  reauthError.value = ''
+  reauthPasswordInput.value = null
+  isEditMode.value = false
+  editingTransaction.value = null
+  selectedCreditCardItems.value = []
+  selectedBankAccountItems.value = []
+  balanceHistoryData.value = null
+  toast.value = { visible: false, message: '', type: 'success' }
+  clearTimeout(toastTimer)
+  toastTimer = null
+  clearTimeout(searchTimeout)
+  searchTimeout = null
+  localStorage.removeItem('snapshot_restored')
+  if (reauthRequest?.reject) {
+    reauthRequest.reject(new Error('セッションが無操作タイムアウトになりました'))
+  }
+  reauthRequest = null
+}
+
+function checkIdleTimeout() {
+  if (isWailsMode || idleLockInProgress || !idleTimeoutSeconds.value || !lastUserActivityAt) return
+  if (Date.now() - lastUserActivityAt >= idleTimeoutSeconds.value * 1000) {
+    void lockForIdle()
+    return
+  }
+  scheduleIdleCheck()
+}
+
+function scheduleIdleCheck() {
+  clearIdleTimer()
+  if (isWailsMode || idleLockInProgress || !idleTimeoutSeconds.value || !lastUserActivityAt) return
+  const remaining = idleTimeoutSeconds.value * 1000 - (Date.now() - lastUserActivityAt)
+  idleTimer = setTimeout(checkIdleTimeout, Math.max(1, Math.min(remaining, 1000)))
+}
+
+function recordUserActivity() {
+  if (isWailsMode || idleLockInProgress || document.visibilityState === 'hidden') return
+  lastUserActivityAt = Date.now()
+  scheduleIdleCheck()
+}
+
+function handleVisibilityChange() {
+  if (!isWailsMode && document.visibilityState === 'visible') {
+    checkIdleTimeout()
+  }
+}
+
+async function lockForIdle() {
+  if (isWailsMode || idleLockInProgress) return
+  idleLockInProgress = true
+  // Cover the entire UI before clearing stores or awaiting any network work.
+  // This also prevents an already in-flight request from repainting sensitive
+  // data during the short best-effort logout window.
+  idleScreenLocked.value = true
+  clearSensitiveStateForIdle()
+
+  // Best effort: the browser may already be offline or the server may have
+  // expired the session. The local purge and redirect remain mandatory.
+  let timeoutID = null
+  try {
+    const timeout = new Promise(resolve => {
+      timeoutID = setTimeout(resolve, 750)
+    })
+    await Promise.race([apiLogout(), timeout])
+  } catch (error) {
+    console.warn('アイドルタイムアウト時のログアウトに失敗しました:', error)
+  } finally {
+    if (timeoutID !== null) clearTimeout(timeoutID)
+  }
+  window.location.replace('/login?reason=idle')
+}
+
+function startIdleLock(seconds) {
+  if (isWailsMode || !Number.isFinite(seconds) || seconds <= 0) return
+  idleTimeoutSeconds.value = Math.floor(seconds)
+  lastUserActivityAt = Date.now()
+  document.addEventListener('pointerdown', recordUserActivity, { passive: true })
+  document.addEventListener('keydown', recordUserActivity, { passive: true })
+  document.addEventListener('touchstart', recordUserActivity, { passive: true })
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  idleListenersRegistered = true
+  scheduleIdleCheck()
+}
+
 function handleReauthRequired(event) {
   // api.js coalesces simultaneous 428 responses, but ignore malformed or
   // duplicate events so a stale page cannot create an unresolvable promise.
@@ -609,6 +739,12 @@ onMounted(async () => {
     // The same server flag controls both the login form and the recent-auth
     // dialog, so a TOTP field is never shown when TOTP is disabled.
     totpRequired.value = Boolean(authStatus?.totp_required)
+    if (!isWailsMode && authStatus?.authenticated) {
+      const serverIdleSeconds = Number(authStatus?.idle_timeout_seconds)
+      if (Number.isFinite(serverIdleSeconds) && serverIdleSeconds > 0) {
+        startIdleLock(serverIdleSeconds)
+      }
+    }
   } catch {
     // The normal API calls below provide the visible error/redirect behavior.
   }
@@ -631,6 +767,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', handleGlobalClick)
+  stopIdleLock()
   if (reauthListenerRegistered) {
     window.removeEventListener('omni-money:reauth-required', handleReauthRequired)
   }
@@ -641,6 +778,22 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.idle-lock-curtain {
+  position: fixed;
+  z-index: 100000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: #f4f5f8;
+}
+
+.idle-lock-message {
+  color: #333;
+  font-weight: 600;
+  text-align: center;
+}
+
 .reauth-overlay {
   position: fixed;
   z-index: 1000;

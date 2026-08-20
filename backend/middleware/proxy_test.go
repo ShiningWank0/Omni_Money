@@ -8,7 +8,7 @@ import (
 
 func TestProxyMiddlewareResolvesForwardedForFromRight(t *testing.T) {
 	cfg := &ProxyConfig{
-		trustedCIDRs: parseTrustedProxies("10.0.0.0/8"),
+		trustedCIDRs: parseTrustedProxies("10.0.0.0/24"),
 	}
 	handler := ProxyMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(ClientIPFromRequest(r)))
@@ -28,7 +28,7 @@ func TestProxyMiddlewareResolvesForwardedForFromRight(t *testing.T) {
 
 func TestProxyMiddlewareIgnoresForwardedHeadersFromUntrustedRemote(t *testing.T) {
 	cfg := &ProxyConfig{
-		trustedCIDRs: parseTrustedProxies("10.0.0.0/8"),
+		trustedCIDRs: parseTrustedProxies("10.0.0.0/24"),
 	}
 	handler := ProxyMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(ClientIPFromRequest(r) + "," + RequestProto(r)))
@@ -98,7 +98,7 @@ func TestProxyMiddlewareForceHTTPSCanUseConfiguredRedirectHost(t *testing.T) {
 }
 
 func TestParseTrustedProxiesRejectsBroadAndMalformedEntries(t *testing.T) {
-	for _, raw := range []string{"0.0.0.0/0", "::/0", "not-an-ip", "10.0.0.0/33"} {
+	for _, raw := range []string{"0.0.0.0/0", "10.0.0.0/23", "::/0", "2001:db8::/119", "not-an-ip", "10.0.0.0/33"} {
 		t.Run(raw, func(t *testing.T) {
 			if _, err := parseTrustedProxiesStrict(raw); err == nil {
 				t.Fatalf("parseTrustedProxiesStrict(%q) unexpectedly succeeded", raw)
@@ -138,15 +138,33 @@ func TestNewProxyConfigFromEnvRequiresCanonicalBoolean(t *testing.T) {
 }
 
 func TestNewProxyConfigFromEnvRequiresAllowedHostsWithTrustedProxy(t *testing.T) {
-	t.Setenv("TRUSTED_PROXIES", "10.0.0.0/8")
+	t.Setenv("TRUSTED_PROXIES", "10.0.0.0/24")
 	t.Setenv("ALLOWED_HOSTS", "")
 	if cfg := NewProxyConfigFromEnv(); cfg.configErr == nil {
 		t.Fatal("trusted proxy without ALLOWED_HOSTS was accepted")
 	}
 }
 
+func TestNewProxyConfigFromEnvAlwaysRequiresAllowedHosts(t *testing.T) {
+	t.Setenv("TRUSTED_PROXIES", "")
+	t.Setenv("ALLOWED_HOSTS", "")
+	if cfg := NewProxyConfigFromEnv(); cfg.configErr == nil {
+		t.Fatal("empty ALLOWED_HOSTS was accepted")
+	}
+}
+
+func TestParseTrustedProxiesAcceptsOnlySmallCIDRsOrIndividualIPs(t *testing.T) {
+	for _, raw := range []string{"10.0.0.0/24", "10.0.0.3", "2001:db8::/120", "2001:db8::3"} {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := parseTrustedProxiesStrict(raw); err != nil {
+				t.Fatalf("parseTrustedProxiesStrict(%q): %v", raw, err)
+			}
+		})
+	}
+}
+
 func TestProxyMiddlewareRejectsAmbiguousForwardedHeaders(t *testing.T) {
-	cfg := &ProxyConfig{trustedCIDRs: parseTrustedProxies("10.0.0.0/8")}
+	cfg := &ProxyConfig{trustedCIDRs: parseTrustedProxies("10.0.0.0/24")}
 	handler := ProxyMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -175,7 +193,7 @@ func TestProxyMiddlewareRejectsAmbiguousForwardedHeaders(t *testing.T) {
 }
 
 func TestProxyMiddlewareRejectsMultipleForwardedHeaderValues(t *testing.T) {
-	cfg := &ProxyConfig{trustedCIDRs: parseTrustedProxies("10.0.0.0/8")}
+	cfg := &ProxyConfig{trustedCIDRs: parseTrustedProxies("10.0.0.0/24")}
 	handler := ProxyMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -190,7 +208,7 @@ func TestProxyMiddlewareRejectsMultipleForwardedHeaderValues(t *testing.T) {
 }
 
 func TestProxyMiddlewareRemovesForwardedHeadersFromUntrustedRemote(t *testing.T) {
-	cfg := &ProxyConfig{trustedCIDRs: parseTrustedProxies("10.0.0.0/8")}
+	cfg := &ProxyConfig{trustedCIDRs: parseTrustedProxies("10.0.0.0/24")}
 	var got http.Header
 	handler := ProxyMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.Header.Clone()
@@ -198,7 +216,7 @@ func TestProxyMiddlewareRemovesForwardedHeadersFromUntrustedRemote(t *testing.T)
 	}))
 	req := httptest.NewRequest(http.MethodGet, "http://money.local/", nil)
 	req.RemoteAddr = "203.0.113.10:12345"
-	for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Proto", "X-Real-IP"} {
+	for _, name := range forwardingHeaders {
 		req.Header.Set(name, "198.51.100.23")
 	}
 	rr := httptest.NewRecorder()
@@ -206,10 +224,67 @@ func TestProxyMiddlewareRemovesForwardedHeadersFromUntrustedRemote(t *testing.T)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
-	for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Proto", "X-Real-IP"} {
+	for _, name := range forwardingHeaders {
 		if got.Get(name) != "" {
 			t.Errorf("untrusted %s header remained: %q", name, got.Get(name))
 		}
+	}
+}
+
+func TestProxyMiddlewareRemovesForwardingHeadersAfterTrustedResolution(t *testing.T) {
+	cfg := &ProxyConfig{trustedCIDRs: parseTrustedProxies("10.0.0.0/24")}
+	var got http.Header
+	handler := ProxyMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		if clientIP := ClientIPFromRequest(r); clientIP != "198.51.100.23" {
+			t.Errorf("client IP = %q", clientIP)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "http://money.local/", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	req.Header.Set("X-Forwarded-For", "198.51.100.23")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "evil.example")
+	req.Header.Set("X-Forwarded-Port", "444")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	for _, name := range forwardingHeaders {
+		if got.Get(name) != "" {
+			t.Errorf("trusted %s header remained: %q", name, got.Get(name))
+		}
+	}
+}
+
+func TestValidatePublicListenerSecurity(t *testing.T) {
+	t.Setenv("ALLOWED_HOSTS", "money.example.com")
+	t.Setenv("TRUSTED_PROXIES", "")
+	t.Setenv("FORCE_HTTPS", "false")
+	t.Setenv("ALLOW_INSECURE_HTTP", "false")
+
+	if err := ValidatePublicListenerSecurity("127.0.0.1", false); err != nil {
+		t.Fatalf("loopback HTTP rejected: %v", err)
+	}
+	if err := ValidatePublicListenerSecurity("0.0.0.0", true); err != nil {
+		t.Fatalf("direct TLS rejected: %v", err)
+	}
+	if err := ValidatePublicListenerSecurity("0.0.0.0", false); err == nil {
+		t.Fatal("non-loopback clear-text listener was accepted")
+	}
+
+	t.Setenv("ALLOW_INSECURE_HTTP", "true")
+	if err := ValidatePublicListenerSecurity("0.0.0.0", false); err != nil {
+		t.Fatalf("explicit insecure local override rejected: %v", err)
+	}
+
+	t.Setenv("ALLOW_INSECURE_HTTP", "false")
+	t.Setenv("FORCE_HTTPS", "true")
+	t.Setenv("TRUSTED_PROXIES", "10.0.0.3")
+	if err := ValidatePublicListenerSecurity("0.0.0.0", false); err != nil {
+		t.Fatalf("trusted HTTPS proxy listener rejected: %v", err)
 	}
 }
 

@@ -90,10 +90,15 @@ func TestPasswordVerificationDoesNotTrimCredential(t *testing.T) {
 
 func TestValidatePasswordHashRequiresMinimumCost(t *testing.T) {
 	for name, hash := range map[string]string{
-		"empty":          "",
-		"malformed":      "not-a-bcrypt-hash",
-		"cost four":      "$2y$04$.OWNgfSMaTsdqHrwD6ydEeCs3dBUsAzNlpFzq3kJuK4BtUqU8E0WG",
-		"cost seventeen": "$2y$17$TMw6R8z61SPOp1Y/4t3mLu/LVqe3.L5d5.H9piLwdDjKpSytNxaEi",
+		"empty":                    "",
+		"malformed":                "not-a-bcrypt-hash",
+		"invalid salt character":   "$2y$12$!Mw6R8z61SPOp1Y/4t3mLu/LVqe3.L5d5.H9piLwdDjKpSytNxaEi",
+		"invalid digest character": "$2y$12$TMw6R8z61SPOp1Y/4t3mLu/LVqe3.L5d5.H9piLwdDjKpSytNxaE!",
+		"truncated digest":         "$2y$12$TMw6R8z61SPOp1Y/4t3mLu/LVqe3.L5d5.H9piLwdDjKpSytNxaE",
+		"trailing data":            "$2y$12$TMw6R8z61SPOp1Y/4t3mLu/LVqe3.L5d5.H9piLwdDjKpSytNxaEi.",
+		"unsupported 2x version":   "$2x$12$TMw6R8z61SPOp1Y/4t3mLu/LVqe3.L5d5.H9piLwdDjKpSytNxaEi",
+		"cost four":                "$2y$04$.OWNgfSMaTsdqHrwD6ydEeCs3dBUsAzNlpFzq3kJuK4BtUqU8E0WG",
+		"cost seventeen":           "$2y$17$TMw6R8z61SPOp1Y/4t3mLu/LVqe3.L5d5.H9piLwdDjKpSytNxaEi",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := ValidatePasswordHash(hash); err == nil {
@@ -103,5 +108,11 @@ func TestValidatePasswordHashRequiresMinimumCost(t *testing.T) {
 	}
 	if err := ValidatePasswordHash(securityTestPasswordHash); err != nil {
 		t.Fatalf("cost-12 password hash rejected: %v", err)
+	}
+	for _, prefix := range []string{"$2a$", "$2b$", "$2y$"} {
+		hash := prefix + securityTestPasswordHash[len(prefix):]
+		if err := ValidatePasswordHash(hash); err != nil {
+			t.Errorf("supported bcrypt prefix %q rejected: %v", prefix, err)
+		}
 	}
 }

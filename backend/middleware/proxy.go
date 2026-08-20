@@ -3,6 +3,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,9 +14,24 @@ import (
 type proxyContextKey string
 
 const (
-	clientIPKey     proxyContextKey = "client-ip"
-	requestProtoKey proxyContextKey = "request-proto"
+	clientIPKey          proxyContextKey = "client-ip"
+	requestProtoKey      proxyContextKey = "request-proto"
+	minTrustedIPv4Prefix                 = 24
+	minTrustedIPv6Prefix                 = 120
 )
+
+var forwardingHeaders = []string{
+	"Forwarded",
+	"X-Forwarded-For",
+	"X-Forwarded-Host",
+	"X-Forwarded-Port",
+	"X-Forwarded-Proto",
+	"X-Forwarded-Server",
+	"X-Original-Host",
+	"X-Original-URL",
+	"X-Real-IP",
+	"X-Rewrite-URL",
+}
 
 // ProxyConfig はリバースプロキシ関連設定
 type ProxyConfig struct {
@@ -42,14 +58,12 @@ func NewProxyConfigFromEnv() *ProxyConfig {
 		configErr = allowedErr
 	} else if forceErr != nil {
 		configErr = forceErr
+	} else if len(allowedHosts) == 0 {
+		configErr = fmt.Errorf("ALLOWED_HOSTS is required")
 	} else if rawRedirect := strings.TrimSpace(os.Getenv("HTTPS_REDIRECT_HOST")); rawRedirect != "" && redirectHost == "" {
 		configErr = fmt.Errorf("invalid HTTPS_REDIRECT_HOST")
-	} else if redirectHost != "" && len(allowedHosts) > 0 && !hostInSet(redirectHost, allowedHosts) {
+	} else if redirectHost != "" && !hostInSet(redirectHost, allowedHosts) {
 		configErr = fmt.Errorf("HTTPS_REDIRECT_HOST is not present in ALLOWED_HOSTS")
-	} else if forceHTTPS && redirectHost == "" && len(allowedHosts) == 0 {
-		configErr = fmt.Errorf("FORCE_HTTPS requires HTTPS_REDIRECT_HOST or ALLOWED_HOSTS")
-	} else if len(trustedCIDRs) > 0 && len(allowedHosts) == 0 {
-		configErr = fmt.Errorf("ALLOWED_HOSTS is required when TRUSTED_PROXIES is configured")
 	}
 
 	cfg := &ProxyConfig{
@@ -69,6 +83,42 @@ func (c *ProxyConfig) Validate() error {
 		return fmt.Errorf("proxy configuration is required")
 	}
 	return c.configErr
+}
+
+// ValidatePublicListenerSecurity rejects an accidental clear-text listener on
+// a non-loopback interface. Containers intentionally bind the Web listener to
+// all interfaces so Newt can reach it, but that is safe only when a trusted
+// proxy supplies HTTPS semantics or the operator makes an explicit local-only
+// acknowledgement (for example, Docker publishing solely on 127.0.0.1).
+func ValidatePublicListenerSecurity(host string, tlsConfigured bool) error {
+	allowInsecure, err := parseStrictBoolEnv("ALLOW_INSECURE_HTTP")
+	if err != nil {
+		return err
+	}
+	if tlsConfigured || isLoopbackBindHost(host) {
+		return nil
+	}
+
+	config := NewProxyConfigFromEnv()
+	if err := config.Validate(); err != nil {
+		return err
+	}
+	if config.forceHTTPS && len(config.trustedCIDRs) > 0 {
+		return nil
+	}
+	if allowInsecure {
+		return nil
+	}
+	return errors.New("non-loopback HTTP requires TLS, FORCE_HTTPS with a trusted proxy, or explicit ALLOW_INSECURE_HTTP=true")
+}
+
+func isLoopbackBindHost(host string) bool {
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func parseStrictBoolEnv(name string) (bool, error) {
@@ -108,7 +158,11 @@ func parseTrustedProxiesStrict(raw string) ([]*net.IPNet, error) {
 				return nil, fmt.Errorf("invalid TRUSTED_PROXIES entry %q", token)
 			}
 			ones, bits := ipNet.Mask.Size()
-			if ones == 0 || (bits != 32 && bits != 128) {
+			minimumPrefix := minTrustedIPv6Prefix
+			if bits == 32 {
+				minimumPrefix = minTrustedIPv4Prefix
+			}
+			if (bits != 32 && bits != 128) || ones < minimumPrefix {
 				return nil, fmt.Errorf("TRUSTED_PROXIES entry %q is too broad", token)
 			}
 			result = append(result, ipNet)
@@ -233,17 +287,13 @@ func ProxyMiddleware(config *ProxyConfig, next http.Handler) http.Handler {
 			if forwardedProto != "" {
 				proto = forwardedProto
 			}
-		} else {
-			// Do not leave attacker-controlled forwarding headers for downstream
-			// middleware to accidentally trust.
-			r.Header.Del("Forwarded")
-			r.Header.Del("X-Forwarded-For")
-			r.Header.Del("X-Forwarded-Proto")
-			r.Header.Del("X-Real-IP")
 		}
-		// The application does not consume RFC 7239 Forwarded. Remove it even
-		// from trusted requests to prevent ambiguity in downstream handlers.
-		r.Header.Del("Forwarded")
+		// Only the canonical context values above are authoritative. Remove all
+		// forwarding/original-URL headers even from trusted requests so a future
+		// downstream middleware cannot accidentally reinterpret attacker input.
+		for _, name := range forwardingHeaders {
+			r.Header.Del(name)
+		}
 
 		if config.forceHTTPS && proto == "http" && r.URL.Path != "/healthz" {
 			redirectHost := config.redirectTargetHost(r.Host)

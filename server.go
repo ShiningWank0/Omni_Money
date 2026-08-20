@@ -59,6 +59,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("公開Webのセキュリティ設定が無効です: %v", err)
 	}
+	if err := middleware.ValidatePublicListenerSecurity(host, certFile != ""); err != nil {
+		log.Fatalf("公開Webの待受設定が安全ではありません: %v", err)
+	}
+	if certFile == "" && !isLoopbackHost(host) && strings.TrimSpace(os.Getenv("ALLOW_INSECURE_HTTP")) == "true" {
+		log.Printf("警告: ALLOW_INSECURE_HTTP=true により非loopback HTTP待受を許可します。Dockerのhost公開先を127.0.0.1に限定してください")
+	}
 
 	srv := &http.Server{
 		Addr:              addr,

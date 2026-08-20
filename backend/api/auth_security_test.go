@@ -26,7 +26,7 @@ func prepareAuthSecurityEnv(t *testing.T) {
 	t.Setenv("TRUSTED_PROXIES", "")
 	t.Setenv("FORCE_HTTPS", "false")
 	t.Setenv("HTTPS_REDIRECT_HOST", "")
-	t.Setenv("ALLOWED_HOSTS", "")
+	t.Setenv("ALLOWED_HOSTS", "example.com")
 	t.Setenv("CORS_ALLOWED_ORIGINS", "")
 }
 
@@ -95,6 +95,22 @@ func TestTOTPIsOptionalWhenNoSecretIsConfigured(t *testing.T) {
 	response := serveSecurityRequest(handler, login)
 	if response.Code != http.StatusOK {
 		t.Fatalf("password-only login status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	statusRequest.AddCookie(securitySessionCookie(t, response))
+	statusResponse := serveSecurityRequest(handler, statusRequest)
+	if statusResponse.Code != http.StatusOK {
+		t.Fatalf("authenticated status = %d, want %d; body=%s", statusResponse.Code, http.StatusOK, statusResponse.Body.String())
+	}
+	var authenticatedStatus struct {
+		IdleTimeoutSeconds int64 `json:"idle_timeout_seconds"`
+	}
+	if err := json.Unmarshal(statusResponse.Body.Bytes(), &authenticatedStatus); err != nil {
+		t.Fatalf("decode authenticated status: %v", err)
+	}
+	if authenticatedStatus.IdleTimeoutSeconds != int64((15*time.Minute)/time.Second) {
+		t.Fatalf("idle_timeout_seconds = %d, want 900", authenticatedStatus.IdleTimeoutSeconds)
 	}
 }
 
