@@ -194,13 +194,7 @@ jobs:
           set -euo pipefail
           runtime_data="$(mktemp -d)"
           container_id=""
-          cleanup() {
-            if [ -n "$container_id" ]; then
-              docker rm -f "$container_id" >/dev/null 2>&1 || true
-            fi
-            rm -rf "$runtime_data"
-          }
-          trap cleanup EXIT
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true; rm -rf "$runtime_data"' EXIT
           sudo chown 10001:10001 "$runtime_data"
           chmod 700 "$runtime_data"
 
