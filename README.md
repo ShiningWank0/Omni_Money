@@ -140,6 +140,10 @@ go run -tags server ./server.go
 
 コマンドはセットアップキーと `otpauth://` URI を表示し、認証アプリの現在コードを確認できた後にだけmode `0600`の秘密ファイルを作成します。その出力を端末ログやチャットへ残さず、秘密ファイルもバックアップ時に暗号化して保管してください。TOTPを使わない場合は両方のTOTP環境変数を空のままにします。
 
+TOTPを有効化した場合でも、通常操作中に定期的なコード入力は要求しません。TOTPは新しいセッションへのログインと、無操作・絶対期限・サーバー再起動後の再ログインで使用します。有効なセッション内では通常の閲覧・編集をそのまま継続でき、CSV入出力やスナップショット復元等の高影響操作だけをOmni Moneyのパスワードで再確認します。
+
+可視タブで実際に操作している間は、ブラウザが低頻度のheartbeat（最大4分間隔、操作停止後の末尾送信あり）を送ってサーバー側の無操作期限も延長します。非表示タブや操作のない状態からheartbeatは送信しません。
+
 この場合、AI専用APIは標準で `127.0.0.1:4001` で待ち受けます。公開WebとAI APIは同じGoプロセスとSQLiteを使用しますが、HTTPルーターと認証境界は分離されています。
 
 - 公開WebポートにはAI APIルートを登録しません。
@@ -157,7 +161,7 @@ go run -tags server ./server.go
 | `AUTH_PASSWORD_HASH` | なし（必須） | ログインパスワードの bcrypt ハッシュ（cost 12〜16） |
 | `SESSION_MAX_AGE_HOURS` | `8` | セッションの絶対有効期間（時間） |
 | `SESSION_IDLE_TIMEOUT_MINUTES` | `15` | 無操作セッションのタイムアウト（分）。画面も自動ロック |
-| `SESSION_REAUTH_MAX_AGE_MINUTES` | `5` | 高リスク操作で要求する最近の再認証の有効期間（分） |
+| `SESSION_REAUTH_MAX_AGE_MINUTES` | `5` | CSV入出力・復元等の高影響操作で要求するパスワード再確認の有効期間（分） |
 | `SESSION_MAX_CONCURRENT` | `3` | 1ユーザーあたりの同時セッション上限 |
 | `AI_API_TOKEN` | なし | 32文字以上のAI API Bearerトークン。未設定ならAI API無効 |
 | `AUTH_TOTP_SECRET_FILE` | なし | Omni Money専用TOTPのBase32秘密ファイル。設定するとTOTPを有効化 |

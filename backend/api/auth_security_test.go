@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"omni_money/backend/middleware"
 )
 
 func prepareAuthSecurityEnv(t *testing.T) {
@@ -111,6 +113,176 @@ func TestTOTPIsOptionalWhenNoSecretIsConfigured(t *testing.T) {
 	}
 	if authenticatedStatus.IdleTimeoutSeconds != int64((15*time.Minute)/time.Second) {
 		t.Fatalf("idle_timeout_seconds = %d, want 900", authenticatedStatus.IdleTimeoutSeconds)
+	}
+}
+
+func TestAuthKeepaliveRequiresSessionAndCSRFAndReturnsNoContent(t *testing.T) {
+	prepareAuthSecurityEnv(t)
+	handler, err := NewRouterWithError()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unauthenticated := securityJSONRequest(http.MethodPost, "/api/auth/keepalive", ``)
+	unauthenticated.RemoteAddr = "198.51.100.60:12345"
+	if response := serveSecurityRequest(handler, unauthenticated); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated keepalive status=%d, want %d", response.Code, http.StatusUnauthorized)
+	}
+
+	login := securityJSONRequest(http.MethodPost, "/api/auth/login", `{"password":"test-password"}`)
+	login.RemoteAddr = unauthenticated.RemoteAddr
+	loginResponse := serveSecurityRequest(handler, login)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("login status=%d; body=%s", loginResponse.Code, loginResponse.Body.String())
+	}
+	cookie := securitySessionCookie(t, loginResponse)
+	csrfToken := securityCSRFToken(t, loginResponse)
+
+	missingToken := securityJSONRequest(http.MethodPost, "/api/auth/keepalive", ``)
+	missingToken.RemoteAddr = login.RemoteAddr
+	missingToken.AddCookie(cookie)
+	if response := serveSecurityRequest(handler, missingToken); response.Code != http.StatusForbidden {
+		t.Fatalf("keepalive without CSRF status=%d, want %d", response.Code, http.StatusForbidden)
+	}
+
+	keepalive := securityJSONRequest(http.MethodPost, "/api/auth/keepalive", ``)
+	keepalive.RemoteAddr = login.RemoteAddr
+	keepalive.AddCookie(cookie)
+	keepalive.Header.Set("X-CSRF-Token", csrfToken)
+	response := serveSecurityRequest(handler, keepalive)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("keepalive status=%d, want %d", response.Code, http.StatusNoContent)
+	}
+	if response.Body.Len() != 0 {
+		t.Fatalf("keepalive body=%q, want empty", response.Body.String())
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("keepalive Cache-Control=%q, want no-store", got)
+	}
+
+	wrongMethod := httptest.NewRequest(http.MethodGet, "/api/auth/keepalive", nil)
+	wrongMethod.RemoteAddr = login.RemoteAddr
+	wrongMethod.AddCookie(cookie)
+	if response := serveSecurityRequest(handler, wrongMethod); response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET keepalive status=%d, want %d", response.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestReauthenticationRotationFailureRequiresFullLoginAndClearsCookies(t *testing.T) {
+	sessionManager := middleware.NewSessionManager(time.Hour)
+	t.Cleanup(sessionManager.Close)
+	authManager := middleware.NewAuthSessionManager(sessionManager, testPasswordHash, nil)
+	session, err := sessionManager.CreateSession("user")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// SessionAuth and CSRF must both succeed first. Deleting the server-side
+	// record in this inner handler deterministically reproduces expiry or a
+	// logout-all race while bcrypt/reauthentication is in progress.
+	reauthenticate := handleAuthReauthenticate(authManager)
+	invalidateAfterSecurityChecks := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessionManager.DeleteSession(session.ID)
+		reauthenticate.ServeHTTP(w, r)
+	})
+	handler := middleware.SessionAuthMiddleware(
+		sessionManager,
+		middleware.CSRFMiddleware(sessionManager, invalidateAfterSecurityChecks),
+	)
+
+	request := securityJSONRequest(http.MethodPost, "/api/auth/reauth", `{"password":"test-password"}`)
+	request.RemoteAddr = "198.51.100.61:12345"
+	request.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: session.ID, Path: "/"})
+	request.Header.Set(middleware.CSRFHeaderName, session.CSRFToken)
+	response := serveSecurityRequest(handler, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("rotation failure status=%d, want %d; body=%s", response.Code, http.StatusUnauthorized, response.Body.String())
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("rotation failure Cache-Control=%q, want no-store", got)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode rotation failure body: %v", err)
+	}
+	if body["login_required"] != true {
+		t.Fatalf("rotation failure body=%v, want login_required=true", body)
+	}
+
+	cleared := map[string]bool{}
+	for _, cookie := range response.Result().Cookies() {
+		if (cookie.Name == middleware.SessionCookieName || cookie.Name == middleware.SecureSessionCookieName) &&
+			cookie.Value == "" && cookie.MaxAge < 0 {
+			cleared[cookie.Name] = true
+		}
+	}
+	for _, name := range []string{middleware.SessionCookieName, middleware.SecureSessionCookieName} {
+		if !cleared[name] {
+			t.Fatalf("rotation failure did not clear cookie %q; cookies=%v", name, response.Result().Cookies())
+		}
+	}
+}
+
+func TestProductionRouterDoesNotDispatchHighImpactTrailingSlashLookalikes(t *testing.T) {
+	prepareAuthSecurityEnv(t)
+	handler, err := NewRouterWithError()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	login := securityJSONRequest(http.MethodPost, "/api/auth/login", `{"password":"test-password"}`)
+	login.RemoteAddr = "198.51.100.62:12345"
+	loginResponse := serveSecurityRequest(handler, login)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("login status=%d; body=%s", loginResponse.Code, loginResponse.Body.String())
+	}
+	cookie := securitySessionCookie(t, loginResponse)
+	csrfToken := securityCSRFToken(t, loginResponse)
+
+	// A fresh session would be allowed through RecentAuthMiddleware, so these
+	// production-router responses prove the lookalikes reached the FileServer
+	// fallback instead of any high-impact handler. Include every protected path,
+	// not only the six routes that have a distinct leaf name.
+	for _, target := range []struct {
+		method string
+		path   string
+		want   int
+	}{
+		{http.MethodGet, "/api/backup_csv/", http.StatusNotFound},
+		{http.MethodPost, "/api/import_csv/", http.StatusNotFound},
+		{http.MethodPost, "/api/snapshots/", http.StatusNotFound},
+		{http.MethodPost, "/api/snapshots/restore/", http.StatusNotFound},
+		{http.MethodPost, "/api/auth/logout-all/", http.StatusNotFound},
+		{http.MethodPost, "/api/ai-console/transactions/", http.StatusNotFound},
+		{http.MethodPost, "/api/ai-console/analysis/", http.StatusNotFound},
+	} {
+		t.Run(target.method+" "+target.path, func(t *testing.T) {
+			request := securityJSONRequest(target.method, target.path, `{}`)
+			request.RemoteAddr = login.RemoteAddr
+			request.AddCookie(cookie)
+			if target.method != http.MethodGet {
+				request.Header.Set("X-CSRF-Token", csrfToken)
+			}
+			response := serveSecurityRequest(handler, request)
+			if response.Code != target.want {
+				t.Fatalf("lookalike status=%d, want %d; body=%s", response.Code, target.want, response.Body.String())
+			}
+		})
+	}
+
+	// In particular, the logout-all lookalike must not invalidate the session.
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	statusRequest.RemoteAddr = login.RemoteAddr
+	statusRequest.AddCookie(cookie)
+	statusResponse := serveSecurityRequest(handler, statusRequest)
+	var statusBody struct {
+		Authenticated bool `json:"authenticated"`
+	}
+	if err := json.Unmarshal(statusResponse.Body.Bytes(), &statusBody); err != nil {
+		t.Fatalf("decode post-lookalike status: %v", err)
+	}
+	if statusResponse.Code != http.StatusOK || !statusBody.Authenticated {
+		t.Fatalf("lookalike invalidated session: status=%d body=%s", statusResponse.Code, statusResponse.Body.String())
 	}
 }
 
@@ -320,7 +492,7 @@ func TestInvalidConfiguredTOTPSecretFailsEvenWhenRequireAssertionIsFalse(t *test
 	}
 }
 
-func TestConfiguredTOTPIsRequiredForReauthentication(t *testing.T) {
+func TestConfiguredTOTPIsRequiredForLoginButNotReauthentication(t *testing.T) {
 	prepareAuthSecurityEnv(t)
 	secret := []byte("12345678901234567890")
 	t.Setenv("AUTH_TOTP_SECRET_FILE", writeSecurityTOTPSecret(t, secret, 0o600))
@@ -328,6 +500,16 @@ func TestConfiguredTOTPIsRequiredForReauthentication(t *testing.T) {
 	handler, err := NewRouterWithError()
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	withoutTOTP := securityJSONRequest(http.MethodPost, "/api/auth/login", `{"password":"test-password"}`)
+	withoutTOTP.RemoteAddr = "198.51.100.42:12345"
+	withoutTOTPResponse := serveSecurityRequest(handler, withoutTOTP)
+	if withoutTOTPResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("login without configured TOTP status=%d, want %d", withoutTOTPResponse.Code, http.StatusUnauthorized)
+	}
+	if cookies := withoutTOTPResponse.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("login without configured TOTP created session cookies: %v", cookies)
 	}
 
 	now := time.Now().UTC()
@@ -345,18 +527,46 @@ func TestConfiguredTOTPIsRequiredForReauthentication(t *testing.T) {
 	missingCode.AddCookie(cookie)
 	missingCode.Header.Set("X-CSRF-Token", csrfToken)
 	missingResponse := serveSecurityRequest(handler, missingCode)
-	if missingResponse.Code != http.StatusUnauthorized {
-		t.Fatalf("reauth without configured TOTP status=%d, want %d", missingResponse.Code, http.StatusUnauthorized)
+	if missingResponse.Code != http.StatusOK {
+		t.Fatalf("password-only reauth with configured TOTP status=%d, want %d", missingResponse.Code, http.StatusOK)
 	}
 
-	nextCode := securityTOTPCode(secret, now.Add(30*time.Second))
-	withCode := securityJSONRequest(http.MethodPost, "/api/auth/reauth", `{"password":"test-password","totp_code":"`+nextCode+`"}`)
-	withCode.RemoteAddr = login.RemoteAddr
-	withCode.AddCookie(cookie)
-	withCode.Header.Set("X-CSRF-Token", csrfToken)
-	withCodeResponse := serveSecurityRequest(handler, withCode)
-	if withCodeResponse.Code != http.StatusOK {
-		t.Fatalf("reauth with configured TOTP status=%d; body=%s", withCodeResponse.Code, withCodeResponse.Body.String())
+	// Reauthentication is intentionally password-only; even an invalid TOTP
+	// value must not turn it back into a full login verification.
+	wrongCode := securityJSONRequest(http.MethodPost, "/api/auth/reauth", `{"password":"test-password","totp_code":"000000"}`)
+	wrongCode.RemoteAddr = login.RemoteAddr
+	wrongCode.AddCookie(securitySessionCookie(t, missingResponse))
+	wrongCode.Header.Set("X-CSRF-Token", securityCSRFToken(t, missingResponse))
+	wrongCodeResponse := serveSecurityRequest(handler, wrongCode)
+	if wrongCodeResponse.Code != http.StatusOK {
+		t.Fatalf("password-only reauth with invalid TOTP status=%d; body=%s", wrongCodeResponse.Code, wrongCodeResponse.Body.String())
+	}
+}
+
+func TestReauthenticationWithoutSessionRequiresLoginEvenWhenTOTPIsConfigured(t *testing.T) {
+	prepareAuthSecurityEnv(t)
+	secret := []byte("12345678901234567890")
+	t.Setenv("AUTH_TOTP_SECRET_FILE", writeSecurityTOTPSecret(t, secret, 0o600))
+	handler, err := NewRouterWithError()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reauth := securityJSONRequest(http.MethodPost, "/api/auth/reauth", `{"password":"test-password"}`)
+	reauth.RemoteAddr = "198.51.100.44:12345"
+	response := serveSecurityRequest(handler, reauth)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated reauth status=%d, want %d", response.Code, http.StatusUnauthorized)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode unauthenticated reauth body: %v", err)
+	}
+	if body["login_required"] != true {
+		t.Fatalf("unauthenticated reauth body=%v, want login_required=true", body)
+	}
+	if cookies := response.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("unauthenticated reauth created session cookies: %v", cookies)
 	}
 }
 

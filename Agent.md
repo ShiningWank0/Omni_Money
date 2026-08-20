@@ -164,8 +164,8 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
 * **認証方式**: セッションベース認証を基本とする。Cookieにセッション識別子を格納し、サーバー側でセッション状態を管理する。
 * **パスワード**: bcryptハッシュにより保管すること。平文での保存は絶対に行わない。パスワードの初期設定は環境変数 `AUTH_PASSWORD_HASH` で bcrypt ハッシュ値を渡す形とする。
 * **ログイン試行制限**: 同一IPアドレスからのログイン試行を制限する。5回連続失敗で15分間のロックアウトを実施すること（旧アプリの `check_login_attempts` / `record_login_attempt` の移植）。
-* **セッション有効期限**: セッションにはサーバー側で絶対有効期限（既定: 8時間）と無操作有効期限（既定: 15分）を設定する。期限切れのセッションは自動で無効化し、金融APIは直近5分以内のOmni Money再認証を要求する。環境変数で安全な範囲内に調整可能とする。
-* **任意の第2要素**: `AUTH_TOTP_SECRET_FILE`が未設定ならpassword-only、設定した場合はログインと再認証の両方でOmni Money専用TOTPを必須とする。Pangolinとはseedを共有しない。
+* **セッション有効期限**: セッションにはサーバー側で絶対有効期限（既定: 8時間）とsliding無操作有効期限（既定: 15分）を設定する。認証済みAPI操作は無操作時刻を更新するが、絶対期限は延長しない。可視タブで実際に操作している間は、フロントエンドが最大4分間隔（操作停止後は30秒以内に末尾送信）の`POST /api/auth/keepalive`を送ってサーバー側の無操作時刻と画面ロックを整合させる。非表示タブや操作のない状態から送信してはならない。通常の閲覧・CRUDは有効なセッションで継続し、CSV入出力、手動スナップショット作成・復元、AI操作、全セッションログアウト等の高影響操作だけが直近5分以内のOmni Moneyパスワード再確認を要求する。環境変数で安全な範囲内に調整可能とする。
+* **任意の第2要素**: `AUTH_TOTP_SECRET_FILE`が未設定ならpassword-only、設定した場合は新しいセッションへのログインでOmni Money専用TOTPを必須とする。有効なセッション内の高影響操作はパスワードだけで再確認し、無操作・絶対期限・サーバー再起動後のログインではTOTPを再度要求する。Pangolinとはseedを共有しない。
 * **認証不要の例外パス**:
   - `POST /api/auth/login` — ログイン処理自体
   - `GET /api/auth/status` — 認証状態の確認
@@ -226,7 +226,7 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
 | `AUTH_PASSWORD_HASH` | サーバーモード時必須 | なし | ログインパスワードのbcryptハッシュ |
 | `SESSION_MAX_AGE_HOURS` | 任意 | `8` | セッションの絶対有効期間（時間） |
 | `SESSION_IDLE_TIMEOUT_MINUTES` | 任意 | `15` | 無操作セッション有効期間（分） |
-| `SESSION_REAUTH_MAX_AGE_MINUTES` | 任意 | `5` | 金融APIで許容する直近再認証時間（分） |
+| `SESSION_REAUTH_MAX_AGE_MINUTES` | 任意 | `5` | 高影響操作で許容する直近パスワード再確認時間（分） |
 | `SESSION_MAX_CONCURRENT` | 任意 | `3` | 同一ユーザーの同時セッション上限 |
 | `AUTH_TOTP_SECRET_FILE` | 任意 | なし | 設定時だけ有効になるOmni Money専用TOTP秘密ファイル |
 | `AUTH_REQUIRE_TOTP` | 任意 | `false` | `true`時は秘密ファイルの設定漏れを起動エラーにするassertion |

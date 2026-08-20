@@ -161,6 +161,27 @@ func (a *AuthSessionManager) ReserveAuthAttempt(ip string) (bool, time.Duration)
 // VerifyCredentials performs the expensive comparison under a small semaphore.
 // It never trims the submitted password; whitespace may be part of a credential.
 func (a *AuthSessionManager) VerifyCredentials(password, oneTimeCode string) (valid bool, busy bool) {
+	valid, busy = a.verifyPassword(password)
+	if busy {
+		return false, true
+	}
+	if !valid {
+		return false, false
+	}
+	if a.totpVerifier != nil && a.totpVerifier.VerifyAndConsume(oneTimeCode) != nil {
+		return false, false
+	}
+	return true, false
+}
+
+// VerifyPasswordOnlyForReauthentication verifies only the password for an
+// already-authenticated in-session step-up. It must not be used for login:
+// login uses VerifyCredentials, which also enforces configured TOTP.
+func (a *AuthSessionManager) VerifyPasswordOnlyForReauthentication(password string) (valid bool, busy bool) {
+	return a.verifyPassword(password)
+}
+
+func (a *AuthSessionManager) verifyPassword(password string) (valid bool, busy bool) {
 	if !a.PasswordConfigured() {
 		return false, false
 	}
@@ -170,13 +191,7 @@ func (a *AuthSessionManager) VerifyCredentials(password, oneTimeCode string) (va
 	default:
 		return false, true
 	}
-	if bcrypt.CompareHashAndPassword([]byte(a.passwordHash), []byte(password)) != nil {
-		return false, false
-	}
-	if a.totpVerifier != nil && a.totpVerifier.VerifyAndConsume(oneTimeCode) != nil {
-		return false, false
-	}
-	return true, false
+	return bcrypt.CompareHashAndPassword([]byte(a.passwordHash), []byte(password)) == nil, false
 }
 
 func (a *AuthSessionManager) IsIPLocked(ip string) (bool, time.Duration) {

@@ -69,6 +69,7 @@ func NewRouterWithError() (http.Handler, error) {
 	mux.HandleFunc("/api/auth/logout", handleAuthLogout(authManager))
 	mux.HandleFunc("/api/auth/logout-all", handleAuthLogoutAll(authManager))
 	mux.HandleFunc("/api/auth/reauth", handleAuthReauthenticate(authManager))
+	mux.HandleFunc("/api/auth/keepalive", handleAuthKeepalive)
 	mux.HandleFunc("/api/auth/status", handleAuthStatus(authManager))
 
 	// 認証済み管理UIから固定loopbackのAI専用リスナーへ中継する。

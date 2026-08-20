@@ -36,7 +36,7 @@ var (
 )
 
 // TOTPVerifier validates RFC 6238 codes and consumes each accepted time-step
-// at most once for this process. A mutex makes concurrent login/reauth races
+// at most once for this process. A mutex makes concurrent login races
 // deterministic: only one request can consume a code.
 type TOTPVerifier struct {
 	secret []byte

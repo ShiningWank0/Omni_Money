@@ -174,8 +174,8 @@
     <!-- 最近の認証が必要な操作用の再認証ダイアログ -->
     <div v-if="showReauthModal" class="reauth-overlay" @click.self="cancelReauthentication">
       <div class="reauth-card" role="dialog" aria-modal="true" aria-labelledby="reauth-title">
-        <h3 id="reauth-title">操作を続けるには再認証が必要です</h3>
-        <p class="reauth-description">安全のため、もう一度Omni Moneyの認証情報を入力してください。</p>
+        <h3 id="reauth-title">重要な操作の確認</h3>
+        <p class="reauth-description">一括取り込み・書き出し、復元など重要な操作を実行するため、Omni Moneyのパスワードを入力してください。</p>
         <form @submit.prevent="submitReauthentication">
           <label class="reauth-label" for="reauth-password">パスワード</label>
           <input
@@ -188,25 +188,11 @@
             maxlength="72"
             required
           >
-          <template v-if="totpRequired">
-            <label class="reauth-label" for="reauth-totp">認証アプリのコード</label>
-            <input
-              id="reauth-totp"
-              v-model="reauthTotpCode"
-              class="reauth-input"
-              type="text"
-              inputmode="numeric"
-              autocomplete="one-time-code"
-              pattern="[0-9]{6}"
-              maxlength="6"
-              required
-            >
-          </template>
           <div v-if="reauthError" class="reauth-error">{{ reauthError }}</div>
           <div class="reauth-actions">
             <button type="button" class="reauth-cancel" :disabled="reauthLoading" @click="cancelReauthentication">キャンセル</button>
             <button type="submit" class="reauth-submit" :disabled="reauthLoading">
-              {{ reauthLoading ? '確認中...' : '認証して続行' }}
+              {{ reauthLoading ? '確認中...' : '確認して実行' }}
             </button>
           </div>
         </form>
@@ -243,7 +229,8 @@ import {
   isWailsMode,
   logout as apiLogout,
   getAuthStatus,
-  reauthenticate
+  reauthenticate,
+  keepAlive
 } from './utils/api'
 
 const store = useAppStore()
@@ -262,8 +249,6 @@ const showAIAPIConsole = ref(false)
 const showReauthModal = ref(false)
 const reauthLoading = ref(false)
 const reauthPassword = ref('')
-const reauthTotpCode = ref('')
-const totpRequired = ref(false)
 const reauthError = ref('')
 const reauthPasswordInput = ref(null)
 let reauthRequest = null
@@ -274,6 +259,17 @@ let idleTimer = null
 let lastUserActivityAt = 0
 let idleLockInProgress = false
 let idleListenersRegistered = false
+let activityThrottleTimer = null
+let heartbeatIntervalTimer = null
+let heartbeatTrailingTimer = null
+let heartbeatInFlight = false
+let heartbeatPending = false
+let heartbeatRecheckInFlight = false
+let lastHeartbeatAttemptAt = 0
+let componentMounted = false
+const heartbeatIntervalMs = 4 * 60 * 1000
+const heartbeatTrailingMs = 30 * 1000
+const heartbeatFailureRecheckDelaysMs = [500, 1500]
 const isEditMode = ref(false)
 const editingTransaction = ref(null)
 const dateSortOrder = ref('desc')
@@ -548,12 +544,32 @@ function clearIdleTimer() {
   }
 }
 
+function clearHeartbeatTimers() {
+  if (heartbeatIntervalTimer !== null) {
+    clearTimeout(heartbeatIntervalTimer)
+    heartbeatIntervalTimer = null
+  }
+  if (heartbeatTrailingTimer !== null) {
+    clearTimeout(heartbeatTrailingTimer)
+    heartbeatTrailingTimer = null
+  }
+  heartbeatPending = false
+}
+
 function stopIdleLock() {
   clearIdleTimer()
+  clearHeartbeatTimers()
+  if (activityThrottleTimer !== null) {
+    clearTimeout(activityThrottleTimer)
+    activityThrottleTimer = null
+  }
   if (!idleListenersRegistered) return
   document.removeEventListener('pointerdown', recordUserActivity)
   document.removeEventListener('keydown', recordUserActivity)
   document.removeEventListener('touchstart', recordUserActivity)
+  document.removeEventListener('pointermove', recordThrottledUserActivity)
+  document.removeEventListener('wheel', recordThrottledUserActivity)
+  window.removeEventListener('scroll', recordThrottledUserActivity)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   idleListenersRegistered = false
 }
@@ -577,7 +593,6 @@ function clearSensitiveStateForIdle() {
   showReauthModal.value = false
   reauthLoading.value = false
   reauthPassword.value = ''
-  reauthTotpCode.value = ''
   reauthError.value = ''
   reauthPasswordInput.value = null
   isEditMode.value = false
@@ -617,16 +632,153 @@ function recordUserActivity() {
   if (isWailsMode || idleLockInProgress || document.visibilityState === 'hidden') return
   lastUserActivityAt = Date.now()
   scheduleIdleCheck()
+  scheduleActivityHeartbeat()
 }
 
-function handleVisibilityChange() {
-  if (!isWailsMode && document.visibilityState === 'visible') {
-    checkIdleTimeout()
+// The server only refreshes LastSeenAt when it receives an authenticated
+// request. Keep the client-side activity lock and server idle timeout aligned
+// with a low-frequency, visible-tab heartbeat. A trailing request covers a
+// user who stops scrolling or moving the pointer before the four-minute
+// periodic interval; no heartbeat is emitted without real user activity.
+async function sendActivityHeartbeat() {
+  if (!componentMounted || isWailsMode || idleLockInProgress || document.visibilityState === 'hidden') return
+  if (heartbeatInFlight) {
+    heartbeatPending = true
+    return
+  }
+
+  heartbeatInFlight = true
+  if (heartbeatIntervalTimer !== null) {
+    clearTimeout(heartbeatIntervalTimer)
+    heartbeatIntervalTimer = null
+  }
+  // Cadence is based on attempts, not only successful responses. A failed
+  // request must not produce a zero-delay retry loop while the user keeps
+  // moving the pointer or scrolling.
+  lastHeartbeatAttemptAt = Date.now()
+  try {
+    const status = await keepAlive()
+    // A cross-tab rotation can produce 403 (new shared cookie, old in-memory
+    // CSRF token), while a request that left just before rotation can produce
+    // 401. Status rechecking both cases either refreshes the current CSRF token
+    // or confirms that a full login is genuinely required.
+    if (status === 401 || status === 403) void recheckSessionAfterHeartbeatFailure()
+  } catch {
+    // Heartbeats are best effort. A network failure is inconclusive and must
+    // not redirect or erase the screen; authentication/CSRF failures are
+    // rechecked separately so a rotation is not mistaken for expiry.
+  } finally {
+    heartbeatInFlight = false
+    if (heartbeatPending) {
+      heartbeatPending = false
+      if (componentMounted && !idleLockInProgress && document.visibilityState !== 'hidden') {
+        // A pending event only records that activity happened during the
+        // request. Respect the same four-minute cadence before retrying.
+        scheduleHeartbeatInterval()
+      }
+    } else if (componentMounted && !idleLockInProgress && document.visibilityState !== 'hidden' &&
+               Date.now() - lastUserActivityAt <= heartbeatTrailingMs) {
+      scheduleHeartbeatInterval()
+    }
   }
 }
 
+function scheduleHeartbeatInterval() {
+  if (heartbeatIntervalTimer !== null || !componentMounted || isWailsMode || idleLockInProgress ||
+      document.visibilityState === 'hidden' || !lastUserActivityAt) return
+  const elapsed = Date.now() - lastHeartbeatAttemptAt
+  const delay = Math.max(0, heartbeatIntervalMs - elapsed)
+  heartbeatIntervalTimer = setTimeout(() => {
+    heartbeatIntervalTimer = null
+    // If activity stopped, the trailing timer is sufficient and a periodic
+    // timer must not keep an unattended session alive.
+    if (componentMounted && Date.now() - lastUserActivityAt <= heartbeatTrailingMs) {
+      void sendActivityHeartbeat()
+    }
+  }, delay)
+}
+
+async function recheckSessionAfterHeartbeatFailure() {
+  if (heartbeatRecheckInFlight) return
+  heartbeatRecheckInFlight = true
+  let confirmedExpired = false
+  try {
+    // A heartbeat can race with a same-tab or cross-tab session rotation: the
+    // server has invalidated the old cookie, but the browser may not have
+    // received Set-Cookie yet. Two spaced status checks avoid turning that
+    // short race (or Pangolin latency) into a surprising full-login redirect.
+    for (const delay of heartbeatFailureRecheckDelaysMs) {
+      await new Promise(resolve => setTimeout(resolve, delay))
+      if (!componentMounted || isWailsMode || idleLockInProgress || document.visibilityState === 'hidden') return
+      // The explicit reauthentication request owns expiry handling while it
+      // is in flight. Never carry a stale unauthenticated probe across the
+      // session rotation and apply it after the new cookie arrives.
+      if (reauthLoading.value) return
+      try {
+        const status = await getAuthStatus()
+        if (status?.authenticated !== false) return
+        confirmedExpired = true
+      } catch {
+        // A network failure is inconclusive. Do not erase the screen; the next
+        // real user activity can perform another bounded heartbeat check.
+        return
+      }
+    }
+    if (confirmedExpired && !reauthLoading.value && !idleLockInProgress &&
+        document.visibilityState !== 'hidden') {
+      expireSessionAndRedirect('session-expired')
+    }
+  } finally {
+    heartbeatRecheckInFlight = false
+  }
+}
+
+function expireSessionAndRedirect(reason) {
+  if (!componentMounted || isWailsMode || idleLockInProgress) return
+  idleLockInProgress = true
+  idleScreenLocked.value = true
+  clearSensitiveStateForIdle()
+  window.location.replace(`/login?reason=${encodeURIComponent(reason)}`)
+}
+
+function scheduleActivityHeartbeat() {
+  if (!componentMounted || isWailsMode || idleLockInProgress || document.visibilityState === 'hidden') return
+  scheduleHeartbeatInterval()
+  if (heartbeatTrailingTimer !== null) clearTimeout(heartbeatTrailingTimer)
+  heartbeatTrailingTimer = setTimeout(() => {
+    heartbeatTrailingTimer = null
+    if (componentMounted && !idleLockInProgress && document.visibilityState !== 'hidden') {
+      void sendActivityHeartbeat()
+    }
+  }, heartbeatTrailingMs)
+}
+
+// Pointer movement and scrolling can fire hundreds of events per second. Treat
+// them as activity at most once per second, while keeping explicit clicks,
+// keypresses, and touch starts immediate. The visibility guard in
+// recordUserActivity prevents background tabs from extending the idle window.
+function recordThrottledUserActivity() {
+  if (activityThrottleTimer !== null) return
+  recordUserActivity()
+  activityThrottleTimer = setTimeout(() => {
+    activityThrottleTimer = null
+  }, 1000)
+}
+
+function handleVisibilityChange() {
+  if (isWailsMode) return
+  if (document.visibilityState === 'hidden') {
+    // Do not let a background tab keep either the local or server session
+    // alive. Any pending heartbeat is discarded and a later visible-tab
+    // activity will schedule a fresh one.
+    clearHeartbeatTimers()
+    return
+  }
+  checkIdleTimeout()
+}
+
 async function lockForIdle() {
-  if (isWailsMode || idleLockInProgress) return
+  if (!componentMounted || isWailsMode || idleLockInProgress) return
   idleLockInProgress = true
   // Cover the entire UI before clearing stores or awaiting any network work.
   // This also prevents an already in-flight request from repainting sensitive
@@ -654,9 +806,14 @@ function startIdleLock(seconds) {
   if (isWailsMode || !Number.isFinite(seconds) || seconds <= 0) return
   idleTimeoutSeconds.value = Math.floor(seconds)
   lastUserActivityAt = Date.now()
+  // getAuthStatus() immediately before this call has touched the server.
+  lastHeartbeatAttemptAt = lastUserActivityAt
   document.addEventListener('pointerdown', recordUserActivity, { passive: true })
   document.addEventListener('keydown', recordUserActivity, { passive: true })
   document.addEventListener('touchstart', recordUserActivity, { passive: true })
+  document.addEventListener('pointermove', recordThrottledUserActivity, { passive: true })
+  document.addEventListener('wheel', recordThrottledUserActivity, { passive: true })
+  window.addEventListener('scroll', recordThrottledUserActivity, { passive: true })
   document.addEventListener('visibilitychange', handleVisibilityChange)
   idleListenersRegistered = true
   scheduleIdleCheck()
@@ -668,10 +825,14 @@ function handleReauthRequired(event) {
   if (!event?.detail?.resolve || reauthRequest) return
   reauthRequest = event.detail
   reauthPassword.value = ''
-  reauthTotpCode.value = ''
   reauthError.value = ''
   showReauthModal.value = true
   nextTick(() => reauthPasswordInput.value?.focus())
+}
+
+function handleSessionExpired(event) {
+  event?.preventDefault?.()
+  expireSessionAndRedirect(event?.detail?.reason || 'session-expired')
 }
 
 function cancelReauthentication() {
@@ -681,7 +842,6 @@ function cancelReauthentication() {
   reauthRequest = null
   showReauthModal.value = false
   reauthPassword.value = ''
-  reauthTotpCode.value = ''
   reauthError.value = ''
 }
 
@@ -690,17 +850,15 @@ async function submitReauthentication() {
   reauthLoading.value = true
   reauthError.value = ''
   try {
-    await reauthenticate(reauthPassword.value, reauthTotpCode.value)
+    await reauthenticate(reauthPassword.value)
     reauthRequest.resolve(true)
     reauthRequest = null
     showReauthModal.value = false
     reauthPassword.value = ''
-    reauthTotpCode.value = ''
   } catch (error) {
     reauthError.value = error?.message || '再認証に失敗しました'
     // Never retain credentials after a failed attempt.
     reauthPassword.value = ''
-    reauthTotpCode.value = ''
     await nextTick()
     reauthPasswordInput.value?.focus()
   } finally {
@@ -731,15 +889,14 @@ function handleGlobalClick() {
 
 // 初期化
 onMounted(async () => {
+  componentMounted = true
   document.addEventListener('click', handleGlobalClick)
   window.addEventListener('omni-money:reauth-required', handleReauthRequired)
+  window.addEventListener('omni-money:session-expired', handleSessionExpired)
   reauthListenerRegistered = true
   try {
     const authStatus = await getAuthStatus()
-    // The same server flag controls both the login form and the recent-auth
-    // dialog, so a TOTP field is never shown when TOTP is disabled.
-    totpRequired.value = Boolean(authStatus?.totp_required)
-    if (!isWailsMode && authStatus?.authenticated) {
+    if (componentMounted && !isWailsMode && authStatus?.authenticated) {
       const serverIdleSeconds = Number(authStatus?.idle_timeout_seconds)
       if (Number.isFinite(serverIdleSeconds) && serverIdleSeconds > 0) {
         startIdleLock(serverIdleSeconds)
@@ -766,10 +923,12 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  componentMounted = false
   document.removeEventListener('click', handleGlobalClick)
   stopIdleLock()
   if (reauthListenerRegistered) {
     window.removeEventListener('omni-money:reauth-required', handleReauthRequired)
+    window.removeEventListener('omni-money:session-expired', handleSessionExpired)
   }
   if (reauthRequest?.reject) {
     reauthRequest.reject(new Error('再認証ダイアログが終了しました'))

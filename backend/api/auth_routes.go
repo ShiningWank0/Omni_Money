@@ -39,6 +39,7 @@ func handleAuthLogin(authManager *middleware.AuthSessionManager) http.HandlerFun
 		if !reserveAuthAttempt(w, authManager, clientIP, "login") {
 			return
 		}
+		// Login always performs the full password + configured TOTP check.
 		valid, busy := authManager.VerifyCredentials(request.Password, request.TOTPCode)
 		if busy {
 			auditAuth("login_busy", clientIP, "")
@@ -84,7 +85,9 @@ func handleAuthReauthenticate(authManager *middleware.AuthSessionManager) http.H
 		if !reserveAuthAttempt(w, authManager, clientIP, "reauth") {
 			return
 		}
-		valid, busy := authManager.VerifyCredentials(request.Password, request.TOTPCode)
+		// In-session step-up deliberately verifies password only. Login's
+		// VerifyCredentials path remains the sole full password+TOTP check.
+		valid, busy := authManager.VerifyPasswordOnlyForReauthentication(request.Password)
 		if busy {
 			auditAuth("reauth_busy", clientIP, "")
 			writeAuthRateLimited(w, time.Second)
@@ -101,13 +104,36 @@ func handleAuthReauthenticate(authManager *middleware.AuthSessionManager) http.H
 		rotated, err := authManager.SessionManager().RotateAfterReauthentication(current.ID)
 		if err != nil {
 			auditAuth("reauth_failed", clientIP, "session_rotation")
-			jsonError(w, "再認証に失敗しました", http.StatusUnauthorized)
+			// The session can expire or be invalidated after the outer session and
+			// CSRF checks but while bcrypt is running. Treat that race as a full
+			// session expiry so the browser leaves the step-up dialog and returns to
+			// login instead of asking for the password again indefinitely.
+			authManager.SessionManager().ClearSessionCookie(w, r)
+			writeAuthRequired(w)
 			return
 		}
 		authManager.SessionManager().SetSessionCookie(w, r, rotated)
 		auditAuth("reauth_succeeded", clientIP, "")
 		writeAuthenticatedResponse(w, rotated, "再認証しました")
 	}
+}
+
+// handleAuthKeepalive records visible, user-driven activity without returning
+// session metadata or rotating any credential. SessionAuthMiddleware has
+// already touched LastSeenAt before this handler runs, and CSRFMiddleware
+// requires the existing session-bound token for this unsafe method.
+func handleAuthKeepalive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if _, ok := middleware.SessionFromContext(r.Context()); !ok {
+		jsonError(w, "認証が必要です", http.StatusUnauthorized)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", "0")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func handleAuthLogout(authManager *middleware.AuthSessionManager) http.HandlerFunc {
@@ -292,6 +318,14 @@ func writeAuthRateLimited(w http.ResponseWriter, retryAfter time.Duration) {
 func writeInvalidCredentials(w http.ResponseWriter) {
 	jsonResponse(w, map[string]string{
 		"error": "認証情報を確認してください",
+	}, http.StatusUnauthorized)
+}
+
+func writeAuthRequired(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	jsonResponse(w, map[string]interface{}{
+		"error":          "認証が必要です",
+		"login_required": true,
 	}, http.StatusUnauthorized)
 }
 

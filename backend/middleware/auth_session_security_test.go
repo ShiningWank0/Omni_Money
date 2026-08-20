@@ -78,6 +78,32 @@ func TestPasswordVerificationSemaphoreFailsBusyWithoutStartingExtraBcrypt(t *tes
 	}
 }
 
+func TestPasswordOnlyReauthenticationDoesNotConsumeOrRequireTOTP(t *testing.T) {
+	sessionManager := NewSessionManager(time.Hour)
+	t.Cleanup(sessionManager.Close)
+	verifier := &countingOneTimeCodeVerifier{}
+	authManager := NewAuthSessionManager(sessionManager, securityTestPasswordHash, verifier)
+
+	if valid, busy := authManager.VerifyPasswordOnlyForReauthentication("test-password"); !valid || busy {
+		t.Fatalf("password-only reauthentication valid=%v busy=%v, want true false", valid, busy)
+	}
+	if verifier.calls != 0 {
+		t.Fatalf("password-only reauthentication called TOTP verifier %d times", verifier.calls)
+	}
+	if valid, busy := authManager.VerifyPasswordOnlyForReauthentication("wrong-password"); valid || busy {
+		t.Fatalf("wrong password-only reauthentication valid=%v busy=%v, want false false", valid, busy)
+	}
+}
+
+type countingOneTimeCodeVerifier struct {
+	calls int
+}
+
+func (v *countingOneTimeCodeVerifier) VerifyAndConsume(string) error {
+	v.calls++
+	return nil
+}
+
 func TestPasswordVerificationDoesNotTrimCredential(t *testing.T) {
 	sessionManager := NewSessionManager(time.Hour)
 	t.Cleanup(sessionManager.Close)

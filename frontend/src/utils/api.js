@@ -144,23 +144,58 @@ export async function login(password, totpCode = '') {
 /**
  * 最近の再認証を行い、サーバーが発行したCSRFトークンを更新する。
  * @param {string} password
- * @param {string} totpCode
  * @returns {Promise<object>}
  */
-export async function reauthenticate(password, totpCode = '') {
+export async function reauthenticate(password) {
   if (isWails) return { authenticated: true }
 
   const res = await apiFetch('/api/auth/reauth', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password, totp_code: totpCode })
+    body: JSON.stringify({ password })
   }, { skipAuthRedirect: true, skipReauth: true })
   const data = await res.json()
+  // A wrong password should keep the confirmation dialog open, but the
+  // session can expire while that dialog is displayed. In that case the
+  // server marks the 401 explicitly and there is no session left to confirm;
+  // clear the in-memory CSRF token and return to the full login flow (which
+  // will request TOTP again when it is configured). App.vue handles the event
+  // synchronously to purge sensitive state before navigation.
+  if (res.status === 401 && data?.login_required) {
+    csrfToken = null
+    const expiryEvent = new CustomEvent('omni-money:session-expired', {
+      cancelable: true,
+      detail: { reason: 'session-expired' }
+    })
+    window.dispatchEvent(expiryEvent)
+    // App.vue normally handles this synchronously so it can purge in-memory
+    // financial state before navigating. Keep a fallback for a stale page or
+    // a non-App caller that has no listener.
+    if (!expiryEvent.defaultPrevented && window.location.pathname !== '/login') {
+      window.location.replace('/login?reason=session-expired')
+    }
+    throw new Error('セッションの有効期限が切れました')
+  }
   if (!res.ok) {
     throw new Error(data?.error || '再認証に失敗しました')
   }
   rememberAuthToken(data)
   return data
+}
+
+/**
+ * Record visible, user-driven activity without returning session metadata.
+ * Heartbeats are best-effort: a concurrent re-authentication may rotate the
+ * session while one is in flight, so callers must not redirect on failure.
+ * @returns {Promise<number>} HTTP status (204 means success)
+ */
+export async function keepAlive() {
+  if (isWails) return 204
+
+  const res = await apiFetch('/api/auth/keepalive', {
+    method: 'POST'
+  }, { skipAuthRedirect: true, skipReauth: true })
+  return res.status
 }
 
 /**

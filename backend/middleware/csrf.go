@@ -97,12 +97,10 @@ func writeCSRFRejected(w http.ResponseWriter) {
 	})
 }
 
-// RecentAuthMiddleware requires newly verified Omni credentials for all
-// financial data access and mutations, as well as bulk export/import,
-// destructive restore, AI-console access, and global logout. A stolen but
-// otherwise valid session therefore cannot be used indefinitely to read or
-// modify the household's financial record without another password (and,
-// when configured, TOTP) check.
+// RecentAuthMiddleware requires newly verified Omni credentials only for
+// explicitly high-impact operations. Ordinary financial reads and CRUD remain
+// available to a valid session; high-impact export/import, snapshots, global
+// logout, and AI-console operations require recent authentication.
 func RecentAuthMiddleware(sessionManager *SessionManager, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !requiresRecentAuthentication(r) {
@@ -134,50 +132,15 @@ func requiresRecentAuthentication(r *http.Request) bool {
 		return true
 	case path == "/api/snapshots/restore" && method == http.MethodPost:
 		return true
-	case path == "/api/snapshots" && (method == http.MethodGet || method == http.MethodPost):
+	case path == "/api/snapshots" && method == http.MethodPost:
 		return true
 	case path == "/api/auth/logout-all" && method == http.MethodPost:
 		return true
 	case (path == "/api/ai-console/transactions" || path == "/api/ai-console/analysis") && method == http.MethodPost:
 		return true
-	case (path == "/api/accounts" || path == "/api/items" ||
-		path == "/api/balance_history" || path == "/api/balance_history_filtered") && method == http.MethodGet:
-		return true
-	case path == "/api/transactions" && (method == http.MethodGet || method == http.MethodPost):
-		return true
-	case hasRoutePrefix(path, "/api/transactions/") &&
-		(method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete):
-		return true
-	case (path == "/api/credit_card_settings" || path == "/api/bank_account_settings") &&
-		(method == http.MethodGet || method == http.MethodPost):
-		return true
-	case hasRoutePrefix(path, "/api/transaction_images/") &&
-		(method == http.MethodGet || method == http.MethodPost || method == http.MethodDelete):
-		return true
-	case path == "/api/tags" && (method == http.MethodGet || method == http.MethodPost):
-		return true
-	case path == "/api/tags/path" && method == http.MethodPost:
-		return true
-	case path == "/api/tags/summary" && method == http.MethodGet:
-		return true
-	case hasRoutePrefix(path, "/api/tags/") &&
-		(method == http.MethodPut || method == http.MethodDelete):
-		return true
-	case hasRoutePrefix(path, "/api/transaction_tags/") &&
-		(method == http.MethodGet || method == http.MethodPost || method == http.MethodDelete):
-		return true
-	case hasRoutePrefix(path, "/api/transaction_links/") &&
-		(method == http.MethodGet || method == http.MethodPost || method == http.MethodDelete):
-		return true
 	default:
 		return false
 	}
-}
-
-// hasRoutePrefix matches a path parameter route while avoiding lookalike
-// endpoints such as /api/transactions (which have their own method matrix).
-func hasRoutePrefix(path, prefix string) bool {
-	return strings.HasPrefix(path, prefix) && len(path) > len(prefix)
 }
 
 // NoStoreAPIMiddleware prevents browsers and intermediary caches from keeping
