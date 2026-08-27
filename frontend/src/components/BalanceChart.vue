@@ -232,7 +232,10 @@ const chartOptions = computed(() => ({
             return '¥' + (value / 1000000).toFixed(1) + 'M'
           }
           if (Math.abs(value) >= 10000) {
-            return '¥' + (value / 10000).toFixed(0) + '万'
+            return '¥' + (value / 10000).toLocaleString('ja-JP', {
+              minimumFractionDigits: 0,
+              maximumFractionDigits: 2,
+            }) + '万'
           }
           return '¥' + value.toLocaleString('ja-JP')
         },

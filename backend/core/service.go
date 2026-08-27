@@ -117,17 +117,18 @@ func GetItems(account string) ([]string, error) {
 func GetTransactions(account string, search string) ([]models.TransactionResponse, error) {
 	db := database.GetDB()
 
-	query := "SELECT id, account, date, item, type, amount, balance, memo FROM transactions WHERE 1=1"
+	whereClause := " WHERE 1=1"
 	args := []interface{}{}
 
 	if account != "" {
-		query += " AND account = ?"
+		whereClause += " AND account = ?"
 		args = append(args, account)
 	}
 	if search != "" {
-		query += " AND (item LIKE ? OR memo LIKE ?)"
+		whereClause += " AND (item LIKE ? OR memo LIKE ?)"
 		args = append(args, "%"+search+"%", "%"+search+"%")
 	}
+	query := "SELECT id, account, date, item, type, amount, balance, memo FROM transactions" + whereClause
 	query += " ORDER BY date, id"
 
 	rows, err := db.Query(query, args...)
@@ -145,14 +146,71 @@ func GetTransactions(account string, search string) ([]models.TransactionRespons
 		}
 		t.Date = parseDate(dateStr)
 		resp := t.ToResponse()
-		resp.Tags, _ = GetTransactionTags(int64(t.ID))
 		transactions = append(transactions, resp)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("取引履歴行取得エラー: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("取引履歴行クローズエラー: %w", err)
+	}
+
+	// 取引ごとのタグを1件ずつ取得すると取引件数に比例してSQLが増えるため、
+	// 同じ取引フィルターを使った1回のJOINでまとめて取得する。
+	tagsByTransaction, err := getTransactionTagsForFilteredTransactions(db, whereClause, args)
+	if err != nil {
+		return nil, fmt.Errorf("取引タグ一括取得エラー: %w", err)
+	}
+	for i := range transactions {
+		tags := tagsByTransaction[transactions[i].ID]
+		if tags == nil {
+			tags = []models.Tag{}
+		}
+		transactions[i].Tags = tags
 	}
 
 	if transactions == nil {
 		transactions = []models.TransactionResponse{}
 	}
 	return transactions, nil
+}
+
+// getTransactionTagsForFilteredTransactions はGetTransactionsと同じ条件に一致する
+// 取引のタグを一括取得する。タグ順序は従来のGetTransactionTagsと同じlevel, name順。
+func getTransactionTagsForFilteredTransactions(db *sql.DB, whereClause string, args []interface{}) (map[int64][]models.Tag, error) {
+	query := `WITH filtered_transactions AS (
+		SELECT id FROM transactions` + whereClause + `
+	)
+	SELECT ft.id, t.id, t.name, t.parent_id, t.level
+	FROM filtered_transactions ft
+	INNER JOIN transaction_tags tt ON tt.transaction_id = ft.id
+	INNER JOIN tags t ON t.id = tt.tag_id
+	ORDER BY ft.id, t.level, t.name`
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tagsByTransaction := make(map[int64][]models.Tag)
+	for rows.Next() {
+		var transactionID int64
+		var tag models.Tag
+		var parentID sql.NullInt64
+		if err := rows.Scan(&transactionID, &tag.ID, &tag.Name, &parentID, &tag.Level); err != nil {
+			return nil, err
+		}
+		if parentID.Valid {
+			pid := parentID.Int64
+			tag.ParentID = &pid
+		}
+		tagsByTransaction[transactionID] = append(tagsByTransaction[transactionID], tag)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return tagsByTransaction, nil
 }
 
 // AddTransaction は新しい取引を追加する
