@@ -5,6 +5,23 @@ import (
 	"time"
 )
 
+func TestVerifyPasswordPreservesBcryptBehavior(t *testing.T) {
+	const hash = "$2y$04$.OWNgfSMaTsdqHrwD6ydEeCs3dBUsAzNlpFzq3kJuK4BtUqU8E0WG"
+	sessionManager := NewSessionManager(time.Hour)
+	defer sessionManager.Close()
+
+	manager := NewAuthSessionManager(sessionManager, hash)
+	if !manager.VerifyPassword("test-password") {
+		t.Fatal("valid bcrypt password was rejected")
+	}
+	if manager.VerifyPassword("wrong-password") {
+		t.Fatal("invalid bcrypt password was accepted")
+	}
+	if NewAuthSessionManager(sessionManager, "not-a-bcrypt-hash").VerifyPassword("test-password") {
+		t.Fatal("malformed bcrypt hash was accepted")
+	}
+}
+
 func TestAuthSessionManagerGCOldLoginAttempts(t *testing.T) {
 	sessionManager := NewSessionManager(time.Hour)
 	defer sessionManager.Close()
