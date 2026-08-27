@@ -62,6 +62,7 @@ export async function apiFetch(url, options = {}, config = {}) {
   const response = await fetch(url, {
     credentials: 'include',
     ...options,
+    cache: 'no-store',
     headers
   })
 
@@ -78,7 +79,7 @@ export async function apiFetch(url, options = {}, config = {}) {
   if (!isWailsMode && !skipAuthRedirect && response.status === 401) {
     const skipPaths = new Set(['/api/auth/login', '/api/auth/status'])
     if (!skipPaths.has(path) && window.location.pathname !== '/login') {
-      window.location.href = '/login'
+      window.location.replace('/login')
     }
     throw new Error('認証が必要です')
   }

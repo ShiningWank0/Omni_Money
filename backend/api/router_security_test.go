@@ -125,7 +125,7 @@ func TestAIRouterRequiresBearerToken(t *testing.T) {
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("AI専用ポートの未認証アクセス status = %d, want %d", recorder.Code, http.StatusUnauthorized)
 	}
-	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+	if got := recorder.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
 		t.Fatalf("Cache-Control = %q, want no-store", got)
 	}
 }
@@ -173,6 +173,28 @@ func TestHealthEndpointDoesNotExposeData(t *testing.T) {
 	}
 }
 
+func TestPublicRouterPreventsCachingPrivateAndHTMLResponses(t *testing.T) {
+	handler := newTestPublicRouter(t)
+
+	apiRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(apiRecorder, httptest.NewRequest(http.MethodGet, "/api/accounts", nil))
+	if apiRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated API status = %d, want %d", apiRecorder.Code, http.StatusUnauthorized)
+	}
+	if got := apiRecorder.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
+		t.Fatalf("API Cache-Control = %q, want no-store", got)
+	}
+	if got := apiRecorder.Header().Get("Surrogate-Control"); got != "no-store" {
+		t.Fatalf("API Surrogate-Control = %q, want no-store", got)
+	}
+
+	htmlRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(htmlRecorder, httptest.NewRequest(http.MethodGet, "/login", nil))
+	if got := htmlRecorder.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("HTML Cache-Control = %q, want no-cache", got)
+	}
+}
+
 func TestAIRouterAuthorizedTransactionAndAnalysis(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "omni_money_test.db")
 	if err := database.InitDB(dbPath); err != nil {
@@ -207,7 +229,7 @@ func TestAIRouterAuthorizedTransactionAndAnalysis(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("AI analysis status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
-	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+	if got := recorder.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
 		t.Fatalf("Cache-Control = %q, want no-store", got)
 	}
 
@@ -421,7 +443,7 @@ func TestAIConsoleProxyKeepsTokenServerSide(t *testing.T) {
 	if gotPath != "/api/v1/ai/transactions" {
 		t.Fatalf("path = %q", gotPath)
 	}
-	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+	if got := recorder.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
 		t.Fatalf("Cache-Control = %q, want no-store", got)
 	}
 }
