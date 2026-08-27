@@ -391,7 +391,7 @@ func TestTransactionImageAPIRejectsInvalidContentAndReportsUsage(t *testing.T) {
 	}
 
 	t.Setenv("AUTH_PASSWORD_HASH", testPasswordHash)
-	handler := NewRouter()
+	handler := newTestPublicRouter(t)
 	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"test-password"}`))
 	loginReq.Header.Set("Content-Type", "application/json")
 	loginRecorder := httptest.NewRecorder()
@@ -406,6 +406,7 @@ func TestTransactionImageAPIRejectsInvalidContentAndReportsUsage(t *testing.T) {
 		strings.NewReader(`{"filename":"fake.png","mime_type":"image/png","data":"bm90IGFuIGltYWdl"}`),
 	)
 	imageReq.Header.Set("Content-Type", "application/json")
+	imageReq.Header.Set("X-CSRF-Token", csrfFromAuthResponse(t, loginRecorder))
 	for _, cookie := range loginRecorder.Result().Cookies() {
 		imageReq.AddCookie(cookie)
 	}
