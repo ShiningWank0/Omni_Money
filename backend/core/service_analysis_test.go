@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"testing"
 
 	"omni_money/backend/database"
@@ -40,6 +41,9 @@ func TestAnalyzeTransactionsAppliesAccountAndTagFiltersToTagSummaries(t *testing
 	if tagResult.Count != 2 || tagResult.TotalExpense != 500 {
 		t.Fatalf("filtered analysis count=%d expense=%d, want 2 and 500", tagResult.Count, tagResult.TotalExpense)
 	}
+	if len(tagResult.Transactions) != 0 || tagResult.ReturnedCount != 0 {
+		t.Fatalf("summary-only analysis leaked transactions: %#v", tagResult.Transactions)
+	}
 	assertAnalysisTagSummary(t, tagResult.TagSummaries, "food", 500, 2)
 	assertAnalysisTagSummary(t, tagResult.TagSummaries, "shared", 400, 1)
 	assertAnalysisTagSummaryAbsent(t, tagResult.TagSummaries, "travel")
@@ -50,6 +54,82 @@ func TestAnalyzeTransactionsAppliesAccountAndTagFiltersToTagSummaries(t *testing
 	}
 	if emptyResult.Count != 0 || len(emptyResult.TagSummaries) != 0 {
 		t.Fatalf("unknown tag result = count:%d summaries:%#v", emptyResult.Count, emptyResult.TagSummaries)
+	}
+}
+
+func TestAnalyzeTransactionsDetailsUseStableBoundedPagination(t *testing.T) {
+	setupCoreTestDB(t)
+	wantIDs := make(map[int64]struct{})
+	for i := 0; i < 5; i++ {
+		id := insertTestTransaction(t, "cash", fmt.Sprintf("2026-07-%02d", i+1), fmt.Sprintf("item-%d", i), "expense", int64(i+1)*100, -100)
+		wantIDs[id] = struct{}{}
+	}
+	insertTestTransaction(t, "bank", "2026-07-03", "out-of-scope", "expense", 999, -999)
+
+	request := models.AnalysisRequest{
+		Account:             "cash",
+		StartDate:           "2026-07-01",
+		EndDate:             "2026-07-31",
+		IncludeTransactions: true,
+		Limit:               2,
+	}
+	seen := make(map[int64]struct{})
+	for {
+		response, err := AnalyzeTransactions(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.Count != 5 || response.ReturnedCount < 1 || response.ReturnedCount > 2 {
+			t.Fatalf("page metadata = count:%d returned:%d", response.Count, response.ReturnedCount)
+		}
+		for _, transaction := range response.Transactions {
+			if transaction.Account != "cash" || transaction.Memo != "" {
+				t.Fatalf("detail leaked account or memo: %#v", transaction)
+			}
+			if _, duplicate := seen[transaction.ID]; duplicate {
+				t.Fatalf("duplicate transaction across pages: %d", transaction.ID)
+			}
+			seen[transaction.ID] = struct{}{}
+		}
+		if response.NextCursor == "" {
+			break
+		}
+		request.Cursor = response.NextCursor
+	}
+	if len(seen) != len(wantIDs) {
+		t.Fatalf("seen IDs = %#v, want %#v", seen, wantIDs)
+	}
+	for id := range wantIDs {
+		if _, ok := seen[id]; !ok {
+			t.Fatalf("transaction %d missing from pagination", id)
+		}
+	}
+
+	request.Cursor = "invalid"
+	if _, err := AnalyzeTransactions(request); err == nil {
+		t.Fatal("invalid cursor was accepted")
+	}
+	request.Cursor = ""
+	request.Limit = maxAIAnalysisLimit + 1
+	if _, err := AnalyzeTransactions(request); err == nil {
+		t.Fatal("oversized detail limit was accepted")
+	}
+}
+
+func TestTruncateTagSummariesBoundsNestedResponse(t *testing.T) {
+	summaries := []models.TagSummary{
+		{TagID: 1, Children: []models.TagSummary{{TagID: 2}, {TagID: 3}}},
+		{TagID: 4},
+	}
+	remaining := 2
+	got := truncateTagSummaries(summaries, &remaining)
+	if len(got) != 1 || got[0].TagID != 1 || len(got[0].Children) != 1 || got[0].Children[0].TagID != 2 {
+		t.Fatalf("truncated summaries = %#v", got)
+	}
+	var count int
+	countTagSummaries(got, &count)
+	if count != 2 || remaining != 0 {
+		t.Fatalf("count=%d remaining=%d, want 2,0", count, remaining)
 	}
 }
 

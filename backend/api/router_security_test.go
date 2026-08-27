@@ -5,19 +5,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"omni_money/backend/aicredentials"
+	"omni_money/backend/audithmac"
 	"omni_money/backend/database"
 	"omni_money/backend/models"
 	"omni_money/backend/validation"
 )
 
-const testAIToken = "0123456789abcdef0123456789abcdef"
+const testAIToken = "0123456789abcdef0123456789abcdef0123456789A"
 const testPasswordHash = "$2y$12$TMw6R8z61SPOp1Y/4t3mLu/LVqe3.L5d5.H9piLwdDjKpSytNxaEi"
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -48,7 +52,6 @@ func csrfFromAuthResponse(t *testing.T, recorder *httptest.ResponseRecorder) str
 }
 
 func TestPublicRouterDoesNotAllowAITokenToBypassSession(t *testing.T) {
-	t.Setenv("AI_API_TOKEN", testAIToken)
 	handler := newTestPublicRouter(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/analysis", nil)
@@ -102,7 +105,7 @@ func TestAIConsoleRequiresWebSession(t *testing.T) {
 }
 
 func TestAIRouterDoesNotExposeRegularAPIs(t *testing.T) {
-	handler := NewAIRouter(testAIToken)
+	handler := newTestAIRouter(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/accounts", nil)
 	req.Header.Set("Authorization", "Bearer "+testAIToken)
@@ -116,7 +119,7 @@ func TestAIRouterDoesNotExposeRegularAPIs(t *testing.T) {
 }
 
 func TestAIRouterRequiresBearerToken(t *testing.T) {
-	handler := NewAIRouter(testAIToken)
+	handler := newTestAIRouter(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/analysis", nil)
 	recorder := httptest.NewRecorder()
@@ -132,7 +135,7 @@ func TestAIRouterRequiresBearerToken(t *testing.T) {
 }
 
 func TestAIRouterRejectsWrongBearerToken(t *testing.T) {
-	handler := NewAIRouter(testAIToken)
+	handler := newTestAIRouter(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/analysis", nil)
 	req.Header.Set("Authorization", "Bearer 0123456789abcdef0123456789abcdeg")
@@ -146,7 +149,7 @@ func TestAIRouterRejectsWrongBearerToken(t *testing.T) {
 }
 
 func TestAIRouterRejectsNonPOSTWithValidToken(t *testing.T) {
-	handler := NewAIRouter(testAIToken)
+	handler := newTestAIRouter(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/ai/analysis", nil)
 	req.Header.Set("Authorization", "Bearer "+testAIToken)
@@ -203,7 +206,7 @@ func TestAIRouterAuthorizedTransactionAndAnalysis(t *testing.T) {
 	}
 	t.Cleanup(database.CloseDB)
 
-	handler := NewAIRouter(testAIToken)
+	handler := newTestAIRouter(t)
 	today := time.Now().Format("2006-01-02")
 	postAITransaction(t, handler, fmt.Sprintf(`{
 		"account":"cash",
@@ -213,15 +216,21 @@ func TestAIRouterAuthorizedTransactionAndAnalysis(t *testing.T) {
 		"amount":123,
 		"memo":"AI専用APIの正常系"
 	}`, today))
-	postAITransaction(t, handler, fmt.Sprintf(`{
-		"account":"bank",
-		"date":%q,
-		"item":"対象外取引",
-		"type":"expense",
-		"amount":456
-	}`, today))
+	if _, err := database.GetDB().Exec(`
+		INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+		VALUES (?, ?, ?, ?, ?, ?, '')
+	`, "bank", today, "対象外取引", "expense", 456, -456); err != nil {
+		t.Fatalf("insert out-of-scope transaction: %v", err)
+	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/analysis", strings.NewReader(`{"account":"cash"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/analysis", strings.NewReader(fmt.Sprintf(`{
+		"account":"cash",
+		"start_date":%q,
+		"end_date":%q,
+		"include_transactions":true,
+		"include_memo":true,
+		"limit":100
+	}`, today, today)))
 	req.Header.Set("Authorization", "Bearer "+testAIToken)
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
@@ -300,6 +309,11 @@ func TestAITransactionRequiresFields(t *testing.T) {
 		{name: "type", mutate: func(req *models.TransactionRequest) { req.Type = "other" }},
 		{name: "amount", mutate: func(req *models.TransactionRequest) { req.Amount = 0 }},
 		{name: "amount上限超過", mutate: func(req *models.TransactionRequest) { req.Amount = validation.MaxTransactionAmount + 1 }},
+		{name: "account length", mutate: func(req *models.TransactionRequest) { req.Account = strings.Repeat("a", maxAIAccountBytes+1) }},
+		{name: "item length", mutate: func(req *models.TransactionRequest) { req.Item = strings.Repeat("i", maxAIItemBytes+1) }},
+		{name: "memo length", mutate: func(req *models.TransactionRequest) { req.Memo = strings.Repeat("m", maxAIMemoBytes+1) }},
+		{name: "item control", mutate: func(req *models.TransactionRequest) { req.Item = "food\nforged" }},
+		{name: "memo format rune", mutate: func(req *models.TransactionRequest) { req.Memo = "hidden\u200btext" }},
 	}
 
 	for _, tt := range tests {
@@ -352,8 +366,14 @@ func TestAITransactionRejectsInvalidTagsAndImages(t *testing.T) {
 
 	unknownTag := valid
 	unknownTag.Tags = []int64{999999}
-	if _, err := validateAITransactionReferences(unknownTag); err == nil {
+	if _, err := validateAITransactionReferences(unknownTag, &aicredentials.Credential{AllowedTagIDs: []int64{999999}}); err == nil {
 		t.Fatal("expected unknown tag validation error")
+	}
+
+	tooManyTags := valid
+	tooManyTags.Tags = make([]int64, maxAITagIDs+1)
+	if _, err := validateAITransactionReferences(tooManyTags, nil); err == nil {
+		t.Fatal("expected tag count validation error")
 	}
 
 	invalidImage := valid
@@ -366,7 +386,7 @@ func TestAITransactionRejectsInvalidTagsAndImages(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+testAIToken)
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
-	NewAIRouter(testAIToken).ServeHTTP(recorder, req)
+	newTestAIRouter(t).ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("invalid AI image status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
 	}
@@ -477,26 +497,43 @@ func TestPublicTransactionDoesNotUseAIDateWindow(t *testing.T) {
 
 func TestAIConsoleProxyKeepsTokenServerSide(t *testing.T) {
 	var gotAuthorization string
+	var gotRelayMarker string
+	var gotIdempotencyKey string
 	var gotHost string
 	var gotPath string
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		gotAuthorization = r.Header.Get("Authorization")
+		gotRelayMarker = r.Header.Get("X-Omni-AI-Console-Relay")
+		gotIdempotencyKey = r.Header.Get("Idempotency-Key")
 		gotHost = r.URL.Host
 		gotPath = r.URL.Path
 		return &http.Response{
 			StatusCode: http.StatusCreated,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
-			Request:    r,
+			Header: http.Header{
+				"Content-Type":         []string{"application/json"},
+				"Idempotency-Replayed": []string{"true"},
+				"Retry-After":          []string{"123"},
+			},
+			Body:    io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Request: r,
 		}, nil
 	})}
 	originalClient := aiConsoleHTTPClient
 	aiConsoleHTTPClient = client
 	t.Cleanup(func() { aiConsoleHTTPClient = originalClient })
-	t.Setenv("AI_API_TOKEN", testAIToken)
+	tokenFile := filepath.Join(t.TempDir(), "ai-console-token")
+	if err := os.WriteFile(tokenFile, []byte(testAIToken+"\n"), 0o600); err != nil {
+		t.Fatalf("write console token: %v", err)
+	}
+	t.Setenv("AI_CONSOLE_TOKEN_FILE", tokenFile)
 	t.Setenv("AI_PORT", "43123")
+	var consoleAudit bytes.Buffer
+	originalLogOutput := log.Writer()
+	log.SetOutput(&consoleAudit)
+	t.Cleanup(func() { log.SetOutput(originalLogOutput) })
 
 	req := httptest.NewRequest(http.MethodPost, "/api/ai-console/transactions", strings.NewReader(`{"amount":100}`))
+	req.Header.Set("Idempotency-Key", "console-idempotency-key-0001")
 	recorder := httptest.NewRecorder()
 	handleAIConsoleProxy("/api/v1/ai/transactions").ServeHTTP(recorder, req)
 
@@ -506,14 +543,29 @@ func TestAIConsoleProxyKeepsTokenServerSide(t *testing.T) {
 	if gotAuthorization != "Bearer "+testAIToken {
 		t.Fatalf("Authorization = %q", gotAuthorization)
 	}
+	if gotIdempotencyKey != "console-idempotency-key-0001" {
+		t.Fatalf("Idempotency-Key = %q", gotIdempotencyKey)
+	}
+	if recorder.Header().Get("Idempotency-Replayed") != "true" || recorder.Header().Get("Retry-After") != "123" {
+		t.Fatalf("safe upstream headers were not relayed: %v", recorder.Header())
+	}
 	if gotHost != "127.0.0.1:43123" {
 		t.Fatalf("host = %q, want fixed loopback target", gotHost)
 	}
 	if gotPath != "/api/v1/ai/transactions" {
 		t.Fatalf("path = %q", gotPath)
 	}
+	if gotRelayMarker != "1" {
+		t.Fatalf("relay marker = %q, want 1", gotRelayMarker)
+	}
 	if got := recorder.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
 		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if !strings.Contains(consoleAudit.String(), "AI_CONSOLE_AUDIT") || !strings.Contains(consoleAudit.String(), `"client_ip":"192.0.2.1"`) {
+		t.Fatalf("console audit missing: %q", consoleAudit.String())
+	}
+	if strings.Contains(consoleAudit.String(), testAIToken) || strings.Contains(consoleAudit.String(), `"amount":100`) {
+		t.Fatalf("console audit leaked request data: %q", consoleAudit.String())
 	}
 }
 
@@ -537,7 +589,6 @@ func TestAIConsoleProxyRejectsUnapprovedTargetsBeforeNetworkAccess(t *testing.T)
 	}
 
 	for _, raw := range []string{
-		"https://127.0.0.1:43123/api/v1/ai/analysis",
 		"http://example.com:43123/api/v1/ai/analysis",
 		"http://127.0.0.1:43123/api/v1/ai/analysis?redirect=1",
 		"http://127.0.0.1:43123/api/v1/ai/unapproved",
@@ -548,25 +599,92 @@ func TestAIConsoleProxyRejectsUnapprovedTargetsBeforeNetworkAccess(t *testing.T)
 	}
 }
 
+func newTestAIRouter(t *testing.T) http.Handler {
+	t.Helper()
+	return newTestAIRouterWithCredential(t, aicredentials.Credential{
+		ID: "test-credential",
+		Scopes: []string{
+			aicredentials.ScopeTransactionsCreate,
+			aicredentials.ScopeAnalysisSummary,
+			aicredentials.ScopeAnalysisTransactions,
+			aicredentials.ScopeAnalysisMemo,
+			aicredentials.ScopeConsoleRelay,
+		},
+		Accounts:        []string{"cash", "bank"},
+		MaxAnalysisDays: aicredentials.MaxAnalysisDays,
+		MaxResults:      aicredentials.MaxResults,
+	})
+}
+
+func newTestAIRouterWithCredential(t *testing.T, credential aicredentials.Credential) http.Handler {
+	t.Helper()
+	credentialFile := filepath.Join(t.TempDir(), "ai-credentials.json")
+	now := time.Now().UTC()
+	credential.TokenSHA256 = aicredentials.HashToken(testAIToken)
+	if credential.NotBefore.IsZero() {
+		credential.NotBefore = now.Add(-time.Hour)
+	}
+	if credential.ExpiresAt.IsZero() {
+		credential.ExpiresAt = now.Add(24 * time.Hour)
+	}
+	if credential.HasScope(aicredentials.ScopeAnalysisSummary) && credential.AnalysisStartDate == "" {
+		credential.AnalysisStartDate = "2020-01-01"
+		credential.AnalysisEndDate = "2030-12-31"
+	}
+	document := &aicredentials.File{
+		Version:     aicredentials.CurrentVersion,
+		Credentials: []aicredentials.Credential{credential},
+	}
+	if err := aicredentials.WriteFileAtomic(credentialFile, document); err != nil {
+		t.Fatalf("write AI credentials: %v", err)
+	}
+	store, err := aicredentials.NewStore(credentialFile)
+	if err != nil {
+		t.Fatalf("load AI credentials: %v", err)
+	}
+	auditFile := filepath.Join(t.TempDir(), "audit-keyring.json")
+	if _, err := audithmac.InitializeFile(auditFile, bytes.NewReader(bytes.Repeat([]byte{0x53}, 32))); err != nil {
+		t.Fatalf("write audit keyring: %v", err)
+	}
+	auditStore, err := audithmac.NewStore(auditFile)
+	if err != nil {
+		t.Fatalf("load audit keyring: %v", err)
+	}
+	return NewAIRouter(store, auditStore)
+}
+
 func postAITransaction(t *testing.T, handler http.Handler, body string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/transactions", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testAIToken)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "test-idempotency-key-0001")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("AI transaction status = %d, want %d; body=%s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	for _, forbiddenField := range []string{`"balance"`, `"memo"`, `"tags"`, `"images"`, `"amount"`, `"item"`} {
+		if strings.Contains(recorder.Body.String(), forbiddenField) {
+			t.Fatalf("AI write-only response exposed %s: %s", forbiddenField, recorder.Body.String())
+		}
 	}
 }
 
 func waitForAPISnapshot(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
+	stableSince := time.Time{}
+	lastCount := -1
 	for time.Now().Before(deadline) {
 		snapshots, err := database.ListSnapshots("")
 		if err == nil && len(snapshots) > 0 {
-			return
+			if len(snapshots) != lastCount {
+				lastCount = len(snapshots)
+				stableSince = time.Now()
+			} else if time.Since(stableSince) >= 250*time.Millisecond {
+				return
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
