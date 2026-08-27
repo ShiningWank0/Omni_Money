@@ -22,6 +22,7 @@ export const useAppStore = defineStore('app', () => {
 
     // UI状態
     const loading = ref(false)
+    let transactionRequestId = 0
 
     // 選択中の口座に含まれない口座を除いた実際の口座一覧
     const actualFundItems = computed(() => accounts.value)
@@ -38,24 +39,24 @@ export const useAppStore = defineStore('app', () => {
     const currentBalance = computed(() => {
         if (transactions.value.length === 0) return 0
 
-        // 口座ごとの最新残高を取得して合算
-        const latestBalances = {}
-        const sorted = [...transactions.value].sort((a, b) => {
-            const dateA = new Date(a.date)
-            const dateB = new Date(b.date)
-            if (dateA.getTime() !== dateB.getTime()) return dateA - dateB
-            return a.id - b.id
-        })
+        // 口座ごとの最新残高を1回の走査で取得して合算する。
+        // 画面表示用ソートとは分離し、取引件数が増えても不要な全件sortを避ける。
+        const latestByAccount = new Map()
+        const creditCards = new Set(creditCardItems.value)
 
-        for (const tx of sorted) {
-            // クレジットカード項目は残高計算から除外
-            if (creditCardItems.value.includes(tx.account || tx.fundItem)) {
-                continue
+        for (const tx of transactions.value) {
+            const account = tx.account || tx.fundItem
+            if (creditCards.has(account)) continue
+
+            const timestamp = Date.parse(tx.date) || 0
+            const current = latestByAccount.get(account)
+            if (!current || timestamp > current.timestamp ||
+                (timestamp === current.timestamp && tx.id > current.id)) {
+                latestByAccount.set(account, { balance: tx.balance, timestamp, id: tx.id })
             }
-            latestBalances[tx.account || tx.fundItem] = tx.balance
         }
 
-        return Object.values(latestBalances).reduce((sum, b) => sum + b, 0)
+        return [...latestByAccount.values()].reduce((sum, entry) => sum + entry.balance, 0)
     })
 
     // 資金項目列を表示するかどうか
@@ -79,25 +80,35 @@ export const useAppStore = defineStore('app', () => {
 
     // 取引履歴を取得
     async function fetchTransactions() {
+        const requestId = ++transactionRequestId
+        const selectedAccounts = [...selectedFundItems.value]
+        const search = searchQuery.value
         loading.value = true
         try {
-            // 選択中の口座ごとに取引を取得して結合
             let allTransactions = []
-            if (selectedFundItems.value.length === accounts.value.length) {
+            if (selectedAccounts.length === accounts.value.length) {
                 // 全選択の場合はフィルタなしで取得
-                allTransactions = await getTransactions('', searchQuery.value)
-            } else {
-                // 各口座ごとに取得
-                for (const account of selectedFundItems.value) {
-                    const txs = await getTransactions(account, searchQuery.value)
-                    allTransactions = allTransactions.concat(txs || [])
-                }
+                allTransactions = await getTransactions('', search)
+            } else if (selectedAccounts.length > 0) {
+                // 複数口座は並行取得し、直列待ちによる遅延を避ける。
+                const results = await Promise.all(
+                    selectedAccounts.map(account => getTransactions(account, search))
+                )
+                allTransactions = results.flatMap(result => result || [])
             }
-            transactions.value = allTransactions || []
+
+            // 検索入力や口座選択の連打で、古いレスポンスが最新結果を上書きしないようにする。
+            if (requestId === transactionRequestId) {
+                transactions.value = allTransactions || []
+            }
         } catch (e) {
-            console.error('取引履歴取得エラー:', e)
+            if (requestId === transactionRequestId) {
+                console.error('取引履歴取得エラー:', e)
+            }
         } finally {
-            loading.value = false
+            if (requestId === transactionRequestId) {
+                loading.value = false
+            }
         }
     }
 
@@ -152,6 +163,7 @@ export const useAppStore = defineStore('app', () => {
 
     // 全状態をリセット（スナップショット復元後などに使用）
     function resetState() {
+        transactionRequestId++
         accounts.value = []
         selectedFundItems.value = []
         creditCardItems.value = []
