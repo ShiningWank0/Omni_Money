@@ -82,10 +82,15 @@ func main() {
 	if certFile == "" && !config.IsLoopbackHost(host) && strings.TrimSpace(os.Getenv("ALLOW_INSECURE_HTTP")) == "true" {
 		log.Printf("警告: ALLOW_INSECURE_HTTP=true により非loopback HTTP待受を許可します。Dockerのhost公開先を127.0.0.1に限定してください")
 	}
+	publicTLSConfig, err := aitransport.BuildPublicServerTLSConfig(certFile, keyFile)
+	if err != nil {
+		log.Fatalf("公開WebのTLS設定が無効です: %v", err)
+	}
 
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           publicHandler,
+		TLSConfig:         publicTLSConfig,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -96,7 +101,7 @@ func main() {
 	go func() {
 		if certFile != "" {
 			log.Printf("Omni Money v%s 公開Web起動 (TLS): %s", version, addr)
-			errCh <- srv.ListenAndServeTLS(certFile, keyFile)
+			errCh <- srv.ListenAndServeTLS("", "")
 			return
 		}
 		log.Printf("Omni Money v%s 公開Web起動 (HTTP): %s", version, addr)
