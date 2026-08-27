@@ -583,10 +583,11 @@ async function logout() {
   showMenu.value = false
   try {
     await apiLogout()
-    window.location.href = '/login'
   } catch (e) {
     console.error('ログアウトエラー:', e)
-    showToast('ログアウトに失敗しました', 'error', 5000)
+  } finally {
+    clearSensitiveStateForIdle()
+    window.location.replace('/login')
   }
 }
 
@@ -663,6 +664,36 @@ function clearSensitiveStateForIdle() {
     reauthRequest.reject(new Error('セッションが無操作タイムアウトになりました'))
   }
   reauthRequest = null
+}
+
+async function fetchPrivateData() {
+  await store.fetchAccounts()
+  await store.fetchCreditCardSettings()
+  await store.fetchBankAccountSettings()
+  await store.fetchTransactions()
+}
+
+async function handlePageShow(event) {
+  if (isWailsMode || !event.persisted) return
+
+  isInitialLoading.value = true
+  clearSensitiveStateForIdle()
+  try {
+    const authStatus = await getAuthStatus()
+    if (!authStatus?.authenticated) {
+      window.location.replace('/login')
+      return
+    }
+    const serverIdleSeconds = Number(authStatus?.idle_timeout_seconds)
+    if (Number.isFinite(serverIdleSeconds) && serverIdleSeconds > 0) {
+      startIdleLock(serverIdleSeconds)
+    }
+    await fetchPrivateData()
+    isInitialLoading.value = false
+  } catch (e) {
+    console.error('キャッシュ復元後の再認証エラー:', e)
+    window.location.replace('/login')
+  }
 }
 
 function checkIdleTimeout() {
@@ -946,6 +977,7 @@ onMounted(async () => {
   document.addEventListener('click', handleGlobalClick)
   window.addEventListener('omni-money:reauth-required', handleReauthRequired)
   window.addEventListener('omni-money:session-expired', handleSessionExpired)
+  window.addEventListener('pageshow', handlePageShow)
   reauthListenerRegistered = true
   try {
     const authStatus = await getAuthStatus()
@@ -958,10 +990,7 @@ onMounted(async () => {
   } catch {
     // The normal API calls below provide the visible error/redirect behavior.
   }
-  await store.fetchAccounts()
-  await store.fetchCreditCardSettings()
-  await store.fetchBankAccountSettings()
-  await store.fetchTransactions()
+  await fetchPrivateData()
   isInitialLoading.value = false
 
   // スナップショット復元後のリロードならトースト通知を表示
@@ -979,6 +1008,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   componentMounted = false
   document.removeEventListener('click', handleGlobalClick)
+  window.removeEventListener('pageshow', handlePageShow)
   clearTimeout(searchTimeout)
   clearTimeout(toastTimer)
   stopIdleLock()
