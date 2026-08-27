@@ -189,9 +189,11 @@ func createTables() error {
 		)`,
 		// インデックス
 		`CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account)`,
+		`CREATE INDEX IF NOT EXISTS idx_transactions_account_date_id ON transactions(account, date, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date)`,
 		`CREATE INDEX IF NOT EXISTS idx_transactions_item ON transactions(item)`,
 		`CREATE INDEX IF NOT EXISTS idx_transactions_memo ON transactions(memo)`,
+		`CREATE INDEX IF NOT EXISTS idx_transaction_links_child_id ON transaction_links(child_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_images_txid ON transaction_images(transaction_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_txid ON transaction_tags(transaction_id)`,
