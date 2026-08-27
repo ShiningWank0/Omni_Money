@@ -1,10 +1,32 @@
 package database
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestEmbeddedSQLiteIncludesMemorySafetyFixes(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "sqlite-version.db")
+	if err := InitDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(CloseDB)
+
+	var version string
+	if err := GetDB().QueryRow("SELECT sqlite_version()").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("embedded SQLite: %s", version)
+	var major, minor, patch int
+	if _, err := fmt.Sscanf(version, "%d.%d.%d", &major, &minor, &patch); err != nil {
+		t.Fatalf("parse sqlite version %q: %v", version, err)
+	}
+	if major < 3 || (major == 3 && minor < 50) || (major == 3 && minor == 50 && patch < 2) {
+		t.Fatalf("embedded SQLite %s predates required memory-safety fixes in 3.50.2", version)
+	}
+}
 
 // TestRestoreSnapshotRejectsUnsafeNames はスナップショット名による
 // パストラバーサルが拒否されることを検証する回帰テスト。
