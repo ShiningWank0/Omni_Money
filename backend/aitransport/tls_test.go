@@ -16,6 +16,31 @@ import (
 	"time"
 )
 
+func TestBuildPublicServerTLSConfigLoadsIdentityIntoMemory(t *testing.T) {
+	files := writeTestPKI(t)
+	config, err := BuildPublicServerTLSConfig(files.serverCert, files.serverKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("minimum TLS version=%d", config.MinVersion)
+	}
+	if len(config.Certificates) != 1 || len(config.Certificates[0].Certificate) == 0 {
+		t.Fatalf("public certificate was not loaded into memory: %#v", config.Certificates)
+	}
+	if _, err := BuildPublicServerTLSConfig(files.serverCert, ""); err == nil {
+		t.Fatal("certificate without private key was accepted")
+	}
+}
+
+func TestBuildPublicServerTLSConfigRejectsMismatchedIdentity(t *testing.T) {
+	first := writeTestPKI(t)
+	second := writeTestPKI(t)
+	if _, err := BuildPublicServerTLSConfig(first.serverCert, second.serverKey); err == nil {
+		t.Fatal("mismatched public certificate and key were accepted")
+	}
+}
+
 func TestBuildServerTLSConfigRequiresMTLSForRemoteListener(t *testing.T) {
 	if config, err := BuildServerTLSConfig("127.0.0.1", "", "", ""); err != nil || config != nil {
 		t.Fatalf("loopback plaintext config=%#v err=%v", config, err)

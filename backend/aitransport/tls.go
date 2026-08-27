@@ -13,6 +13,39 @@ import (
 
 const maxTLSFileBytes = 2 * 1024 * 1024
 
+// BuildPublicServerTLSConfig loads the public Web identity through the same
+// bounded, symlink-safe secret boundary as the isolated AI listener. The
+// returned config owns the parsed certificate in memory, so net/http never
+// reopens attacker-replaceable paths after validation.
+func BuildPublicServerTLSConfig(certFile, keyFile string) (*tls.Config, error) {
+	certFile = strings.TrimSpace(certFile)
+	keyFile = strings.TrimSpace(keyFile)
+	if (certFile == "") != (keyFile == "") {
+		return nil, fmt.Errorf("TLS_CERT_FILE と TLS_KEY_FILE は両方指定してください")
+	}
+	if certFile == "" {
+		return nil, nil
+	}
+
+	certPEM, err := secretfile.ReadIntegrityProtected(certFile, maxTLSFileBytes)
+	if err != nil {
+		return nil, fmt.Errorf("公開Web TLS証明書: %w", err)
+	}
+	keyPEM, err := secretfile.ReadConfidential(keyFile, maxTLSFileBytes)
+	if err != nil {
+		return nil, fmt.Errorf("公開Web TLS秘密鍵: %w", err)
+	}
+	certificate, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("公開Web TLS証明書と鍵が無効です: %w", err)
+	}
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{certificate},
+		NextProtos:   []string{"h2", "http/1.1"},
+	}, nil
+}
+
 // IsLoopbackHost reports whether host is a literal loopback address. Hostnames
 // are deliberately not trusted because name resolution can be reconfigured.
 func IsLoopbackHost(host string) bool {
