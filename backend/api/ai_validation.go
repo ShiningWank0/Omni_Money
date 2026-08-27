@@ -1,9 +1,7 @@
 package api
 
 import (
-	"encoding/base64"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -63,9 +61,8 @@ func normalizeAndValidateAITransaction(req models.TransactionRequest, now time.T
 	return req, nil
 }
 
-// validateAITransactionReferences はAI入力に含まれるDB参照と画像を事前検証する。
-// core.AddTransactionが画像・タグの一部失敗を警告扱いにする既存挙動でも、
-// AI経由では不完全な取引を作らないための防御層となる。
+// validateAITransactionReferences はAI入力に含まれるDB参照を事前検証する。
+// 画像は通常Web/Wailsと同じcore.AddTransaction境界で検証する。
 func validateAITransactionReferences(req models.TransactionRequest) (models.TransactionRequest, error) {
 	if len(req.Tags) > 0 {
 		uniqueTags := make([]int64, 0, len(req.Tags))
@@ -99,46 +96,6 @@ func validateAITransactionReferences(req models.TransactionRequest) (models.Tran
 			return req, fmt.Errorf("存在しないタグIDが含まれています")
 		}
 		req.Tags = uniqueTags
-	}
-
-	allowedMIMETypes := map[string]struct{}{
-		"image/jpeg": {},
-		"image/png":  {},
-		"image/gif":  {},
-		"image/webp": {},
-	}
-	extensionMIMETypes := map[string]string{
-		".jpg":  "image/jpeg",
-		".jpeg": "image/jpeg",
-		".png":  "image/png",
-		".gif":  "image/gif",
-		".webp": "image/webp",
-	}
-	for i, image := range req.Images {
-		image.Filename = strings.TrimSpace(image.Filename)
-		image.MimeType = strings.TrimSpace(strings.ToLower(image.MimeType))
-		image.Data = strings.TrimSpace(image.Data)
-		if image.Filename == "" || strings.ContainsAny(image.Filename, "/\\") {
-			return req, fmt.Errorf("画像%dのファイル名が無効です", i+1)
-		}
-		if image.Data == "" {
-			return req, fmt.Errorf("画像%dのBase64データは必須です", i+1)
-		}
-		expectedMIME, supportedExtension := extensionMIMETypes[strings.ToLower(filepath.Ext(image.Filename))]
-		if !supportedExtension {
-			return req, fmt.Errorf("画像%dの拡張子はJPEG、PNG、GIF、WebPのみ使用できます", i+1)
-		}
-		decoded, err := base64.StdEncoding.Strict().DecodeString(image.Data)
-		if err != nil || len(decoded) == 0 {
-			return req, fmt.Errorf("画像%dのBase64データが無効です", i+1)
-		}
-		if image.MimeType == "" {
-			image.MimeType = expectedMIME
-		}
-		if _, allowed := allowedMIMETypes[image.MimeType]; !allowed || image.MimeType != expectedMIME {
-			return req, fmt.Errorf("画像%dのMIMEタイプと拡張子が一致しません", i+1)
-		}
-		req.Images[i] = image
 	}
 
 	return req, nil

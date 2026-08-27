@@ -115,6 +115,7 @@
               <div class="image-upload-placeholder">
                 <span class="upload-icon">📷</span>
                 <span>クリックまたはドラッグ&ドロップで画像を添付</span>
+                <small>JPEG / PNG / GIF / WebP、1枚5 MiB・最大10枚</small>
               </div>
               <input ref="fileInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple
                 @change="onFileSelect" style="display: none;">
@@ -181,7 +182,7 @@
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
-import { getTags, createTag, createTagByPath, getTransactionLinks, addTransactionLink, removeTransactionLink, getTransactions } from '../utils/api'
+import { getTags, createTag, createTagByPath, getTransactionLinks, addTransactionLink, removeTransactionLink, getTransactions, isWailsMode } from '../utils/api'
 
 const MAX_TRANSACTION_AMOUNT = 1_000_000_000
 
@@ -410,6 +411,14 @@ async function unlinkTransaction(linkedId) {
 }
 
 // 画像添付
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+// Web APIはBase64を含むリクエスト全体が10 MiB上限のため、原データを7 MiBに抑える。
+const MAX_IMAGE_TOTAL_BYTES = (isWailsMode ? 20 : 7) * 1024 * 1024
+const MAX_IMAGE_COUNT = 10
+const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
+let pendingImageCount = 0
+let pendingImageBytes = 0
+
 function triggerFileSelect() {
   if (fileInput.value) {
     fileInput.value.click()
@@ -423,16 +432,41 @@ function onAmountInput(e) {
 function onFileSelect(e) {
   const files = Array.from(e.target.files)
   processFiles(files)
+  e.target.value = ''
 }
 
 function onImageDrop(e) {
   isDragOver.value = false
-  const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'))
+  const files = Array.from(e.dataTransfer.files)
   processFiles(files)
 }
 
 function processFiles(files) {
+  let acceptedBytes = attachedImages.value.reduce((total, image) => total + (image.size || 0), 0) + pendingImageBytes
+  let acceptedCount = attachedImages.value.length + pendingImageCount
+
   for (const file of files) {
+    if (acceptedCount >= MAX_IMAGE_COUNT) {
+      formError.value = `画像は1取引につき${MAX_IMAGE_COUNT}件までです`
+      break
+    }
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+      formError.value = `${file.name}: JPEG、PNG、GIF、WebPのみ使用できます`
+      continue
+    }
+    if (file.size <= 0 || file.size > MAX_IMAGE_BYTES) {
+      formError.value = `${file.name}: 画像は1件につき5 MiBまでです`
+      continue
+    }
+    if (acceptedBytes + file.size > MAX_IMAGE_TOTAL_BYTES) {
+      formError.value = `画像データの合計は1取引につき${isWailsMode ? 20 : 7} MiBまでです`
+      break
+    }
+
+    acceptedCount++
+    acceptedBytes += file.size
+    pendingImageCount++
+    pendingImageBytes += file.size
     const reader = new FileReader()
     reader.onload = (e) => {
       const base64 = e.target.result.split(',')[1]
@@ -440,8 +474,16 @@ function processFiles(files) {
         filename: file.name,
         data: base64,
         mime_type: file.type,
+        size: file.size,
         preview: e.target.result
       })
+      pendingImageCount--
+      pendingImageBytes -= file.size
+    }
+    reader.onerror = () => {
+      pendingImageCount--
+      pendingImageBytes -= file.size
+      formError.value = `${file.name}: 画像の読み込みに失敗しました`
     }
     reader.readAsDataURL(file)
   }
@@ -452,6 +494,10 @@ function removeImage(index) {
 }
 
 function handleSubmit() {
+  if (pendingImageCount > 0) {
+    formError.value = '画像の読み込みが完了するまでお待ちください'
+    return
+  }
   const amount = parseInt(form.value.amount)
   if (!amount || amount <= 0) {
     formError.value = '金額は正の数値である必要があります'

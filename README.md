@@ -25,6 +25,18 @@ macOS デスクトップアプリ、Mac + Colima、TrueNAS Custom App の詳し�
 - AI エージェント向けの取引追加 API と分析 API
 - GitHub Actions による VERSION 起点のデスクトップ版リリースと Docker イメージリリース
 
+### 画像添付の安全上限
+
+通常Web、デスクトップ、AI APIの画像添付には同じ検証と保存上限が適用されます。
+
+- 対応形式: 静止画のJPEG、PNG、GIF、WebP（MIME、拡張子、実データが一致すること）
+- 画像1件: 5 MiB、20メガピクセルまで
+- 取引1件: 10画像、合計20 MiBまで
+- 同名口座: 合計128 MiBまで
+- DB全体: 合計256 MiBまで
+
+サーバーモードではBase64を含むHTTPリクエスト全体が10 MiB上限のため、画面から一度に送る画像原データは合計7 MiBまでに制限されます。また、認証済みの `GET /api/image_storage` で現在の件数、使用量、上限、口座別使用量を確認できます。画像を削除する場合は、一覧取得で取引IDと画像IDを確認してから `DELETE /api/transaction_images/{transactionId}/{imageId}` を使用してください。URLの取引IDと画像の所属が一致しない削除は拒否されます。削除後は `GET /api/image_storage` で使用量が減ったことを確認してください。
+
 ## 技術スタック
 
 - Backend: Go, SQLite

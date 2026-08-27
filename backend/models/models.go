@@ -3,6 +3,21 @@ package models
 
 import "time"
 
+const (
+	// MaxImageBytes は画像1件のデコード後バイト数上限（5 MiB）。
+	MaxImageBytes int64 = 5 * 1024 * 1024
+	// MaxImagePixels は画像1件の最大画素数。デコード前に検査する。
+	MaxImagePixels int64 = 20_000_000
+	// MaxImagesPerTransaction は1取引に保存できる画像数。
+	MaxImagesPerTransaction = 10
+	// MaxImageBytesPerTransaction は1取引の画像データ合計上限（20 MiB）。
+	MaxImageBytesPerTransaction int64 = 20 * 1024 * 1024
+	// MaxImageBytesPerAccount は同名口座に保存できる画像データ合計上限（128 MiB）。
+	MaxImageBytesPerAccount int64 = 128 * 1024 * 1024
+	// MaxImageBytesDatabase はDB全体に保存できる画像データ合計上限（256 MiB）。
+	MaxImageBytesDatabase int64 = 256 * 1024 * 1024
+)
+
 // Transaction は取引データの構造体
 type Transaction struct {
 	ID      int64     `json:"id"`
@@ -56,6 +71,27 @@ type TransactionImageResponse struct {
 	MimeType  string `json:"mime_type"`
 	CreatedAt string `json:"created_at"`
 	DataURL   string `json:"data_url,omitempty"` // data:mime;base64,... の形式
+	Invalid   bool   `json:"invalid,omitempty"`  // 旧DB内の不正画像はデータを返さず削除だけ許可
+}
+
+// AccountImageStorageUsage は口座単位の画像保存量を表す。
+type AccountImageStorageUsage struct {
+	Account    string `json:"account"`
+	ImageCount int64  `json:"image_count"`
+	Bytes      int64  `json:"bytes"`
+}
+
+// ImageStorageUsage は画像保存量と強制中のクォータを返す監視用レスポンス。
+type ImageStorageUsage struct {
+	ImageCount              int64                      `json:"image_count"`
+	Bytes                   int64                      `json:"bytes"`
+	MaxImageBytes           int64                      `json:"max_image_bytes"`
+	MaxImagePixels          int64                      `json:"max_image_pixels"`
+	MaxImagesPerTransaction int                        `json:"max_images_per_transaction"`
+	MaxBytesPerTransaction  int64                      `json:"max_bytes_per_transaction"`
+	MaxBytesPerAccount      int64                      `json:"max_bytes_per_account"`
+	MaxBytesDatabase        int64                      `json:"max_bytes_database"`
+	Accounts                []AccountImageStorageUsage `json:"accounts"`
 }
 
 // Tag はタグの構造体（Agent.md §6.6: 3階層タグシステム）

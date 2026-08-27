@@ -17,6 +17,7 @@ import (
 
 	sqlite3 "github.com/mattn/go-sqlite3"
 
+	"omni_money/backend/models"
 	"omni_money/backend/validation"
 )
 
@@ -195,6 +196,33 @@ func createTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_transactions_memo ON transactions(memo)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_links_child_id ON transaction_links(child_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_images_txid ON transaction_images(transaction_id)`,
+		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS trg_transaction_images_quota_insert
+			BEFORE INSERT ON transaction_images
+			WHEN length(NEW.data) <= 0
+				OR length(NEW.data) > %d
+				OR (SELECT COUNT(*) FROM transaction_images WHERE transaction_id = NEW.transaction_id) >= %d
+				OR COALESCE((SELECT SUM(length(data)) FROM transaction_images WHERE transaction_id = NEW.transaction_id), 0) + length(NEW.data) > %d
+				OR COALESCE((
+					SELECT SUM(length(ti.data))
+					FROM transaction_images ti
+					JOIN transactions t ON t.id = ti.transaction_id
+					WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+				), 0) + length(NEW.data) > %d
+				OR COALESCE((SELECT SUM(length(data)) FROM transaction_images), 0) + length(NEW.data) > %d
+			BEGIN
+				SELECT RAISE(ABORT, 'image storage quota exceeded');
+			END`,
+			models.MaxImageBytes,
+			models.MaxImagesPerTransaction,
+			models.MaxImageBytesPerTransaction,
+			models.MaxImageBytesPerAccount,
+			models.MaxImageBytesDatabase,
+		),
+		`CREATE TRIGGER IF NOT EXISTS trg_transaction_images_immutable_update
+			BEFORE UPDATE ON transaction_images
+			BEGIN
+				SELECT RAISE(ABORT, 'transaction images are immutable; delete and re-add the image');
+			END`,
 		`CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_txid ON transaction_tags(transaction_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_tagid ON transaction_tags(tag_id)`,
