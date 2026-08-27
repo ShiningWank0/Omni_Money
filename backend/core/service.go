@@ -1177,17 +1177,20 @@ func GetTransactionImages(transactionID int64) ([]models.TransactionImageRespons
 
 // DeleteTransactionImage はWails互換用に画像IDを指定して削除する。
 func DeleteTransactionImage(imageID int64) error {
-	return deleteTransactionImage("id = ?", imageID)
+	result, err := database.GetDB().Exec("DELETE FROM transaction_images WHERE id = ?", imageID)
+	return finishTransactionImageDelete(result, err)
 }
 
 // DeleteTransactionImageForTransaction はURL上の取引IDと画像の所属を照合して削除する。
 func DeleteTransactionImageForTransaction(transactionID, imageID int64) error {
-	return deleteTransactionImage("transaction_id = ? AND id = ?", transactionID, imageID)
+	result, err := database.GetDB().Exec(
+		"DELETE FROM transaction_images WHERE transaction_id = ? AND id = ?",
+		transactionID, imageID,
+	)
+	return finishTransactionImageDelete(result, err)
 }
 
-func deleteTransactionImage(where string, args ...interface{}) error {
-	db := database.GetDB()
-	result, err := db.Exec("DELETE FROM transaction_images WHERE "+where, args...)
+func finishTransactionImageDelete(result sql.Result, err error) error {
 	if err != nil {
 		return fmt.Errorf("画像削除エラー: %w", err)
 	}
