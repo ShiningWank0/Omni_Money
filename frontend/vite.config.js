@@ -1,7 +1,20 @@
-import {defineConfig} from 'vite'
+import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
-// https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [vue()]
+  plugins: [vue()],
+  server: {
+    host: '127.0.0.1',
+    strictPort: true,
+    fs: {
+      strict: true,
+    },
+  },
+  preview: {
+    host: '127.0.0.1',
+    strictPort: true,
+  },
+  build: {
+    target: 'es2019',
+  },
 })
