@@ -56,7 +56,9 @@
               :class="form.type === 'income' ? 'amount-input-income' : 'amount-input-expense'"
               @input="onAmountInput"
               inputmode="numeric"
+              aria-describedby="amount-limit-hint"
               autocomplete="off">
+            <small id="amount-limit-hint">1取引あたり10億円以下</small>
           </div>
           <div class="form-row">
             <label>メモ (任意):</label>
@@ -180,6 +182,8 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { getTags, createTag, createTagByPath, getTransactionLinks, addTransactionLink, removeTransactionLink, getTransactions } from '../utils/api'
+
+const MAX_TRANSACTION_AMOUNT = 1_000_000_000
 
 const props = defineProps({
   isEditMode: Boolean,
@@ -451,6 +455,10 @@ function handleSubmit() {
   const amount = parseInt(form.value.amount)
   if (!amount || amount <= 0) {
     formError.value = '金額は正の数値である必要があります'
+    return
+  }
+  if (!Number.isSafeInteger(amount) || amount > MAX_TRANSACTION_AMOUNT) {
+    formError.value = `金額は${MAX_TRANSACTION_AMOUNT.toLocaleString('ja-JP')}円以下で指定してください`
     return
   }
   formError.value = ''

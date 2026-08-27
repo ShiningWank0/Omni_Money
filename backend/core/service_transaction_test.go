@@ -1,10 +1,13 @@
 package core
 
 import (
+	"math"
 	"strings"
 	"testing"
 
 	"omni_money/backend/database"
+	"omni_money/backend/models"
+	"omni_money/backend/validation"
 )
 
 func TestUpdateTransactionRejectsMissingID(t *testing.T) {
@@ -16,6 +19,49 @@ func TestUpdateTransactionRejectsMissingID(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "取引が見つかりません") {
 		t.Fatalf("error = %q, want missing transaction error", err)
+	}
+}
+
+func TestAddAndUpdateTransactionUseSharedAmountLimit(t *testing.T) {
+	setupCoreTestDB(t)
+	valid := transactionRequest("cash", "2026-01-01", "給与", "income", validation.MaxTransactionAmount)
+	created, err := AddTransaction(valid)
+	if err != nil {
+		t.Fatalf("AddTransaction at limit: %v", err)
+	}
+	tooLarge := valid
+	tooLarge.Amount = validation.MaxTransactionAmount + 1
+	if _, err := AddTransaction(tooLarge); err == nil {
+		t.Fatal("AddTransaction above limit succeeded")
+	}
+	if _, err := UpdateTransaction(created.ID, tooLarge); err == nil {
+		t.Fatal("UpdateTransaction above limit succeeded")
+	}
+}
+
+func TestBalanceAndAnalysisRejectInt64Overflow(t *testing.T) {
+	setupCoreTestDB(t)
+	db := database.GetDB()
+	if _, err := db.Exec("DROP TRIGGER validate_transactions_amount_insert"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA ignore_check_constraints = ON"); err != nil {
+		t.Fatal(err)
+	}
+	for index, amount := range []int64{math.MaxInt64, 1} {
+		date := []string{"2026-01-01", "2026-01-02"}[index]
+		if _, err := db.Exec(
+			`INSERT INTO transactions (account, date, item, type, amount, balance) VALUES ('overflow', ?, 'item', 'income', ?, 0)`,
+			date, amount,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := recalculateBalance("overflow"); err == nil {
+		t.Fatal("recalculateBalance overflow succeeded")
+	}
+	if _, err := AnalyzeTransactions(models.AnalysisRequest{Account: "overflow"}); err == nil {
+		t.Fatal("AnalyzeTransactions overflow succeeded")
 	}
 }
 
