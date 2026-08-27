@@ -26,6 +26,7 @@ func TestIssueRotateListAndRevoke(t *testing.T) {
 		"--expires-at", now.Add(24 * time.Hour).Format(time.RFC3339),
 		"--scope", "analysis:summary", "--scope", "console:relay",
 		"--account", "現金", "--max-analysis-days", "30", "--max-results", "100",
+		"--max-transactions-per-day", "7",
 		"--tag-id", "10", "--tag-id", "20",
 		"--analysis-start-date", "2026-01-01", "--analysis-end-date", "2026-12-31",
 	}, environment)
@@ -59,6 +60,9 @@ func TestIssueRotateListAndRevoke(t *testing.T) {
 	}
 	if !issued.AllowsTag(10) || issued.AllowsTag(30) {
 		t.Fatalf("issued tag allowlist = %#v", issued.AllowedTagIDs)
+	}
+	if issued.MaxTransactionsPerDay != 7 {
+		t.Fatalf("issued daily transaction quota = %d, want 7", issued.MaxTransactionsPerDay)
 	}
 
 	listOutput := &bytes.Buffer{}
@@ -136,6 +140,26 @@ func TestIssueDoesNotPrintTokenWhenWriteFails(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("token was printed before durable write: %q", stdout.String())
+	}
+}
+
+func TestIssueRejectsZeroDailyQuotaBeforePrintingToken(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
+	exit := run([]string{
+		"issue", "--file", filepath.Join(t.TempDir(), "credentials.json"), "--id", "agent-1",
+		"--expires-at", now.Add(time.Hour).Format(time.RFC3339),
+		"--scope", "transactions:create", "--account", "cash",
+		"--max-transactions-per-day", "0",
+	}, commandEnvironment{
+		stdout: stdout,
+		stderr: stderr,
+		now:    func() time.Time { return now },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x44}, 32)),
+	})
+	if exit == 0 || stdout.Len() != 0 {
+		t.Fatalf("zero quota exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
 	}
 }
 

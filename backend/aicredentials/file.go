@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"omni_money/backend/secretfile"
 )
 
 const MaxFileSize int64 = 1 << 20
@@ -20,37 +22,9 @@ func LoadFile(path string) (*File, error) {
 		return nil, errors.New("credential file path is required")
 	}
 
-	before, err := os.Lstat(path)
-	if err != nil {
-		return nil, fmt.Errorf("stat credential file: %w", err)
-	}
-	if err := validateFileInfo(before); err != nil {
-		return nil, err
-	}
-
-	handle, err := secureOpen(path)
-	if err != nil {
-		return nil, fmt.Errorf("open credential file: %w", err)
-	}
-	defer handle.Close()
-
-	after, err := handle.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat opened credential file: %w", err)
-	}
-	if !os.SameFile(before, after) {
-		return nil, errors.New("credential file changed while being opened")
-	}
-	if err := validateFileInfo(after); err != nil {
-		return nil, err
-	}
-
-	content, err := io.ReadAll(io.LimitReader(handle, MaxFileSize+1))
+	content, err := secretfile.ReadIntegrityProtected(path, MaxFileSize)
 	if err != nil {
 		return nil, fmt.Errorf("read credential file: %w", err)
-	}
-	if int64(len(content)) > MaxFileSize {
-		return nil, fmt.Errorf("credential file exceeds %d bytes", MaxFileSize)
 	}
 	if err := rejectDuplicateJSONFields(content); err != nil {
 		return nil, err

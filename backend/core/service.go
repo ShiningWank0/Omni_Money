@@ -3,6 +3,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/csv"
@@ -219,16 +220,7 @@ func getTransactionTagsForFilteredTransactions(db *sql.DB, whereClause string, a
 // INSERT時のbalanceは仮値（0）で挿入する。
 func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse, error) {
 	db := database.GetDB()
-
-	date, err := parseTransactionDate(req.Date, req.Time)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := validateTransactionData(req); err != nil {
-		return nil, err
-	}
-	preparedImages, err := prepareTransactionImages(req.Images)
+	prepared, err := prepareTransactionInsert(req)
 	if err != nil {
 		return nil, err
 	}
@@ -239,10 +231,50 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 	}
 	defer tx.Rollback()
 
-	// INSERT（balanceは仮値0。直後にrecalculateBalanceで正しい値に上書きされる）
+	resp, err := addPreparedTransactionIn(tx, prepared)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("トランザクションコミットエラー: %w", err)
+	}
+	resp.Tags, _ = GetTransactionTags(resp.ID)
+	database.AutoSnapshot()
+	return resp, nil
+}
+
+type preparedTransactionInsert struct {
+	request models.TransactionRequest
+	date    time.Time
+	images  []preparedTransactionImage
+}
+
+// prepareTransactionInsert performs all validation and expensive image
+// decoding before a SQL write transaction is opened. Both UI and AI writes use
+// this exact path so their ledger semantics remain identical.
+func prepareTransactionInsert(req models.TransactionRequest) (preparedTransactionInsert, error) {
+	date, err := parseTransactionDate(req.Date, req.Time)
+	if err != nil {
+		return preparedTransactionInsert{}, err
+	}
+	if err := validateTransactionData(req); err != nil {
+		return preparedTransactionInsert{}, err
+	}
+	preparedImages, err := prepareTransactionImages(req.Images)
+	if err != nil {
+		return preparedTransactionInsert{}, err
+	}
+	return preparedTransactionInsert{request: req, date: date, images: preparedImages}, nil
+}
+
+// addPreparedTransactionIn mutates the ledger using the caller-owned SQL
+// transaction. The caller alone decides whether to commit, which lets the AI
+// path atomically combine idempotency, quota accounting, and the ledger write.
+func addPreparedTransactionIn(tx *sql.Tx, prepared preparedTransactionInsert) (*models.TransactionResponse, error) {
+	req := prepared.request
 	result, err := tx.Exec(
 		"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, ?)",
-		req.Account, date, req.Item, req.Type, req.Amount, req.Memo,
+		req.Account, prepared.date, req.Item, req.Type, req.Amount, req.Memo,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("取引追加エラー: %w", err)
@@ -253,42 +285,29 @@ func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse,
 		return nil, fmt.Errorf("取引ID取得エラー: %w", err)
 	}
 
-	// 画像は検証・クォータ確認・取引作成を同じSQL transactionで確定する。
-	if err := insertPreparedTransactionImages(tx, id, preparedImages); err != nil {
+	if err := insertPreparedTransactionImages(tx, id, prepared.images); err != nil {
 		return nil, err
 	}
-
-	// タグ紐付け処理
-	if len(req.Tags) > 0 {
-		for _, tagID := range req.Tags {
-			if _, err := tx.Exec("INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)", id, tagID); err != nil {
-				return nil, fmt.Errorf("タグ紐付けエラー: %w", err)
-			}
+	for _, tagID := range req.Tags {
+		if _, err := tx.Exec("INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)", id, tagID); err != nil {
+			return nil, fmt.Errorf("タグ紐付けエラー: %w", err)
 		}
 	}
 
-	// バックデート挿入も含め、口座全体の残高を時系列順に再計算
 	if err := recalculateBalanceIn(tx, req.Account); err != nil {
 		return nil, fmt.Errorf("残高再計算エラー: %w", err)
 	}
 
-	// 再計算後の正しい値を取得して返却
 	var inserted models.Transaction
 	var dateStr string
-	err = tx.QueryRow(
+	if err := tx.QueryRow(
 		"SELECT id, account, date, item, type, amount, balance, memo FROM transactions WHERE id = ?", id,
-	).Scan(&inserted.ID, &inserted.Account, &dateStr, &inserted.Item, &inserted.Type, &inserted.Amount, &inserted.Balance, &inserted.Memo)
-	if err != nil {
+	).Scan(&inserted.ID, &inserted.Account, &dateStr, &inserted.Item, &inserted.Type, &inserted.Amount, &inserted.Balance, &inserted.Memo); err != nil {
 		return nil, fmt.Errorf("追加後データ取得エラー: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("トランザクションコミットエラー: %w", err)
-	}
 	inserted.Date = parseDate(dateStr)
-	resp := inserted.ToResponse()
-	resp.Tags, _ = GetTransactionTags(id)
-	database.AutoSnapshot()
-	return &resp, nil
+	response := inserted.ToResponse()
+	return &response, nil
 }
 
 // UpdateTransaction は既存の取引を更新する
@@ -1570,9 +1589,53 @@ func GetTagSummary(txType string, startDate, endDate string) ([]models.TagSummar
 	return getTagSummaryFiltered(txType, startDate, endDate, "", nil)
 }
 
+type tagSummaryOptions struct {
+	maxScannedNodes      int
+	maxMaterializedNodes int
+}
+
+type tagSummaryData struct {
+	id       int64
+	name     string
+	level    int
+	parentID sql.NullInt64
+	amount   int64
+	count    int
+}
+
+type tagSummaryNode struct {
+	data         tagSummaryData
+	amount       int64
+	count        int
+	childIndexes []int
+}
+
+type tagSummaryForest struct {
+	nodes       []tagSummaryNode
+	rootIndexes []int
+}
+
 // getTagSummaryFiltered はAI分析を含む呼び出し元の全フィルターを適用し、
 // 条件に一致した取引群についてタグ別集計を返す。
 func getTagSummaryFiltered(txType, startDate, endDate, account string, tagIDs []int64) ([]models.TagSummary, error) {
+	summaries, _, err := getTagSummaryFilteredContext(
+		context.Background(),
+		txType,
+		startDate,
+		endDate,
+		account,
+		tagIDs,
+		tagSummaryOptions{},
+	)
+	return summaries, err
+}
+
+func getTagSummaryFilteredContext(
+	ctx context.Context,
+	txType, startDate, endDate, account string,
+	tagIDs []int64,
+	options tagSummaryOptions,
+) ([]models.TagSummary, bool, error) {
 	db := database.GetDB()
 
 	// フィルタ条件をON句に含めてLEFT JOINを維持する
@@ -1617,119 +1680,302 @@ func getTagSummaryFiltered(txType, startDate, endDate, account string, tagIDs []
 		LEFT JOIN transactions tr ON ` + strings.Join(joinConditions, " AND ") + `
 		GROUP BY t.id
 		ORDER BY total_amount DESC`
+	if options.maxScannedNodes > 0 {
+		query += "\n\t\tLIMIT ?"
+		args = append(args, options.maxScannedNodes+1)
+	}
 
-	rows, err := db.Query(query, args...)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("タグ集計エラー: %w", err)
+		return nil, false, fmt.Errorf("タグ集計エラー: %w", err)
 	}
 	defer rows.Close()
 
-	type tagData struct {
-		id       int64
-		name     string
-		level    int
-		parentID sql.NullInt64
-		amount   int64
-		count    int
-	}
-	var allData []tagData
+	var allData []tagSummaryData
 
 	for rows.Next() {
-		var td tagData
+		if err := ctx.Err(); err != nil {
+			return nil, false, fmt.Errorf("タグ集計キャンセル: %w", err)
+		}
+		var td tagSummaryData
 		if err := rows.Scan(&td.id, &td.name, &td.level, &td.parentID, &td.amount, &td.count); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		allData = append(allData, td)
+		if options.maxScannedNodes > 0 && len(allData) > options.maxScannedNodes {
+			return nil, false, fmt.Errorf("タグ集計対象が内部上限%d件を超えています", options.maxScannedNodes)
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("タグ集計行取得エラー: %w", err)
+		return nil, false, fmt.Errorf("タグ集計行取得エラー: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, false, fmt.Errorf("タグ集計行終了エラー: %w", err)
 	}
 
-	// ツリー構造を構築し、子タグの金額を親タグに集約する
-	var buildSummary func(parentID *int64) ([]models.TagSummary, error)
-	buildSummary = func(parentID *int64) ([]models.TagSummary, error) {
-		var summaries []models.TagSummary
-		for _, td := range allData {
-			match := false
-			if parentID == nil && !td.parentID.Valid {
-				match = true
-			} else if parentID != nil && td.parentID.Valid && td.parentID.Int64 == *parentID {
-				match = true
-			}
-			if match {
-				children, err := buildSummary(&td.id)
-				if err != nil {
-					return nil, err
-				}
-				// 子タグの金額・件数を親に集約
-				amount := td.amount
-				count := td.count
-				for _, child := range children {
-					amount, err = validation.CheckedAddInt64(amount, child.Amount)
-					if err != nil {
-						return nil, fmt.Errorf("タグ金額集計オーバーフロー (tag_id=%d): %w", td.id, err)
-					}
-					count += child.Count
-				}
-				s := models.TagSummary{
-					TagID:    td.id,
-					TagName:  td.name,
-					Amount:   amount,
-					Count:    count,
-					Children: children,
-				}
-				summaries = append(summaries, s)
-			}
-		}
-		// 金額が0のタグを除外
-		var filtered []models.TagSummary
-		for _, s := range summaries {
-			if s.Amount > 0 {
-				filtered = append(filtered, s)
-			}
-		}
-		sort.Slice(filtered, func(i, j int) bool {
-			return filtered[i].Amount > filtered[j].Amount
-		})
-		return filtered, nil
-	}
-
-	result, err := buildSummary(nil)
+	forest, err := buildTagSummaryForest(ctx, allData)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-
-	// トップレベルの合計金額からratioを算出
-	var totalAmount int64
-	for _, s := range result {
-		totalAmount, err = validation.CheckedAddInt64(totalAmount, s.Amount)
-		if err != nil {
-			return nil, fmt.Errorf("タグ合計オーバーフロー: %w", err)
-		}
+	totalAmount, err := forest.rollup(ctx)
+	if err != nil {
+		return nil, false, err
 	}
-	var setRatios func([]models.TagSummary)
-	setRatios = func(summaries []models.TagSummary) {
-		for i := range summaries {
-			if totalAmount > 0 {
-				summaries[i].Ratio = float64(summaries[i].Amount) / float64(totalAmount)
-			}
-			setRatios(summaries[i].Children)
-		}
+	result, truncated, err := forest.materialize(ctx, totalAmount, options.maxMaterializedNodes)
+	if err != nil {
+		return nil, false, err
 	}
-	setRatios(result)
-
 	if result == nil {
 		result = []models.TagSummary{}
 	}
-	return result, nil
+	return result, truncated, nil
+}
+
+func buildTagSummaryForest(ctx context.Context, data []tagSummaryData) (*tagSummaryForest, error) {
+	forest := &tagSummaryForest{nodes: make([]tagSummaryNode, len(data))}
+	idToIndex := make(map[int64]int, len(data))
+	for i := range data {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("タグ構造検証キャンセル: %w", err)
+		}
+		if _, exists := idToIndex[data[i].id]; exists {
+			return nil, fmt.Errorf("タグ構造が不正です: 重複tag_id=%d", data[i].id)
+		}
+		idToIndex[data[i].id] = i
+		forest.nodes[i].data = data[i]
+	}
+
+	// idToIndexはlookupにのみ使い、SQLのscan順でroot/子sliceへ追加する。
+	for i := range forest.nodes {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("タグ構造検証キャンセル: %w", err)
+		}
+		parentID := forest.nodes[i].data.parentID
+		if !parentID.Valid {
+			forest.rootIndexes = append(forest.rootIndexes, i)
+			continue
+		}
+		parentIndex, exists := idToIndex[parentID.Int64]
+		if !exists {
+			return nil, fmt.Errorf(
+				"タグ構造が不正です: orphan tag_id=%d parent_id=%d",
+				forest.nodes[i].data.id,
+				parentID.Int64,
+			)
+		}
+		forest.nodes[parentIndex].childIndexes = append(forest.nodes[parentIndex].childIndexes, i)
+	}
+
+	// cycle検証前にlevel範囲とroot levelを反復検証する。
+	for i := range forest.nodes {
+		node := &forest.nodes[i]
+		if node.data.level < 1 || node.data.level > 3 {
+			return nil, fmt.Errorf(
+				"タグ構造が不正です: tag_id=%d のlevel=%dは1から3の範囲外です",
+				node.data.id,
+				node.data.level,
+			)
+		}
+		if !node.data.parentID.Valid {
+			if node.data.level != 1 {
+				return nil, fmt.Errorf(
+					"タグ構造が不正です: root tag_id=%d のlevel=%dです",
+					node.data.id,
+					node.data.level,
+				)
+			}
+			continue
+		}
+	}
+
+	// rootを起点にKahn法で反復走査し、長大な破損chainでもstackを消費しない。
+	queue := append([]int(nil), forest.rootIndexes...)
+	reachable := make([]bool, len(forest.nodes))
+	reachableCount := 0
+	for cursor := 0; cursor < len(queue); cursor++ {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("タグ構造検証キャンセル: %w", err)
+		}
+		index := queue[cursor]
+		if reachable[index] {
+			return nil, fmt.Errorf("タグ構造が不正です: tag_id=%dへの重複経路があります", forest.nodes[index].data.id)
+		}
+		reachable[index] = true
+		reachableCount++
+		queue = append(queue, forest.nodes[index].childIndexes...)
+	}
+	if reachableCount != len(forest.nodes) {
+		for i := range forest.nodes {
+			if !reachable[i] {
+				return nil, fmt.Errorf("タグ構造が不正です: cycle tag_id=%d", forest.nodes[i].data.id)
+			}
+		}
+		return nil, fmt.Errorf("タグ構造が不正です: rootから到達できないタグがあります")
+	}
+
+	// cycleがないことを確定した後に親子levelを検証し、後続再帰の深さを3以内に限定する。
+	for i := range forest.nodes {
+		node := &forest.nodes[i]
+		if !node.data.parentID.Valid {
+			continue
+		}
+		parentIndex := idToIndex[node.data.parentID.Int64]
+		expectedLevel := forest.nodes[parentIndex].data.level + 1
+		if node.data.level != expectedLevel {
+			return nil, fmt.Errorf(
+				"タグ構造が不正です: tag_id=%d のlevel=%d、parent_id=%d に対する期待level=%d",
+				node.data.id,
+				node.data.level,
+				node.data.parentID.Int64,
+				expectedLevel,
+			)
+		}
+	}
+
+	return forest, nil
+}
+
+func (forest *tagSummaryForest) rollup(ctx context.Context) (int64, error) {
+	var rollupNode func(int) error
+	rollupNode = func(index int) error {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("タグ金額集計キャンセル: %w", err)
+		}
+		node := &forest.nodes[index]
+		var positiveChildren []int
+		for _, childIndex := range node.childIndexes {
+			if err := rollupNode(childIndex); err != nil {
+				return err
+			}
+			if forest.nodes[childIndex].amount > 0 {
+				positiveChildren = append(positiveChildren, childIndex)
+			}
+		}
+		sort.Slice(positiveChildren, func(i, j int) bool {
+			return forest.nodes[positiveChildren[i]].amount > forest.nodes[positiveChildren[j]].amount
+		})
+
+		amount := node.data.amount
+		count := node.data.count
+		for _, childIndex := range positiveChildren {
+			var err error
+			amount, err = validation.CheckedAddInt64(amount, forest.nodes[childIndex].amount)
+			if err != nil {
+				return fmt.Errorf("タグ金額集計オーバーフロー (tag_id=%d): %w", node.data.id, err)
+			}
+			count += forest.nodes[childIndex].count
+		}
+		node.amount = amount
+		node.count = count
+		node.childIndexes = positiveChildren
+		return nil
+	}
+
+	var positiveRoots []int
+	for _, rootIndex := range forest.rootIndexes {
+		if err := rollupNode(rootIndex); err != nil {
+			return 0, err
+		}
+		if forest.nodes[rootIndex].amount > 0 {
+			positiveRoots = append(positiveRoots, rootIndex)
+		}
+	}
+	sort.Slice(positiveRoots, func(i, j int) bool {
+		return forest.nodes[positiveRoots[i]].amount > forest.nodes[positiveRoots[j]].amount
+	})
+	forest.rootIndexes = positiveRoots
+
+	var totalAmount int64
+	for _, rootIndex := range forest.rootIndexes {
+		var err error
+		totalAmount, err = validation.CheckedAddInt64(totalAmount, forest.nodes[rootIndex].amount)
+		if err != nil {
+			return 0, fmt.Errorf("タグ合計オーバーフロー: %w", err)
+		}
+	}
+	return totalAmount, nil
+}
+
+func (forest *tagSummaryForest) materialize(
+	ctx context.Context,
+	totalAmount int64,
+	maxNodes int,
+) ([]models.TagSummary, bool, error) {
+	var countVisible func([]int) (int, error)
+	countVisible = func(indexes []int) (int, error) {
+		count := 0
+		for _, index := range indexes {
+			if err := ctx.Err(); err != nil {
+				return 0, fmt.Errorf("タグ応答構築キャンセル: %w", err)
+			}
+			childCount, err := countVisible(forest.nodes[index].childIndexes)
+			if err != nil {
+				return 0, err
+			}
+			count += 1 + childCount
+		}
+		return count, nil
+	}
+
+	truncated := false
+	if maxNodes > 0 {
+		visibleCount, err := countVisible(forest.rootIndexes)
+		if err != nil {
+			return nil, false, err
+		}
+		truncated = visibleCount > maxNodes
+	}
+
+	remaining := maxNodes
+	var materializeIndexes func([]int) ([]models.TagSummary, error)
+	materializeIndexes = func(indexes []int) ([]models.TagSummary, error) {
+		var summaries []models.TagSummary
+		for _, index := range indexes {
+			if err := ctx.Err(); err != nil {
+				return nil, fmt.Errorf("タグ応答構築キャンセル: %w", err)
+			}
+			if maxNodes > 0 && remaining <= 0 {
+				break
+			}
+			if maxNodes > 0 {
+				remaining--
+			}
+			node := &forest.nodes[index]
+			children, err := materializeIndexes(node.childIndexes)
+			if err != nil {
+				return nil, err
+			}
+			ratio := 0.0
+			if totalAmount > 0 {
+				ratio = float64(node.amount) / float64(totalAmount)
+			}
+			summaries = append(summaries, models.TagSummary{
+				TagID:    node.data.id,
+				TagName:  node.data.name,
+				Amount:   node.amount,
+				Count:    node.count,
+				Ratio:    ratio,
+				Children: children,
+			})
+		}
+		return summaries, nil
+	}
+
+	summaries, err := materializeIndexes(forest.rootIndexes)
+	if err != nil {
+		return nil, false, err
+	}
+	return summaries, truncated, nil
 }
 
 // --- AI分析 (Agent.md §6.3) ---
 
 const (
-	defaultAIAnalysisLimit = 100
-	maxAIAnalysisLimit     = 500
-	maxAIAnalysisTagIDs    = 20
+	defaultAIAnalysisLimit     = 100
+	maxAIAnalysisLimit         = 500
+	maxAIAnalysisTagIDs        = 20
+	maxAITagSummaryScanNodes   = 10_000
+	maxAITagSummaryOutputNodes = 500
 )
 
 type aiAnalysisCursor struct {
@@ -1739,6 +1985,12 @@ type aiAnalysisCursor struct {
 
 // AnalyzeTransactions はAIエージェント向けの取引分析を行う
 func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, error) {
+	return AnalyzeTransactionsContext(context.Background(), req)
+}
+
+// AnalyzeTransactionsContext はAI分析のDBクエリ、タグ集計、明細取得に
+// 呼び出し元のキャンセルとdeadlineを伝播する。
+func AnalyzeTransactionsContext(ctx context.Context, req models.AnalysisRequest) (*models.AnalysisResponse, error) {
 	db := database.GetDB()
 	where, args, err := buildAIAnalysisFilter(req)
 	if err != nil {
@@ -1751,7 +2003,7 @@ func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, 
 		COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0)
 		FROM transactions` + where
-	if err := db.QueryRow(aggregateQuery, args...).Scan(&resp.Count, &resp.TotalIncome, &resp.TotalExpense); err != nil {
+	if err := db.QueryRowContext(ctx, aggregateQuery, args...).Scan(&resp.Count, &resp.TotalIncome, &resp.TotalExpense); err != nil {
 		return nil, fmt.Errorf("分析集計エラー: %w", err)
 	}
 	resp.NetAmount, err = validation.CheckedSubInt64(resp.TotalIncome, resp.TotalExpense)
@@ -1760,20 +2012,28 @@ func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, 
 	}
 
 	// タグ別集計にも取引一覧と同じフィルターを適用する。
-	tagSummaries, err := getTagSummaryFiltered(req.Type, req.StartDate, req.EndDate, req.Account, req.TagIDs)
+	// 全nodeのroll-up後に応答だけをbudget内へ切り詰めるため、親集計値は変わらない。
+	maxMaterializedNodes := req.MaxTagSummaries
+	if maxMaterializedNodes > maxAITagSummaryOutputNodes {
+		maxMaterializedNodes = maxAITagSummaryOutputNodes
+	}
+	tagSummaries, tagSummariesTruncated, err := getTagSummaryFilteredContext(
+		ctx,
+		req.Type,
+		req.StartDate,
+		req.EndDate,
+		req.Account,
+		req.TagIDs,
+		tagSummaryOptions{
+			maxScannedNodes:      maxAITagSummaryScanNodes,
+			maxMaterializedNodes: maxMaterializedNodes,
+		},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("タグ別分析エラー: %w", err)
 	}
-	if req.MaxTagSummaries > 0 {
-		var total int
-		countTagSummaries(tagSummaries, &total)
-		if total > req.MaxTagSummaries {
-			remaining := req.MaxTagSummaries
-			tagSummaries = truncateTagSummaries(tagSummaries, &remaining)
-			resp.TagSummariesTruncated = true
-		}
-	}
 	resp.TagSummaries = tagSummaries
+	resp.TagSummariesTruncated = tagSummariesTruncated
 
 	if !req.IncludeTransactions {
 		return resp, nil
@@ -1798,7 +2058,7 @@ func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, 
 		detailArgs = append(detailArgs, cursor.Date, cursor.Date, cursor.ID)
 	}
 	detailArgs = append(detailArgs, limit+1)
-	rows, err := db.Query(`SELECT id, account, datetime(date), item, type, amount, memo
+	rows, err := db.QueryContext(ctx, `SELECT id, account, datetime(date), item, type, amount, memo
 		FROM transactions`+detailWhere+`
 		ORDER BY datetime(date) DESC, id DESC
 		LIMIT ?`, detailArgs...)
@@ -1808,6 +2068,9 @@ func AnalyzeTransactions(req models.AnalysisRequest) (*models.AnalysisResponse, 
 	defer rows.Close()
 
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("分析明細取得キャンセル: %w", err)
+		}
 		var detail models.AITransactionDetail
 		var memo string
 		if err := rows.Scan(&detail.ID, &detail.Account, &detail.Date, &detail.Item, &detail.Type, &detail.Amount, &memo); err != nil {
