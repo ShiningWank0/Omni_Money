@@ -1,50 +1,43 @@
-# ビルド成果物
-build/
-*.app
-*.exe
+# Deny by default. Only files explicitly required by Dockerfile are sent to
+# the builder, so financial databases, WAL/journals, exports, credentials, TLS
+# keys, and unrelated workspace files cannot enter remote builders or caches.
+**
 
-# 開発用ファイル
-.git
-.github
-.gitignore
-*.md
-!README.md
+!Dockerfile
+!go.mod
+!go.sum
+!server.go
 
-# ランタイムデータ
-*.db
-data/
-snapshots/
-.env
-.env.*
+!backend/
+!backend/**
 
-# 認証・TLS秘密（Docker build contextへ送らない）
-*.secret
-**/*.secret
-*.key
-**/*.key
-*.pem
+!cmd/
+!cmd/omni-totp/
+!cmd/omni-totp/**
+
+!frontend/
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/index.html
+!frontend/vite.config.js
+!frontend/src/
+!frontend/src/**
+
+# Keep sensitive/runtime patterns excluded even if they appear below an
+# allow-listed source directory.
+**/data/**
+**/secrets/**
+**/*.db
+**/*.db-*
+**/*.db-journal
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.sqlite3-*
 **/*.pem
-*.p12
+**/*.key
 **/*.p12
-*.pfx
 **/*.pfx
-
-# IDE
-.vscode/
-.idea/
-
-# Node.js（frontend stageで独自にinstallする）
-frontend/node_modules/
-frontend/dist/
-
-# Go ビルドキャッシュ
-vendor/
-
-# OS関連
-.DS_Store
-Thumbs.db
-
-# Wails関連（サーバーモードでは不要）
-wails.json
-main.go
-app.go
+**/*.secret
+**/*_token
+**/*_credentials.json

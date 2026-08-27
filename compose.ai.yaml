@@ -1,0 +1,47 @@
+# AI APIを有効にするときだけ compose.yaml と重ねて使用する。
+# すべてのsecretはリポジトリ外に作成し、コミットしないこと。
+services:
+  omni-money:
+    ports:
+      - "127.0.0.1:${OMNI_AI_PORT:-4001}:4001"
+    environment:
+      AI_CREDENTIALS_FILE: /run/secrets/omni_ai_credentials
+      AI_CONSOLE_TOKEN_FILE: /run/secrets/omni_ai_console_token
+      AI_AUDIT_HMAC_KEYRING_FILE: /run/secrets/omni_ai_audit_hmac_keyring
+      AI_HOST_IP: 0.0.0.0
+      AI_PORT: 4001
+      AI_ALLOW_REMOTE: "true"
+      AI_TLS_CERT_FILE: /run/secrets/omni_ai_server_cert
+      AI_TLS_KEY_FILE: /run/secrets/omni_ai_server_key
+      AI_TLS_CLIENT_CA_FILE: /run/secrets/omni_ai_ca
+      AI_TLS_CA_FILE: /run/secrets/omni_ai_ca
+      AI_TLS_CLIENT_CERT_FILE: /run/secrets/omni_ai_client_cert
+      AI_TLS_CLIENT_KEY_FILE: /run/secrets/omni_ai_client_key
+      AI_TLS_SERVER_NAME: omni-money-ai
+    secrets:
+      - omni_ai_credentials
+      - omni_ai_console_token
+      - omni_ai_audit_hmac_keyring
+      - omni_ai_ca
+      - omni_ai_server_cert
+      - omni_ai_server_key
+      - omni_ai_client_cert
+      - omni_ai_client_key
+
+secrets:
+  omni_ai_credentials:
+    file: "${AI_CREDENTIALS_SECRET_FILE:-./secrets/ai_credentials.json}"
+  omni_ai_console_token:
+    file: "${AI_CONSOLE_TOKEN_SECRET_FILE:-./secrets/ai_console_token}"
+  omni_ai_audit_hmac_keyring:
+    file: "${AI_AUDIT_HMAC_SECRET_FILE:-./secrets/ai_audit_hmac.json}"
+  omni_ai_ca:
+    file: "${AI_TLS_CA_SECRET_FILE:-./secrets/ai_ca.pem}"
+  omni_ai_server_cert:
+    file: "${AI_TLS_SERVER_CERT_SECRET_FILE:-./secrets/ai_server_cert.pem}"
+  omni_ai_server_key:
+    file: "${AI_TLS_SERVER_KEY_SECRET_FILE:-./secrets/ai_server_key.pem}"
+  omni_ai_client_cert:
+    file: "${AI_TLS_CLIENT_CERT_SECRET_FILE:-./secrets/ai_client_cert.pem}"
+  omni_ai_client_key:
+    file: "${AI_TLS_CLIENT_KEY_SECRET_FILE:-./secrets/ai_client_key.pem}"

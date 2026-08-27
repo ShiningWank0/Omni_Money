@@ -5,6 +5,30 @@ import (
 	"time"
 )
 
+func TestVerifyPasswordPreservesBcryptBehavior(t *testing.T) {
+	const hash = "$2y$12$TMw6R8z61SPOp1Y/4t3mLu/LVqe3.L5d5.H9piLwdDjKpSytNxaEi"
+	sessionManager := NewSessionManager(time.Hour)
+	defer sessionManager.Close()
+
+	manager := NewAuthSessionManager(sessionManager, hash)
+	verify := func(target *AuthSessionManager, password string) bool {
+		valid, busy := target.verifyPassword(password)
+		if busy {
+			t.Fatal("bcrypt verification unexpectedly reported the concurrency gate as busy")
+		}
+		return valid
+	}
+	if !verify(manager, "test-password") {
+		t.Fatal("valid bcrypt password was rejected")
+	}
+	if verify(manager, "wrong-password") {
+		t.Fatal("invalid bcrypt password was accepted")
+	}
+	if verify(NewAuthSessionManager(sessionManager, "not-a-bcrypt-hash"), "test-password") {
+		t.Fatal("malformed bcrypt hash was accepted")
+	}
+}
+
 func TestAuthSessionManagerGCOldLoginAttempts(t *testing.T) {
 	sessionManager := NewSessionManager(time.Hour)
 	defer sessionManager.Close()
