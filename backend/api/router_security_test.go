@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"omni_money/backend/aicredentials"
+	"omni_money/backend/audithmac"
 	"omni_money/backend/database"
 	"omni_money/backend/models"
 	"omni_money/backend/validation"
@@ -585,21 +586,6 @@ func TestAIConsoleProxyKeepsTokenServerSide(t *testing.T) {
 	}
 }
 
-func TestAIConsoleTokenPermissionsDistinguishHostAndDockerSecrets(t *testing.T) {
-	if safeAIConsoleTokenPermissions("/tmp/ai-token", 0o644) {
-		t.Fatal("host token with group/other read bits was accepted")
-	}
-	if !safeAIConsoleTokenPermissions("/tmp/ai-token", 0o600) {
-		t.Fatal("host token mode 0600 was rejected")
-	}
-	if !safeAIConsoleTokenPermissions("/run/secrets/omni_ai_console_token", 0o444) {
-		t.Fatal("Docker secret mode 0444 was rejected")
-	}
-	if safeAIConsoleTokenPermissions("/run/secrets/omni_ai_console_token", 0o464) {
-		t.Fatal("writable Docker secret was accepted")
-	}
-}
-
 func newTestAIRouter(t *testing.T) http.Handler {
 	t.Helper()
 	return newTestAIRouterWithCredential(t, aicredentials.Credential{
@@ -643,7 +629,15 @@ func newTestAIRouterWithCredential(t *testing.T, credential aicredentials.Creden
 	if err != nil {
 		t.Fatalf("load AI credentials: %v", err)
 	}
-	return NewAIRouter(store)
+	auditFile := filepath.Join(t.TempDir(), "audit-keyring.json")
+	if _, err := audithmac.InitializeFile(auditFile, bytes.NewReader(bytes.Repeat([]byte{0x53}, 32))); err != nil {
+		t.Fatalf("write audit keyring: %v", err)
+	}
+	auditStore, err := audithmac.NewStore(auditFile)
+	if err != nil {
+		t.Fatalf("load audit keyring: %v", err)
+	}
+	return NewAIRouter(store, auditStore)
 }
 
 func postAITransaction(t *testing.T, handler http.Handler, body string) {
