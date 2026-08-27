@@ -80,3 +80,14 @@ func TestDesktopReleaseUsesLeastPrivilegeAndReproducibleTools(t *testing.T) {
 		}
 	}
 }
+
+func TestCIUsesPinnedGoVulnerabilityScanner(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const command = "go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./..."
+	if count := strings.Count(string(contents), command); count != 1 {
+		t.Fatalf("CI must run the pinned Go vulnerability scanner exactly once, got %d", count)
+	}
+}
