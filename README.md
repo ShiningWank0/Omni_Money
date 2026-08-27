@@ -99,6 +99,8 @@ wails build
 
 デスクトップモードでは、SQLite データベースは OS 標準のアプリケーションデータディレクトリに保存されます。
 
+DB、SQLiteの一時ファイル、スナップショット、デスクトップ版が書き出すCSVは、所有者だけが読み書きできる権限で作成します。ただし現時点のSQLiteとCSVは暗号化形式ではありません。端末・ディスク・バックアップ媒体にはOSのフルディスク暗号化を有効にし、CSVを共有ストレージへ放置しないでください。全面暗号化の導入では、鍵をDBと同じ場所へ保存せず、公式に保守される暗号化SQLiteとOSキーストアを組み合わせる必要があります。
+
 - macOS: `~/Library/Application Support/OmniMoney/omni_money.db`
 - Windows: `%APPDATA%/OmniMoney/omni_money.db`
 - Linux: `~/.local/share/OmniMoney/omni_money.db`

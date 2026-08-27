@@ -24,6 +24,7 @@ var (
 	db     *sql.DB
 	dbPath string
 	mu     sync.RWMutex
+	umask  sync.Once
 
 	// snapshotLifecycle serializes database lifecycle changes with snapshot
 	// operations.  A snapshot keeps a database handle and path for the whole
@@ -52,6 +53,10 @@ func InitDB(path string) error {
 // initDBLocked は mu.Lock() を保持した状態で呼び出す前提の初期化本体。
 // RestoreSnapshot のようにロックを保持したまま再初期化する経路と共有する。
 func initDBLocked(path string) error {
+	// SQLiteが後から作成するWAL/SHM/rollback journalも所有者だけが読めるよう、
+	// プロセスのファイル作成マスクを一度だけ制限する。
+	umask.Do(setRestrictiveUmask)
+
 	// 既存の接続があればまず閉じる
 	if db != nil {
 		db.Close()
@@ -63,15 +68,16 @@ func initDBLocked(path string) error {
 	}
 	dbPath = path
 
-	// データベースディレクトリが存在しない場合は作成
+	// データベースディレクトリが存在しない場合はprivate権限で作成する。
+	// 既存ディレクトリのACLや共有設定はアプリから無条件に変更しない。
 	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0700); err != nil {
+		if err := ensurePrivateDir(dir); err != nil {
 			return fmt.Errorf("データベースディレクトリ作成エラー: %w", err)
 		}
-		if err := os.Chmod(dir, 0700); err != nil { // #nosec G302 -- DB directory is intentionally private to the local user.
-			return fmt.Errorf("データベースディレクトリ権限設定エラー: %w", err)
-		}
+	}
+	if err := preparePrivateDatabaseFile(path); err != nil {
+		return fmt.Errorf("データベースファイル準備エラー: %w", err)
 	}
 
 	var err error
@@ -97,6 +103,9 @@ func initDBLocked(path string) error {
 	// テーブル作成
 	if err := createTables(); err != nil {
 		return fmt.Errorf("テーブル作成エラー: %w", err)
+	}
+	if err := hardenSQLiteFiles(path); err != nil {
+		return fmt.Errorf("データベース権限設定エラー: %w", err)
 	}
 
 	log.Printf("データベース初期化完了: %s", path)
@@ -251,15 +260,18 @@ func createSnapshot(snapshotDir string) (string, error) {
 		return "", fmt.Errorf("データベースが初期化されていません")
 	}
 
-	if snapshotDir == "" {
+	defaultSnapshotDir := snapshotDir == ""
+	if defaultSnapshotDir {
 		snapshotDir = filepath.Join(filepath.Dir(currentPath), "snapshots")
 	}
 
-	if err := os.MkdirAll(snapshotDir, 0700); err != nil {
+	if err := ensurePrivateDir(snapshotDir); err != nil {
 		return "", fmt.Errorf("スナップショットディレクトリ作成エラー: %w", err)
 	}
-	if err := os.Chmod(snapshotDir, 0700); err != nil { // #nosec G302 -- Snapshot directory is intentionally private to the local user.
-		return "", fmt.Errorf("スナップショットディレクトリ権限設定エラー: %w", err)
+	if defaultSnapshotDir {
+		if err := os.Chmod(snapshotDir, 0700); err != nil { // #nosec G302 -- the default snapshot directory is intentionally private.
+			return "", fmt.Errorf("スナップショットディレクトリ権限設定エラー: %w", err)
+		}
 	}
 
 	// Nanosecond precision avoids same-process collisions.  copyFile also uses
@@ -533,6 +545,60 @@ func endDBLifecycle() {
 	dbLifecycleMu.Unlock()
 }
 
+func ensurePrivateDir(path string) error {
+	info, err := os.Stat(path)
+	if err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("ディレクトリではありません")
+		}
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0700) // #nosec G302 -- newly created financial-data directories are owner-only.
+}
+
+func preparePrivateDatabaseFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		file, createErr := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- path is the configured database path and O_EXCL rejects existing symlinks.
+		if createErr != nil {
+			return createErr
+		}
+		return file.Close()
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("データベースパスが通常ファイルではありません")
+	}
+	return os.Chmod(path, 0600)
+}
+
+func hardenSQLiteFiles(path string) error {
+	for _, candidate := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		info, err := os.Lstat(candidate)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("SQLite関連パスが通常ファイルではありません: %s", candidate)
+		}
+		if err := os.Chmod(candidate, 0600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // backupSQLiteDatabase はSQLiteのオンラインBackup APIで一貫した複製を作る。
 func backupSQLiteDatabase(source *sql.DB, snapshotPath string) (err error) {
 	// 先にprivate directory内へ排他的に作成し、既存ファイルやsymlinkを上書きしない。
@@ -619,6 +685,13 @@ func backupSQLiteDatabase(source *sql.DB, snapshotPath string) (err error) {
 
 // copyFile はファイルをコピーする
 func copyFile(src, dst string) error {
+	sourceInfo, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if !sourceInfo.Mode().IsRegular() {
+		return fmt.Errorf("コピー元が通常ファイルではありません")
+	}
 	in, err := os.Open(src) // #nosec G304 -- src is the configured DB or validated snapshot path.
 	if err != nil {
 		return err
@@ -631,13 +704,22 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	completed := false
+	defer func() {
+		_ = out.Close()
+		if !completed {
+			_ = os.Remove(dst)
+		}
+	}()
 	if err := out.Chmod(0600); err != nil {
 		return err
 	}
-
 	if _, err := io.Copy(out, in); err != nil {
 		return err
 	}
-	return out.Sync()
+	if err := out.Sync(); err != nil {
+		return err
+	}
+	completed = true
+	return nil
 }
