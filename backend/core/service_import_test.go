@@ -77,6 +77,7 @@ func TestImportCSVRejectsInvalidRowsWithRowNumber(t *testing.T) {
 	}{
 		{name: "不正金額", invalidRecord: "cash,2026-01-02,食費,expense,12abc", wantMessage: "金額は正の整数"},
 		{name: "ゼロ金額", invalidRecord: "cash,2026-01-02,食費,expense,0", wantMessage: "金額は正の整数"},
+		{name: "上限超過", invalidRecord: "cash,2026-01-02,食費,expense,1000000001", wantMessage: "1000000000円以下"},
 		{name: "不正種別", invalidRecord: "cash,2026-01-02,食費,transfer,300", wantMessage: "種別はincomeまたはexpense"},
 		{name: "不正日付", invalidRecord: "cash,2026-02-30,食費,expense,300", wantMessage: "日付形式が正しくありません"},
 		{name: "空口座", invalidRecord: ",2026-01-02,食費,expense,300", wantMessage: "口座名は必須"},

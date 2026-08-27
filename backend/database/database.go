@@ -2,10 +2,12 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,7 +15,9 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
+
+	"omni_money/backend/validation"
 )
 
 var (
@@ -124,16 +128,16 @@ func CloseDB() {
 func createTables() error {
 	statements := []string{
 		// 取引テーブル
-		`CREATE TABLE IF NOT EXISTS transactions (
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS transactions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			account TEXT NOT NULL,
 			date DATETIME NOT NULL,
 			item TEXT NOT NULL,
 			type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
-			amount INTEGER NOT NULL,
+			amount INTEGER NOT NULL CHECK(amount BETWEEN 1 AND %d),
 			balance INTEGER NOT NULL DEFAULT 0,
 			memo TEXT DEFAULT ''
-		)`,
+		)`, validation.MaxTransactionAmount),
 		// 取引紐付けテーブル
 		`CREATE TABLE IF NOT EXISTS transaction_links (
 			parent_id INTEGER NOT NULL,
@@ -183,6 +187,19 @@ func createTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_txid ON transaction_tags(transaction_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_tagid ON transaction_tags(tag_id)`,
+		// 既存DBにも共通金額上限を適用する防御的トリガー。
+		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS validate_transactions_amount_insert
+			BEFORE INSERT ON transactions
+			WHEN NEW.amount < 1 OR NEW.amount > %d
+			BEGIN
+				SELECT RAISE(ABORT, 'transaction amount out of range');
+			END`, validation.MaxTransactionAmount),
+		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS validate_transactions_amount_update
+			BEFORE UPDATE OF amount ON transactions
+			WHEN NEW.amount < 1 OR NEW.amount > %d
+			BEGIN
+				SELECT RAISE(ABORT, 'transaction amount out of range');
+			END`, validation.MaxTransactionAmount),
 	}
 
 	for _, stmt := range statements {
@@ -230,11 +247,8 @@ func createSnapshot(snapshotDir string) (string, error) {
 		return "", fmt.Errorf("データベースが初期化されていません")
 	}
 
-	// WALの内容をメインDBファイルにフラッシュしてからコピーする
-	if currentDB != nil {
-		if _, err := currentDB.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-			log.Printf("WALチェックポイント警告: %v", err)
-		}
+	if currentDB == nil {
+		return "", fmt.Errorf("データベースが初期化されていません")
 	}
 
 	if snapshotDir == "" {
@@ -256,8 +270,9 @@ func createSnapshot(snapshotDir string) (string, error) {
 	timestamp = strings.ReplaceAll(timestamp, ".", "_")
 	snapshotPath := filepath.Join(snapshotDir, fmt.Sprintf("omni_money_%s.db", timestamp))
 
-	// ファイルコピー
-	if err := copyFile(currentPath, snapshotPath); err != nil {
+	// sqlite3_backup APIはWALを含む一貫した状態をオンラインで複製する。
+	// TRUNCATE checkpointを実行しないため、直後の取引更新と競合しない。
+	if err := backupSQLiteDatabase(currentDB, snapshotPath); err != nil {
 		return "", fmt.Errorf("スナップショット作成エラー: %w", err)
 	}
 
@@ -516,6 +531,90 @@ func endDBLifecycle() {
 	snapshotCond.Broadcast()
 	snapshotMu.Unlock()
 	dbLifecycleMu.Unlock()
+}
+
+// backupSQLiteDatabase はSQLiteのオンラインBackup APIで一貫した複製を作る。
+func backupSQLiteDatabase(source *sql.DB, snapshotPath string) (err error) {
+	// 先にprivate directory内へ排他的に作成し、既存ファイルやsymlinkを上書きしない。
+	placeholder, err := os.OpenFile(snapshotPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- path is generated inside the configured private snapshot directory.
+	if err != nil {
+		return err
+	}
+	if err := placeholder.Close(); err != nil {
+		_ = os.Remove(snapshotPath)
+		return err
+	}
+
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = os.Remove(snapshotPath)
+		}
+	}()
+
+	snapshotURI := (&url.URL{Scheme: "file", Path: snapshotPath}).String() + "?mode=rw&_busy_timeout=5000"
+	destination, err := sql.Open("sqlite3", snapshotURI)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = destination.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	sourceConn, err := source.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer sourceConn.Close()
+
+	destinationConn, err := destination.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer destinationConn.Close()
+
+	err = destinationConn.Raw(func(destinationDriverConn any) error {
+		destinationSQLiteConn, ok := destinationDriverConn.(*sqlite3.SQLiteConn)
+		if !ok {
+			return fmt.Errorf("unexpected destination SQLite driver connection %T", destinationDriverConn)
+		}
+		return sourceConn.Raw(func(sourceDriverConn any) error {
+			sourceSQLiteConn, ok := sourceDriverConn.(*sqlite3.SQLiteConn)
+			if !ok {
+				return fmt.Errorf("unexpected source SQLite driver connection %T", sourceDriverConn)
+			}
+
+			backup, err := destinationSQLiteConn.Backup("main", sourceSQLiteConn, "main")
+			if err != nil {
+				return err
+			}
+			for {
+				done, stepErr := backup.Step(128)
+				if stepErr != nil {
+					_ = backup.Finish()
+					return stepErr
+				}
+				if done {
+					return backup.Finish()
+				}
+				select {
+				case <-ctx.Done():
+					_ = backup.Finish()
+					return ctx.Err()
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+		})
+	})
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(snapshotPath, 0600); err != nil {
+		return err
+	}
+	succeeded = true
+	return nil
 }
 
 // copyFile はファイルをコピーする

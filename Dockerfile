@@ -48,8 +48,9 @@ FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec4
 ARG VERSION=dev
 ENV VERSION=${VERSION}
 
-# タイムゾーンとCA証明書
-RUN apk add --no-cache ca-certificates tzdata
+# タイムゾーンとCA証明書。固定したAlpine系列内で公開済みのセキュリティ修正を適用する。
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates tzdata
 
 # セキュリティ: 非rootユーザーで実行。UID/GIDを固定し、bind mountの
 # ACLを事前に安全に設定できるようにする。
