@@ -11,10 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"omni_money/backend/api"
 	"omni_money/backend/database"
+	"omni_money/backend/middleware"
 )
 
 // version はCI/CDビルド時に -ldflags で埋め込まれる（§8.3準拠）
@@ -25,8 +24,8 @@ func main() {
 	if passwordHash == "" {
 		log.Fatal("AUTH_PASSWORD_HASH が未設定です（サーバーモードでは必須）")
 	}
-	if _, err := bcrypt.Cost([]byte(passwordHash)); err != nil {
-		log.Fatal("AUTH_PASSWORD_HASH が有効なbcryptハッシュではありません")
+	if err := middleware.ValidatePasswordHash(passwordHash); err != nil {
+		log.Fatalf("AUTH_PASSWORD_HASH の安全性検証に失敗しました: %v", err)
 	}
 
 	// データベースの初期化
@@ -42,7 +41,7 @@ func main() {
 	// 公開Web用ホストIPとポートの設定
 	host := os.Getenv("HOST_IP")
 	if host == "" {
-		host = "0.0.0.0"
+		host = "127.0.0.1"
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -56,12 +55,24 @@ func main() {
 		log.Fatal("TLS_CERT_FILE と TLS_KEY_FILE は両方指定してください")
 	}
 
+	publicHandler, err := api.NewRouterWithError()
+	if err != nil {
+		log.Fatalf("公開Webのセキュリティ設定が無効です: %v", err)
+	}
+	if err := middleware.ValidatePublicListenerSecurity(host, certFile != ""); err != nil {
+		log.Fatalf("公開Webの待受設定が安全ではありません: %v", err)
+	}
+	if certFile == "" && !isLoopbackHost(host) && strings.TrimSpace(os.Getenv("ALLOW_INSECURE_HTTP")) == "true" {
+		log.Printf("警告: ALLOW_INSECURE_HTTP=true により非loopback HTTP待受を許可します。Dockerのhost公開先を127.0.0.1に限定してください")
+	}
+
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      api.NewRouter(),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:              addr,
+		Handler:           publicHandler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	errCh := make(chan error, 2)
@@ -100,11 +111,12 @@ func main() {
 			log.Printf("警告: AI専用APIを非ループバックアドレス %s にTLSなしで公開します。BearerトークンとAI送受信データが平文で流れるため、Dockerのlocalhost限定ポート公開やリバースプロキシでのTLS終端で必ず保護してください", aiAddr)
 		}
 		aiServer := &http.Server{
-			Addr:         aiAddr,
-			Handler:      api.NewAIRouter(aiToken),
-			ReadTimeout:  15 * time.Second,
-			WriteTimeout: 60 * time.Second,
-			IdleTimeout:  120 * time.Second,
+			Addr:              aiAddr,
+			Handler:           api.NewAIRouter(aiToken),
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       120 * time.Second,
 		}
 		go func() {
 			log.Printf("Omni Money v%s AI専用API起動: %s", version, aiAddr)

@@ -49,6 +49,7 @@
 
 <script setup>
 import { onBeforeUnmount, ref, watch } from 'vue'
+import { apiFetch } from '../utils/api'
 
 const emit = defineEmits(['close', 'transaction-added'])
 
@@ -101,9 +102,8 @@ async function sendRequest() {
 
   sending.value = true
   try {
-    const response = await fetch(`/api/ai-console/${operation.value}`, {
+    const response = await apiFetch(`/api/ai-console/${operation.value}`, {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     })

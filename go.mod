@@ -1,11 +1,15 @@
 module omni_money
 
-go 1.23
+// Go 1.26.6 contains the standard-library fixes for GO-2026-5972 and
+// GO-2026-6090. CI and release builds intentionally use the newer 1.26.7.
+go 1.26.6
+
+toolchain go1.26.7
 
 require (
 	github.com/mattn/go-sqlite3 v1.14.24
 	github.com/wailsapp/wails/v2 v2.11.0
-	golang.org/x/crypto v0.33.0
+	golang.org/x/crypto v0.55.0
 )
 
 require (
@@ -32,7 +36,7 @@ require (
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
-	golang.org/x/net v0.35.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
-	golang.org/x/text v0.22.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 )

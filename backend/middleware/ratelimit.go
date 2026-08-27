@@ -15,6 +15,9 @@ const (
 	aiTxRateLimitPerMinute     = 30
 	rateLimitWindow            = time.Minute
 	rateLimitRetentionDuration = rateLimitWindow * 2
+	// A client IP is untrusted input. Bound the number of per-key windows so a
+	// flood of spoofed/rotating addresses cannot grow this map without limit.
+	maxRateLimiterEntries = 4096
 )
 
 type requestWindow struct {
@@ -24,15 +27,29 @@ type requestWindow struct {
 
 // RateLimiter はIP+バケット単位のスライディングウィンドウ制限
 type RateLimiter struct {
-	mu          sync.Mutex
-	windows     map[string]*requestWindow
-	requestSeen uint64
+	mu              sync.Mutex
+	windows         map[string]*requestWindow
+	overflowWindows map[string]*requestWindow
+	maxEntries      int
+	requestSeen     uint64
 }
 
 // NewRateLimiter はRateLimiterを生成する
 func NewRateLimiter() *RateLimiter {
+	return NewRateLimiterWithMaxEntries(maxRateLimiterEntries)
+}
+
+// NewRateLimiterWithMaxEntries is primarily useful for tests and for
+// deployments that need a tighter memory budget. Values below one use the
+// default cap.
+func NewRateLimiterWithMaxEntries(maxEntries int) *RateLimiter {
+	if maxEntries < 1 {
+		maxEntries = maxRateLimiterEntries
+	}
 	return &RateLimiter{
-		windows: make(map[string]*requestWindow),
+		windows:         make(map[string]*requestWindow),
+		overflowWindows: make(map[string]*requestWindow),
+		maxEntries:      maxEntries,
 	}
 }
 
@@ -40,18 +57,38 @@ func NewRateLimiter() *RateLimiter {
 func (r *RateLimiter) Allow(key string, limit int, now time.Time) (allowed bool, remaining int, resetAtUnix int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if limit <= 0 {
+		return false, 0, now.Add(rateLimitWindow).Unix()
+	}
 
 	r.requestSeen++
-	if r.requestSeen%200 == 0 {
+	if r.requestSeen%128 == 0 {
 		r.gc(now)
 	}
 
 	win, ok := r.windows[key]
 	if !ok {
+		// Reclaim stale keys before falling back to the bounded overflow
+		// buckets. This keeps normal clients working after an idle period.
+		if len(r.windows) >= r.maxEntries {
+			r.gc(now)
+		}
+		if len(r.windows) >= r.maxEntries {
+			bucket := rateLimitOverflowBucket(key)
+			win = r.overflowWindows[bucket]
+			if win == nil {
+				win = &requestWindow{}
+				r.overflowWindows[bucket] = win
+			}
+			return r.allowWindow(win, limit, now)
+		}
 		win = &requestWindow{}
 		r.windows[key] = win
 	}
+	return r.allowWindow(win, limit, now)
+}
 
+func (r *RateLimiter) allowWindow(win *requestWindow, limit int, now time.Time) (allowed bool, remaining int, resetAtUnix int64) {
 	cutoff := now.Add(-rateLimitWindow)
 	filtered := win.Timestamps[:0]
 	for _, ts := range win.Timestamps {
@@ -80,6 +117,18 @@ func (r *RateLimiter) gc(now time.Time) {
 			delete(r.windows, key)
 		}
 	}
+	for key, win := range r.overflowWindows {
+		if win.LastSeen.Before(cutoff) {
+			delete(r.overflowWindows, key)
+		}
+	}
+}
+
+func rateLimitOverflowBucket(key string) string {
+	if idx := strings.LastIndexByte(key, '|'); idx >= 0 && idx+1 < len(key) {
+		return key[idx+1:]
+	}
+	return "global"
 }
 
 func resolveRateLimitBucket(req *http.Request) (bucket string, limit int) {

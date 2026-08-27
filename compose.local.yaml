@@ -1,0 +1,13 @@
+# Local-only override. The base compose.yaml intentionally publishes no host ports.
+# Use: docker compose -f compose.yaml -f compose.local.yaml up -d
+services:
+  omni-money:
+    # Local development intentionally opts into cleartext HTTP, but remains
+    # reachable only from the host's IPv4 loopback interface.
+    environment:
+      FORCE_HTTPS: "false"
+      ALLOW_INSECURE_HTTP: "true"
+      TRUSTED_PROXIES: ""
+      ALLOWED_HOSTS: "localhost:${OMNI_WEB_PORT:-4000},127.0.0.1:${OMNI_WEB_PORT:-4000}"
+    ports:
+      - "127.0.0.1:${OMNI_WEB_PORT:-4000}:4000"

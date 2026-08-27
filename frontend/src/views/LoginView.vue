@@ -9,10 +9,6 @@
 
         <form @submit.prevent="handleLogin">
           <div v-if="errorMessage" class="error-message">{{ errorMessage }}</div>
-          <div v-if="remainingAttempts !== null && remainingAttempts >= 0" class="attempts-warning">
-            残り {{ remainingAttempts }} 回でロックされます
-          </div>
-
           <div class="form-group">
             <label for="password" class="form-label">パスワード</label>
             <input
@@ -21,6 +17,22 @@
               type="password"
               class="form-input"
               autocomplete="current-password"
+              maxlength="72"
+              required
+            >
+          </div>
+
+          <div v-if="totpRequired" class="form-group">
+            <label for="totp-code" class="form-label">認証アプリのコード</label>
+            <input
+              id="totp-code"
+              v-model="totpCode"
+              type="text"
+              class="form-input"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              pattern="[0-9]{6}"
+              maxlength="6"
               required
             >
           </div>
@@ -40,9 +52,10 @@ import { onMounted, ref } from 'vue'
 import { getAuthStatus, isWailsMode, login } from '../utils/api'
 
 const password = ref('')
+const totpCode = ref('')
+const totpRequired = ref(false)
 const loading = ref(false)
 const errorMessage = ref('')
-const remainingAttempts = ref(null)
 
 onMounted(async () => {
   if (isWailsMode) {
@@ -52,6 +65,7 @@ onMounted(async () => {
 
   try {
     const status = await getAuthStatus()
+    totpRequired.value = Boolean(status?.totp_required)
     if (status?.authenticated) {
       window.location.href = '/'
     }
@@ -63,19 +77,16 @@ onMounted(async () => {
 async function handleLogin() {
   loading.value = true
   errorMessage.value = ''
-  remainingAttempts.value = null
 
   try {
-    await login(password.value)
+    await login(password.value, totpCode.value)
     window.location.href = '/'
   } catch (error) {
     errorMessage.value = error?.message || 'ログインに失敗しました'
-    if (typeof error?.remainingAttempts === 'number') {
-      remainingAttempts.value = error.remainingAttempts
-    }
   } finally {
     loading.value = false
     password.value = ''
+    totpCode.value = ''
   }
 }
 </script>
@@ -175,16 +186,6 @@ async function handleLogin() {
   border-radius: 10px;
   margin-bottom: 1rem;
   font-size: 0.9rem;
-}
-
-.attempts-warning {
-  background: rgba(255, 149, 0, 0.1);
-  border: 1px solid rgba(255, 149, 0, 0.3);
-  color: #bf5700;
-  padding: 0.5rem 1rem;
-  border-radius: 8px;
-  margin-bottom: 1rem;
-  font-size: 0.85rem;
 }
 
 .loading-spinner {

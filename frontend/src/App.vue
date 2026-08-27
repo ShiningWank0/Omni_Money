@@ -1,5 +1,8 @@
 <template>
   <div id="app">
+    <div v-if="idleScreenLocked" class="idle-lock-curtain" role="status" aria-live="polite">
+      <div class="idle-lock-message">無操作タイムアウトのため画面をロックしました</div>
+    </div>
     <!-- ヘッダーエリア -->
     <div class="card header">
       <div class="header-top">
@@ -168,6 +171,34 @@
       @restored="handleSnapshotRestored"
     />
 
+    <!-- 最近の認証が必要な操作用の再認証ダイアログ -->
+    <div v-if="showReauthModal" class="reauth-overlay" @click.self="cancelReauthentication">
+      <div class="reauth-card" role="dialog" aria-modal="true" aria-labelledby="reauth-title">
+        <h3 id="reauth-title">重要な操作の確認</h3>
+        <p class="reauth-description">一括取り込み・書き出し、復元など重要な操作を実行するため、Omni Moneyのパスワードを入力してください。</p>
+        <form @submit.prevent="submitReauthentication">
+          <label class="reauth-label" for="reauth-password">パスワード</label>
+          <input
+            id="reauth-password"
+            ref="reauthPasswordInput"
+            v-model="reauthPassword"
+            class="reauth-input"
+            type="password"
+            autocomplete="current-password"
+            maxlength="72"
+            required
+          >
+          <div v-if="reauthError" class="reauth-error">{{ reauthError }}</div>
+          <div class="reauth-actions">
+            <button type="button" class="reauth-cancel" :disabled="reauthLoading" @click="cancelReauthentication">キャンセル</button>
+            <button type="submit" class="reauth-submit" :disabled="reauthLoading">
+              {{ reauthLoading ? '確認中...' : '確認して実行' }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <!-- トースト通知 -->
     <Transition name="toast-fade">
       <div v-if="toast.visible" class="toast" :class="toast.type">
@@ -178,7 +209,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useAppStore } from './store/index'
 import TransactionModal from './components/TransactionModal.vue'
 import CSVImportModal from './components/CSVImportModal.vue'
@@ -196,7 +227,10 @@ import {
   saveBankAccountSettings as apiSaveBankAccountSettings,
   getBalanceHistoryFiltered,
   isWailsMode,
-  logout as apiLogout
+  logout as apiLogout,
+  getAuthStatus,
+  reauthenticate,
+  keepAlive
 } from './utils/api'
 
 const store = useAppStore()
@@ -212,6 +246,30 @@ const showGraph = ref(false)
 const showSnapshotModal = ref(false)
 const showTagChart = ref(false)
 const showAIAPIConsole = ref(false)
+const showReauthModal = ref(false)
+const reauthLoading = ref(false)
+const reauthPassword = ref('')
+const reauthError = ref('')
+const reauthPasswordInput = ref(null)
+let reauthRequest = null
+let reauthListenerRegistered = false
+const idleTimeoutSeconds = ref(0)
+const idleScreenLocked = ref(false)
+let idleTimer = null
+let lastUserActivityAt = 0
+let idleLockInProgress = false
+let idleListenersRegistered = false
+let activityThrottleTimer = null
+let heartbeatIntervalTimer = null
+let heartbeatTrailingTimer = null
+let heartbeatInFlight = false
+let heartbeatPending = false
+let heartbeatRecheckInFlight = false
+let lastHeartbeatAttemptAt = 0
+let componentMounted = false
+const heartbeatIntervalMs = 4 * 60 * 1000
+const heartbeatTrailingMs = 30 * 1000
+const heartbeatFailureRecheckDelaysMs = [500, 1500]
 const isEditMode = ref(false)
 const editingTransaction = ref(null)
 const dateSortOrder = ref('desc')
@@ -479,6 +537,335 @@ async function logout() {
   }
 }
 
+function clearIdleTimer() {
+  if (idleTimer !== null) {
+    clearTimeout(idleTimer)
+    idleTimer = null
+  }
+}
+
+function clearHeartbeatTimers() {
+  if (heartbeatIntervalTimer !== null) {
+    clearTimeout(heartbeatIntervalTimer)
+    heartbeatIntervalTimer = null
+  }
+  if (heartbeatTrailingTimer !== null) {
+    clearTimeout(heartbeatTrailingTimer)
+    heartbeatTrailingTimer = null
+  }
+  heartbeatPending = false
+}
+
+function stopIdleLock() {
+  clearIdleTimer()
+  clearHeartbeatTimers()
+  if (activityThrottleTimer !== null) {
+    clearTimeout(activityThrottleTimer)
+    activityThrottleTimer = null
+  }
+  if (!idleListenersRegistered) return
+  document.removeEventListener('pointerdown', recordUserActivity)
+  document.removeEventListener('keydown', recordUserActivity)
+  document.removeEventListener('touchstart', recordUserActivity)
+  document.removeEventListener('pointermove', recordThrottledUserActivity)
+  document.removeEventListener('wheel', recordThrottledUserActivity)
+  window.removeEventListener('scroll', recordThrottledUserActivity)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  idleListenersRegistered = false
+}
+
+// Drop every in-memory value that could reveal household financial data before
+// navigating away. The v-if guards also unmount open modals and clear their
+// component-local form state.
+function clearSensitiveStateForIdle() {
+  stopIdleLock()
+  store.resetState()
+  showMenu.value = false
+  showAccountDropdown.value = false
+  showAddTransactionModal.value = false
+  showImportCSVModal.value = false
+  showCreditCardModal.value = false
+  showBankAccountModal.value = false
+  showGraph.value = false
+  showSnapshotModal.value = false
+  showTagChart.value = false
+  showAIAPIConsole.value = false
+  showReauthModal.value = false
+  reauthLoading.value = false
+  reauthPassword.value = ''
+  reauthError.value = ''
+  reauthPasswordInput.value = null
+  isEditMode.value = false
+  editingTransaction.value = null
+  selectedCreditCardItems.value = []
+  selectedBankAccountItems.value = []
+  balanceHistoryData.value = null
+  toast.value = { visible: false, message: '', type: 'success' }
+  clearTimeout(toastTimer)
+  toastTimer = null
+  clearTimeout(searchTimeout)
+  searchTimeout = null
+  localStorage.removeItem('snapshot_restored')
+  if (reauthRequest?.reject) {
+    reauthRequest.reject(new Error('セッションが無操作タイムアウトになりました'))
+  }
+  reauthRequest = null
+}
+
+function checkIdleTimeout() {
+  if (isWailsMode || idleLockInProgress || !idleTimeoutSeconds.value || !lastUserActivityAt) return
+  if (Date.now() - lastUserActivityAt >= idleTimeoutSeconds.value * 1000) {
+    void lockForIdle()
+    return
+  }
+  scheduleIdleCheck()
+}
+
+function scheduleIdleCheck() {
+  clearIdleTimer()
+  if (isWailsMode || idleLockInProgress || !idleTimeoutSeconds.value || !lastUserActivityAt) return
+  const remaining = idleTimeoutSeconds.value * 1000 - (Date.now() - lastUserActivityAt)
+  idleTimer = setTimeout(checkIdleTimeout, Math.max(1, Math.min(remaining, 1000)))
+}
+
+function recordUserActivity() {
+  if (isWailsMode || idleLockInProgress || document.visibilityState === 'hidden') return
+  lastUserActivityAt = Date.now()
+  scheduleIdleCheck()
+  scheduleActivityHeartbeat()
+}
+
+// The server only refreshes LastSeenAt when it receives an authenticated
+// request. Keep the client-side activity lock and server idle timeout aligned
+// with a low-frequency, visible-tab heartbeat. A trailing request covers a
+// user who stops scrolling or moving the pointer before the four-minute
+// periodic interval; no heartbeat is emitted without real user activity.
+async function sendActivityHeartbeat() {
+  if (!componentMounted || isWailsMode || idleLockInProgress || document.visibilityState === 'hidden') return
+  if (heartbeatInFlight) {
+    heartbeatPending = true
+    return
+  }
+
+  heartbeatInFlight = true
+  if (heartbeatIntervalTimer !== null) {
+    clearTimeout(heartbeatIntervalTimer)
+    heartbeatIntervalTimer = null
+  }
+  // Cadence is based on attempts, not only successful responses. A failed
+  // request must not produce a zero-delay retry loop while the user keeps
+  // moving the pointer or scrolling.
+  lastHeartbeatAttemptAt = Date.now()
+  try {
+    const status = await keepAlive()
+    // A cross-tab rotation can produce 403 (new shared cookie, old in-memory
+    // CSRF token), while a request that left just before rotation can produce
+    // 401. Status rechecking both cases either refreshes the current CSRF token
+    // or confirms that a full login is genuinely required.
+    if (status === 401 || status === 403) void recheckSessionAfterHeartbeatFailure()
+  } catch {
+    // Heartbeats are best effort. A network failure is inconclusive and must
+    // not redirect or erase the screen; authentication/CSRF failures are
+    // rechecked separately so a rotation is not mistaken for expiry.
+  } finally {
+    heartbeatInFlight = false
+    if (heartbeatPending) {
+      heartbeatPending = false
+      if (componentMounted && !idleLockInProgress && document.visibilityState !== 'hidden') {
+        // A pending event only records that activity happened during the
+        // request. Respect the same four-minute cadence before retrying.
+        scheduleHeartbeatInterval()
+      }
+    } else if (componentMounted && !idleLockInProgress && document.visibilityState !== 'hidden' &&
+               Date.now() - lastUserActivityAt <= heartbeatTrailingMs) {
+      scheduleHeartbeatInterval()
+    }
+  }
+}
+
+function scheduleHeartbeatInterval() {
+  if (heartbeatIntervalTimer !== null || !componentMounted || isWailsMode || idleLockInProgress ||
+      document.visibilityState === 'hidden' || !lastUserActivityAt) return
+  const elapsed = Date.now() - lastHeartbeatAttemptAt
+  const delay = Math.max(0, heartbeatIntervalMs - elapsed)
+  heartbeatIntervalTimer = setTimeout(() => {
+    heartbeatIntervalTimer = null
+    // If activity stopped, the trailing timer is sufficient and a periodic
+    // timer must not keep an unattended session alive.
+    if (componentMounted && Date.now() - lastUserActivityAt <= heartbeatTrailingMs) {
+      void sendActivityHeartbeat()
+    }
+  }, delay)
+}
+
+async function recheckSessionAfterHeartbeatFailure() {
+  if (heartbeatRecheckInFlight) return
+  heartbeatRecheckInFlight = true
+  let confirmedExpired = false
+  try {
+    // A heartbeat can race with a same-tab or cross-tab session rotation: the
+    // server has invalidated the old cookie, but the browser may not have
+    // received Set-Cookie yet. Two spaced status checks avoid turning that
+    // short race (or Pangolin latency) into a surprising full-login redirect.
+    for (const delay of heartbeatFailureRecheckDelaysMs) {
+      await new Promise(resolve => setTimeout(resolve, delay))
+      if (!componentMounted || isWailsMode || idleLockInProgress || document.visibilityState === 'hidden') return
+      // The explicit reauthentication request owns expiry handling while it
+      // is in flight. Never carry a stale unauthenticated probe across the
+      // session rotation and apply it after the new cookie arrives.
+      if (reauthLoading.value) return
+      try {
+        const status = await getAuthStatus()
+        if (status?.authenticated !== false) return
+        confirmedExpired = true
+      } catch {
+        // A network failure is inconclusive. Do not erase the screen; the next
+        // real user activity can perform another bounded heartbeat check.
+        return
+      }
+    }
+    if (confirmedExpired && !reauthLoading.value && !idleLockInProgress &&
+        document.visibilityState !== 'hidden') {
+      expireSessionAndRedirect('session-expired')
+    }
+  } finally {
+    heartbeatRecheckInFlight = false
+  }
+}
+
+function expireSessionAndRedirect(reason) {
+  if (!componentMounted || isWailsMode || idleLockInProgress) return
+  idleLockInProgress = true
+  idleScreenLocked.value = true
+  clearSensitiveStateForIdle()
+  window.location.replace(`/login?reason=${encodeURIComponent(reason)}`)
+}
+
+function scheduleActivityHeartbeat() {
+  if (!componentMounted || isWailsMode || idleLockInProgress || document.visibilityState === 'hidden') return
+  scheduleHeartbeatInterval()
+  if (heartbeatTrailingTimer !== null) clearTimeout(heartbeatTrailingTimer)
+  heartbeatTrailingTimer = setTimeout(() => {
+    heartbeatTrailingTimer = null
+    if (componentMounted && !idleLockInProgress && document.visibilityState !== 'hidden') {
+      void sendActivityHeartbeat()
+    }
+  }, heartbeatTrailingMs)
+}
+
+// Pointer movement and scrolling can fire hundreds of events per second. Treat
+// them as activity at most once per second, while keeping explicit clicks,
+// keypresses, and touch starts immediate. The visibility guard in
+// recordUserActivity prevents background tabs from extending the idle window.
+function recordThrottledUserActivity() {
+  if (activityThrottleTimer !== null) return
+  recordUserActivity()
+  activityThrottleTimer = setTimeout(() => {
+    activityThrottleTimer = null
+  }, 1000)
+}
+
+function handleVisibilityChange() {
+  if (isWailsMode) return
+  if (document.visibilityState === 'hidden') {
+    // Do not let a background tab keep either the local or server session
+    // alive. Any pending heartbeat is discarded and a later visible-tab
+    // activity will schedule a fresh one.
+    clearHeartbeatTimers()
+    return
+  }
+  checkIdleTimeout()
+}
+
+async function lockForIdle() {
+  if (!componentMounted || isWailsMode || idleLockInProgress) return
+  idleLockInProgress = true
+  // Cover the entire UI before clearing stores or awaiting any network work.
+  // This also prevents an already in-flight request from repainting sensitive
+  // data during the short best-effort logout window.
+  idleScreenLocked.value = true
+  clearSensitiveStateForIdle()
+
+  // Best effort: the browser may already be offline or the server may have
+  // expired the session. The local purge and redirect remain mandatory.
+  let timeoutID = null
+  try {
+    const timeout = new Promise(resolve => {
+      timeoutID = setTimeout(resolve, 750)
+    })
+    await Promise.race([apiLogout(), timeout])
+  } catch (error) {
+    console.warn('アイドルタイムアウト時のログアウトに失敗しました:', error)
+  } finally {
+    if (timeoutID !== null) clearTimeout(timeoutID)
+  }
+  window.location.replace('/login?reason=idle')
+}
+
+function startIdleLock(seconds) {
+  if (isWailsMode || !Number.isFinite(seconds) || seconds <= 0) return
+  idleTimeoutSeconds.value = Math.floor(seconds)
+  lastUserActivityAt = Date.now()
+  // getAuthStatus() immediately before this call has touched the server.
+  lastHeartbeatAttemptAt = lastUserActivityAt
+  document.addEventListener('pointerdown', recordUserActivity, { passive: true })
+  document.addEventListener('keydown', recordUserActivity, { passive: true })
+  document.addEventListener('touchstart', recordUserActivity, { passive: true })
+  document.addEventListener('pointermove', recordThrottledUserActivity, { passive: true })
+  document.addEventListener('wheel', recordThrottledUserActivity, { passive: true })
+  window.addEventListener('scroll', recordThrottledUserActivity, { passive: true })
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  idleListenersRegistered = true
+  scheduleIdleCheck()
+}
+
+function handleReauthRequired(event) {
+  // api.js coalesces simultaneous 428 responses, but ignore malformed or
+  // duplicate events so a stale page cannot create an unresolvable promise.
+  if (!event?.detail?.resolve || reauthRequest) return
+  reauthRequest = event.detail
+  reauthPassword.value = ''
+  reauthError.value = ''
+  showReauthModal.value = true
+  nextTick(() => reauthPasswordInput.value?.focus())
+}
+
+function handleSessionExpired(event) {
+  event?.preventDefault?.()
+  expireSessionAndRedirect(event?.detail?.reason || 'session-expired')
+}
+
+function cancelReauthentication() {
+  if (reauthRequest?.reject) {
+    reauthRequest.reject(new Error('再認証がキャンセルされました'))
+  }
+  reauthRequest = null
+  showReauthModal.value = false
+  reauthPassword.value = ''
+  reauthError.value = ''
+}
+
+async function submitReauthentication() {
+  if (!reauthRequest || reauthLoading.value) return
+  reauthLoading.value = true
+  reauthError.value = ''
+  try {
+    await reauthenticate(reauthPassword.value)
+    reauthRequest.resolve(true)
+    reauthRequest = null
+    showReauthModal.value = false
+    reauthPassword.value = ''
+  } catch (error) {
+    reauthError.value = error?.message || '再認証に失敗しました'
+    // Never retain credentials after a failed attempt.
+    reauthPassword.value = ''
+    await nextTick()
+    reauthPasswordInput.value?.focus()
+  } finally {
+    reauthLoading.value = false
+  }
+}
+
 async function handleSnapshotRestored() {
   // 全状態をリセットしてから再取得
   store.resetState()
@@ -502,7 +889,22 @@ function handleGlobalClick() {
 
 // 初期化
 onMounted(async () => {
+  componentMounted = true
   document.addEventListener('click', handleGlobalClick)
+  window.addEventListener('omni-money:reauth-required', handleReauthRequired)
+  window.addEventListener('omni-money:session-expired', handleSessionExpired)
+  reauthListenerRegistered = true
+  try {
+    const authStatus = await getAuthStatus()
+    if (componentMounted && !isWailsMode && authStatus?.authenticated) {
+      const serverIdleSeconds = Number(authStatus?.idle_timeout_seconds)
+      if (Number.isFinite(serverIdleSeconds) && serverIdleSeconds > 0) {
+        startIdleLock(serverIdleSeconds)
+      }
+    }
+  } catch {
+    // The normal API calls below provide the visible error/redirect behavior.
+  }
   await store.fetchAccounts()
   await store.fetchCreditCardSettings()
   await store.fetchBankAccountSettings()
@@ -519,4 +921,126 @@ onMounted(async () => {
     }
   }
 })
+
+onBeforeUnmount(() => {
+  componentMounted = false
+  document.removeEventListener('click', handleGlobalClick)
+  stopIdleLock()
+  if (reauthListenerRegistered) {
+    window.removeEventListener('omni-money:reauth-required', handleReauthRequired)
+    window.removeEventListener('omni-money:session-expired', handleSessionExpired)
+  }
+  if (reauthRequest?.reject) {
+    reauthRequest.reject(new Error('再認証ダイアログが終了しました'))
+  }
+})
 </script>
+
+<style scoped>
+.idle-lock-curtain {
+  position: fixed;
+  z-index: 100000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: #f4f5f8;
+}
+
+.idle-lock-message {
+  color: #333;
+  font-weight: 600;
+  text-align: center;
+}
+
+.reauth-overlay {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.reauth-card {
+  width: min(420px, 100%);
+  padding: 1.5rem;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.28);
+}
+
+.reauth-card h3 {
+  margin: 0 0 0.6rem;
+  color: #333;
+}
+
+.reauth-description {
+  margin: 0 0 1.25rem;
+  color: #666;
+  font-size: 0.9rem;
+}
+
+.reauth-label {
+  display: block;
+  margin: 0.75rem 0 0.35rem;
+  color: #333;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.reauth-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.7rem 0.8rem;
+  border: 2px solid rgba(102, 126, 234, 0.2);
+  border-radius: 9px;
+}
+
+.reauth-input:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15);
+}
+
+.reauth-error {
+  margin-top: 0.8rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(255, 69, 58, 0.1);
+  color: #b00020;
+  font-size: 0.85rem;
+}
+
+.reauth-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 1.25rem;
+}
+
+.reauth-actions button {
+  padding: 0.65rem 0.9rem;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.reauth-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.reauth-cancel {
+  background: #eee;
+  color: #333;
+}
+
+.reauth-submit {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: #fff;
+}
+</style>

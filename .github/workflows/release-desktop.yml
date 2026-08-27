@@ -5,11 +5,111 @@ on:
     branches: [main]
     paths: ['VERSION']
 
-permissions:
-  contents: write
+permissions: {}
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WAILS_VERSION: v2.11.0
 
 jobs:
+  prepare:
+    name: Validate and test release
+    permissions:
+      contents: read # required to inspect the release-triggering source
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_exists: ${{ steps.release.outputs.exists }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Read and validate version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(awk 'END { print NR }' VERSION)" != 1 ]; then
+            echo "::error::VERSION must contain exactly one line"
+            exit 1
+          fi
+          VERSION="$(sed -n '1p' VERSION)"
+          semver_re='^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))(\.((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [ "${#VERSION}" -gt 64 ] || [[ ! "$VERSION" =~ $semver_re ]]; then
+            echo "::error::VERSION is not valid SemVer"
+            exit 1
+          fi
+          if [[ "$VERSION" == *+* ]]; then
+            echo "::error::Release versions must not contain SemVer build metadata (+...); Docker and desktop artifacts use the same version"
+            exit 1
+          fi
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Go for release quality gate
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26.7'
+
+      - name: Setup Node.js for release quality gate
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24.19.0'
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Install and audit frontend dependencies
+        working-directory: frontend
+        run: |
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
+          npm run build
+
+      - name: Run release quality gate
+        run: |
+          go test ./...
+          go vet ./...
+          go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 -quiet -severity medium ./...
+          go test -race ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+      - name: Check release existence
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          STATUS="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/v${APP_VERSION}")"
+          case "$STATUS" in
+            200) echo "exists=true" >> "$GITHUB_OUTPUT" ;;
+            404) echo "exists=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::release existence check failed with HTTP $STATUS"; exit 1 ;;
+          esac
+
   build:
+    name: Build desktop artifacts
+    needs: prepare
+    if: needs.prepare.outputs.release_exists == 'false'
+    permissions:
+      contents: read
+    env:
+      APP_VERSION: ${{ needs.prepare.outputs.version }}
+      BUILD_PLATFORM: ${{ matrix.platform }}
+      ARTIFACT_NAME: ${{ matrix.artifact_name }}
     strategy:
       matrix:
         include:
@@ -24,162 +124,192 @@ jobs:
             artifact_name: omni-money-linux
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
-      - name: Read version
-        id: version
+      - name: Verify checkout did not persist credentials
         shell: bash
         run: |
-          VERSION=$(cat VERSION | tr -d '[:space:]')
-          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Check if release already exists
-        id: check_release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if gh release view "v${{ env.APP_VERSION }}" > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
+          if git config --local --get-regexp '^http\..*\.extraheader$'; then
+            echo "::error::checkout credential remained in local git config"
+            exit 1
           fi
 
       - name: Setup Go
-        if: steps.check_release.outputs.exists == 'false'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '1.24'
+          go-version: '1.26.7'
 
       - name: Setup Node.js
-        if: steps.check_release.outputs.exists == 'false'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: '20'
+          node-version: '24.19.0'
 
       # Linux: WebKitGTK 依存パッケージ（Ubuntu 24.04+ は 4.1）
       - name: Install Linux dependencies
-        if: runner.os == 'Linux' && steps.check_release.outputs.exists == 'false'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Install Wails CLI
-        if: steps.check_release.outputs.exists == 'false'
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
-
-      - name: Build application
-        if: steps.check_release.outputs.exists == 'false'
         shell: bash
         run: |
-          TAGS=""
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            TAGS="-tags webkit2_41"
+          REQUIRED_VERSION="$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"
+          if [ "$REQUIRED_VERSION" != "$WAILS_VERSION" ]; then
+            echo "::error::go.mod Wails version ($REQUIRED_VERSION) does not match $WAILS_VERSION"
+            exit 1
           fi
-          wails build -platform ${{ matrix.platform }} \
-            $TAGS \
-            -ldflags "-X main.version=${{ env.APP_VERSION }}"
+          go install "github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION"
+
+      - name: Build application
+        shell: bash
+        run: |
+          WAILS_ARGS=()
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            WAILS_ARGS+=("-tags" "webkit2_41")
+          fi
+          wails build -platform "$BUILD_PLATFORM" \
+            "${WAILS_ARGS[@]}" \
+            -ldflags "-X main.version=${APP_VERSION}"
 
       # macOSの場合: ad-hoc署名 + dittoでバンドル構造保持ZIP
       - name: Package macOS app
-        if: runner.os == 'macOS' && steps.check_release.outputs.exists == 'false'
+        if: runner.os == 'macOS'
         run: |
           cd build/bin
           codesign --force --deep -s - "Omni Money.app"
           codesign --verify --strict "Omni Money.app"
-          ditto -c -k --sequesterRsrc --keepParent "Omni Money.app" "../../${{ matrix.artifact_name }}-v${{ env.APP_VERSION }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "Omni Money.app" "../../${ARTIFACT_NAME}-v${APP_VERSION}.zip"
 
       # Linuxの場合: バイナリをtar.gz圧縮
       - name: Package Linux app
-        if: runner.os == 'Linux' && steps.check_release.outputs.exists == 'false'
+        if: runner.os == 'Linux'
         run: |
           cd build/bin
-          tar czf ../../${{ matrix.artifact_name }}-v${{ env.APP_VERSION }}.tar.gz omni_money
+          tar czf "../../${ARTIFACT_NAME}-v${APP_VERSION}.tar.gz" omni_money
 
       # Windowsの場合: exeをzip圧縮
       - name: Package Windows app
-        if: runner.os == 'Windows' && steps.check_release.outputs.exists == 'false'
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "build\bin\omni_money.exe" -DestinationPath "${{ matrix.artifact_name }}-v${{ env.APP_VERSION }}.zip"
+          $destination = "$env:ARTIFACT_NAME-v$env:APP_VERSION.zip"
+          Compress-Archive -Path "build\bin\omni_money.exe" -DestinationPath $destination
 
       - name: Upload artifact
-        if: steps.check_release.outputs.exists == 'false'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_name }}-v${{ env.APP_VERSION }}.*
           retention-days: 1
 
-  release:
-    needs: build
+  attest:
+    name: Attest desktop artifacts
+    needs: [prepare, build]
     runs-on: ubuntu-latest
-    if: needs.build.result == 'success'
+    timeout-minutes: 15
+    if: >-
+      needs.prepare.outputs.release_exists == 'false' &&
+      needs.build.result == 'success'
+    permissions:
+      actions: read # required to download build artifacts
+      contents: read # required by actions/attest provenance metadata
+      id-token: write # signs provenance through GitHub OIDC
+      attestations: write # publishes the artifact attestations
+      artifact-metadata: write # links attestations to GitHub artifact metadata
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Read version
-        run: |
-          VERSION=$(cat VERSION | tr -d '[:space:]')
-          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
-
-      - name: Check if release already exists
-        id: check_release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if gh release view "v${{ env.APP_VERSION }}" > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Download all artifacts
-        if: steps.check_release.outputs.exists == 'false'
-        uses: actions/download-artifact@v8
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist/
 
-      - name: Create GitHub Release
-        if: steps.check_release.outputs.exists == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attest release artifacts
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/**/*.zip
+            dist/**/*.tar.gz
+
+  release:
+    name: Publish GitHub release
+    needs: [prepare, build, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: >-
+      needs.prepare.outputs.release_exists == 'false' &&
+      needs.build.result == 'success' &&
+      needs.attest.result == 'success'
+    permissions:
+      actions: read # required to download build artifacts
+      contents: write # required only for creating the GitHub Release
+    env:
+      APP_VERSION: ${{ needs.prepare.outputs.version }}
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist/
+
+      - name: Generate checksums
         shell: bash
         run: |
-          PRERELEASE_FLAG=""
-          if echo "${{ env.APP_VERSION }}" | grep -q '-'; then
-            PRERELEASE_FLAG="--prerelease"
+          CHECKSUM_FILE="$(mktemp)"
+          (cd dist && find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$CHECKSUM_FILE"
+          mv "$CHECKSUM_FILE" dist/SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_FLAGS=()
+          RELEASE_CORE="${APP_VERSION%%+*}"
+          if [[ "$RELEASE_CORE" == *-* ]]; then
+            RELEASE_FLAGS+=(--prerelease)
           fi
 
-          cat > /tmp/release-notes.md << 'NOTES_EOF'
-          ## Omni Money v${{ env.APP_VERSION }}
+          cat > /tmp/release-notes.md << NOTES_EOF
+          ## Omni Money v${APP_VERSION}
 
           ### ダウンロード
-          - **macOS (Apple Silicon / Intel)**: `omni-money-macos-v${{ env.APP_VERSION }}.zip`
-          - **Windows**: `omni-money-windows-v${{ env.APP_VERSION }}.zip`
-          - **Linux**: `omni-money-linux-v${{ env.APP_VERSION }}.tar.gz`
+          - **macOS (Apple Silicon / Intel)**: \`omni-money-macos-v${APP_VERSION}.zip\`
+          - **Windows**: \`omni-money-windows-v${APP_VERSION}.zip\`
+          - **Linux**: \`omni-money-linux-v${APP_VERSION}.tar.gz\`
 
-          ### macOS で初回起動する場合
-          zipを解凍後、ターミナルで以下を実行してから起動してください：
-          ```bash
-          xattr -cr "Omni Money.app"
-          ```
-          または、右クリック →「開く」→「システム設定 > プライバシーとセキュリティ > このまま開く」でも起動できます。
+          ### 署名と検証
+          現在のmacOS／Windows成果物には、Developer ID／Authenticodeによる配布元署名がありません。
+          \`SHA256SUMS\` とGitHub artifact attestationを検証し、出所を確認できない成果物は実行しないでください。
 
           ### Docker
-          ```bash
-          docker pull ghcr.io/${{ github.repository }}:${{ env.APP_VERSION }}
-          ```
+          \`\`\`bash
+          docker pull ghcr.io/${RELEASE_REPOSITORY}:${APP_VERSION}
+          \`\`\`
           NOTES_EOF
 
-          gh release create "v${{ env.APP_VERSION }}" \
-            --title "Omni Money v${{ env.APP_VERSION }}" \
+          for artifact_dir in omni-money-macos omni-money-windows omni-money-linux; do
+            if [ ! -d "dist/$artifact_dir" ]; then
+              echo "::error::missing release artifact directory: $artifact_dir"
+              exit 1
+            fi
+            artifact_count="$(find "dist/$artifact_dir" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) -print | wc -l | tr -d '[:space:]')"
+            if [ "$artifact_count" -ne 1 ]; then
+              echo "::error::expected exactly one packaged artifact in $artifact_dir, found $artifact_count"
+              exit 1
+            fi
+          done
+          mapfile -d '' RELEASE_FILES < <(find dist/ -type f -print0)
+          gh release create "v${APP_VERSION}" \
+            --title "Omni Money v${APP_VERSION}" \
             --notes-file /tmp/release-notes.md \
-            $PRERELEASE_FLAG \
-            $(find dist/ -type f)
+            "${RELEASE_FLAGS[@]}" \
+            "${RELEASE_FILES[@]}"

@@ -20,12 +20,26 @@ var (
 	db     *sql.DB
 	dbPath string
 	mu     sync.RWMutex
+
+	// snapshotLifecycle serializes database lifecycle changes with snapshot
+	// operations.  A snapshot keeps a database handle and path for the whole
+	// copy, so closing/reinitializing the database must wait for it to finish.
+	snapshotLifecycle sync.RWMutex
+	dbLifecycleMu     sync.Mutex
+	snapshotMu        sync.Mutex
+	snapshotCond      = sync.NewCond(&snapshotMu)
+	snapshotRunning   bool
+	snapshotPending   bool
+	snapshotClosing   bool
 )
 
 // InitDB はSQLiteデータベースを初期化する。
 // wails build でバインディング生成時にも呼ばれるため、sync.Once は使わない。
 // 既に接続がある場合はまず閉じてから再接続する。
 func InitDB(path string) error {
+	beginDBLifecycle()
+	defer endDBLifecycle()
+
 	mu.Lock()
 	defer mu.Unlock()
 	return initDBLocked(path)
@@ -48,8 +62,11 @@ func initDBLocked(path string) error {
 	// データベースディレクトリが存在しない場合は作成
 	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := os.MkdirAll(dir, 0700); err != nil {
 			return fmt.Errorf("データベースディレクトリ作成エラー: %w", err)
+		}
+		if err := os.Chmod(dir, 0700); err != nil { // #nosec G302 -- DB directory is intentionally private to the local user.
+			return fmt.Errorf("データベースディレクトリ権限設定エラー: %w", err)
 		}
 	}
 
@@ -61,7 +78,16 @@ func initDBLocked(path string) error {
 
 	// 接続テスト
 	if err := db.Ping(); err != nil {
+		db.Close()
+		db = nil
 		return fmt.Errorf("データベースping失敗: %w", err)
+	}
+	// SQLite creates the file on first open.  Restrict an existing database as
+	// well: it may contain the user's complete financial history.
+	if err := os.Chmod(path, 0600); err != nil {
+		db.Close()
+		db = nil
+		return fmt.Errorf("データベースファイル権限設定エラー: %w", err)
 	}
 
 	// テーブル作成
@@ -82,6 +108,9 @@ func GetDB() *sql.DB {
 
 // CloseDB はデータベース接続を閉じる
 func CloseDB() {
+	beginDBLifecycle()
+	defer endDBLifecycle()
+
 	mu.Lock()
 	defer mu.Unlock()
 	if db != nil {
@@ -182,10 +211,20 @@ func getSnapshotDir() string {
 // CreateSnapshot は現在のDBファイルのスナップショットを作成する。
 // snapshotDir にタイムスタンプ付きのコピーを保存する。
 func CreateSnapshot(snapshotDir string) (string, error) {
-	mu.RLock()
+	snapshotLifecycle.RLock()
+	defer snapshotLifecycle.RUnlock()
+	return createSnapshot(snapshotDir)
+}
+
+// createSnapshot performs the copy while holding the database lock.  It is
+// called by CreateSnapshot and the auto-snapshot worker, both of which hold a
+// read lock on snapshotLifecycle for the duration of the operation.
+func createSnapshot(snapshotDir string) (string, error) {
+	mu.Lock()
+	defer mu.Unlock()
+
 	currentPath := dbPath
 	currentDB := db
-	mu.RUnlock()
 
 	if currentPath == "" {
 		return "", fmt.Errorf("データベースが初期化されていません")
@@ -199,14 +238,20 @@ func CreateSnapshot(snapshotDir string) (string, error) {
 	}
 
 	if snapshotDir == "" {
-		snapshotDir = getSnapshotDir()
+		snapshotDir = filepath.Join(filepath.Dir(currentPath), "snapshots")
 	}
 
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0700); err != nil {
 		return "", fmt.Errorf("スナップショットディレクトリ作成エラー: %w", err)
 	}
+	if err := os.Chmod(snapshotDir, 0700); err != nil { // #nosec G302 -- Snapshot directory is intentionally private to the local user.
+		return "", fmt.Errorf("スナップショットディレクトリ権限設定エラー: %w", err)
+	}
 
-	timestamp := time.Now().Format("20060102_150405.000")
+	// Nanosecond precision avoids same-process collisions.  copyFile also uses
+	// O_EXCL, so a collision or pre-existing symlink fails closed instead of
+	// overwriting an existing snapshot.
+	timestamp := time.Now().UTC().Format("20060102_150405.000000000")
 	// ドットをアンダースコアに置換してファイル名に安全な形式にする
 	timestamp = strings.ReplaceAll(timestamp, ".", "_")
 	snapshotPath := filepath.Join(snapshotDir, fmt.Sprintf("omni_money_%s.db", timestamp))
@@ -261,19 +306,22 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 		return err
 	}
 
+	beginDBLifecycle()
+	defer endDBLifecycle()
+
+	// 復元中に他のリクエストが nil の DB 接続へアクセスして panic しないよう、
+	// ファイル差し替えと再接続が終わるまでロックを保持し続ける。
+	mu.Lock()
+	defer mu.Unlock()
+
 	if snapshotDir == "" {
-		snapshotDir = getSnapshotDir()
+		snapshotDir = filepath.Join(filepath.Dir(dbPath), "snapshots")
 	}
 
 	snapshotPath := filepath.Join(snapshotDir, snapshotName)
 	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
 		return fmt.Errorf("スナップショットが見つかりません: %s", snapshotName)
 	}
-
-	// 復元中に他のリクエストが nil の DB 接続へアクセスして panic しないよう、
-	// ファイル差し替えと再接続が終わるまでロックを保持し続ける。
-	mu.Lock()
-	defer mu.Unlock()
 
 	// --- 手順1: データベース接続の完全な遮断 ---
 	currentPath := dbPath
@@ -361,8 +409,17 @@ func validateSnapshotName(name string) error {
 
 // CleanOldSnapshots は古いスナップショットを削除する（世代管理: 最新N件を残す）
 func CleanOldSnapshots(snapshotDir string, maxKeep int) error {
+	snapshotLifecycle.RLock()
+	defer snapshotLifecycle.RUnlock()
+	return cleanOldSnapshots(snapshotDir, maxKeep)
+}
+
+func cleanOldSnapshots(snapshotDir string, maxKeep int) error {
 	if snapshotDir == "" {
-		snapshotDir = getSnapshotDir()
+		mu.RLock()
+		path := dbPath
+		mu.RUnlock()
+		snapshotDir = filepath.Join(filepath.Dir(path), "snapshots")
 	}
 	if maxKeep <= 0 {
 		maxKeep = 30
@@ -381,7 +438,9 @@ func CleanOldSnapshots(snapshotDir string, maxKeep int) error {
 	// 古いものから削除
 	toDelete := snapshots[:len(snapshots)-maxKeep]
 	for _, name := range toDelete {
-		os.Remove(filepath.Join(snapshotDir, name))
+		if err := os.Remove(filepath.Join(snapshotDir, name)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("古いスナップショット削除エラー (%s): %w", name, err)
+		}
 		log.Printf("古いスナップショットを削除: %s", name)
 	}
 	return nil
@@ -389,31 +448,94 @@ func CleanOldSnapshots(snapshotDir string, maxKeep int) error {
 
 // AutoSnapshot は操作ごとに自動スナップショットを作成し、30世代を維持する
 func AutoSnapshot() {
-	go func() {
-		_, err := CreateSnapshot("")
+	snapshotMu.Lock()
+	defer snapshotMu.Unlock()
+	if snapshotClosing {
+		return
+	}
+	if snapshotRunning {
+		// Coalesce bursts of writes into one follow-up snapshot.  This avoids
+		// spawning an unbounded number of goroutines while preserving the
+		// asynchronous API expected by callers.
+		snapshotPending = true
+		return
+	}
+	snapshotRunning = true
+	go runAutoSnapshots()
+}
+
+func runAutoSnapshots() {
+	for {
+		snapshotLifecycle.RLock()
+		_, err := createSnapshot("")
 		if err != nil {
 			log.Printf("自動スナップショット作成エラー: %v", err)
-			return
-		}
-		if err := CleanOldSnapshots("", 30); err != nil {
+		} else if err := cleanOldSnapshots("", 30); err != nil {
 			log.Printf("スナップショットクリーンアップエラー: %v", err)
 		}
-	}()
+		snapshotLifecycle.RUnlock()
+
+		snapshotMu.Lock()
+		if snapshotPending && !snapshotClosing {
+			snapshotPending = false
+			snapshotMu.Unlock()
+			continue
+		}
+		snapshotPending = false
+		snapshotRunning = false
+		snapshotCond.Broadcast()
+		snapshotMu.Unlock()
+		return
+	}
+}
+
+// beginDBLifecycle prevents new automatic snapshots and waits for an already
+// scheduled worker to finish before a database is closed or replaced.  The
+// lifecycle lock also waits for direct CreateSnapshot calls that are already
+// in progress.
+func beginDBLifecycle() {
+	// Serialize lifecycle transitions themselves.  Without this outer mutex,
+	// two concurrent CloseDB/InitDB calls could both observe the closing state,
+	// and the first one to finish could reopen the window while the second still
+	// owns the database lifecycle lock.
+	dbLifecycleMu.Lock()
+
+	snapshotMu.Lock()
+	snapshotClosing = true
+	for snapshotRunning {
+		snapshotCond.Wait()
+	}
+	snapshotMu.Unlock()
+	snapshotLifecycle.Lock()
+}
+
+func endDBLifecycle() {
+	snapshotLifecycle.Unlock()
+	snapshotMu.Lock()
+	snapshotClosing = false
+	snapshotCond.Broadcast()
+	snapshotMu.Unlock()
+	dbLifecycleMu.Unlock()
 }
 
 // copyFile はファイルをコピーする
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+	in, err := os.Open(src) // #nosec G304 -- src is the configured DB or validated snapshot path.
 	if err != nil {
 		return err
 	}
 	defer in.Close()
 
-	out, err := os.Create(dst)
+	// Snapshot and restored database files contain sensitive financial data.
+	// O_EXCL prevents an existing file or symlink from being followed.
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- dst is generated under the configured DB/snapshot directory.
 	if err != nil {
 		return err
 	}
 	defer out.Close()
+	if err := out.Chmod(0600); err != nil {
+		return err
+	}
 
 	if _, err := io.Copy(out, in); err != nil {
 		return err
