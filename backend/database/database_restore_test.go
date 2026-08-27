@@ -1,6 +1,7 @@
 package database
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -164,4 +165,146 @@ func TestRestoreSnapshotOldVersion(t *testing.T) {
 	t.Log("snap2 still exists after restore ✓ (no auto-deletion)")
 
 	CloseDB()
+}
+
+func TestRestoreSnapshotReappliesCurrentSchemaGuards(t *testing.T) {
+	t.Cleanup(CloseDB)
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "current.db")
+	snapshotDir := filepath.Join(tmpDir, "snapshots")
+	if err := os.MkdirAll(snapshotDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := InitDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshotName := "legacy.db"
+	createLegacyImageSnapshot(t, filepath.Join(snapshotDir, snapshotName), true)
+	if err := RestoreSnapshot(snapshotDir, snapshotName); err != nil {
+		t.Fatalf("RestoreSnapshot failed: %v", err)
+	}
+
+	for _, object := range []string{
+		"idx_transaction_images_txid",
+		"trg_transaction_images_quota_insert",
+		"trg_transaction_images_immutable_update",
+	} {
+		var count int
+		if err := GetDB().QueryRow(
+			"SELECT COUNT(*) FROM sqlite_master WHERE name = ? AND type IN ('index', 'trigger')",
+			object,
+		).Scan(&count); err != nil {
+			t.Fatalf("query sqlite_master for %s: %v", object, err)
+		}
+		if count != 1 {
+			t.Fatalf("schema guard %s was not restored", object)
+		}
+	}
+
+	if _, err := GetDB().Exec(
+		"INSERT INTO transaction_images (transaction_id, filename, data, mime_type) VALUES (1, 'empty.png', ?, 'image/png')",
+		[]byte{},
+	); err == nil {
+		t.Fatal("restored image quota trigger accepted an empty image")
+	}
+	result, err := GetDB().Exec(
+		"INSERT INTO transaction_images (transaction_id, filename, data, mime_type) VALUES (1, 'valid.png', ?, 'image/png')",
+		[]byte{1},
+	)
+	if err != nil {
+		t.Fatalf("insert valid image after restore: %v", err)
+	}
+	imageID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := GetDB().Exec("UPDATE transaction_images SET filename = 'changed.png' WHERE id = ?", imageID); err == nil {
+		t.Fatal("restored immutable trigger accepted an image update")
+	}
+
+	if err := checkIntegrity(GetDB()); err != nil {
+		t.Fatalf("restored database integrity: %v", err)
+	}
+}
+
+func TestRestoreSnapshotSchemaFailureRestoresOriginalDatabase(t *testing.T) {
+	t.Cleanup(CloseDB)
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "current.db")
+	snapshotDir := filepath.Join(tmpDir, "snapshots")
+	if err := os.MkdirAll(snapshotDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := InitDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := GetDB().Exec(
+		"INSERT INTO transactions (account, date, item, type, amount, balance) VALUES ('cash', '2026-01-01', 'original', 'income', 1, 1)",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshotName := "incompatible.db"
+	createLegacyImageSnapshot(t, filepath.Join(snapshotDir, snapshotName), false)
+	if err := RestoreSnapshot(snapshotDir, snapshotName); err == nil {
+		t.Fatal("RestoreSnapshot unexpectedly accepted an incompatible schema")
+	}
+
+	var item string
+	if err := GetDB().QueryRow("SELECT item FROM transactions WHERE account = 'cash'").Scan(&item); err != nil {
+		t.Fatalf("original database is not usable after rollback: %v", err)
+	}
+	if item != "original" {
+		t.Fatalf("rollback restored item %q, want original", item)
+	}
+	if _, err := os.Stat(dbPath + ".bak"); !os.IsNotExist(err) {
+		t.Fatalf("backup file remains after rollback: %v", err)
+	}
+	if err := checkIntegrity(GetDB()); err != nil {
+		t.Fatalf("rolled back database integrity: %v", err)
+	}
+}
+
+func createLegacyImageSnapshot(t *testing.T, path string, includeDataColumn bool) {
+	t.Helper()
+	legacy, err := sql.Open("sqlite3", path+"?_journal_mode=DELETE&_foreign_keys=ON")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = legacy.Close() })
+	if _, err := legacy.Exec(`CREATE TABLE transactions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		account TEXT NOT NULL,
+		date DATETIME NOT NULL,
+		item TEXT NOT NULL,
+		type TEXT NOT NULL,
+		amount INTEGER NOT NULL,
+		balance INTEGER NOT NULL DEFAULT 0,
+		memo TEXT DEFAULT ''
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	imageColumns := `
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		transaction_id INTEGER NOT NULL,
+		filename TEXT NOT NULL,`
+	if includeDataColumn {
+		imageColumns += " data BLOB NOT NULL,"
+	}
+	imageColumns += `
+		mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	`
+	if _, err := legacy.Exec("CREATE TABLE transaction_images (" + imageColumns + ")"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(
+		"INSERT INTO transactions (account, date, item, type, amount, balance) VALUES ('cash', '2025-01-01', 'legacy', 'income', 1, 1)",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
