@@ -159,6 +159,7 @@ export const useAppStore = defineStore('app', () => {
         itemNames.value = []
         transactions.value = []
         searchQuery.value = ''
+        loading.value = false
     }
 
     return {

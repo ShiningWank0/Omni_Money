@@ -12,9 +12,22 @@ build/
 
 # ランタイムデータ
 *.db
+data/
 snapshots/
 .env
 .env.*
+
+# 認証・TLS秘密（Docker build contextへ送らない）
+*.secret
+**/*.secret
+*.key
+**/*.key
+*.pem
+**/*.pem
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
 
 # IDE
 .vscode/

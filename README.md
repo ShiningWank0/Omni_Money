@@ -61,8 +61,8 @@ macOS デスクトップアプリ、Mac + Colima、TrueNAS Custom App の詳し�
 
 ## 必要な環境
 
-- Go 1.23 以上
-- Node.js 20 以上
+- Go 1.26.6 以上（CI・リリースは 1.26.7）
+- Node.js 24.19 以上
 - npm
 - Wails CLI
 - Docker
@@ -111,18 +111,38 @@ wails build
 cd frontend
 npm run build
 cd ..
-AUTH_PASSWORD_HASH='<bcrypt-hash>' go run -tags server ./server.go
+AUTH_PASSWORD_HASH='<bcrypt-hash>' \
+ALLOWED_HOSTS='localhost:4000,127.0.0.1:4000' \
+go run -tags server ./server.go
 ```
 
 `<bcrypt-hash>` は実際に作成した bcrypt ハッシュへ置き換えてください。作成方法は[利用ガイド](docs/how-to-use.md#21-bcrypt-ハッシュを作成する)を参照してください。
 
-公開Webは標準で `0.0.0.0:4000` で待ち受けます。AI APIも利用する場合だけ、32文字以上のランダムなトークンを追加します。
+直接起動した公開Webは標準で `127.0.0.1:4000` で待ち受けます。`ALLOWED_HOSTS` は直接起動でも必須です。外部公開はPangolin等のゲートウェイまたはVPNを経由し、AI APIも利用する場合だけ32文字以上のランダムなトークンを追加します。同梱のComposeはPangolin/Newt専用構成で、ホストへポートを公開しません。ローカル利用時だけ `compose.local.yaml` を重ねます。
 
 ```bash
 AUTH_PASSWORD_HASH='<bcrypt-hash>' \
 AI_API_TOKEN='<32文字以上のランダム値>' \
+ALLOWED_HOSTS='localhost:4000,127.0.0.1:4000' \
 go run -tags server ./server.go
 ```
+
+Omni Money側にも認証アプリのTOTPを追加する場合は、Pangolinとは必ず別のseedを生成します。秘密ファイルは環境変数へ直接書かず、ファイルパスだけを設定してください。
+
+```bash
+go run ./cmd/omni-totp --out ./data/omni-money-totp.secret
+export AUTH_TOTP_SECRET_FILE="$PWD/data/omni-money-totp.secret"
+export AUTH_REQUIRE_TOTP=true
+AUTH_PASSWORD_HASH='<bcrypt-cost-12-to-16-hash>' \
+ALLOWED_HOSTS='localhost:4000,127.0.0.1:4000' \
+go run -tags server ./server.go
+```
+
+コマンドはセットアップキーと `otpauth://` URI を表示し、認証アプリの現在コードを確認できた後にだけmode `0600`の秘密ファイルを作成します。その出力を端末ログやチャットへ残さず、秘密ファイルもバックアップ時に暗号化して保管してください。TOTPを使わない場合は両方のTOTP環境変数を空のままにします。
+
+TOTPを有効化した場合でも、通常操作中に定期的なコード入力は要求しません。TOTPは新しいセッションへのログインと、無操作・絶対期限・サーバー再起動後の再ログインで使用します。有効なセッション内では通常の閲覧・編集をそのまま継続でき、CSV入出力やスナップショット復元等の高影響操作だけをOmni Moneyのパスワードで再確認します。
+
+可視タブで実際に操作している間は、ブラウザが低頻度のheartbeat（最大4分間隔、操作停止後の末尾送信あり）を送ってサーバー側の無操作期限も延長します。非表示タブや操作のない状態からheartbeatは送信しません。
 
 この場合、AI専用APIは標準で `127.0.0.1:4001` で待ち受けます。公開WebとAI APIは同じGoプロセスとSQLiteを使用しますが、HTTPルーターと認証境界は分離されています。
 
@@ -136,18 +156,24 @@ go run -tags server ./server.go
 | 変数 | 既定値 | 説明 |
 | --- | --- | --- |
 | `DB_PATH` | `omni_money.db` | SQLite データベースの保存先 |
-| `HOST_IP` | `0.0.0.0` | 待受アドレス |
+| `HOST_IP` | `127.0.0.1` | 直接起動時の待受アドレス（Docker内部は `0.0.0.0`） |
 | `PORT` | `4000` | 待受ポート |
-| `AUTH_PASSWORD_HASH` | なし（必須） | ログインパスワードの bcrypt ハッシュ |
-| `SESSION_MAX_AGE_HOURS` | `24` | セッション有効期間（時間） |
+| `AUTH_PASSWORD_HASH` | なし（必須） | ログインパスワードの bcrypt ハッシュ（cost 12〜16） |
+| `SESSION_MAX_AGE_HOURS` | `8` | セッションの絶対有効期間（時間） |
+| `SESSION_IDLE_TIMEOUT_MINUTES` | `15` | 無操作セッションのタイムアウト（分）。画面も自動ロック |
+| `SESSION_REAUTH_MAX_AGE_MINUTES` | `5` | CSV入出力・復元等の高影響操作で要求するパスワード再確認の有効期間（分） |
+| `SESSION_MAX_CONCURRENT` | `3` | 1ユーザーあたりの同時セッション上限 |
 | `AI_API_TOKEN` | なし | 32文字以上のAI API Bearerトークン。未設定ならAI API無効 |
+| `AUTH_TOTP_SECRET_FILE` | なし | Omni Money専用TOTPのBase32秘密ファイル。設定するとTOTPを有効化 |
+| `AUTH_REQUIRE_TOTP` | `false` | `true` の場合、秘密ファイルがないと起動失敗。TOTPを採用した本番環境では `true` を推奨 |
 | `AI_HOST_IP` | `127.0.0.1` | AI専用リスナーの待受アドレス |
 | `AI_PORT` | `4001` | AI専用リスナーのポート |
 | `AI_ALLOW_REMOTE` | `false` | AIを非ループバックで待受する明示許可。Docker内の待受時のみ利用 |
-| `TRUSTED_PROXIES` | なし | 信頼するリバースプロキシIP/CIDR |
+| `TRUSTED_PROXIES` | なし | 信頼する最後段プロキシの固定IPまたは狭いCIDR（IPv4は`/24`以上、IPv6は`/120`以上） |
 | `FORCE_HTTPS` | `false` | 公開WebのHTTPSリダイレクト |
 | `HTTPS_REDIRECT_HOST` | なし | HTTPSリダイレクト先 |
-| `ALLOWED_HOSTS` | なし | HTTPSリダイレクトで許可するホスト |
+| `ALLOWED_HOSTS` | なし（必須） | すべてのリクエストで許可する正確な公開Host |
+| `ALLOW_INSECURE_HTTP` | `false` | 非loopback平文HTTPを明示許可。loopbackだけへpublishするローカル構成以外では使わない |
 | `CORS_ALLOWED_ORIGINS` | 同一オリジンのみ | 許可する CORS オリジンのカンマ区切りリスト |
 
 ## Docker で起動
@@ -159,6 +185,8 @@ export AUTH_PASSWORD_HASH='<bcrypt-hash>'
 docker run --rm \
   --user "$(id -u):$(id -g)" \
   -e AUTH_PASSWORD_HASH \
+  -e ALLOWED_HOSTS='localhost:4000,127.0.0.1:4000' \
+  -e ALLOW_INSECURE_HTTP=true \
   -p 127.0.0.1:4000:4000 \
   -v "$(pwd)/data:/app/data" \
   omni-money
@@ -177,6 +205,8 @@ docker run --rm \
   -p 127.0.0.1:4000:4000 \
   -p 127.0.0.1:4001:4001 \
   -e AUTH_PASSWORD_HASH \
+  -e ALLOWED_HOSTS='localhost:4000,127.0.0.1:4000' \
+  -e ALLOW_INSECURE_HTTP=true \
   -e AI_API_TOKEN \
   -e AI_HOST_IP=0.0.0.0 \
   -e AI_ALLOW_REMOTE=true \
@@ -187,15 +217,40 @@ docker run --rm \
 `-p 4001:4001` のようにホストIPを省略してAIポートを公開しないでください。
 AIを利用しない場合は `AI_API_TOKEN` と4001番ポートの公開を両方省略します。
 
-### Docker Compose / TrueNAS
+### Docker Compose / Pangolin / TrueNAS
 
-同梱の `compose.yaml` は、家計簿Webを4000番、AI APIをDockerホストのlocalhost:4001へ分離して、
-1コンテナで起動します。
+同梱の `compose.yaml` はPangolin/Newt向けの閉じた構成です。Omni Moneyは`internal`な専用networkにだけ接続し、Web/AIともホストへポートを公開しません。Pangolinのtargetは`http://omni-money:4000`にします。Newt側も同じ`omni-money-pangolin` networkへ参加させ、`DOCKER_ENFORCE_NETWORK_VALIDATION=true`、公開FQDNに一致する`ALLOWED_HOSTS`、Newtだけを指す`TRUSTED_PROXIES`を設定してください。
 
 ```bash
 cp .env.example .env
-# .env の AUTH_PASSWORD_HASH、AI_API_TOKEN、OMNI_DATA_DIR を編集
+# .env の AUTH_PASSWORD_HASH、ALLOWED_HOSTS、TRUSTED_PROXIES、OMNI_DATA_DIR を編集
+mkdir -p ./data
 docker compose up -d --build
+```
+
+ネイティブLinuxでbind mountを使う場合、初回起動前に`./data`をコンテナの固定UID/GID `10001:10001`だけが書ける所有者・modeへ設定してください。TrueNASでは同等のACLを設定します。`chmod 777`やPrivileged modeは使いません。
+
+```bash
+sudo chown 10001:10001 ./data
+chmod 700 ./data
+```
+
+ローカル端末だけから試す場合は、閉じたbase構成にloopback公開を重ねます。
+
+```bash
+docker compose -f compose.yaml -f compose.local.yaml up -d --build
+```
+
+Omni Money側TOTPを有効にする場合は、イメージ内のhelperを同じ非rootユーザーで実行します。認証アプリのコード確認が成功するまでファイルは作られません。
+
+```bash
+docker compose -f compose.yaml -f compose.local.yaml run --rm --no-deps \
+  --entrypoint /app/omni-totp omni-money \
+  --out /app/data/omni-money-totp.secret --issuer "Omni Money" --account admin
+# .envへ次を設定してコンテナを再作成する:
+# AUTH_TOTP_SECRET_FILE=/app/data/omni-money-totp.secret
+# AUTH_REQUIRE_TOTP=true
+docker compose -f compose.yaml -f compose.local.yaml up -d --force-recreate
 ```
 
 bcryptハッシュは `$` を含むため、`.env` では例のとおり値全体をシングルクォートで囲んでください。
@@ -203,12 +258,12 @@ bcryptハッシュは `$` を含むため、`.env` では例のとおり値全�
 TrueNAS Custom Appでは `compose.yaml` 相当の設定を使い、次を守ってください。
 
 - `/app/data` を `/mnt/<pool>/apps/omni-money` 等の永続Datasetへ割り当てる
-- Webのコンテナポート4000だけをLANまたはリバースプロキシへ公開する
-- AIのコンテナポート4001はホストIP `127.0.0.1` に限定する
-- TrueNAS UIでホストIPを限定できない場合は4001を公開しない
-- 外部公開はCaddy/Nginx等でTLS終端し、`TRUSTED_PROXIES`を限定設定する
+- Pangolin運用ではWebの`ports:`を削除し、Newtとだけ共有する専用networkへ接続する
+- LAN限定の移行構成でもWeb publish先はTrueNASの正確な固定IPへ限定し、`ALLOWED_HOSTS`を一致させる
+- AIのコンテナポート4001は公開しない（管理画面からの操作は同一コンテナ内relayを使う）
+- 外部公開はPangolin等でTLS終端し、`TRUSTED_PROXIES`をNewtの固定IPだけに設定する
 
-設定値は次のように生成できます。bcrypt生成はパスワードを対話入力するため、シェル履歴へ平文を残しません。
+設定値は次のように生成できます。bcrypt生成はパスワードを対話入力するため、シェル履歴へ平文を残しません。TOTP秘密は `omni-totp` で生成し、Pangolin側のTOTP秘密と共有しないでください。
 
 ```bash
 docker run -it --rm httpd:2.4-alpine htpasswd -nBC 12 omni

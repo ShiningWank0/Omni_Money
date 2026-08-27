@@ -17,7 +17,7 @@ import (
 )
 
 const testAIToken = "0123456789abcdef0123456789abcdef"
-const testPasswordHash = "$2y$04$.OWNgfSMaTsdqHrwD6ydEeCs3dBUsAzNlpFzq3kJuK4BtUqU8E0WG"
+const testPasswordHash = "$2y$12$TMw6R8z61SPOp1Y/4t3mLu/LVqe3.L5d5.H9piLwdDjKpSytNxaEi"
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -25,9 +25,30 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func newTestPublicRouter(t *testing.T) http.Handler {
+	t.Helper()
+	t.Setenv("AUTH_PASSWORD_HASH", testPasswordHash)
+	t.Setenv("ALLOWED_HOSTS", "example.com")
+	return NewRouter()
+}
+
+func csrfFromAuthResponse(t *testing.T, recorder *httptest.ResponseRecorder) string {
+	t.Helper()
+	var response struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("auth response decode failed: %v", err)
+	}
+	if response.CSRFToken == "" {
+		t.Fatal("auth response did not contain a CSRF token")
+	}
+	return response.CSRFToken
+}
+
 func TestPublicRouterDoesNotAllowAITokenToBypassSession(t *testing.T) {
 	t.Setenv("AI_API_TOKEN", testAIToken)
-	handler := NewRouter()
+	handler := newTestPublicRouter(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/analysis", nil)
 	req.Header.Set("Authorization", "Bearer "+testAIToken)
@@ -42,7 +63,7 @@ func TestPublicRouterDoesNotAllowAITokenToBypassSession(t *testing.T) {
 
 func TestPublicRouterDoesNotRegisterAIEndpoints(t *testing.T) {
 	t.Setenv("AUTH_PASSWORD_HASH", testPasswordHash)
-	handler := NewRouter()
+	handler := newTestPublicRouter(t)
 
 	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"test-password"}`))
 	loginReq.Header.Set("Content-Type", "application/json")
@@ -54,6 +75,7 @@ func TestPublicRouterDoesNotRegisterAIEndpoints(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/analysis", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer "+testAIToken)
+	req.Header.Set("X-CSRF-Token", csrfFromAuthResponse(t, loginRecorder))
 	for _, cookie := range loginRecorder.Result().Cookies() {
 		req.AddCookie(cookie)
 	}
@@ -66,7 +88,7 @@ func TestPublicRouterDoesNotRegisterAIEndpoints(t *testing.T) {
 }
 
 func TestAIConsoleRequiresWebSession(t *testing.T) {
-	handler := NewRouter()
+	handler := newTestPublicRouter(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/ai-console/analysis", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer "+testAIToken)
 	recorder := httptest.NewRecorder()
@@ -137,7 +159,7 @@ func TestAIRouterRejectsNonPOSTWithValidToken(t *testing.T) {
 }
 
 func TestHealthEndpointDoesNotExposeData(t *testing.T) {
-	handler := NewRouter()
+	handler := newTestPublicRouter(t)
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	recorder := httptest.NewRecorder()
 
@@ -331,7 +353,7 @@ func TestPublicTransactionDoesNotUseAIDateWindow(t *testing.T) {
 	}
 	t.Cleanup(database.CloseDB)
 	t.Setenv("AUTH_PASSWORD_HASH", testPasswordHash)
-	handler := NewRouter()
+	handler := newTestPublicRouter(t)
 
 	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"test-password"}`))
 	loginReq.Header.Set("Content-Type", "application/json")
@@ -349,6 +371,7 @@ func TestPublicTransactionDoesNotUseAIDateWindow(t *testing.T) {
 		"amount":1
 	}`))
 	transactionReq.Header.Set("Content-Type", "application/json")
+	transactionReq.Header.Set("X-CSRF-Token", csrfFromAuthResponse(t, loginRecorder))
 	for _, cookie := range loginRecorder.Result().Cookies() {
 		transactionReq.AddCookie(cookie)
 	}
@@ -400,6 +423,37 @@ func TestAIConsoleProxyKeepsTokenServerSide(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+}
+
+func TestAIConsoleProxyRejectsUnapprovedTargetsBeforeNetworkAccess(t *testing.T) {
+	networkCalled := false
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		networkCalled = true
+		return nil, fmt.Errorf("unexpected network request to %s", r.URL)
+	})}
+	originalClient := aiConsoleHTTPClient
+	aiConsoleHTTPClient = client
+	t.Cleanup(func() { aiConsoleHTTPClient = originalClient })
+	t.Setenv("AI_API_TOKEN", testAIToken)
+	t.Setenv("AI_PORT", "43123")
+
+	request := httptest.NewRequest(http.MethodPost, "/api/ai-console/unapproved", strings.NewReader(`{}`))
+	recorder := httptest.NewRecorder()
+	handleAIConsoleProxy("/api/v1/ai/unapproved").ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusInternalServerError || networkCalled {
+		t.Fatalf("unapproved relay status=%d networkCalled=%v, want 500 false", recorder.Code, networkCalled)
+	}
+
+	for _, raw := range []string{
+		"https://127.0.0.1:43123/api/v1/ai/analysis",
+		"http://example.com:43123/api/v1/ai/analysis",
+		"http://127.0.0.1:43123/api/v1/ai/analysis?redirect=1",
+		"http://127.0.0.1:43123/api/v1/ai/unapproved",
+	} {
+		if _, err := validateAIConsoleTarget(raw); err == nil {
+			t.Errorf("unsafe AI console target accepted: %q", raw)
+		}
 	}
 }
 
