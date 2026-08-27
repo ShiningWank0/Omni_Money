@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,6 +15,47 @@ import (
 	"omni_money/backend/database"
 	"omni_money/backend/models"
 )
+
+func TestWriteAIAnalysisErrorMapsContextFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		wantStatus  int
+		wantMessage string
+	}{
+		{
+			name:        "deadline exceeded",
+			err:         fmt.Errorf("internal query detail: %w", context.DeadlineExceeded),
+			wantStatus:  http.StatusGatewayTimeout,
+			wantMessage: "AI分析がタイムアウトしました",
+		},
+		{
+			name:        "canceled",
+			err:         fmt.Errorf("internal query detail: %w", context.Canceled),
+			wantStatus:  http.StatusRequestTimeout,
+			wantMessage: "AI分析リクエストがキャンセルされました",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			writeAIAnalysisError(recorder, test.err)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d", recorder.Code, test.wantStatus)
+			}
+			var response map[string]string
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response["error"] != test.wantMessage {
+				t.Fatalf("error = %q, want fixed message %q", response["error"], test.wantMessage)
+			}
+			if strings.Contains(recorder.Body.String(), "internal query detail") {
+				t.Fatalf("internal error leaked: %s", recorder.Body.String())
+			}
+		})
+	}
+}
 
 func TestValidateAndScopeAIAnalysisAppliesCredentialDefaults(t *testing.T) {
 	now := time.Date(2026, time.August, 9, 15, 0, 0, 0, time.FixedZone("JST", 9*60*60))
@@ -74,6 +116,7 @@ func TestAIAnalysisEnforcesPeriodResultAndMemoScopes(t *testing.T) {
 		MaxResults:        2,
 		AnalysisStartDate: "2026-08-01",
 		AnalysisEndDate:   "2026-08-31",
+		AllowedTagIDs:     []int64{10},
 		AllowConsoleRelay: false,
 	}
 	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
@@ -86,6 +129,7 @@ func TestAIAnalysisEnforcesPeriodResultAndMemoScopes(t *testing.T) {
 		{name: "fixed credential window", modify: func(r *models.AnalysisRequest) { r.StartDate = "2026-07-31"; r.EndDate = "2026-08-06" }, status: http.StatusForbidden},
 		{name: "results", modify: func(r *models.AnalysisRequest) { r.Limit = 3 }, status: http.StatusForbidden},
 		{name: "memo", modify: func(r *models.AnalysisRequest) { r.IncludeMemo = true }, status: http.StatusForbidden},
+		{name: "tag allowlist", modify: func(r *models.AnalysisRequest) { r.TagIDs = []int64{11} }, status: http.StatusForbidden},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -182,6 +226,84 @@ func TestAIRouterFailsClosedForUnmappedAIPath(t *testing.T) {
 	handler.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("unmapped AI path status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAITagAllowlistPreventsCrossAccountTagOracle(t *testing.T) {
+	databaseForAIScopeTest(t)
+	result, err := database.GetDB().Exec("INSERT INTO tags (name, level) VALUES ('機微な他口座タグ', 1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretTagID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bankResult, err := database.GetDB().Exec(
+		"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES ('bank', ?, 'private', 'expense', 1, -1, '')",
+		time.Now().Format("2006-01-02"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bankTransactionID, err := bankResult.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.GetDB().Exec(
+		"INSERT INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)", bankTransactionID, secretTagID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	credential := aicredentials.Credential{
+		ID: "no-tags",
+		Scopes: []string{
+			aicredentials.ScopeTransactionsCreate,
+			aicredentials.ScopeAnalysisSummary,
+		},
+		Accounts:        []string{"cash"},
+		MaxAnalysisDays: 30,
+		MaxResults:      10,
+	}
+	handler := newTestAIRouterWithCredential(t, credential)
+	today := time.Now().Format("2006-01-02")
+
+	postTag := func(tagID int64) *httptest.ResponseRecorder {
+		body := fmt.Sprintf(`{"account":"cash","date":%q,"item":"probe","type":"expense","amount":1,"tags":[%d]}`, today, tagID)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/transactions", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+testAIToken)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		return recorder
+	}
+	existing := postTag(secretTagID)
+	unknown := postTag(secretTagID + 999999)
+	if existing.Code != http.StatusForbidden || unknown.Code != http.StatusForbidden {
+		t.Fatalf("tag oracle status existing=%d unknown=%d", existing.Code, unknown.Code)
+	}
+	if existing.Body.String() != unknown.Body.String() {
+		t.Fatalf("tag existence leaked through different responses: existing=%q unknown=%q", existing.Body.String(), unknown.Body.String())
+	}
+
+	var cashTransactions int
+	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transactions WHERE account = 'cash'").Scan(&cashTransactions); err != nil {
+		t.Fatal(err)
+	}
+	if cashTransactions != 0 {
+		t.Fatalf("forbidden tag probe created %d cash transactions", cashTransactions)
+	}
+
+	filter := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/ai/analysis",
+		strings.NewReader(fmt.Sprintf(`{"account":"cash","start_date":%q,"end_date":%q,"tag_ids":[%d]}`, today, today, secretTagID)),
+	)
+	filter.Header.Set("Authorization", "Bearer "+testAIToken)
+	filterRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(filterRecorder, filter)
+	if filterRecorder.Code != http.StatusForbidden {
+		t.Fatalf("analysis tag filter status=%d body=%s", filterRecorder.Code, filterRecorder.Body.String())
 	}
 }
 

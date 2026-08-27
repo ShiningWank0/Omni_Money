@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,24 @@ type stringList []string
 func (values *stringList) String() string { return strings.Join(*values, ",") }
 func (values *stringList) Set(value string) error {
 	*values = append(*values, value)
+	return nil
+}
+
+type int64List []int64
+
+func (values *int64List) String() string {
+	parts := make([]string, len(*values))
+	for i, value := range *values {
+		parts[i] = strconv.FormatInt(value, 10)
+	}
+	return strings.Join(parts, ",")
+}
+func (values *int64List) Set(value string) error {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fmt.Errorf("tag id must be an integer: %w", err)
+	}
+	*values = append(*values, parsed)
 	return nil
 }
 
@@ -80,17 +99,23 @@ func runIssue(args []string, environment commandEnvironment) error {
 	expiresAtValue := flags.String("expires-at", "", "required RFC3339 expiration time")
 	maxAnalysisDays := flags.Int("max-analysis-days", 30, "maximum analysis period")
 	maxResults := flags.Int("max-results", 100, "maximum analysis result count")
+	maxTransactionsPerDay := flags.Int("max-transactions-per-day", aicredentials.DefaultMaxTransactionsPerDay, "maximum successful AI transaction creates per UTC day")
 	analysisStartDate := flags.String("analysis-start-date", "", "earliest analysis date, YYYY-MM-DD")
 	analysisEndDate := flags.String("analysis-end-date", "", "latest analysis date, YYYY-MM-DD")
 	var scopes stringList
 	var accounts stringList
+	var allowedTagIDs int64List
 	flags.Var(&scopes, "scope", "allowed scope (repeatable)")
 	flags.Var(&accounts, "account", "explicitly allowed account (repeatable; wildcard is forbidden)")
+	flags.Var(&allowedTagIDs, "tag-id", "explicitly allowed tag id (repeatable; default: none)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || *path == "" || *id == "" {
 		return errors.New("--file and --id are required")
+	}
+	if *maxTransactionsPerDay < aicredentials.MinTransactionsPerDay || *maxTransactionsPerDay > aicredentials.MaxTransactionsPerDay {
+		return fmt.Errorf("--max-transactions-per-day must be between %d and %d", aicredentials.MinTransactionsPerDay, aicredentials.MaxTransactionsPerDay)
 	}
 
 	notBefore, expiresAt, err := parseValidity(*notBeforeValue, *expiresAtValue, environment.now())
@@ -109,16 +134,18 @@ func runIssue(args []string, environment commandEnvironment) error {
 		return err
 	}
 	document.Credentials = append(document.Credentials, aicredentials.Credential{
-		ID:                *id,
-		TokenSHA256:       aicredentials.HashToken(rawToken),
-		NotBefore:         notBefore,
-		ExpiresAt:         expiresAt,
-		Scopes:            append([]string(nil), scopes...),
-		Accounts:          append([]string(nil), accounts...),
-		MaxAnalysisDays:   *maxAnalysisDays,
-		MaxResults:        *maxResults,
-		AnalysisStartDate: *analysisStartDate,
-		AnalysisEndDate:   *analysisEndDate,
+		ID:                    *id,
+		TokenSHA256:           aicredentials.HashToken(rawToken),
+		NotBefore:             notBefore,
+		ExpiresAt:             expiresAt,
+		Scopes:                append([]string(nil), scopes...),
+		Accounts:              append([]string(nil), accounts...),
+		AllowedTagIDs:         append([]int64(nil), allowedTagIDs...),
+		MaxAnalysisDays:       *maxAnalysisDays,
+		MaxResults:            *maxResults,
+		MaxTransactionsPerDay: *maxTransactionsPerDay,
+		AnalysisStartDate:     *analysisStartDate,
+		AnalysisEndDate:       *analysisEndDate,
 	})
 	if err := aicredentials.WriteFileAtomic(*path, document); err != nil {
 		return err

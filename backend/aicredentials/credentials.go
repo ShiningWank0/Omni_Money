@@ -3,11 +3,14 @@
 package aicredentials
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 	"unicode"
@@ -23,6 +26,12 @@ const (
 	MaxAnalysisDays       = 366
 	MinResults            = 1
 	MaxResults            = 500
+	MaxAllowedTagIDs      = 100
+	// DefaultMaxTransactionsPerDay is applied when an existing version 1
+	// credential omits the newly introduced persistent write quota.
+	DefaultMaxTransactionsPerDay = 100
+	MinTransactionsPerDay        = 1
+	MaxTransactionsPerDay        = 1000
 
 	ScopeTransactionsCreate   = "transactions:create"
 	ScopeAnalysisSummary      = "analysis:summary"
@@ -58,21 +67,73 @@ type File struct {
 // the lowercase hexadecimal SHA-256 digest; raw bearer tokens are never
 // serialized by this package.
 type Credential struct {
-	ID                string    `json:"id"`
-	TokenSHA256       string    `json:"token_sha256"`
-	NotBefore         time.Time `json:"not_before"`
-	ExpiresAt         time.Time `json:"expires_at"`
-	Scopes            []string  `json:"scopes"`
-	Accounts          []string  `json:"accounts"`
-	MaxAnalysisDays   int       `json:"max_analysis_days"`
-	MaxResults        int       `json:"max_results"`
-	AnalysisStartDate string    `json:"analysis_start_date,omitempty"`
-	AnalysisEndDate   string    `json:"analysis_end_date,omitempty"`
-	AllowConsoleRelay bool      `json:"-"`
+	ID                    string    `json:"id"`
+	TokenSHA256           string    `json:"token_sha256"`
+	NotBefore             time.Time `json:"not_before"`
+	ExpiresAt             time.Time `json:"expires_at"`
+	Scopes                []string  `json:"scopes"`
+	Accounts              []string  `json:"accounts"`
+	AllowedTagIDs         []int64   `json:"allowed_tag_ids,omitempty"`
+	MaxAnalysisDays       int       `json:"max_analysis_days"`
+	MaxResults            int       `json:"max_results"`
+	MaxTransactionsPerDay int       `json:"max_transactions_per_day"`
+	AnalysisStartDate     string    `json:"analysis_start_date,omitempty"`
+	AnalysisEndDate       string    `json:"analysis_end_date,omitempty"`
+	AllowConsoleRelay     bool      `json:"-"`
 
-	tokenHash  [sha256.Size]byte
-	scopeSet   map[string]struct{}
-	accountSet map[string]struct{}
+	tokenHash                    [sha256.Size]byte
+	scopeSet                     map[string]struct{}
+	accountSet                   map[string]struct{}
+	tagSet                       map[int64]struct{}
+	maxTransactionsPerDayPresent bool
+}
+
+// UnmarshalJSON distinguishes an omitted quota in an older version 1 file
+// from an explicitly configured zero. Omission receives the conservative
+// compatibility default; explicit zero is rejected instead of unexpectedly
+// enabling writes.
+func (c *Credential) UnmarshalJSON(data []byte) error {
+	type credentialWire struct {
+		ID                    string    `json:"id"`
+		TokenSHA256           string    `json:"token_sha256"`
+		NotBefore             time.Time `json:"not_before"`
+		ExpiresAt             time.Time `json:"expires_at"`
+		Scopes                []string  `json:"scopes"`
+		Accounts              []string  `json:"accounts"`
+		AllowedTagIDs         []int64   `json:"allowed_tag_ids,omitempty"`
+		MaxAnalysisDays       int       `json:"max_analysis_days"`
+		MaxResults            int       `json:"max_results"`
+		MaxTransactionsPerDay *int      `json:"max_transactions_per_day"`
+		AnalysisStartDate     string    `json:"analysis_start_date,omitempty"`
+		AnalysisEndDate       string    `json:"analysis_end_date,omitempty"`
+	}
+	var wire credentialWire
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&wire); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("credential JSON must contain one object")
+	}
+	*c = Credential{
+		ID:                           wire.ID,
+		TokenSHA256:                  wire.TokenSHA256,
+		NotBefore:                    wire.NotBefore,
+		ExpiresAt:                    wire.ExpiresAt,
+		Scopes:                       wire.Scopes,
+		Accounts:                     wire.Accounts,
+		AllowedTagIDs:                wire.AllowedTagIDs,
+		MaxAnalysisDays:              wire.MaxAnalysisDays,
+		MaxResults:                   wire.MaxResults,
+		AnalysisStartDate:            wire.AnalysisStartDate,
+		AnalysisEndDate:              wire.AnalysisEndDate,
+		maxTransactionsPerDayPresent: wire.MaxTransactionsPerDay != nil,
+	}
+	if wire.MaxTransactionsPerDay != nil {
+		c.MaxTransactionsPerDay = *wire.MaxTransactionsPerDay
+	}
+	return nil
 }
 
 // HashToken returns the canonical hash stored in a credential file.
@@ -174,12 +235,34 @@ func (c *Credential) validate() error {
 		}
 		c.accountSet[account] = struct{}{}
 	}
+	if len(c.AllowedTagIDs) > MaxAllowedTagIDs {
+		return fmt.Errorf("allowed_tag_ids must contain at most %d entries", MaxAllowedTagIDs)
+	}
+	c.tagSet = make(map[int64]struct{}, len(c.AllowedTagIDs))
+	for _, tagID := range c.AllowedTagIDs {
+		if tagID <= 0 {
+			return errors.New("allowed_tag_ids must contain only positive integers")
+		}
+		if _, duplicate := c.tagSet[tagID]; duplicate {
+			return fmt.Errorf("duplicate allowed tag id %d", tagID)
+		}
+		c.tagSet[tagID] = struct{}{}
+	}
 
 	if c.MaxAnalysisDays < MinAnalysisDays || c.MaxAnalysisDays > MaxAnalysisDays {
 		return fmt.Errorf("max_analysis_days must be between %d and %d", MinAnalysisDays, MaxAnalysisDays)
 	}
 	if c.MaxResults < MinResults || c.MaxResults > MaxResults {
 		return fmt.Errorf("max_results must be between %d and %d", MinResults, MaxResults)
+	}
+	// This field was added without changing the version 1 file format so
+	// existing securely-issued credentials remain loadable with a conservative
+	// default. All newly written files serialize the resolved value explicitly.
+	if c.MaxTransactionsPerDay == 0 && !c.maxTransactionsPerDayPresent {
+		c.MaxTransactionsPerDay = DefaultMaxTransactionsPerDay
+	}
+	if c.MaxTransactionsPerDay < MinTransactionsPerDay || c.MaxTransactionsPerDay > MaxTransactionsPerDay {
+		return fmt.Errorf("max_transactions_per_day must be between %d and %d", MinTransactionsPerDay, MaxTransactionsPerDay)
 	}
 	hasAnalysisScope := c.HasScope(ScopeAnalysisSummary) || c.HasScope(ScopeAnalysisTransactions) || c.HasScope(ScopeAnalysisMemo)
 	if (c.AnalysisStartDate == "") != (c.AnalysisEndDate == "") {
@@ -269,10 +352,29 @@ func (c *Credential) AllowsAccount(account string) bool {
 	return false
 }
 
+// AllowsTag reports whether a tag ID is explicitly allowed for AI write and
+// analysis filters. An empty allowlist deliberately grants no tag access.
+func (c *Credential) AllowsTag(tagID int64) bool {
+	if c == nil || tagID <= 0 {
+		return false
+	}
+	if c.tagSet != nil {
+		_, ok := c.tagSet[tagID]
+		return ok
+	}
+	for _, candidate := range c.AllowedTagIDs {
+		if candidate == tagID {
+			return true
+		}
+	}
+	return false
+}
+
 func (c Credential) clone() Credential {
 	cloned := c
 	cloned.Scopes = append([]string(nil), c.Scopes...)
 	cloned.Accounts = append([]string(nil), c.Accounts...)
+	cloned.AllowedTagIDs = append([]int64(nil), c.AllowedTagIDs...)
 	cloned.scopeSet = make(map[string]struct{}, len(c.scopeSet))
 	for scope := range c.scopeSet {
 		cloned.scopeSet[scope] = struct{}{}
@@ -280,6 +382,10 @@ func (c Credential) clone() Credential {
 	cloned.accountSet = make(map[string]struct{}, len(c.accountSet))
 	for account := range c.accountSet {
 		cloned.accountSet[account] = struct{}{}
+	}
+	cloned.tagSet = make(map[int64]struct{}, len(c.tagSet))
+	for tagID := range c.tagSet {
+		cloned.tagSet[tagID] = struct{}{}
 	}
 	return cloned
 }

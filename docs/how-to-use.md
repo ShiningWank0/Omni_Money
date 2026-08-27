@@ -127,7 +127,7 @@ AI APIを有効にすると、公開Webの4000番とは別にAI専用の4001番�
 - 通常起動ではAI専用リスナーは `127.0.0.1:4001` だけで待ち受けます。
 - 公開Webの `/api/v1/ai/*` は利用できず、ログイン済みでも404になります。
 - AI専用ポートには通常の家計簿API、ログインAPI、画面配信を登録しません。
-- AI専用の2エンドポイントは、期限・scope・口座制約を持つBearer資格情報とPOSTを必須とします。
+- AI専用の2エンドポイントは、期限・scope・口座・許可タグID制約を持つBearer資格情報とPOSTを必須とします。
 - 分析は既定で単一口座・最大30日の集計だけを返し、明細とメモには追加scopeが必要です。
 - クラウドLLMへAIトークンを渡さず、ローカルの仲介プロセスが `127.0.0.1:4001` を呼び出します。
 
@@ -145,11 +145,17 @@ go run ./cmd/ai-credential issue \
   --scope analysis:transactions \
   --scope console:relay \
   --account '現金' \
+  --tag-id 1 \
   --analysis-start-date '<YYYY-MM-DD>' \
   --analysis-end-date '<YYYY-MM-DD>' \
   --max-analysis-days 30 \
-  --max-results 100 > secrets/ai_console_token
+  --max-results 100 \
+  --max-transactions-per-day 100 > secrets/ai_console_token
 ```
+
+`--tag-id` は、その資格情報で取引へ付与したり分析条件に指定したりできる既存タグIDです。必要なタグだけを繰り返し指定してください。省略した場合はタグ操作を許可しません。
+
+AIの取引追加は16〜128文字の `Idempotency-Key` ヘッダーを必須とします。タイムアウト等で結果が不明な場合は、同じ本文と同じkeyを再送してください。再送は同じ結果を返し、日次上限を重ねて消費しません。同じkeyを別の本文へ再利用すると409、`--max-transactions-per-day` で指定したUTC日次上限を超えると `Retry-After` 付きの429になります。raw keyはDBや監査ログへ保存されません。
 
 Dockerでは資格情報、console token、CA、サーバー証明書、クライアント証明書をリポジトリ外に準備し、`docker compose -f compose.yaml -f compose.ai.yaml up -d --build` で起動します。コンテナ内の非ループバック待受はTLS 1.3とmTLSが揃わない限り起動を拒否し、ホスト側は `127.0.0.1:4001` に限定されます。証明書の検証名は既定で `omni-money-ai` です。
 
@@ -200,6 +206,8 @@ chmod 600 "$HOME/.config/omni-money/server.env"
 ### 3.3 コンテナを起動する
 
 まずは Mac からだけアクセスできる設定で起動します。
+
+同梱のCompose構成ではroot filesystemをread-onlyにし、`/app/data` だけを永続書き込み可能にします。`/tmp` は128 MiBのtmpfsで、CPU 2、memory 1 GiB、PID 256を既定上限にします。変更する場合は `.env` の `OMNI_CPU_LIMIT`、`OMNI_MEMORY_LIMIT`、`OMNI_PIDS_LIMIT`、`OMNI_TMPFS_SIZE` を設定し、画像・snapshot・CSVを含む動作確認を行ってください。
 
 ```bash
 docker pull ghcr.io/shiningwank0/omni_money:latest

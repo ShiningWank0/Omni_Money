@@ -13,7 +13,7 @@ LLMの出力は正しいとは限りません。AI専用入口はLLMの候補値
 | 項目 | 現在の状態 |
 | --- | --- |
 | AI待受 | 既定 `127.0.0.1:4001` |
-| 認証 | 最大90日のBearer資格情報（hash保存、scope・口座・期間・件数制約） |
+| 認証 | 最大90日のBearer資格情報（hash保存、scope・口座・許可タグID・期間・件数制約） |
 | 通信 | loopback限定HTTP、非loopbackはTLS 1.3 + mTLS必須 |
 | 取引追加 | `POST /api/v1/ai/transactions` |
 | 分析 | `POST /api/v1/ai/analysis` |
@@ -22,7 +22,7 @@ LLMの出力は正しいとは限りません。AI専用入口はLLMの候補値
 | 公開Webとの分離 | 公開Webの4000番にはAIルートを登録しない |
 | AI専用入力検証 | 必須項目、種類、正の金額、日付範囲を検証 |
 | 日付範囲 | サーバーの今日を基準に1年前から2日後まで（両端を含む） |
-| タグ | IDの存在確認と重複排除を行い、未知IDを拒否 |
+| タグ | 資格情報の許可IDだけを受け付け、存在確認と重複排除を行い、未許可・未知IDを同じ403で拒否 |
 | 画像 | Base64、ファイル名、対応MIMEを事前検証してから追加 |
 | 管理UI | セッション認証済みWebからサーバー内部でAI専用リスナーへ固定中継 |
 
@@ -122,7 +122,7 @@ Base64は元データより約33%大きくなるため、現在のHTTP body上�
 
 - client別token、最小scope、rotation、revokeを維持し、90日以内に更新する
 - 資格情報と接続元単位のrate limitを維持する
-- credential ID、操作、接続元、mTLS証明書fingerprint、HMAC化した口座参照、期間、明細種別、該当／返却件数、日時、許否、HTTP statusを構造化監査ログへ残す
+- credential ID、操作、接続元、mTLS証明書fingerprint、専用監査鍵とkey IDでHMAC化した口座参照、期間、明細種別、該当／返却件数、日時、許否、HTTP statusを構造化監査ログへ残す
 - token、provider key、リクエスト本文、金額、メモ、Base64画像、レシート全文はログへ残さない
 - クラウドLLMへ画像を送る場合はUIで明示し、利用者のopt-inを必須にする
 - Manager障害時にDB直接書き込みへfallbackしない

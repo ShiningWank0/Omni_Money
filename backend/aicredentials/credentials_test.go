@@ -1,6 +1,8 @@
 package aicredentials
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -28,6 +30,7 @@ func validTestFile() *File {
 			ExpiresAt:         notBefore.Add(30 * 24 * time.Hour),
 			Scopes:            []string{"analysis:summary", "console:relay"},
 			Accounts:          []string{testAccount},
+			AllowedTagIDs:     []int64{10, 20},
 			MaxAnalysisDays:   30,
 			MaxResults:        100,
 			AnalysisStartDate: "2026-01-01",
@@ -48,8 +51,14 @@ func TestFileValidateAndCredentialHelpers(t *testing.T) {
 	if !credential.AllowsAccount(testAccount) || credential.AllowsAccount("銀行") {
 		t.Fatalf("unexpected accounts: %#v", credential.Accounts)
 	}
+	if !credential.AllowsTag(10) || credential.AllowsTag(30) {
+		t.Fatalf("unexpected allowed tags: %#v", credential.AllowedTagIDs)
+	}
 	if !credential.AllowConsoleRelay {
 		t.Fatal("AllowConsoleRelay = false, want true")
+	}
+	if credential.MaxTransactionsPerDay != DefaultMaxTransactionsPerDay {
+		t.Fatalf("MaxTransactionsPerDay = %d, want backward-compatible default %d", credential.MaxTransactionsPerDay, DefaultMaxTransactionsPerDay)
 	}
 }
 
@@ -76,10 +85,20 @@ func TestFileValidateRejectsInvalidCredentials(t *testing.T) {
 		{name: "missing accounts", mutate: func(f *File) { f.Credentials[0].Accounts = nil }},
 		{name: "blank account", mutate: func(f *File) { f.Credentials[0].Accounts = []string{" "} }},
 		{name: "wildcard", mutate: func(f *File) { f.Credentials[0].Accounts = []string{"*"} }},
+		{name: "invalid tag id", mutate: func(f *File) { f.Credentials[0].AllowedTagIDs = []int64{0} }},
+		{name: "duplicate tag id", mutate: func(f *File) { f.Credentials[0].AllowedTagIDs = []int64{10, 10} }},
+		{name: "too many tag ids", mutate: func(f *File) {
+			f.Credentials[0].AllowedTagIDs = make([]int64, MaxAllowedTagIDs+1)
+			for i := range f.Credentials[0].AllowedTagIDs {
+				f.Credentials[0].AllowedTagIDs[i] = int64(i + 1)
+			}
+		}},
 		{name: "analysis days low", mutate: func(f *File) { f.Credentials[0].MaxAnalysisDays = 0 }},
 		{name: "analysis days high", mutate: func(f *File) { f.Credentials[0].MaxAnalysisDays = 367 }},
 		{name: "results low", mutate: func(f *File) { f.Credentials[0].MaxResults = 0 }},
 		{name: "results high", mutate: func(f *File) { f.Credentials[0].MaxResults = 501 }},
+		{name: "transaction quota low", mutate: func(f *File) { f.Credentials[0].MaxTransactionsPerDay = -1 }},
+		{name: "transaction quota high", mutate: func(f *File) { f.Credentials[0].MaxTransactionsPerDay = MaxTransactionsPerDay + 1 }},
 		{name: "analysis dates missing", mutate: func(f *File) { f.Credentials[0].AnalysisStartDate = ""; f.Credentials[0].AnalysisEndDate = "" }},
 		{name: "analysis date partial", mutate: func(f *File) { f.Credentials[0].AnalysisEndDate = "" }},
 		{name: "analysis date format", mutate: func(f *File) { f.Credentials[0].AnalysisStartDate = "2026/01/01" }},
@@ -149,6 +168,41 @@ func TestLoadFileStrictJSONAndPermissions(t *testing.T) {
 	}
 	if _, err := LoadFile(duplicatePath); err == nil {
 		t.Fatal("LoadFile() accepted duplicate JSON field")
+	}
+}
+
+func TestVersionOneDailyQuotaDistinguishesOmittedAndExplicitZero(t *testing.T) {
+	document := validTestFile()
+	document.Credentials[0].MaxTransactionsPerDay = 77
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+
+	omittedPath := filepath.Join(directory, "omitted.json")
+	omitted := bytes.Replace(encoded, []byte(`,"max_transactions_per_day":77`), nil, 1)
+	if bytes.Equal(omitted, encoded) {
+		t.Fatal("test fixture did not remove max_transactions_per_day")
+	}
+	if err := os.WriteFile(omittedPath, omitted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadFile(omittedPath)
+	if err != nil {
+		t.Fatalf("legacy omitted quota was rejected: %v", err)
+	}
+	if loaded.Credentials[0].MaxTransactionsPerDay != DefaultMaxTransactionsPerDay {
+		t.Fatalf("legacy quota = %d, want %d", loaded.Credentials[0].MaxTransactionsPerDay, DefaultMaxTransactionsPerDay)
+	}
+
+	explicitZeroPath := filepath.Join(directory, "zero.json")
+	explicitZero := bytes.Replace(encoded, []byte(`"max_transactions_per_day":77`), []byte(`"max_transactions_per_day":0`), 1)
+	if err := os.WriteFile(explicitZeroPath, explicitZero, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(explicitZeroPath); err == nil {
+		t.Fatal("explicit zero daily quota was accepted")
 	}
 }
 

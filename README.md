@@ -130,11 +130,13 @@ AUTH_PASSWORD_HASH='<bcrypt-hash>' go run -tags server ./server.go
 
 `<bcrypt-hash>` は実際に作成した bcrypt ハッシュへ置き換えてください。作成方法は[利用ガイド](docs/how-to-use.md#21-bcrypt-ハッシュを作成する)を参照してください。
 
-公開Webは標準で `0.0.0.0:4000` で待ち受けます。AI API は期限・権限・口座制約を持つ資格情報ファイルを指定した場合だけ有効になります。
+公開Webは標準でホストの `127.0.0.1:4000` にだけ公開されます（Dockerコンテナ内の待受は `0.0.0.0:4000`）。AI API は期限・権限・口座・タグ制約を持つ資格情報ファイルを指定した場合だけ有効になります。
 
 ```bash
 umask 077
 mkdir -p secrets
+go run ./cmd/ai-audit-key init \
+  --file secrets/ai_audit_hmac.json
 go run ./cmd/ai-credential issue \
   --file secrets/ai_credentials.json \
   --id local-console \
@@ -144,14 +146,17 @@ go run ./cmd/ai-credential issue \
   --scope analysis:transactions \
   --scope console:relay \
   --account '現金' \
+  --tag-id 1 \
   --analysis-start-date '<YYYY-MM-DD>' \
   --analysis-end-date '<YYYY-MM-DD>' \
   --max-analysis-days 30 \
-  --max-results 100 > secrets/ai_console_token
+  --max-results 100 \
+  --max-transactions-per-day 100 > secrets/ai_console_token
 
 AUTH_PASSWORD_HASH='<bcrypt-hash>' \
 AI_CREDENTIALS_FILE="$PWD/secrets/ai_credentials.json" \
 AI_CONSOLE_TOKEN_FILE="$PWD/secrets/ai_console_token" \
+AI_AUDIT_HMAC_KEYRING_FILE="$PWD/secrets/ai_audit_hmac.json" \
 go run -tags server ./server.go
 ```
 
@@ -162,7 +167,7 @@ go run -tags server ./server.go
 - `AI_CREDENTIALS_FILE` 未設定時はAI専用リスナー自体を起動しません。
 - AI専用リスナーは既定でlocalhost以外へバインドできません。
 - 非ループバック待受はTLS 1.3とクライアント証明書認証（mTLS）が必須です。
-- 資格情報は最大90日で失効し、scope、口座、分析可能な固定日付範囲、1リクエストの期間、明細件数を個別に制限します。
+- 資格情報は最大90日で失効し、scope、口座、許可タグID、分析可能な固定日付範囲、1リクエストの期間、明細件数を個別に制限します。`--tag-id` を省略した資格情報は、タグの付与やタグ指定分析を行えません。
 
 主な環境変数:
 
@@ -178,6 +183,7 @@ go run -tags server ./server.go
 | `SESSION_MAX_AGE_HOURS` | `24` | セッション有効期間（時間） |
 | `AI_CREDENTIALS_FILE` | なし | ハッシュ化済みAI資格情報JSON。未設定ならAI API無効 |
 | `AI_CONSOLE_TOKEN_FILE` | なし | 管理画面中継用の生トークンを格納したsecretファイル |
+| `AI_AUDIT_HMAC_KEYRING_FILE` | なし（AI有効時は必須） | 監査口座参照用の専用current/previous HMAC keyring secret |
 | `AI_HOST_IP` | `127.0.0.1` | AI専用リスナーの待受アドレス |
 | `AI_PORT` | `4001` | AI専用リスナーのポート |
 | `AI_ALLOW_REMOTE` | `false` | AIを非ループバックで待受する明示許可。mTLS設定も必須 |
@@ -230,6 +236,8 @@ docker compose -f compose.yaml -f compose.ai.yaml up -d --build
 
 bcryptハッシュは `$` を含むため、`.env` では例のとおり値全体をシングルクォートで囲んでください。
 
+Composeはコンテナのroot filesystemをread-onlyにし、Linux capabilityをすべて削除して、権限昇格を禁止します。永続的に書き込めるアプリ領域は `/app/data` だけです。SQLiteの一時ファイルには再起動で消える `/tmp` tmpfsを使い、CPU・memory・PIDにも上限を設定します。既定値は `.env.example` の `OMNI_CPU_LIMIT`、`OMNI_MEMORY_LIMIT`、`OMNI_PIDS_LIMIT`、`OMNI_TMPFS_SIZE` で調整できます。上限を下げる場合は、最大サイズの画像処理、snapshot作成・復元、CSV取込を実データ量で検証してください。
+
 TrueNAS Custom Appでは `compose.yaml` 相当の設定を使い、次を守ってください。
 
 - `/app/data` を `/mnt/<pool>/apps/omni-money` 等の永続Datasetへ割り当てる
@@ -258,6 +266,18 @@ curl -X POST http://127.0.0.1:4001/api/v1/ai/analysis \
   -d '{}'
 ```
 
+取引追加には、再送しても重複登録されないよう、要求ごとに生成した16〜128文字の
+`Idempotency-Key` が必須です。通信結果が不明な場合は同じ本文と同じkeyで再送してください。
+同じkeyを異なる本文へ再利用すると409、資格情報ごとのUTC日次上限を超えると429になります。
+
+```bash
+curl -X POST http://127.0.0.1:4001/api/v1/ai/transactions \
+  -H 'Authorization: Bearer <AI_CREDENTIAL>' \
+  -H 'Idempotency-Key: <RANDOM-REQUEST-ID>' \
+  -H 'Content-Type: application/json' \
+  -d '{"account":"現金","date":"2026-08-09","item":"食費","type":"expense","amount":1000}'
+```
+
 利用可能なエンドポイント:
 
 | Method | Path | 説明 |
@@ -268,9 +288,22 @@ curl -X POST http://127.0.0.1:4001/api/v1/ai/analysis \
 AI API では `POST` のみ許可され、`GET`、`PUT`、`DELETE` などは拒否されます。
 公開Webポート `:4000/api/v1/ai/*` ではAIトークンを受け付けません。
 
-資格情報のscopeは `transactions:create`、`analysis:summary`、`analysis:transactions`、`analysis:memo`、`console:relay` です。分析は既定で集計だけを返し、資格情報で許可された単一口座・固定日付範囲の中で最大30日（資格情報の上限が短ければその日数）へ自動的に絞ります。日付窓をずらして資格情報の固定範囲外を読むことはできません。明細は `include_transactions: true`、メモはさらに `include_memo: true` と対応scopeが必要で、最大500件のカーソルページングです。
+資格情報のscopeは `transactions:create`、`analysis:summary`、`analysis:transactions`、`analysis:memo`、`console:relay` です。AI取引の日次上限は `--max-transactions-per-day`（既定100、1〜1000）で設定し、成功件数とidempotency情報はSQLiteへ原子的に保存されます。raw idempotency keyは保存・記録しません。分析は既定で集計だけを返し、資格情報で許可された単一口座・固定日付範囲の中で最大30日（資格情報の上限が短ければその日数）へ自動的に絞ります。日付窓をずらして資格情報の固定範囲外を読むことはできません。タグの付与とタグ指定分析は、資格情報に列挙したタグIDだけを許可します。明細は `include_transactions: true`、メモはさらに `include_memo: true` と対応scopeが必要で、最大500件のカーソルページングです。
 
-資格情報の更新は、ホスト上の通常ファイルを直接参照する構成では `rotate` / `revoke` 後に `SIGHUP` を送ると無停止で反映されます。不正な置換ファイルは拒否され、直前の有効な設定を維持します。Compose Secretsは実行中コンテナ内で置換内容が見えない場合があるため、更新後に `docker compose -f compose.yaml -f compose.ai.yaml up -d --force-recreate omni-money` を実行してください。APIアクセスはcredential ID、mTLS証明書fingerprint、HMAC化した口座参照、期間、明細種別、該当／返却件数を、Web中継は実クライアントIPを構造化監査ログへ残します。資格情報操作も構造化監査し、トークン・本文・項目・メモ・金額は記録しません。運用環境では標準出力をアクセス制限された永続ログへ転送してください。
+資格情報または監査keyringの更新は、ホスト上の通常ファイルを直接参照する構成では更新後に `SIGHUP` を送ると無停止で反映されます。不正な置換ファイルは拒否され、それぞれ直前の有効なsnapshotを維持します。Compose Secretsは実行中コンテナ内で置換内容が見えない場合があるため、更新後に `docker compose -f compose.yaml -f compose.ai.yaml up -d --force-recreate omni-money` を実行してください。
+
+監査HMAC鍵はBearer credentialから完全に分離されています。同じ口座参照はBearer rotationを跨いでも変わりません。計画rotationでは次のコマンドが旧鍵を期限付きpreviousとして保持し、overlap中の監査イベントだけにcurrent/previous両方の非可逆参照と非秘密key IDを記録します。overlap終了後はpreviousを削除してください。
+
+```bash
+go run ./cmd/ai-audit-key rotate \
+  --file secrets/ai_audit_hmac.json \
+  --overlap 168h
+# overlap終了後
+go run ./cmd/ai-audit-key retire \
+  --file secrets/ai_audit_hmac.json
+```
+
+CLIはraw鍵を標準出力へ返さず、初期作成は既存fileを上書きしない0600作成、rotationは0600の一時fileを同期したatomic置換で行います。keyringはリポジトリ外かつ所有者管理の親directoryで保管し、通常fileは0400/0600、Composeでは`/run/secrets`直下のread-only secretとしてmountしてください。WindowsではUnix modeに相当するDACL検証を安全に代替できないため、server modeのraw secret読込はfail closedです。Windows desktop modeはAI listenerを起動しないためkeyringを必要としません。APIアクセスはcredential ID、mTLS証明書fingerprint、key ID付きHMAC口座参照、期間、明細種別、該当／返却件数を、Web中継は実クライアントIPを構造化監査ログへ残します。トークン・HMAC鍵・本文・項目・メモ・金額は記録しません。運用環境では標準出力をアクセス制限された永続ログへ転送してください。
 
 サーバーモードのメニューには「クレジットカード設定」の直下に「AI API操作」が表示されます。この画面は通常のセッション認証を通過し、サーバー内部からAI専用リスナーへ固定された分析・取引追加だけを中継します。AI用Bearer tokenはブラウザへ返しません。
 

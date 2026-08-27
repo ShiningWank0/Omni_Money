@@ -19,6 +19,7 @@ import (
 	"omni_money/backend/aicredentials"
 	"omni_money/backend/aitransport"
 	"omni_money/backend/api"
+	"omni_money/backend/audithmac"
 	"omni_money/backend/config"
 	"omni_money/backend/database"
 )
@@ -105,6 +106,14 @@ func main() {
 		if err != nil {
 			log.Fatalf("AI資格情報ファイルが無効です: %v", err)
 		}
+		auditKeyringFile := strings.TrimSpace(os.Getenv("AI_AUDIT_HMAC_KEYRING_FILE"))
+		if auditKeyringFile == "" {
+			log.Fatal("AI_AUDIT_HMAC_KEYRING_FILE が未設定です（AI API有効時は専用監査鍵が必須です）")
+		}
+		auditStore, err := audithmac.NewStore(auditKeyringFile)
+		if err != nil {
+			log.Fatalf("AI監査HMAC keyringが無効です: %v", err)
+		}
 		aiHost := strings.TrimSpace(os.Getenv("AI_HOST_IP"))
 		if aiHost == "" {
 			aiHost = "127.0.0.1"
@@ -130,14 +139,14 @@ func main() {
 		}
 		aiServer := &http.Server{
 			Addr:              aiAddr,
-			Handler:           api.NewAIRouter(credentialStore),
+			Handler:           api.NewAIRouter(credentialStore, auditStore),
 			TLSConfig:         aiTLSConfig,
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       15 * time.Second,
 			WriteTimeout:      60 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		}
-		watchAICredentialReload(credentialStore)
+		watchAIConfigReload(credentialStore, auditStore)
 		go func() {
 			listener, err := net.Listen("tcp", aiAddr)
 			if err != nil {
@@ -169,7 +178,7 @@ func isLoopbackHost(host string) bool {
 	return aitransport.IsLoopbackHost(host)
 }
 
-func watchAICredentialReload(store *aicredentials.Store) {
+func watchAIConfigReload(credentialStore *aicredentials.Store, auditStore *audithmac.Store) {
 	reload := make(chan os.Signal, 1)
 	// Signal 1 is SIGHUP on the Unix platforms used by the server image. Using
 	// the numeric syscall.Signal keeps the server source buildable on Windows;
@@ -177,13 +186,18 @@ func watchAICredentialReload(store *aicredentials.Store) {
 	signal.Notify(reload, syscall.Signal(1))
 	go func() {
 		for range reload {
-			if err := store.Reload(); err != nil {
+			if err := credentialStore.Reload(); err != nil {
 				// Reload is atomic: an invalid replacement never displaces the
 				// last valid snapshot. Do not log credential contents.
 				log.Printf("AI資格情報の再読込を拒否しました。直前の有効な設定を維持します: %v", err)
-				continue
+			} else {
+				log.Printf("AI資格情報を安全に再読込しました (%d件)", len(credentialStore.List()))
 			}
-			log.Printf("AI資格情報を安全に再読込しました (%d件)", len(store.List()))
+			if err := auditStore.Reload(); err != nil {
+				log.Printf("AI監査HMAC keyringの再読込を拒否しました。直前の有効な鍵を維持します: %v", err)
+			} else {
+				log.Printf("AI監査HMAC keyringを安全に再読込しました (key_id=%s)", auditStore.CurrentKeyID())
+			}
 		}
 	}()
 }
