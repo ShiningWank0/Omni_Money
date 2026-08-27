@@ -21,6 +21,7 @@ RUN go mod download
 # UIだけの変更でバックエンドビルドキャッシュが無効になることを避ける。
 COPY server.go ./
 COPY backend/ ./backend/
+COPY cmd/omni-totp/ ./cmd/omni-totp/
 
 # バージョン情報
 ARG VERSION=dev
