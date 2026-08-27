@@ -51,6 +51,9 @@ jobs:
       - name: Run Go tests
         run: go test ./...
 
+      - name: Scan reachable Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
       - name: Build server entrypoint
         run: go build -tags server -o /tmp/omni_money_server ./server.go
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,6 +15,47 @@ import (
 	"omni_money/backend/database"
 	"omni_money/backend/models"
 )
+
+func TestWriteAIAnalysisErrorMapsContextFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		wantStatus  int
+		wantMessage string
+	}{
+		{
+			name:        "deadline exceeded",
+			err:         fmt.Errorf("internal query detail: %w", context.DeadlineExceeded),
+			wantStatus:  http.StatusGatewayTimeout,
+			wantMessage: "AI分析がタイムアウトしました",
+		},
+		{
+			name:        "canceled",
+			err:         fmt.Errorf("internal query detail: %w", context.Canceled),
+			wantStatus:  http.StatusRequestTimeout,
+			wantMessage: "AI分析リクエストがキャンセルされました",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			writeAIAnalysisError(recorder, test.err)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d", recorder.Code, test.wantStatus)
+			}
+			var response map[string]string
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response["error"] != test.wantMessage {
+				t.Fatalf("error = %q, want fixed message %q", response["error"], test.wantMessage)
+			}
+			if strings.Contains(recorder.Body.String(), "internal query detail") {
+				t.Fatalf("internal error leaked: %s", recorder.Body.String())
+			}
+		})
+	}
+}
 
 func TestValidateAndScopeAIAnalysisAppliesCredentialDefaults(t *testing.T) {
 	now := time.Date(2026, time.August, 9, 15, 0, 0, 0, time.FixedZone("JST", 9*60*60))

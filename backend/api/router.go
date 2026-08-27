@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"omni_money/backend/aicredentials"
+	"omni_money/backend/audithmac"
 	"omni_money/backend/core"
 	"omni_money/backend/database"
 	"omni_money/backend/middleware"
@@ -94,13 +96,13 @@ func NewRouter() http.Handler {
 
 // NewAIRouter はAI専用リスナー用のルーターを作成する。
 // 通常の家計簿API、静的ファイル、ユーザー認証APIは一切登録しない。
-func NewAIRouter(credentialStore *aicredentials.Store) http.Handler {
+func NewAIRouter(credentialStore *aicredentials.Store, auditStore *audithmac.Store) http.Handler {
 	aiMux := http.NewServeMux()
 	aiMux.HandleFunc("/api/v1/ai/transactions", handleAITransactions)
 	aiMux.HandleFunc("/api/v1/ai/analysis", handleAIAnalysis)
 
 	var handler http.Handler = middleware.MaxBodySizeMiddleware(aiMux)
-	handler = middleware.AIAPIMiddleware(credentialStore, handler)
+	handler = middleware.AIAPIMiddleware(credentialStore, auditStore, handler)
 	handler = middleware.SecurityHeadersMiddleware(handler)
 	handler = middleware.CacheControlMiddleware(handler)
 	return handler
@@ -370,13 +372,37 @@ func handleAITransactions(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), status)
 		return
 	}
-	createdCount := 1
-	middleware.RecordAIRequestAudit(r.Context(), req.Account, req.Date, req.Date, false, false, nil, &createdCount)
-
-	resp, err := core.AddTransaction(req)
+	idempotencyKeyHash, err := aiIdempotencyKeyHash(r.Header)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	result, err := core.AddAITransaction(r.Context(), req, core.AITransactionIdentity{
+		CredentialID:          credential.ID,
+		IdempotencyKeySHA256:  idempotencyKeyHash,
+		RequestSHA256:         canonicalAITransactionDigest(req),
+		MaxTransactionsPerDay: credential.MaxTransactionsPerDay,
+		Now:                   time.Now(),
+	})
+	if err != nil {
+		if errors.Is(err, core.ErrAIIdempotencyConflict) {
+			jsonError(w, "Idempotency-Keyは別のリクエストで使用済みです", http.StatusConflict)
+			return
+		}
+		var quotaError *core.AIDailyQuotaExceededError
+		if errors.As(err, &quotaError) {
+			w.Header().Set("Retry-After", strconv.Itoa(quotaError.RetryAfterSeconds))
+			jsonError(w, "AI経由の取引追加が日次上限に達しました", http.StatusTooManyRequests)
+			return
+		}
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	createdCount := 1
+	middleware.RecordAIRequestAudit(r.Context(), req.Account, req.Date, req.Date, false, false, nil, &createdCount)
+	if result.Replayed {
+		middleware.RecordAIIdempotencyReplay(r.Context())
+		w.Header().Set("Idempotency-Replayed", "true")
 	}
 
 	jsonResponse(w, map[string]interface{}{
@@ -385,7 +411,7 @@ func handleAITransactions(w http.ResponseWriter, r *http.Request) {
 			ID      int64  `json:"id"`
 			Account string `json:"account"`
 			Date    string `json:"date"`
-		}{ID: resp.ID, Account: resp.Account, Date: resp.Date},
+		}{ID: result.Transaction.ID, Account: result.Transaction.Account, Date: result.Transaction.Date},
 	}, http.StatusCreated)
 }
 
@@ -737,6 +763,8 @@ func handleTransactionLinksAPI(w http.ResponseWriter, r *http.Request) {
 
 // --- AI分析API ハンドラー (Agent.md §6.3) ---
 
+const aiAnalysisTimeout = 10 * time.Second
+
 func handleAIAnalysis(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -762,14 +790,27 @@ func handleAIAnalysis(w http.ResponseWriter, r *http.Request) {
 	}
 	middleware.RecordAIRequestAudit(r.Context(), req.Account, req.StartDate, req.EndDate, req.IncludeTransactions, req.IncludeMemo, nil, nil)
 
-	resp, err := core.AnalyzeTransactions(req)
+	analysisContext, cancel := context.WithTimeout(r.Context(), aiAnalysisTimeout)
+	defer cancel()
+	resp, err := core.AnalyzeTransactionsContext(analysisContext, req)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		writeAIAnalysisError(w, err)
 		return
 	}
 	middleware.RecordAIRequestAudit(r.Context(), req.Account, req.StartDate, req.EndDate, req.IncludeTransactions, req.IncludeMemo, &resp.Count, &resp.ReturnedCount)
 
 	jsonResponse(w, resp, http.StatusOK)
+}
+
+func writeAIAnalysisError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		jsonError(w, "AI分析がタイムアウトしました", http.StatusGatewayTimeout)
+	case errors.Is(err, context.Canceled):
+		jsonError(w, "AI分析リクエストがキャンセルされました", http.StatusRequestTimeout)
+	default:
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func decodeStrictAIJSON(r *http.Request, destination any) error {

@@ -1,6 +1,8 @@
 package aicredentials
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -55,6 +57,9 @@ func TestFileValidateAndCredentialHelpers(t *testing.T) {
 	if !credential.AllowConsoleRelay {
 		t.Fatal("AllowConsoleRelay = false, want true")
 	}
+	if credential.MaxTransactionsPerDay != DefaultMaxTransactionsPerDay {
+		t.Fatalf("MaxTransactionsPerDay = %d, want backward-compatible default %d", credential.MaxTransactionsPerDay, DefaultMaxTransactionsPerDay)
+	}
 }
 
 func TestFileValidateRejectsInvalidCredentials(t *testing.T) {
@@ -92,6 +97,8 @@ func TestFileValidateRejectsInvalidCredentials(t *testing.T) {
 		{name: "analysis days high", mutate: func(f *File) { f.Credentials[0].MaxAnalysisDays = 367 }},
 		{name: "results low", mutate: func(f *File) { f.Credentials[0].MaxResults = 0 }},
 		{name: "results high", mutate: func(f *File) { f.Credentials[0].MaxResults = 501 }},
+		{name: "transaction quota low", mutate: func(f *File) { f.Credentials[0].MaxTransactionsPerDay = -1 }},
+		{name: "transaction quota high", mutate: func(f *File) { f.Credentials[0].MaxTransactionsPerDay = MaxTransactionsPerDay + 1 }},
 		{name: "analysis dates missing", mutate: func(f *File) { f.Credentials[0].AnalysisStartDate = ""; f.Credentials[0].AnalysisEndDate = "" }},
 		{name: "analysis date partial", mutate: func(f *File) { f.Credentials[0].AnalysisEndDate = "" }},
 		{name: "analysis date format", mutate: func(f *File) { f.Credentials[0].AnalysisStartDate = "2026/01/01" }},
@@ -161,6 +168,41 @@ func TestLoadFileStrictJSONAndPermissions(t *testing.T) {
 	}
 	if _, err := LoadFile(duplicatePath); err == nil {
 		t.Fatal("LoadFile() accepted duplicate JSON field")
+	}
+}
+
+func TestVersionOneDailyQuotaDistinguishesOmittedAndExplicitZero(t *testing.T) {
+	document := validTestFile()
+	document.Credentials[0].MaxTransactionsPerDay = 77
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+
+	omittedPath := filepath.Join(directory, "omitted.json")
+	omitted := bytes.Replace(encoded, []byte(`,"max_transactions_per_day":77`), nil, 1)
+	if bytes.Equal(omitted, encoded) {
+		t.Fatal("test fixture did not remove max_transactions_per_day")
+	}
+	if err := os.WriteFile(omittedPath, omitted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadFile(omittedPath)
+	if err != nil {
+		t.Fatalf("legacy omitted quota was rejected: %v", err)
+	}
+	if loaded.Credentials[0].MaxTransactionsPerDay != DefaultMaxTransactionsPerDay {
+		t.Fatalf("legacy quota = %d, want %d", loaded.Credentials[0].MaxTransactionsPerDay, DefaultMaxTransactionsPerDay)
+	}
+
+	explicitZeroPath := filepath.Join(directory, "zero.json")
+	explicitZero := bytes.Replace(encoded, []byte(`"max_transactions_per_day":77`), []byte(`"max_transactions_per_day":0`), 1)
+	if err := os.WriteFile(explicitZeroPath, explicitZero, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(explicitZeroPath); err == nil {
+		t.Fatal("explicit zero daily quota was accepted")
 	}
 }
 

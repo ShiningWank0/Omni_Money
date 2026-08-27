@@ -122,7 +122,7 @@ Base64は元データより約33%大きくなるため、現在のHTTP body上�
 
 - client別token、最小scope、rotation、revokeを維持し、90日以内に更新する
 - 資格情報と接続元単位のrate limitを維持する
-- credential ID、操作、接続元、mTLS証明書fingerprint、HMAC化した口座参照、期間、明細種別、該当／返却件数、日時、許否、HTTP statusを構造化監査ログへ残す
+- credential ID、操作、接続元、mTLS証明書fingerprint、専用監査鍵とkey IDでHMAC化した口座参照、期間、明細種別、該当／返却件数、日時、許否、HTTP statusを構造化監査ログへ残す
 - token、provider key、リクエスト本文、金額、メモ、Base64画像、レシート全文はログへ残さない
 - クラウドLLMへ画像を送る場合はUIで明示し、利用者のopt-inを必須にする
 - Manager障害時にDB直接書き込みへfallbackしない

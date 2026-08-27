@@ -57,10 +57,16 @@ const operation = ref('transactions')
 const requestBody = ref(defaultBody('transactions'))
 const sending = ref(false)
 const result = ref(null)
+const pendingIdempotencyKey = ref('')
 
 watch(operation, (value) => {
   requestBody.value = defaultBody(value)
   result.value = null
+  pendingIdempotencyKey.value = ''
+})
+
+watch(requestBody, () => {
+  pendingIdempotencyKey.value = ''
 })
 
 function defaultBody(value) {
@@ -106,10 +112,17 @@ async function sendRequest() {
 
   sending.value = true
   try {
+    const headers = { 'Content-Type': 'application/json' }
+    if (operation.value === 'transactions') {
+      if (!pendingIdempotencyKey.value) {
+        pendingIdempotencyKey.value = newIdempotencyKey()
+      }
+      headers['Idempotency-Key'] = pendingIdempotencyKey.value
+    }
     const response = await fetch(`/api/ai-console/${operation.value}`, {
       method: 'POST',
       credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload)
     })
     const text = await response.text()
@@ -121,7 +134,10 @@ async function sendRequest() {
     }
     result.value = { ok: response.ok, status: response.status, body: formatted }
     if (response.ok && operation.value === 'transactions') {
+      pendingIdempotencyKey.value = ''
       emit('transaction-added')
+    } else if (response.status === 409) {
+      pendingIdempotencyKey.value = ''
     }
   } catch (error) {
     result.value = { ok: false, status: '接続エラー', body: error.message }
@@ -130,9 +146,20 @@ async function sendRequest() {
   }
 }
 
+function newIdempotencyKey() {
+  if (!globalThis.crypto?.getRandomValues) {
+    throw new Error('安全な乱数生成機能を利用できません')
+  }
+  const random = new Uint8Array(16)
+  globalThis.crypto.getRandomValues(random)
+  const encoded = Array.from(random, (value) => value.toString(16).padStart(2, '0')).join('')
+  return `web-console-${encoded}`
+}
+
 onBeforeUnmount(() => {
   requestBody.value = ''
   result.value = null
+  pendingIdempotencyKey.value = ''
 })
 </script>
 
