@@ -5,12 +5,104 @@ on:
     branches: [main]
     paths: ['VERSION']
 
-permissions:
-  contents: read
-  packages: write
+permissions: {}
+
+concurrency:
+  group: docker-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Validate and scan release
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image: ${{ steps.version.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Read and validate version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(awk 'END { print NR }' VERSION)" != 1 ]; then
+            echo "::error::VERSION must contain exactly one line"
+            exit 1
+          fi
+          VERSION="$(sed -n '1p' VERSION)"
+          semver_re='^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))(\.((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [ "${#VERSION}" -gt 64 ] || [[ ! "$VERSION" =~ $semver_re ]]; then
+            echo "::error::VERSION is not valid SemVer"
+            exit 1
+          fi
+          if [[ "$VERSION" == *+* ]]; then
+            echo "::error::Docker tags do not support SemVer build metadata (+...); use a release version without build metadata"
+            exit 1
+          fi
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Go for release quality gate
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26.7'
+
+      - name: Setup Node.js for release quality gate
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24.19.0'
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Install and audit frontend dependencies
+        working-directory: frontend
+        run: |
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
+          npm run build
+
+      - name: Run release quality gate
+        run: |
+          go test ./...
+          go vet ./...
+          go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 -quiet -severity medium ./...
+          go test -race ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+      - name: Build release candidate image for scanning
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: docker build --build-arg "VERSION=$APP_VERSION" --tag omni-money:release-scan .
+
+      - name: Scan release candidate image
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: omni-money:release-scan
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
   build:
+    name: Build architecture image
+    needs: prepare
+    permissions:
+      contents: read
+      packages: write # pushes the per-architecture GHCR images
+    env:
+      APP_VERSION: ${{ needs.prepare.outputs.version }}
     strategy:
       matrix:
         include:
@@ -20,72 +112,72 @@ jobs:
             platform: linux/arm64
 
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Read version and repository
-        run: |
-          VERSION=$(cat VERSION | tr -d '[:space:]')
-          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
-          echo "REPO_LC=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push (single platform)
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           push: true
           platforms: ${{ matrix.platform }}
-          tags: ghcr.io/${{ env.REPO_LC }}:${{ env.APP_VERSION }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          tags: ${{ needs.prepare.outputs.image }}:${{ env.APP_VERSION }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
           build-args: VERSION=${{ env.APP_VERSION }}
+          provenance: mode=max
+          sbom: true
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
 
   manifest:
-    needs: build
+    name: Publish multi-architecture manifest
+    needs: [prepare, build]
+    permissions:
+      packages: write # publishes the final multi-architecture GHCR manifest
+    env:
+      APP_VERSION: ${{ needs.prepare.outputs.version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Read version and repository
-        run: |
-          VERSION=$(cat VERSION | tr -d '[:space:]')
-          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
-          echo "REPO_LC=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Create and push multi-arch manifest
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          VERSION: ${{ env.APP_VERSION }}
         run: |
-          IMAGE="ghcr.io/${{ env.REPO_LC }}"
-          VERSION="${{ env.APP_VERSION }}"
-
           # buildx imagetools はOCI image index（Buildxが生成する形式）を正しく処理できる
           docker buildx imagetools create -t "${IMAGE}:${VERSION}" \
             "${IMAGE}:${VERSION}-amd64" \
             "${IMAGE}:${VERSION}-arm64"
 
-          docker buildx imagetools create -t "${IMAGE}:latest" \
-            "${IMAGE}:${VERSION}-amd64" \
-            "${IMAGE}:${VERSION}-arm64"
+          if [[ "$VERSION" != *-* ]]; then
+            docker buildx imagetools create -t "${IMAGE}:latest" \
+              "${IMAGE}:${VERSION}-amd64" \
+              "${IMAGE}:${VERSION}-arm64"
+          else
+            echo "Skipping :latest for prerelease ${VERSION}"
+          fi
