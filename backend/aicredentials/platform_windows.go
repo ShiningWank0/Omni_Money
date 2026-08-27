@@ -4,10 +4,6 @@ package aicredentials
 
 import "os"
 
-func secureOpen(path string) (*os.File, error) {
-	return os.Open(path)
-}
-
 // Windows does not expose Unix group/other permission bits through os.FileMode.
 func hasInsecurePermissions(_ os.FileMode) bool {
 	return false

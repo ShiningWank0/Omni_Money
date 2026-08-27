@@ -11,13 +11,13 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"omni_money/backend/aitransport"
 	"omni_money/backend/middleware"
+	"omni_money/backend/secretfile"
 )
 
 const maxAIConsoleResponseSize = 10 * 1024 * 1024
@@ -120,42 +120,15 @@ func readAIConsoleToken() (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("AI_CONSOLE_TOKEN_FILE is not configured")
 	}
-	before, err := os.Lstat(path)
-	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("AI console token must be a regular file")
-	}
-	if before.Size() <= 0 || before.Size() > 4096 || !safeAIConsoleTokenPermissions(path, before.Mode().Perm()) {
-		return "", fmt.Errorf("AI console token file permissions or size are invalid")
-	}
-	handle, err := os.Open(path)
+	data, err := secretfile.ReadConfidential(path, 4096)
 	if err != nil {
-		return "", err
-	}
-	defer handle.Close()
-	after, err := handle.Stat()
-	if err != nil || !os.SameFile(before, after) || !after.Mode().IsRegular() || after.Size() <= 0 || after.Size() > 4096 || !safeAIConsoleTokenPermissions(path, after.Mode().Perm()) {
-		return "", fmt.Errorf("AI console token file changed or became unsafe while opening")
-	}
-	data, err := io.ReadAll(io.LimitReader(handle, 4097))
-	if err != nil || len(data) > 4096 {
-		return "", fmt.Errorf("AI console token could not be read safely")
+		return "", fmt.Errorf("AI console token could not be read safely: %w", err)
 	}
 	token := strings.TrimSpace(string(data))
 	if len(token) < 43 || len(token) > 512 || strings.ContainsAny(token, " \t\r\n") {
 		return "", fmt.Errorf("AI console token is invalid")
 	}
 	return token, nil
-}
-
-func safeAIConsoleTokenPermissions(path string, permissions os.FileMode) bool {
-	cleaned := filepath.ToSlash(filepath.Clean(path))
-	if strings.HasPrefix(cleaned, "/run/secrets/") {
-		// Docker Compose secrets are commonly 0444. They are only mounted into
-		// the explicitly authorized service, but must never be writable/executable.
-		return permissions&0o133 == 0
-	}
-	// A host-side raw bearer token must be private to its owner.
-	return permissions&0o177 == 0
 }
 
 func newAIConsoleTLSClient() (*http.Client, error) {
