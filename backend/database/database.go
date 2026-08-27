@@ -536,7 +536,7 @@ func endDBLifecycle() {
 // backupSQLiteDatabase はSQLiteのオンラインBackup APIで一貫した複製を作る。
 func backupSQLiteDatabase(source *sql.DB, snapshotPath string) (err error) {
 	// 先にprivate directory内へ排他的に作成し、既存ファイルやsymlinkを上書きしない。
-	placeholder, err := os.OpenFile(snapshotPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	placeholder, err := os.OpenFile(snapshotPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- path is generated inside the configured private snapshot directory.
 	if err != nil {
 		return err
 	}
