@@ -136,6 +136,15 @@ func CloseDB() {
 
 // createTables はデータベーステーブルを作成する
 func createTables() error {
+	return createTablesOn(db)
+}
+
+// createTablesOn は指定した接続へ現行スキーマ、index、triggerを適用する。
+// 復元候補をグローバル接続へ公開する前に移行できるよう、接続を引数で受け取る。
+func createTablesOn(target *sql.DB) error {
+	if target == nil {
+		return fmt.Errorf("データベース接続が初期化されていません")
+	}
 	statements := []string{
 		// 取引テーブル
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS transactions (
@@ -242,11 +251,70 @@ func createTables() error {
 	}
 
 	for _, stmt := range statements {
-		if _, err := db.Exec(stmt); err != nil {
+		if _, err := target.Exec(stmt); err != nil {
 			return fmt.Errorf("SQL実行エラー (%s): %w", stmt[:50], err)
 		}
 	}
+	if err := validateCriticalSchema(target); err != nil {
+		return err
+	}
 
+	return nil
+}
+
+func validateCriticalSchema(target *sql.DB) error {
+	requiredColumns := map[string][]string{
+		"transactions":       {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
+		"transaction_images": {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
+	}
+	for table, required := range requiredColumns {
+		rows, err := target.Query("PRAGMA table_info(" + table + ")")
+		if err != nil {
+			return fmt.Errorf("必須列検査エラー (%s): %w", table, err)
+		}
+		found := make(map[string]struct{}, len(required))
+		for rows.Next() {
+			var cid int
+			var name, columnType string
+			var notNull, primaryKey int
+			var defaultValue interface{}
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("必須列検査スキャンエラー (%s): %w", table, err)
+			}
+			found[name] = struct{}{}
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("必須列検査クローズエラー (%s): %w", table, err)
+		}
+		for _, name := range required {
+			if _, ok := found[name]; !ok {
+				return fmt.Errorf("必須列が不足しています: %s.%s", table, name)
+			}
+		}
+	}
+
+	requiredObjects := []struct {
+		objectType string
+		name       string
+	}{
+		{objectType: "index", name: "idx_transaction_images_txid"},
+		{objectType: "trigger", name: "trg_transaction_images_quota_insert"},
+		{objectType: "trigger", name: "trg_transaction_images_immutable_update"},
+	}
+	for _, object := range requiredObjects {
+		var count int
+		if err := target.QueryRow(
+			"SELECT COUNT(*) FROM sqlite_master WHERE type = ? AND name = ?",
+			object.objectType,
+			object.name,
+		).Scan(&count); err != nil {
+			return fmt.Errorf("必須DBオブジェクト検査エラー (%s): %w", object.name, err)
+		}
+		if count != 1 {
+			return fmt.Errorf("必須DBオブジェクトが不足しています: %s", object.name)
+		}
+	}
 	return nil
 }
 
@@ -353,8 +421,9 @@ func ListSnapshots(snapshotDir string) ([]string, error) {
 //  2. 現在のDBファイルを .bak に退避
 //  3. SQLite WAL/SHM 一時ファイルを消去
 //  4. スナップショットファイルを元のDBパスにコピー
-//  5. 再接続し PRAGMA integrity_check で整合性を検証
-//  6. 成功なら退避ファイルを削除、失敗なら退避から復旧
+//  5. 復元候補へ現行スキーマ・index・triggerを再適用
+//  6. PRAGMA integrity_check で整合性を検証
+//  7. 成功なら退避ファイルを削除、失敗なら退避から復旧
 func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	// スナップショット名の検証（パストラバーサル防止）。
 	// APIから任意の名前が渡り得るため、ディレクトリ区切りや ".." を含む名前、
@@ -391,15 +460,27 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 
 	backupPath := currentPath + ".bak"
 	restoreFailed := true
+	var candidateDB *sql.DB
 
 	// 失敗時は退避ファイルから元の状態に自動復旧する
 	defer func() {
 		if restoreFailed {
 			log.Printf("復元失敗: 退避ファイルから元の状態に復旧します")
+			if candidateDB != nil {
+				_ = candidateDB.Close()
+				candidateDB = nil
+			}
+			if db != nil {
+				_ = db.Close()
+				db = nil
+			}
 			os.Remove(currentPath)
 			os.Remove(currentPath + "-wal")
 			os.Remove(currentPath + "-shm")
-			os.Rename(backupPath, currentPath)
+			if err := os.Rename(backupPath, currentPath); err != nil {
+				log.Printf("退避データベースの復旧エラー: %v", err)
+				return
+			}
 			if err := initDBLocked(currentPath); err != nil {
 				log.Printf("復旧後のDB再接続エラー: %v", err)
 			}
@@ -423,30 +504,46 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 		return fmt.Errorf("スナップショットコピーエラー: %w", err)
 	}
 
-	// --- 手順5: 再接続と整合性の検査 ---
+	// --- 手順5: 再接続と現行スキーマの再適用 ---
 	newDB, err := sql.Open("sqlite3", currentPath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON")
 	if err != nil {
 		return fmt.Errorf("復元後のDB接続エラー: %w", err)
 	}
+	candidateDB = newDB
 
-	var integrityResult string
-	if err := newDB.QueryRow("PRAGMA integrity_check").Scan(&integrityResult); err != nil {
-		newDB.Close()
-		return fmt.Errorf("整合性チェック実行エラー: %w", err)
+	// 破損DBへDDLを適用しないよう、移行前にも整合性を確認する。
+	if err := checkIntegrity(newDB); err != nil {
+		return err
 	}
-	if integrityResult != "ok" {
-		newDB.Close()
-		return fmt.Errorf("整合性チェック失敗: %s", integrityResult)
+	if err := createTablesOn(newDB); err != nil {
+		return fmt.Errorf("復元後のスキーマ更新エラー: %w", err)
 	}
 
-	// --- 手順6: 参照の更新と退避ファイルの削除 ---
+	// --- 手順6: スキーマ更新後の整合性の検査 ---
+	if err := checkIntegrity(newDB); err != nil {
+		return err
+	}
+
+	// --- 手順7: 参照の更新と退避ファイルの削除 ---
 	db = newDB
+	candidateDB = nil
 	dbPath = currentPath
 
 	restoreFailed = false
 	os.Remove(backupPath)
 
 	log.Printf("スナップショット復元完了: %s (integrity_check: ok)", snapshotName)
+	return nil
+}
+
+func checkIntegrity(target *sql.DB) error {
+	var integrityResult string
+	if err := target.QueryRow("PRAGMA integrity_check").Scan(&integrityResult); err != nil {
+		return fmt.Errorf("整合性チェック実行エラー: %w", err)
+	}
+	if integrityResult != "ok" {
+		return fmt.Errorf("整合性チェック失敗: %s", integrityResult)
+	}
 	return nil
 }
 
