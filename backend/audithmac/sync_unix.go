@@ -1,14 +1,8 @@
 //go:build aix || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
 
-package aicredentials
+package audithmac
 
-import (
-	"os"
-)
-
-func hasInsecurePermissions(mode os.FileMode) bool {
-	return mode.Perm()&0o033 != 0
-}
+import "os"
 
 func syncDirectory(path string) error {
 	directory, err := os.Open(path)

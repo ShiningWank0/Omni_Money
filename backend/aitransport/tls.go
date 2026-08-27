@@ -5,11 +5,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io"
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
+
+	"omni_money/backend/secretfile"
 )
 
 const maxTLSFileBytes = 2 * 1024 * 1024
@@ -124,54 +123,8 @@ func BuildClientTLSConfig(caFile, certFile, keyFile, serverName string) (*tls.Co
 }
 
 func readCheckedFile(path string, secret bool) ([]byte, error) {
-	before, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
+	if secret {
+		return secretfile.ReadConfidential(path, maxTLSFileBytes)
 	}
-	if err := validateTLSFileInfo(path, before, secret); err != nil {
-		return nil, err
-	}
-	handle, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer handle.Close()
-	after, err := handle.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !os.SameFile(before, after) {
-		return nil, fmt.Errorf("ファイルが読込中に置き換えられました")
-	}
-	if err := validateTLSFileInfo(path, after, secret); err != nil {
-		return nil, err
-	}
-	data, err := io.ReadAll(io.LimitReader(handle, maxTLSFileBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) == 0 || len(data) > maxTLSFileBytes {
-		return nil, fmt.Errorf("ファイルサイズが無効です")
-	}
-	return data, nil
-}
-
-func validateTLSFileInfo(path string, info os.FileInfo, secret bool) error {
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("通常ファイルを直接指定してください")
-	}
-	perm := info.Mode().Perm()
-	// Certificates and CA bundles are public, but their integrity is still an
-	// authentication boundary. Reject group/other writes for every TLS input.
-	if perm&0o133 != 0 {
-		return fmt.Errorf("TLSファイルの権限が安全ではありません: %04o", perm)
-	}
-	cleaned := filepath.ToSlash(filepath.Clean(path))
-	if secret && !strings.HasPrefix(cleaned, "/run/secrets/") && perm&0o077 != 0 {
-		return fmt.Errorf("ホスト上のTLS秘密鍵は所有者だけが読める必要があります: %04o", perm)
-	}
-	if info.Size() <= 0 || info.Size() > maxTLSFileBytes {
-		return fmt.Errorf("ファイルサイズが無効です")
-	}
-	return nil
+	return secretfile.ReadIntegrityProtected(path, maxTLSFileBytes)
 }

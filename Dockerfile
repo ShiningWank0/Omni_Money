@@ -9,7 +9,7 @@ COPY frontend/src ./src
 RUN npm run build
 
 # ===== Stage 2: バックエンドのビルド =====
-FROM golang:1.25.12-alpine AS backend-builder
+FROM golang:1.25.12-alpine3.24@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587 AS backend-builder
 
 # CGO有効化（SQLite用）
 RUN apk add --no-cache gcc musl-dev
@@ -34,7 +34,7 @@ RUN CGO_ENABLED=1 go build \
     ./server.go
 
 # ===== Stage 3: 軽量ランタイム =====
-FROM alpine:3.21
+FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 # バージョン情報を実行時環境変数として参照可能にする（§8.3準拠）
 ARG VERSION=dev
@@ -52,8 +52,8 @@ WORKDIR /app
 COPY --from=backend-builder /omni_money_server ./omni_money_server
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-# スナップショット・データベース用ディレクトリ
-RUN mkdir -p /app/data /app/snapshots && chown -R omni:omni /app
+# DB、WAL、復元用backup、snapshotはすべてこの永続directory配下へ保存する。
+RUN mkdir -p /app/data && chown -R omni:omni /app
 
 USER omni
 
