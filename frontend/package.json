@@ -3,21 +3,23 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": "^24.19.0 || ^26.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@vueuse/core": "^14.2.1",
     "chart.js": "^4.5.1",
     "pinia": "^3.0.4",
-    "vue": "^3.2.37",
-    "vue-chartjs": "^5.3.3",
-    "vue-router": "^4.6.4"
+    "vue": "^3.5.41",
+    "vue-chartjs": "^5.3.3"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "6.0.8",
-    "vite": "8.2.1"
+    "@vitejs/plugin-vue": "^6.0.8",
+    "postcss": "^8.5.26",
+    "vite": "^8.2.1"
   }
 }
