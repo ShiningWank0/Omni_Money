@@ -7,6 +7,7 @@ services:
     environment:
       AI_CREDENTIALS_FILE: /run/secrets/omni_ai_credentials
       AI_CONSOLE_TOKEN_FILE: /run/secrets/omni_ai_console_token
+      AI_AUDIT_HMAC_KEYRING_FILE: /run/secrets/omni_ai_audit_hmac_keyring
       AI_HOST_IP: 0.0.0.0
       AI_PORT: 4001
       AI_ALLOW_REMOTE: "true"
@@ -20,6 +21,7 @@ services:
     secrets:
       - omni_ai_credentials
       - omni_ai_console_token
+      - omni_ai_audit_hmac_keyring
       - omni_ai_ca
       - omni_ai_server_cert
       - omni_ai_server_key
@@ -31,6 +33,8 @@ secrets:
     file: "${AI_CREDENTIALS_SECRET_FILE:-./secrets/ai_credentials.json}"
   omni_ai_console_token:
     file: "${AI_CONSOLE_TOKEN_SECRET_FILE:-./secrets/ai_console_token}"
+  omni_ai_audit_hmac_keyring:
+    file: "${AI_AUDIT_HMAC_SECRET_FILE:-./secrets/ai_audit_hmac.json}"
   omni_ai_ca:
     file: "${AI_TLS_CA_SECRET_FILE:-./secrets/ai_ca.pem}"
   omni_ai_server_cert:

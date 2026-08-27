@@ -27,14 +27,18 @@ var (
 	snapshotMu sync.Mutex
 	umask      sync.Once
 
-	autoSnapshotOnce   sync.Once
-	autoSnapshotWorker *snapshotWorker
+	autoSnapshotWorkerMu sync.Mutex
+	autoSnapshotWorker   *snapshotWorker
 )
 
 // InitDB はSQLiteデータベースを初期化する。
 // wails build でバインディング生成時にも呼ばれるため、sync.Once は使わない。
 // 既に接続がある場合はまず閉じてから再接続する。
 func InitDB(path string) error {
+	// Tests and desktop/server restarts may replace the active database path.
+	// Stop the old asynchronous worker before taking mu so it cannot retain the
+	// previous path or deadlock while waiting for the database read lock.
+	stopAutoSnapshotWorker()
 	mu.Lock()
 	defer mu.Unlock()
 	return initDBLocked(path)
@@ -101,6 +105,9 @@ func GetDB() *sql.DB {
 
 // CloseDB はデータベース接続を閉じる
 func CloseDB() {
+	// Wait for an in-flight snapshot (or cancel a queued one) before the DB and
+	// its containing directory can be closed or removed.
+	stopAutoSnapshotWorker()
 	mu.Lock()
 	defer mu.Unlock()
 	if db != nil {
@@ -168,6 +175,32 @@ func createTablesOn(target *sql.DB) error {
 			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE,
 			FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
 		)`,
+		// AI transaction idempotency metadata intentionally contains only
+		// digests and the minimal write-only response. Raw idempotency keys and
+		// request bodies must never be persisted.
+		`CREATE TABLE IF NOT EXISTS ai_transaction_idempotency (
+			credential_id TEXT NOT NULL,
+			idempotency_key_sha256 BLOB NOT NULL CHECK(length(idempotency_key_sha256) = 32),
+			request_sha256 BLOB NOT NULL CHECK(length(request_sha256) = 32),
+			transaction_id INTEGER,
+			response_account TEXT,
+			response_date TEXT,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (credential_id, idempotency_key_sha256),
+			UNIQUE (transaction_id),
+			CHECK (
+				(transaction_id IS NULL AND response_account IS NULL AND response_date IS NULL)
+				OR (transaction_id IS NOT NULL AND response_account IS NOT NULL AND response_date IS NOT NULL)
+			)
+		)`,
+		// Quotas are persisted in the ledger database and updated in the same
+		// SQL transaction as the corresponding successful AI write.
+		`CREATE TABLE IF NOT EXISTS ai_daily_transaction_usage (
+			credential_id TEXT NOT NULL,
+			utc_date TEXT NOT NULL CHECK(length(utc_date) = 10),
+			successful_creates INTEGER NOT NULL CHECK(successful_creates >= 0),
+			PRIMARY KEY (credential_id, utc_date)
+		)`,
 		// 設定テーブル
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
@@ -181,6 +214,12 @@ func createTablesOn(target *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_transactions_memo ON transactions(memo)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_links_child_id ON transaction_links(child_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_images_txid ON transaction_images(transaction_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_idempotency_credential_key
+			ON ai_transaction_idempotency(credential_id, idempotency_key_sha256)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_idempotency_transaction
+			ON ai_transaction_idempotency(transaction_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_daily_usage_credential_date
+			ON ai_daily_transaction_usage(credential_id, utc_date)`,
 		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS trg_transaction_images_quota_insert
 			BEFORE INSERT ON transaction_images
 			WHEN length(NEW.data) <= 0
@@ -240,8 +279,10 @@ func createTablesOn(target *sql.DB) error {
 
 func validateCriticalSchema(target *sql.DB) error {
 	requiredColumns := map[string][]string{
-		"transactions":       {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
-		"transaction_images": {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
+		"transactions":               {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
+		"transaction_images":         {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
+		"ai_transaction_idempotency": {"credential_id", "idempotency_key_sha256", "request_sha256", "transaction_id", "response_account", "response_date", "created_at"},
+		"ai_daily_transaction_usage": {"credential_id", "utc_date", "successful_creates"},
 	}
 	for table, required := range requiredColumns {
 		rows, err := target.Query("PRAGMA table_info(" + table + ")")
@@ -277,6 +318,9 @@ func validateCriticalSchema(target *sql.DB) error {
 		{objectType: "index", name: "idx_transactions_account_date_id"},
 		{objectType: "index", name: "idx_transaction_links_child_id"},
 		{objectType: "index", name: "idx_transaction_images_txid"},
+		{objectType: "index", name: "idx_ai_idempotency_credential_key"},
+		{objectType: "index", name: "idx_ai_idempotency_transaction"},
+		{objectType: "index", name: "idx_ai_daily_usage_credential_date"},
 		{objectType: "trigger", name: "validate_transactions_amount_insert"},
 		{objectType: "trigger", name: "validate_transactions_amount_update"},
 		{objectType: "trigger", name: "trg_transaction_images_quota_insert"},
@@ -658,10 +702,22 @@ func runAutoSnapshot() {
 // AutoSnapshot は変更通知を単一workerへ送り、最新30世代を維持する。
 // worker実行中の連続通知は、最後の状態を保存する次回実行1件へまとめる。
 func AutoSnapshot() {
-	autoSnapshotOnce.Do(func() {
+	autoSnapshotWorkerMu.Lock()
+	defer autoSnapshotWorkerMu.Unlock()
+	if autoSnapshotWorker == nil {
 		autoSnapshotWorker = newSnapshotWorker(runAutoSnapshot)
-	})
+	}
 	autoSnapshotWorker.request()
+}
+
+func stopAutoSnapshotWorker() {
+	autoSnapshotWorkerMu.Lock()
+	worker := autoSnapshotWorker
+	autoSnapshotWorker = nil
+	autoSnapshotWorkerMu.Unlock()
+	if worker != nil {
+		worker.close()
+	}
 }
 
 // copyFile はファイルをコピーする
