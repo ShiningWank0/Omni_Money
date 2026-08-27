@@ -9,6 +9,7 @@
       <div class="security-note">
         <strong>管理者向けAPI入力画面</strong>
         <p>送信内容は、通常Webのセッション認証を通過した後、サーバー内部からAI専用リスナーへ転送されます。AI用Bearer tokenはブラウザへ渡されません。</p>
+        <p>分析は既定で許可口座・期間内の集計だけを返します。取引明細やメモを含めるには、資格情報側の追加scopeが必要です。</p>
         <p>ローカルLLMやクラウドLLMは、この画面へAPIキーを入力せず、別のローカル仲介プロセスからAI専用ポートを呼び出してください。</p>
       </div>
 
@@ -57,10 +58,16 @@ const operation = ref('transactions')
 const requestBody = ref(defaultBody('transactions'))
 const sending = ref(false)
 const result = ref(null)
+const pendingIdempotencyKey = ref('')
 
 watch(operation, (value) => {
   requestBody.value = defaultBody(value)
   result.value = null
+  pendingIdempotencyKey.value = ''
+})
+
+watch(requestBody, () => {
+  pendingIdempotencyKey.value = ''
 })
 
 function defaultBody(value) {
@@ -70,7 +77,11 @@ function defaultBody(value) {
       end_date: '',
       account: '',
       tag_ids: [],
-      type: ''
+      type: '',
+      include_transactions: false,
+      include_memo: false,
+      limit: 0,
+      cursor: ''
     }, null, 2)
   }
 
@@ -102,9 +113,16 @@ async function sendRequest() {
 
   sending.value = true
   try {
+    const headers = { 'Content-Type': 'application/json' }
+    if (operation.value === 'transactions') {
+      if (!pendingIdempotencyKey.value) {
+        pendingIdempotencyKey.value = newIdempotencyKey()
+      }
+      headers['Idempotency-Key'] = pendingIdempotencyKey.value
+    }
     const response = await apiFetch(`/api/ai-console/${operation.value}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload)
     })
     const text = await response.text()
@@ -116,7 +134,10 @@ async function sendRequest() {
     }
     result.value = { ok: response.ok, status: response.status, body: formatted }
     if (response.ok && operation.value === 'transactions') {
+      pendingIdempotencyKey.value = ''
       emit('transaction-added')
+    } else if (response.status === 409) {
+      pendingIdempotencyKey.value = ''
     }
   } catch (error) {
     result.value = { ok: false, status: '接続エラー', body: error.message }
@@ -125,9 +146,20 @@ async function sendRequest() {
   }
 }
 
+function newIdempotencyKey() {
+  if (!globalThis.crypto?.getRandomValues) {
+    throw new Error('安全な乱数生成機能を利用できません')
+  }
+  const random = new Uint8Array(16)
+  globalThis.crypto.getRandomValues(random)
+  const encoded = Array.from(random, (value) => value.toString(16).padStart(2, '0')).join('')
+  return `web-console-${encoded}`
+}
+
 onBeforeUnmount(() => {
   requestBody.value = ''
   result.value = null
+  pendingIdempotencyKey.value = ''
 })
 </script>
 

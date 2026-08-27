@@ -156,21 +156,40 @@ type BalanceHistoryResponse struct {
 
 // AnalysisRequest はAI分析リクエストの構造体（Agent.md §6.3）
 type AnalysisRequest struct {
-	StartDate string  `json:"start_date,omitempty"` // YYYY-MM-DD
-	EndDate   string  `json:"end_date,omitempty"`   // YYYY-MM-DD
-	Account   string  `json:"account,omitempty"`
-	TagIDs    []int64 `json:"tag_ids,omitempty"`
-	Type      string  `json:"type,omitempty"` // "income" or "expense" or ""（両方）
+	StartDate           string  `json:"start_date,omitempty"` // YYYY-MM-DD
+	EndDate             string  `json:"end_date,omitempty"`   // YYYY-MM-DD
+	Account             string  `json:"account,omitempty"`
+	TagIDs              []int64 `json:"tag_ids,omitempty"`
+	Type                string  `json:"type,omitempty"` // "income" or "expense" or ""（両方）
+	IncludeTransactions bool    `json:"include_transactions,omitempty"`
+	IncludeMemo         bool    `json:"include_memo,omitempty"`
+	Limit               int     `json:"limit,omitempty"`
+	Cursor              string  `json:"cursor,omitempty"`
+	MaxTagSummaries     int     `json:"-"` // API credential boundary; never accepted from JSON.
+}
+
+// AITransactionDetail は明示権限とpagination付きでのみ返す最小明細。
+type AITransactionDetail struct {
+	ID      int64  `json:"id"`
+	Account string `json:"account"`
+	Date    string `json:"date"`
+	Item    string `json:"item"`
+	Type    string `json:"type"`
+	Amount  int64  `json:"amount"`
+	Memo    string `json:"memo,omitempty"`
 }
 
 // AnalysisResponse はAI分析レスポンスの構造体
 type AnalysisResponse struct {
-	TotalIncome  int64                 `json:"total_income"`
-	TotalExpense int64                 `json:"total_expense"`
-	NetAmount    int64                 `json:"net_amount"`
-	Count        int                   `json:"count"`
-	TagSummaries []TagSummary          `json:"tag_summaries,omitempty"`
-	Transactions []TransactionResponse `json:"transactions,omitempty"`
+	TotalIncome           int64                 `json:"total_income"`
+	TotalExpense          int64                 `json:"total_expense"`
+	NetAmount             int64                 `json:"net_amount"`
+	Count                 int                   `json:"count"`
+	TagSummaries          []TagSummary          `json:"tag_summaries,omitempty"`
+	TagSummariesTruncated bool                  `json:"tag_summaries_truncated,omitempty"`
+	Transactions          []AITransactionDetail `json:"transactions,omitempty"`
+	ReturnedCount         int                   `json:"returned_count"`
+	NextCursor            string                `json:"next_cursor,omitempty"`
 }
 
 // ToResponse はTransactionをTransactionResponseに変換する

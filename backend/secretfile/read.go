@@ -11,11 +11,25 @@ import (
 
 type policy uint8
 
-const confidential policy = iota
+const (
+	integrityProtected policy = iota
+	confidential
+)
+
+// ReadIntegrityProtected reads a regular file whose contents must not be
+// replaceable by group/other users. Group/other read bits remain permitted for
+// public certificates and hashed credential documents.
+func ReadIntegrityProtected(path string, maxBytes int64) ([]byte, error) {
+	return read(path, maxBytes, integrityProtected)
+}
 
 // ReadConfidential reads a private regular file. Host files must be owner-only;
-// read-only Docker secrets directly below /run/secrets may be 0444.
+// read-only Docker Compose secrets directly below /run/secrets may be 0444.
 func ReadConfidential(path string, maxBytes int64) ([]byte, error) {
+	return read(path, maxBytes, confidential)
+}
+
+func read(path string, maxBytes int64, filePolicy policy) ([]byte, error) {
 	if path == "" {
 		return nil, errors.New("secret file path is required")
 	}
@@ -27,11 +41,11 @@ func ReadConfidential(path string, maxBytes int64) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stat secret file: %w", err)
 	}
-	if err := validateFileInfo(path, before, maxBytes); err != nil {
+	if err := validateFileInfo(path, before, maxBytes, filePolicy); err != nil {
 		return nil, err
 	}
 
-	handle, err := secureOpen(path, confidential)
+	handle, err := secureOpen(path, filePolicy)
 	if err != nil {
 		return nil, fmt.Errorf("open secret file: %w", err)
 	}
@@ -44,7 +58,7 @@ func ReadConfidential(path string, maxBytes int64) ([]byte, error) {
 	if !os.SameFile(before, after) {
 		return nil, errors.New("secret file changed while being opened")
 	}
-	if err := validateFileInfo(path, after, maxBytes); err != nil {
+	if err := validateFileInfo(path, after, maxBytes, filePolicy); err != nil {
 		return nil, err
 	}
 
@@ -58,7 +72,7 @@ func ReadConfidential(path string, maxBytes int64) ([]byte, error) {
 	return content, nil
 }
 
-func validateFileInfo(path string, info os.FileInfo, maxBytes int64) error {
+func validateFileInfo(path string, info os.FileInfo, maxBytes int64, filePolicy policy) error {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("secret file must not be a symbolic link")
 	}
@@ -70,6 +84,9 @@ func validateFileInfo(path string, info os.FileInfo, maxBytes int64) error {
 	}
 
 	permissions := info.Mode().Perm()
+	if filePolicy == integrityProtected {
+		return validatePlatformIntegrity(permissions)
+	}
 	if err := validateConfidentialPermissions(path, permissions); err != nil {
 		return err
 	}
@@ -79,6 +96,8 @@ func validateFileInfo(path string, info os.FileInfo, maxBytes int64) error {
 func validateConfidentialPermissions(path string, permissions os.FileMode) error {
 	cleaned := filepath.ToSlash(filepath.Clean(path))
 	if filepath.ToSlash(filepath.Dir(cleaned)) == "/run/secrets" {
+		// Compose secrets are normally root-owned 0444. They may be readable by
+		// the service user, but must not be writable or executable by anyone.
 		if permissions&0o333 != 0 {
 			return fmt.Errorf("Docker secret permissions are unsafe: %04o", permissions)
 		}

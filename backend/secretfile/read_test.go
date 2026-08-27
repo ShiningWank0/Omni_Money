@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestReadConfidentialRejectsWeakPermissionsAndSymlink(t *testing.T) {
+func TestHostConfidentialPermissionsAndSymlink(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "secret")
 	if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
@@ -35,14 +35,27 @@ func TestReadConfidentialRejectsWeakPermissionsAndSymlink(t *testing.T) {
 	}
 }
 
-func TestDockerSecretPermissionExceptionIsNarrow(t *testing.T) {
-	if err := validateConfidentialPermissions("/run/secrets/totp", 0o444); err != nil {
+func TestIntegrityAndDockerPermissionPolicies(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "public-config")
+	if err := os.WriteFile(path, []byte("public"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadIntegrityProtected(path, 64); err != nil {
+		t.Fatalf("0644 integrity-protected file rejected: %v", err)
+	}
+	if err := os.Chmod(path, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadIntegrityProtected(path, 64); err == nil {
+		t.Fatal("group-writable integrity-protected file accepted")
+	}
+	if err := validateConfidentialPermissions("/run/secrets/audit-key", 0o444); err != nil {
 		t.Fatalf("Docker 0444 secret rejected: %v", err)
 	}
-	if err := validateConfidentialPermissions("/run/secrets/totp", 0o644); err == nil {
+	if err := validateConfidentialPermissions("/run/secrets/audit-key", 0o644); err == nil {
 		t.Fatal("writable Docker secret accepted")
 	}
-	if err := validateConfidentialPermissions("/run/secrets/nested/totp", 0o444); err == nil {
-		t.Fatal("nested Docker secret received exception")
+	if err := validateConfidentialPermissions("/run/secrets/nested/audit-key", 0o444); err == nil {
+		t.Fatal("nested /run/secrets path received Docker permission exception")
 	}
 }

@@ -3,6 +3,7 @@
 package secretfile
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 )
@@ -16,3 +17,10 @@ func secureOpen(path string, _ policy) (*os.File, error) {
 }
 
 func validatePlatformConfidential(_ string) error { return nil }
+
+func validatePlatformIntegrity(permissions os.FileMode) error {
+	if permissions&0o133 != 0 {
+		return fmt.Errorf("secret file permissions are unsafe: %04o", permissions)
+	}
+	return nil
+}

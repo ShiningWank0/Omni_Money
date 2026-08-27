@@ -14,8 +14,9 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cpus: "${OMNI_CPU_LIMIT:-2.0}"
+    mem_limit: "${OMNI_MEMORY_LIMIT:-1g}"
+    pids_limit: "${OMNI_PIDS_LIMIT:-256}"
     # Pangolin/Newt から同じ Docker network 上のサービス名で接続する。
     # ホストへの ports 公開は行わない。ローカル開発時だけ compose.local.yaml
     # を重ねて、Webポートを127.0.0.1へ公開する。
@@ -23,10 +24,11 @@ services:
       - "4000"
     environment:
       DB_PATH: /app/data/omni_money.db
+      TMPDIR: /tmp
+      SQLITE_TMPDIR: /tmp
       HOST_IP: 0.0.0.0
       PORT: 4000
       AUTH_PASSWORD_HASH: "${AUTH_PASSWORD_HASH:?AUTH_PASSWORD_HASH is required}"
-      AI_API_TOKEN: "${AI_API_TOKEN:-}"
       # AIリスナーはWebリスナーからの内部relayだけに限定する。専用networkへ
       # 接続しているNewtや他のpeerから4001へ到達できないようにする。
       AI_HOST_IP: 127.0.0.1
@@ -52,7 +54,17 @@ services:
       ALLOWED_HOSTS: "${ALLOWED_HOSTS:-}"
       CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS:-}"
     volumes:
-      - "${OMNI_DATA_DIR:-./data}:/app/data"
+      - type: bind
+        source: "${OMNI_DATA_DIR:-./data}"
+        target: /app/data
+        read_only: false
+        bind:
+          create_host_path: true
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: "${OMNI_TMPFS_SIZE:-128m}"
+          mode: 0o1777
 
     networks:
       pangolin_target:

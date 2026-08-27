@@ -162,7 +162,7 @@ Docker の `4000:4000` は、通常すべてのホスト側ネットワークイ
 
 ルーターで TCP 4000 番をインターネットへ直接ポート転送しないでください。自宅外から使う場合は、VPN または HTTPS を終端するリバースプロキシを利用します。
 
-通常の利用では `AI_API_TOKEN` を設定しません。未設定なら AI 専用リスナー自体が起動しません。
+通常の利用では `AI_CREDENTIALS_FILE` を設定しません。未設定なら AI 専用リスナー自体が起動しません。
 
 ### 2.4 AI APIを利用する場合の境界
 
@@ -171,19 +171,39 @@ AI APIを有効にすると、公開Webの4000番とは別にAI専用の4001番�
 - 通常起動ではAI専用リスナーは `127.0.0.1:4001` だけで待ち受けます。
 - 公開Webの `/api/v1/ai/*` は利用できず、ログイン済みでも404になります。
 - AI専用ポートには通常の家計簿API、ログインAPI、画面配信を登録しません。
-- AI専用の2エンドポイントは32文字以上のBearerトークンとPOSTを必須とします。
+- AI専用の2エンドポイントは、期限・scope・口座・許可タグID制約を持つBearer資格情報とPOSTを必須とします。
+- 分析は既定で単一口座・最大30日の集計だけを返し、明細とメモには追加scopeが必要です。
 - クラウドLLMへAIトークンを渡さず、ローカルの仲介プロセスが `127.0.0.1:4001` を呼び出します。
 
-Dockerではコンテナ内のリスナーを `0.0.0.0:4001` にする必要がありますが、ホスト側の公開先は必ずlocalhostへ限定します。次のオプションを通常の `docker run` に追加します。
+ローカルで資格情報を作成する例です。失効日時は発行開始から90日以内を指定し、口座名は実在するものへ置き換えます。
 
 ```bash
--p 127.0.0.1:4001:4001 \
--e AI_API_TOKEN='<32文字以上のランダム値>' \
--e AI_HOST_IP=0.0.0.0 \
--e AI_ALLOW_REMOTE=true
+umask 077
+mkdir -p secrets
+go run ./cmd/ai-credential issue \
+  --file secrets/ai_credentials.json \
+  --id local-console \
+  --expires-at '<RFC3339-within-90-days>' \
+  --scope transactions:create \
+  --scope analysis:summary \
+  --scope analysis:transactions \
+  --scope console:relay \
+  --account '現金' \
+  --tag-id 1 \
+  --analysis-start-date '<YYYY-MM-DD>' \
+  --analysis-end-date '<YYYY-MM-DD>' \
+  --max-analysis-days 30 \
+  --max-results 100 \
+  --max-transactions-per-day 100 > secrets/ai_console_token
 ```
 
-`-p 4001:4001` のようにホストIPを省略するとLAN側にも公開されるため使用しません。同じDockerネットワーク内の別コンテナからはコンテナの4001番へ到達できるため、信頼できないコンテナを同じネットワークへ参加させないでください。
+`--tag-id` は、その資格情報で取引へ付与したり分析条件に指定したりできる既存タグIDです。必要なタグだけを繰り返し指定してください。省略した場合はタグ操作を許可しません。
+
+AIの取引追加は16〜128文字の `Idempotency-Key` ヘッダーを必須とします。タイムアウト等で結果が不明な場合は、同じ本文と同じkeyを再送してください。再送は同じ結果を返し、日次上限を重ねて消費しません。同じkeyを別の本文へ再利用すると409、`--max-transactions-per-day` で指定したUTC日次上限を超えると `Retry-After` 付きの429になります。raw keyはDBや監査ログへ保存されません。
+
+Dockerでは資格情報、console token、CA、サーバー証明書、クライアント証明書をリポジトリ外に準備し、`docker compose -f compose.yaml -f compose.ai.yaml up -d --build` で起動します。コンテナ内の非ループバック待受はTLS 1.3とmTLSが揃わない限り起動を拒否し、ホスト側は `127.0.0.1:4001` に限定されます。証明書の検証名は既定で `omni-money-ai` です。
+
+資格情報の更新にはCLIの `rotate` または `revoke` を使います。通常ファイルを直接参照するサーバーでは、原子的な置換後に `SIGHUP` を送ると再読込し、失敗時は直前の有効な資格情報を維持します。Compose Secretsでは実行中コンテナが古いinodeを参照し続ける場合があるため、更新後に `docker compose -f compose.yaml -f compose.ai.yaml up -d --force-recreate omni-money` で再作成してください。生トークンは発行・rotation成功時の標準出力に一度だけ表示されるため、ターミナル履歴やログへ貼り付けないでください。
 
 ## 3. Mac の Colima で Docker 版を使う
 
@@ -230,6 +250,8 @@ chmod 600 "$HOME/.config/omni-money/server.env"
 ### 3.3 コンテナを起動する
 
 まずは Mac からだけアクセスできる設定で起動します。
+
+同梱のCompose構成ではroot filesystemをread-onlyにし、`/app/data` だけを永続書き込み可能にします。`/tmp` は128 MiBのtmpfsで、CPU 2、memory 1 GiB、PID 256を既定上限にします。変更する場合は `.env` の `OMNI_CPU_LIMIT`、`OMNI_MEMORY_LIMIT`、`OMNI_PIDS_LIMIT`、`OMNI_TMPFS_SIZE` を設定し、画像・snapshot・CSVを含む動作確認を行ってください。
 
 ```bash
 docker pull ghcr.io/shiningwank0/omni_money:latest
@@ -438,7 +460,7 @@ TOTPのリプレイ防止状態は現在のプロセスのメモリ上だけで�
 
 ### 5.1 AI API操作画面
 
-サーバーモードでは、メニューの「クレジットカード設定」の直下に「AI API操作」が表示されます。`AI_API_TOKEN` が未設定の場合、送信時にAI専用APIが無効であることを表示します。
+サーバーモードでは、メニューの「クレジットカード設定」の直下に「AI API操作」が表示されます。`AI_CREDENTIALS_FILE` または `AI_CONSOLE_TOKEN_FILE` が未設定の場合、送信時にAI専用APIが無効であることを表示します。
 
 1. 「AI API操作」を開きます。
 2. 「取引追加」または「分析」を選びます。

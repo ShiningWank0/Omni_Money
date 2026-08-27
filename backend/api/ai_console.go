@@ -2,6 +2,9 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -12,14 +15,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"omni_money/backend/aitransport"
+	"omni_money/backend/middleware"
+	"omni_money/backend/secretfile"
 )
 
 const maxAIConsoleResponseSize = 10 * 1024 * 1024
 
 var aiConsoleHTTPClient = &http.Client{
 	Timeout: 60 * time.Second,
-	// The relay is intentionally loopback-only. Never follow a response to a
-	// second destination, even if another local service returns a redirect.
 	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
@@ -30,13 +35,36 @@ var aiConsoleHTTPClient = &http.Client{
 // ブラウザへ渡さず、任意URLへの転送も許可しない。
 func handleAIConsoleProxy(aiPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		auditWriter := &aiConsoleAuditWriter{ResponseWriter: w, status: http.StatusOK}
+		w = auditWriter
+		defer func() {
+			record := struct {
+				Timestamp     string `json:"timestamp"`
+				Operation     string `json:"operation"`
+				ClientIP      string `json:"client_ip,omitempty"`
+				SessionSHA256 string `json:"session_sha256,omitempty"`
+				Status        int    `json:"status"`
+				DurationMS    int64  `json:"duration_ms"`
+			}{
+				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+				Operation:     aiPath,
+				ClientIP:      middleware.ClientIPFromRequest(r),
+				SessionSHA256: sessionAuditReference(r),
+				Status:        auditWriter.status,
+				DurationMS:    time.Since(started).Milliseconds(),
+			}
+			if encoded, err := json.Marshal(record); err == nil {
+				log.Printf("AI_CONSOLE_AUDIT %s", encoded)
+			}
+		}()
 		w.Header().Set("Cache-Control", "no-store")
 		if !isAllowedAIConsolePath(aiPath) {
 			jsonError(w, "AI専用APIの中継先が無効です", http.StatusInternalServerError)
 			return
 		}
-		token := strings.TrimSpace(os.Getenv("AI_API_TOKEN"))
-		if token == "" {
+		token, err := readAIConsoleToken()
+		if err != nil {
 			jsonError(w, "AI専用APIが有効化されていません", http.StatusServiceUnavailable)
 			return
 		}
@@ -51,9 +79,85 @@ func handleAIConsoleProxy(aiPath string) http.HandlerFunc {
 			return
 		}
 
-		targetURL := "http://" + net.JoinHostPort(aiConsoleRelayHost(), port) + aiPath
-		forwardAIConsoleRequest(w, r, targetURL, token, aiConsoleHTTPClient)
+		scheme := "http"
+		client := aiConsoleHTTPClient
+		if strings.TrimSpace(os.Getenv("AI_TLS_CERT_FILE")) != "" || strings.TrimSpace(os.Getenv("AI_TLS_CA_FILE")) != "" {
+			scheme = "https"
+			client, err = newAIConsoleTLSClient()
+			if err != nil {
+				jsonError(w, "AI専用APIのTLSクライアント設定が無効です", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		targetURL := scheme + "://" + net.JoinHostPort(aiConsoleRelayHost(), port) + aiPath
+		forwardAIConsoleRequest(w, r, targetURL, token, client)
 	}
+}
+
+func sessionAuditReference(r *http.Request) string {
+	session, ok := middleware.SessionFromContext(r.Context())
+	if !ok || session == nil || session.ID == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(session.ID))
+	return hex.EncodeToString(digest[:])
+}
+
+type aiConsoleAuditWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *aiConsoleAuditWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.status = status
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *aiConsoleAuditWriter) Write(body []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func readAIConsoleToken() (string, error) {
+	path := strings.TrimSpace(os.Getenv("AI_CONSOLE_TOKEN_FILE"))
+	if path == "" {
+		return "", fmt.Errorf("AI_CONSOLE_TOKEN_FILE is not configured")
+	}
+	data, err := secretfile.ReadConfidential(path, 4096)
+	if err != nil {
+		return "", fmt.Errorf("AI console token could not be read safely: %w", err)
+	}
+	token := strings.TrimSpace(string(data))
+	if len(token) < 43 || len(token) > 512 || strings.ContainsAny(token, " \t\r\n") {
+		return "", fmt.Errorf("AI console token is invalid")
+	}
+	return token, nil
+}
+
+func newAIConsoleTLSClient() (*http.Client, error) {
+	config, err := aitransport.BuildClientTLSConfig(
+		os.Getenv("AI_TLS_CA_FILE"),
+		os.Getenv("AI_TLS_CLIENT_CERT_FILE"),
+		os.Getenv("AI_TLS_CLIENT_KEY_FILE"),
+		os.Getenv("AI_TLS_SERVER_NAME"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = config
+	return &http.Client{
+		Transport: transport,
+		Timeout: 60 * time.Second,
+		CheckRedirect: aiConsoleHTTPClient.CheckRedirect,
+	}, nil
 }
 
 // aiConsoleRelayHost は中継先ホストを返す。AI_HOST_IPが::1などのループバック
@@ -79,8 +183,8 @@ func forwardAIConsoleRequest(w http.ResponseWriter, r *http.Request, targetURL, 
 		return
 	}
 
-	// #nosec G704 -- validatedTarget is restricted to a literal loopback IP,
-	// an explicit port, and one of two fixed AI paths below.
+	// #nosec G704 -- validatedTarget is restricted to loopback, an explicit
+	// port, and one of the two fixed AI endpoint paths.
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, validatedTarget, bytes.NewReader(body))
 	if err != nil {
 		jsonError(w, "AI専用APIリクエストの作成に失敗しました", http.StatusInternalServerError)
@@ -88,9 +192,13 @@ func forwardAIConsoleRequest(w http.ResponseWriter, r *http.Request, targetURL, 
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Omni-AI-Console-Relay", "1")
+	for _, value := range r.Header.Values("Idempotency-Key") {
+		request.Header.Add("Idempotency-Key", value)
+	}
 
-	// #nosec G704 -- the URL has passed validateAIConsoleTarget and the
-	// production client refuses redirects to any secondary destination.
+	// #nosec G704 -- validatedTarget passed validateAIConsoleTarget and all
+	// clients reject redirects.
 	response, err := client.Do(request)
 	if err != nil {
 		log.Printf("AI console loopback relay failed: %v", err)
@@ -111,6 +219,12 @@ func forwardAIConsoleRequest(w http.ResponseWriter, r *http.Request, targetURL, 
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	if value := response.Header.Get("Idempotency-Replayed"); value != "" {
+		w.Header().Set("Idempotency-Replayed", value)
+	}
+	if value := response.Header.Get("Retry-After"); value != "" {
+		w.Header().Set("Retry-After", value)
+	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = w.Write(responseBody)
 }
@@ -121,8 +235,9 @@ func isAllowedAIConsolePath(path string) bool {
 
 func validateAIConsoleTarget(raw string) (string, error) {
 	target, err := url.Parse(raw)
-	if err != nil || target.Scheme != "http" || target.User != nil || target.Opaque != "" ||
-		target.RawQuery != "" || target.ForceQuery || target.Fragment != "" || !isAllowedAIConsolePath(target.Path) {
+	if err != nil || (target.Scheme != "http" && target.Scheme != "https") ||
+		target.User != nil || target.Opaque != "" || target.RawQuery != "" ||
+		target.ForceQuery || target.Fragment != "" || !isAllowedAIConsolePath(target.Path) {
 		return "", fmt.Errorf("invalid AI console target")
 	}
 	ip := net.ParseIP(target.Hostname())

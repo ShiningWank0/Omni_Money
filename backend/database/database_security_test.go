@@ -1,11 +1,31 @@
 package database
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestAITransactionSecurityTablesEnforceDigestAndQuotaConstraints(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ai-security.db")
+	if err := InitDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(CloseDB)
+
+	if _, err := GetDB().Exec(`INSERT INTO ai_transaction_idempotency (
+		credential_id, idempotency_key_sha256, request_sha256, created_at
+	) VALUES ('agent', ?, ?, '2026-08-09T00:00:00Z')`, []byte("raw-key"), bytes.Repeat([]byte{1}, 32)); err == nil {
+		t.Fatal("idempotency table accepted a non-SHA-256 key")
+	}
+	if _, err := GetDB().Exec(`INSERT INTO ai_daily_transaction_usage (
+		credential_id, utc_date, successful_creates
+	) VALUES ('agent', '2026-08-09', -1)`); err == nil {
+		t.Fatal("daily quota table accepted a negative count")
+	}
+}
 
 func TestEmbeddedSQLiteIncludesMemorySafetyFixes(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "sqlite-version.db")

@@ -187,6 +187,9 @@ func TestRestoreSnapshotReappliesCurrentSchemaGuards(t *testing.T) {
 
 	for _, object := range []string{
 		"idx_transaction_images_txid",
+		"idx_ai_idempotency_credential_key",
+		"idx_ai_idempotency_transaction",
+		"idx_ai_daily_usage_credential_date",
 		"trg_transaction_images_quota_insert",
 		"trg_transaction_images_immutable_update",
 	} {
