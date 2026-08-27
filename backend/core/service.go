@@ -550,15 +550,59 @@ func BackupToCSVFile() (string, error) {
 	}
 
 	filename := fmt.Sprintf("transactions_backup_%s.csv", time.Now().Format("2006-01-02"))
-	filePath := filepath.Join(downloadsDir, filename)
 
-	// BOMを付与してExcel互換にする
+	// BOMを付与してExcel互換にする。既存ファイルやsymlinkは上書きしない。
 	bom := "\xEF\xBB\xBF"
-	if err := os.WriteFile(filePath, []byte(bom+csvContent), 0600); err != nil {
+	filePath, err := writeUniquePrivateFile(downloadsDir, filename, []byte(bom+csvContent))
+	if err != nil {
 		return "", fmt.Errorf("CSVファイル書き出しエラー: %w", err)
 	}
 
 	return filePath, nil
+}
+
+// writeUniquePrivateFile は既存ファイルやsymlinkを上書きせず、所有者だけが
+// 読み書きできる新規ファイルへ内容を保存する。
+func writeUniquePrivateFile(dir, filename string, data []byte) (string, error) {
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filename, ext)
+	for attempt := 0; attempt < 100; attempt++ {
+		candidateName := filename
+		if attempt > 0 {
+			candidateName = fmt.Sprintf("%s_%d%s", base, attempt, ext)
+		}
+		candidate := filepath.Join(dir, candidateName)
+		file, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- candidate is generated under the user's downloads directory and O_EXCL prevents symlink overwrite.
+		if err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return "", err
+		}
+
+		removePartial := func() {
+			_ = file.Close()
+			_ = os.Remove(candidate)
+		}
+		if _, err := file.Write(data); err != nil {
+			removePartial()
+			return "", err
+		}
+		if err := file.Sync(); err != nil {
+			removePartial()
+			return "", err
+		}
+		if err := file.Chmod(0600); err != nil {
+			removePartial()
+			return "", err
+		}
+		if err := file.Close(); err != nil {
+			_ = os.Remove(candidate)
+			return "", err
+		}
+		return candidate, nil
+	}
+	return "", fmt.Errorf("一意なバックアップファイル名を確保できませんでした")
 }
 
 // getDownloadsDir はOS標準のダウンロードフォルダパスを返す
