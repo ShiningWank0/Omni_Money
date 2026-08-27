@@ -10,6 +10,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.49
 	github.com/wailsapp/wails/v2 v2.11.0
 	golang.org/x/crypto v0.55.0
+	golang.org/x/image v0.30.0
 )
 
 require (

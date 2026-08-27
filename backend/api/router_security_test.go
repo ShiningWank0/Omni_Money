@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -357,14 +358,81 @@ func TestAITransactionRejectsInvalidTagsAndImages(t *testing.T) {
 
 	invalidImage := valid
 	invalidImage.Images = []models.TransactionImageRequest{{Filename: "receipt.png", Data: "not-base64", MimeType: "image/png"}}
-	if _, err := validateAITransactionReferences(invalidImage); err == nil {
-		t.Fatal("expected invalid image validation error")
+	body, err := json.Marshal(invalidImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/transactions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testAIToken)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	NewAIRouter(testAIToken).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid AI image status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+}
+
+func TestTransactionImageAPIRejectsInvalidContentAndReportsUsage(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "omni_money_test.db")
+	if err := database.InitDB(dbPath); err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	t.Cleanup(database.CloseDB)
+	result, err := database.GetDB().Exec(
+		"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, '')",
+		"cash", "2026-01-01", "receipt", "expense", 100,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transactionID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	unsafeFilename := valid
-	unsafeFilename.Images = []models.TransactionImageRequest{{Filename: "../receipt.png", Data: "aGVsbG8=", MimeType: "image/png"}}
-	if _, err := validateAITransactionReferences(unsafeFilename); err == nil {
-		t.Fatal("expected unsafe filename validation error")
+	t.Setenv("AUTH_PASSWORD_HASH", testPasswordHash)
+	handler := NewRouter()
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"test-password"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(loginRecorder, loginReq)
+	if loginRecorder.Code != http.StatusOK {
+		t.Fatalf("login status = %d body=%s", loginRecorder.Code, loginRecorder.Body.String())
+	}
+
+	imageReq := httptest.NewRequest(
+		http.MethodPost,
+		fmt.Sprintf("/api/transaction_images/%d", transactionID),
+		strings.NewReader(`{"filename":"fake.png","mime_type":"image/png","data":"bm90IGFuIGltYWdl"}`),
+	)
+	imageReq.Header.Set("Content-Type", "application/json")
+	for _, cookie := range loginRecorder.Result().Cookies() {
+		imageReq.AddCookie(cookie)
+	}
+	imageRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(imageRecorder, imageReq)
+	if imageRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid image status = %d, want %d; body=%s", imageRecorder.Code, http.StatusBadRequest, imageRecorder.Body.String())
+	}
+	var imageCount int
+	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transaction_images").Scan(&imageCount); err != nil {
+		t.Fatal(err)
+	}
+	if imageCount != 0 {
+		t.Fatalf("stored invalid images = %d, want 0", imageCount)
+	}
+
+	usageReq := httptest.NewRequest(http.MethodGet, "/api/image_storage", nil)
+	for _, cookie := range loginRecorder.Result().Cookies() {
+		usageReq.AddCookie(cookie)
+	}
+	usageRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(usageRecorder, usageReq)
+	if usageRecorder.Code != http.StatusOK {
+		t.Fatalf("image storage status = %d body=%s", usageRecorder.Code, usageRecorder.Body.String())
+	}
+	if !strings.Contains(usageRecorder.Body.String(), `"max_image_bytes":5242880`) {
+		t.Fatalf("image storage response does not expose enforced quotas: %s", usageRecorder.Body.String())
 	}
 }
 

@@ -93,6 +93,7 @@ func NewRouterWithError() (http.Handler, error) {
 
 	// 画像API（Agent.md §6.5）
 	mux.HandleFunc("/api/transaction_images/", handleTransactionImages)
+	mux.HandleFunc("/api/image_storage", methodGuard(http.MethodGet, handleImageStorageUsage))
 
 	// タグAPI（Agent.md §6.6）
 	mux.HandleFunc("/api/tags", handleTags)
@@ -537,8 +538,8 @@ func handleTransactionImages(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "無効な画像IDです", http.StatusBadRequest)
 			return
 		}
-		if err := core.DeleteTransactionImage(imgID); err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+		if err := core.DeleteTransactionImageForTransaction(txID, imgID); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "画像を削除しました"}, http.StatusOK)
@@ -546,6 +547,15 @@ func handleTransactionImages(w http.ResponseWriter, r *http.Request) {
 	default:
 		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func handleImageStorageUsage(w http.ResponseWriter, _ *http.Request) {
+	usage, err := core.GetImageStorageUsage()
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, usage, http.StatusOK)
 }
 
 // --- タグAPI ハンドラー (Agent.md §6.6) ---
