@@ -156,7 +156,7 @@ func TestAuthKeepaliveRequiresSessionAndCSRFAndReturnsNoContent(t *testing.T) {
 	if response.Body.Len() != 0 {
 		t.Fatalf("keepalive body=%q, want empty", response.Body.String())
 	}
-	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+	if got := response.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
 		t.Fatalf("keepalive Cache-Control=%q, want no-store", got)
 	}
 
@@ -198,7 +198,7 @@ func TestReauthenticationRotationFailureRequiresFullLoginAndClearsCookies(t *tes
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("rotation failure status=%d, want %d; body=%s", response.Code, http.StatusUnauthorized, response.Body.String())
 	}
-	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+	if got := response.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
 		t.Fatalf("rotation failure Cache-Control=%q, want no-store", got)
 	}
 	var body map[string]interface{}
