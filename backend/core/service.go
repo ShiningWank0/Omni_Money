@@ -178,6 +178,7 @@ func GetTransactions(account string, search string) ([]models.TransactionRespons
 // getTransactionTagsForFilteredTransactions はGetTransactionsと同じ条件に一致する
 // 取引のタグを一括取得する。タグ順序は従来のGetTransactionTagsと同じlevel, name順。
 func getTransactionTagsForFilteredTransactions(db *sql.DB, whereClause string, args []interface{}) (map[int64][]models.Tag, error) {
+	// #nosec G202 -- whereClause is assembled only from fixed SQL fragments above; all user values remain bound placeholders.
 	query := `WITH filtered_transactions AS (
 		SELECT id FROM transactions` + whereClause + `
 	)
