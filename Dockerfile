@@ -71,7 +71,6 @@ USER omni
 # 環境変数のデフォルト値
 ENV CONTROL_DB_PATH=/app/data/control/omni_control.db \
     VAULT_ROOT=/app/data/vaults \
-    AUTH_KDF_CONCURRENCY=2 \
     HOST_IP=0.0.0.0 \
     PORT=4000
 

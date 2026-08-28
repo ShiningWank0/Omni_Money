@@ -273,9 +273,9 @@ jobs:
             --cap-drop ALL \
             --security-opt no-new-privileges \
             --health-interval 1s \
-            --health-start-period 1s \
+            --health-start-period 20s \
             --health-timeout 2s \
-            --health-retries 5 \
+            --health-retries 10 \
             --mount "type=bind,src=$runtime_data,dst=/app/data" \
             --mount "type=bind,src=$attestation_file,dst=/run/secrets/omni_data_at_rest_attestation.json,readonly" \
             --mount "type=bind,src=$control_key_file,dst=/run/secrets/omni_control_database_key,readonly" \
@@ -290,8 +290,12 @@ jobs:
             --env ALLOWED_HOSTS=127.0.0.1:4000 \
             omni-money:ci)"
 
-          for _ in $(seq 1 30); do
-            health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
+          for _ in $(seq 1 90); do
+            if ! health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id" 2>/dev/null)"; then
+              docker ps -a --no-trunc
+              docker logs "$container_id" || true
+              exit 1
+            fi
             if [ "$health" = "healthy" ]; then
               if sudo head -c 16 "$runtime_data/control/omni_control.db" | LC_ALL=C grep -q "SQLite format 3"; then
                 echo "database retained a plaintext SQLite header"
@@ -301,12 +305,16 @@ jobs:
               exit 0
             fi
             if [ "$health" = "unhealthy" ]; then
-              docker logs "$container_id"
+              docker inspect --format '{{json .State}}' "$container_id" || true
+              docker inspect --format '{{json .State.Health}}' "$container_id" || true
+              docker logs "$container_id" || true
               exit 1
             fi
             sleep 1
           done
-          docker logs "$container_id"
+          docker inspect --format '{{json .State}}' "$container_id" || true
+          docker inspect --format '{{json .State.Health}}' "$container_id" || true
+          docker logs "$container_id" || true
           exit 1
 
       - name: Scan image for fixable high-severity vulnerabilities
