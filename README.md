@@ -111,7 +111,7 @@ wails build
 
 デスクトップモードでは、SQLite データベースは OS 標準のアプリケーションデータディレクトリに保存されます。
 
-DB、SQLiteの一時ファイル、スナップショット、デスクトップ版が書き出すCSVは、所有者だけが読み書きできる権限で作成します。ただし現時点のSQLiteとCSVは暗号化形式ではありません。端末・ディスク・バックアップ媒体にはOSのフルディスク暗号化を有効にし、CSVを共有ストレージへ放置しないでください。全面暗号化の導入では、鍵をDBと同じ場所へ保存せず、公式に保守される暗号化SQLiteとOSキーストアを組み合わせる必要があります。
+DB、SQLiteの一時ファイル、スナップショット、デスクトップ版が書き出すCSVは、所有者だけが読み書きできる権限で作成します。desktop modeではOSのFileVault、BitLocker、LUKS等を有効にしてください。server modeは外部暗号化volumeの期限付きattestationがなければDBを開く前に起動を拒否します。設定、復旧試験、key rotation、廃棄手順は[保存時暗号化volumeの運用contract](docs/at-rest-encryption.md)を参照してください。
 
 - macOS: `~/Library/Application Support/OmniMoney/omni_money.db`
 - Windows: `%APPDATA%/OmniMoney/omni_money.db`
@@ -127,6 +127,8 @@ npm run build
 cd ..
 AUTH_PASSWORD_HASH='<bcrypt-hash>' \
 ALLOWED_HOSTS='localhost:4000,127.0.0.1:4000' \
+DATA_AT_REST_MODE='external-encrypted-volume' \
+DATA_AT_REST_ATTESTATION_FILE='/secure-config/omni-data-at-rest.json' \
 go run -tags server ./server.go
 ```
 
@@ -194,6 +196,8 @@ TOTPを有効化した場合でも、通常操作中に定期的なコード入�
 | 変数 | 既定値 | 説明 |
 | --- | --- | --- |
 | `DB_PATH` | `omni_money.db` | SQLite データベースの保存先 |
+| `DATA_AT_REST_MODE` | なし（serverでは必須） | `external-encrypted-volume`だけを許可 |
+| `DATA_AT_REST_ATTESTATION_FILE` | なし（serverでは必須） | data root、非秘密key ID、検証・復旧・rotation時刻を記録したfile |
 | `HOST_IP` | `127.0.0.1` | 直接起動時の待受アドレス（Docker内部は `0.0.0.0`） |
 | `PORT` | `4000` | 待受ポート |
 | `AUTH_PASSWORD_HASH` | なし（必須） | ログインパスワードの bcrypt ハッシュ（cost 12〜16） |
@@ -225,12 +229,17 @@ TOTPを有効化した場合でも、通常操作中に定期的なコード入�
 
 ```bash
 docker build -t omni-money .
+# 先に docs/at-rest-encryption.md に従って暗号化volumeと
+# secrets/omni_data_at_rest.json を準備する。
 mkdir -p data
 export AUTH_PASSWORD_HASH='<bcrypt-hash>'
 docker run --rm \
   --user "$(id -u):$(id -g)" \
   -e AUTH_PASSWORD_HASH \
   -e ALLOWED_HOSTS='localhost:4000,127.0.0.1:4000' \
+  -e DATA_AT_REST_MODE=external-encrypted-volume \
+  -e DATA_AT_REST_ATTESTATION_FILE=/run/secrets/omni_data_at_rest.json \
+  --mount "type=bind,src=$(pwd)/secrets/omni_data_at_rest.json,dst=/run/secrets/omni_data_at_rest.json,readonly" \
   -e ALLOW_INSECURE_HTTP=true \
   -p 127.0.0.1:4000:4000 \
   -v "$(pwd)/data:/app/data" \
