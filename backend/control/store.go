@@ -25,6 +25,8 @@ var (
 	ErrInvitationExpired   = errors.New("invitation has expired")
 	ErrResetTicketInactive = errors.New("password reset ticket is not pending")
 	ErrResetTicketExpired  = errors.New("password reset ticket has expired")
+	ErrCredentialConflict  = errors.New("password credential changed concurrently")
+	ErrRecoveryConflict    = errors.New("recovery envelope changed concurrently")
 )
 
 type Store struct {
@@ -181,8 +183,9 @@ func (s *Store) withImmediate(ctx context.Context, operation func(*sql.Conn) err
 	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return fmt.Errorf("begin immediate control transaction: %w", err)
 	}
+	committed := false
 	defer func() {
-		if err != nil {
+		if !committed {
 			_, _ = connection.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
@@ -192,5 +195,6 @@ func (s *Store) withImmediate(ctx context.Context, operation func(*sql.Conn) err
 	if _, err = connection.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit control transaction: %w", err)
 	}
+	committed = true
 	return nil
 }

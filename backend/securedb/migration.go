@@ -115,7 +115,7 @@ func migratePlaintext(ctx context.Context, path string, opener *Opener) (retErr 
 		return err
 	}
 	defer key.Destroy()
-	if err := exportEncrypted(ctx, source, stagePath, key, userVersion, applicationID); err != nil {
+	if err := exportEncrypted(ctx, source, stagePath, &key, userVersion, applicationID); err != nil {
 		return err
 	}
 
@@ -178,7 +178,7 @@ func requireSQLCipherRuntime(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func exportEncrypted(ctx context.Context, source *sql.DB, targetPath string, key RawKey, userVersion, applicationID int64) error {
+func exportEncrypted(ctx context.Context, source *sql.DB, targetPath string, key *RawKey, userVersion, applicationID int64) error {
 	conn, err := source.Conn(ctx)
 	if err != nil {
 		return err

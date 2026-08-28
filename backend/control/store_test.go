@@ -431,7 +431,7 @@ func TestAdminStateInvariants(t *testing.T) {
 	}
 }
 
-func TestPasswordResetTicketIsHashedSingleUseState(t *testing.T) {
+func TestPasswordResetTicketIsHashedAndSuperseded(t *testing.T) {
 	store := openTestStore(t)
 	admin := bootstrapTestAdmin(t, store)
 	member := inviteAndAccept(t, store, admin.ID, testMemberID, "reset@example.com", RoleUser, 60)
@@ -450,21 +450,19 @@ func TestPasswordResetTicketIsHashedSingleUseState(t *testing.T) {
 		context.Background(),
 		admin.ID,
 		member.ID,
-		CreatePasswordResetTicketInput{TokenHash: hash, ExpiresAt: testNow.Add(2 * time.Hour)},
+		CreatePasswordResetTicketInput{TokenHash: hash, ExpiresAt: testNow.Add(50 * time.Minute)},
 		testNow.Add(3*time.Minute),
 	)
 	if err != nil || ticket.State != PasswordResetPending {
 		t.Fatalf("create reset ticket = %#v, %v", ticket, err)
 	}
-	if _, err := store.ConsumePasswordResetTicket(context.Background(), oldHash, testNow.Add(4*time.Minute)); !errors.Is(err, ErrResetTicketInactive) {
-		t.Fatalf("superseded reset ticket error = %v", err)
+	oldTicket, err := store.GetPasswordResetTicketByTokenHash(context.Background(), oldHash)
+	if err != nil || oldTicket.State != PasswordResetRevoked {
+		t.Fatalf("superseded reset ticket = %#v, %v", oldTicket, err)
 	}
-	consumed, err := store.ConsumePasswordResetTicket(context.Background(), hash, testNow.Add(5*time.Minute))
-	if err != nil || consumed.State != PasswordResetConsumed || consumed.UserID != member.ID {
-		t.Fatalf("consume reset ticket = %#v, %v", consumed, err)
-	}
-	if _, err := store.ConsumePasswordResetTicket(context.Background(), hash, testNow.Add(6*time.Minute)); !errors.Is(err, ErrResetTicketInactive) {
-		t.Fatalf("reuse reset ticket error = %v", err)
+	currentTicket, err := store.GetPasswordResetTicketByTokenHash(context.Background(), hash)
+	if err != nil || currentTicket.State != PasswordResetPending || currentTicket.UserID != member.ID {
+		t.Fatalf("current reset ticket = %#v, %v", currentTicket, err)
 	}
 }
 

@@ -15,6 +15,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"omni_money/backend/control"
+	"omni_money/backend/core"
+	"omni_money/backend/vault"
 )
 
 const (
@@ -41,11 +45,17 @@ const (
 	maxConcurrentSessionCeiling = 10
 )
 
-var errSessionNotFound = errors.New("session is missing or expired")
+var (
+	errSessionNotFound      = errors.New("session is missing or expired")
+	ErrSessionManagerClosed = errors.New("session manager is closed")
+	ErrInvalidVaultSession  = errors.New("vault session binding is invalid")
+)
 
-type sessionContextKey string
+type sessionContextKey struct{}
+type authenticatedUserContextKey struct{}
+type coreServiceContextKey struct{}
 
-const sessionKey sessionContextKey = "session"
+var sessionKey sessionContextKey
 
 // SessionConfig bounds both session lifetime and in-memory resource use.
 type SessionConfig struct {
@@ -115,17 +125,112 @@ func durationEnv(name string, unit, fallback, minimum, maximum time.Duration) (t
 // Session is a request-scoped copy of server-side state. CSRFToken is returned
 // only in authenticated no-store responses and never serialized implicitly.
 type Session struct {
-	ID                string    `json:"-"`
-	Username          string    `json:"username"`
-	CreatedAt         time.Time `json:"created_at"`
-	LastSeenAt        time.Time `json:"last_seen_at"`
-	ExpiresAt         time.Time `json:"expires_at"`
-	ReauthenticatedAt time.Time `json:"-"`
-	CSRFToken         string    `json:"-"`
+	ID                string       `json:"-"`
+	Username          string       `json:"username"`
+	UserID            string       `json:"user_id,omitempty"`
+	Email             string       `json:"email,omitempty"`
+	DisplayName       string       `json:"display_name,omitempty"`
+	Role              control.Role `json:"role,omitempty"`
+	CreatedAt         time.Time    `json:"created_at"`
+	LastSeenAt        time.Time    `json:"last_seen_at"`
+	ExpiresAt         time.Time    `json:"expires_at"`
+	ReauthenticatedAt time.Time    `json:"-"`
+	CSRFToken         string       `json:"-"`
 }
 
 type sessionRecord struct {
 	session Session
+	root    *sessionVaultRoot
+}
+
+// sessionVaultRoot is owned by exactly one sessionRecord after successful
+// creation. The callbacks keep lifecycle bookkeeping testable without
+// exporting constructors or retaining a raw vault lease beyond its closure.
+type sessionVaultRoot struct {
+	userID  string
+	borrow  func() (*requestVaultLease, error)
+	release func()
+	once    sync.Once
+}
+
+type requestVaultLease struct {
+	service *core.Service
+	release func()
+	once    sync.Once
+	mu      sync.RWMutex
+}
+
+func newSessionVaultRoot(lease *vault.Lease) (*sessionVaultRoot, error) {
+	if lease == nil || lease.UserID() == "" || lease.VaultID() == "" {
+		return nil, ErrInvalidVaultSession
+	}
+	if _, err := lease.Service(); err != nil {
+		return nil, ErrInvalidVaultSession
+	}
+	root := &sessionVaultRoot{
+		userID:  lease.UserID(),
+		release: lease.Release,
+	}
+	root.borrow = func() (*requestVaultLease, error) {
+		child, err := lease.Borrow()
+		if err != nil {
+			return nil, err
+		}
+		service, err := child.Service()
+		if err != nil {
+			child.Release()
+			return nil, ErrInvalidVaultSession
+		}
+		return &requestVaultLease{
+			service: service,
+			release: child.Release,
+		}, nil
+	}
+	return root, nil
+}
+
+func (root *sessionVaultRoot) Borrow() (*requestVaultLease, error) {
+	if root == nil || root.borrow == nil {
+		return nil, ErrInvalidVaultSession
+	}
+	return root.borrow()
+}
+
+func (root *sessionVaultRoot) Release() {
+	if root == nil {
+		return
+	}
+	root.once.Do(func() {
+		if root.release != nil {
+			root.release()
+		}
+		root.borrow = nil
+		root.release = nil
+	})
+}
+
+func (lease *requestVaultLease) Release() {
+	if lease == nil {
+		return
+	}
+	lease.once.Do(func() {
+		lease.mu.Lock()
+		defer lease.mu.Unlock()
+		if lease.release != nil {
+			lease.release()
+		}
+		lease.service = nil
+		lease.release = nil
+	})
+}
+
+func (lease *requestVaultLease) Service() *core.Service {
+	if lease == nil {
+		return nil
+	}
+	lease.mu.RLock()
+	defer lease.mu.RUnlock()
+	return lease.service
 }
 
 // SessionManager uses one mutex for lookup/touch/delete/rotation. This avoids
@@ -137,6 +242,7 @@ type SessionManager struct {
 	now       func() time.Time
 	done      chan struct{}
 	closeOnce sync.Once
+	closed    bool
 }
 
 // NewSessionManager preserves the previous test-facing constructor while
@@ -187,7 +293,18 @@ func minDuration(a, b time.Duration) time.Duration {
 }
 
 func (m *SessionManager) Close() {
-	m.closeOnce.Do(func() { close(m.done) })
+	if m == nil {
+		return
+	}
+	m.closeOnce.Do(func() {
+		close(m.done)
+		m.mu.Lock()
+		m.closed = true
+		for id := range m.sessions {
+			m.deleteRecordLocked(id)
+		}
+		m.mu.Unlock()
+	})
 }
 
 // IdleTimeoutSeconds returns the server-enforced inactivity timeout in whole
@@ -221,6 +338,28 @@ func (m *SessionManager) cleanupLoop() {
 func (m *SessionManager) MaxAge() time.Duration { return m.config.MaxAge }
 
 func (m *SessionManager) CreateSession(username string) (*Session, error) {
+	return m.createSession(username, nil, nil)
+}
+
+// CreateVaultSession creates a multi-user session that owns root after it
+// returns successfully. On every error, ownership remains with the caller,
+// which must release root. The caller must not release root after success.
+func (m *SessionManager) CreateVaultSession(user control.UserSummary, root *vault.Lease) (*Session, error) {
+	resource, err := newSessionVaultRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	if user.ID == "" || user.Email == "" || user.State != control.UserActive ||
+		(user.Role != control.RoleAdmin && user.Role != control.RoleUser) || resource.userID != user.ID {
+		return nil, ErrInvalidVaultSession
+	}
+	return m.createSession(user.Email, &user, resource)
+}
+
+func (m *SessionManager) createSession(username string, user *control.UserSummary, root *sessionVaultRoot) (*Session, error) {
+	if m == nil {
+		return nil, ErrSessionManagerClosed
+	}
 	sessionID, csrfToken, err := generateSessionSecrets()
 	if err != nil {
 		return nil, err
@@ -235,12 +374,21 @@ func (m *SessionManager) CreateSession(username string) (*Session, error) {
 		ReauthenticatedAt: now,
 		CSRFToken:         csrfToken,
 	}
+	if user != nil {
+		session.UserID = user.ID
+		session.Email = user.Email
+		session.DisplayName = user.DisplayName
+		session.Role = user.Role
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return nil, ErrSessionManagerClosed
+	}
 	m.purgeExpiredLocked(now)
-	m.evictOldestForUserLocked(username)
-	m.sessions[sessionID] = &sessionRecord{session: session}
+	m.evictOldestForOwnerLocked(sessionOwnerKey(session))
+	m.sessions[sessionID] = &sessionRecord{session: session, root: root}
 	return cloneSession(&session), nil
 }
 
@@ -269,15 +417,18 @@ func randomHex(size int) (string, error) {
 }
 
 func (m *SessionManager) GetSession(sessionID string) (*Session, bool) {
-	if !isCanonicalSessionSecret(sessionID) {
+	if m == nil || !isCanonicalSessionSecret(sessionID) {
 		return nil, false
 	}
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return nil, false
+	}
 	record, ok := m.sessions[sessionID]
 	if !ok || m.expiredLocked(record, now) {
-		delete(m.sessions, sessionID)
+		m.deleteRecordLocked(sessionID)
 		return nil, false
 	}
 	record.session.LastSeenAt = now
@@ -285,21 +436,43 @@ func (m *SessionManager) GetSession(sessionID string) (*Session, bool) {
 }
 
 func (m *SessionManager) DeleteSession(sessionID string) {
-	if !isCanonicalSessionSecret(sessionID) {
+	if m == nil || !isCanonicalSessionSecret(sessionID) {
 		return
 	}
 	m.mu.Lock()
-	delete(m.sessions, sessionID)
+	m.deleteRecordLocked(sessionID)
 	m.mu.Unlock()
 }
 
 func (m *SessionManager) DeleteAllSessions(username string) int {
+	if m == nil {
+		return 0
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	deleted := 0
 	for id, record := range m.sessions {
 		if record.session.Username == username {
-			delete(m.sessions, id)
+			m.deleteRecordLocked(id)
+			deleted++
+		}
+	}
+	return deleted
+}
+
+// DeleteAllSessionsForUser invalidates sessions by the authenticated control
+// user ID. Server callers should use this rather than accepting an email or
+// username supplied by a request body.
+func (m *SessionManager) DeleteAllSessionsForUser(userID string) int {
+	if m == nil || userID == "" {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	deleted := 0
+	for id, record := range m.sessions {
+		if record.session.UserID == userID {
+			m.deleteRecordLocked(id)
 			deleted++
 		}
 	}
@@ -309,7 +482,7 @@ func (m *SessionManager) DeleteAllSessions(username string) int {
 // RotateAfterReauthentication invalidates both the old session ID and old
 // CSRF token atomically without extending the absolute lifetime.
 func (m *SessionManager) RotateAfterReauthentication(oldSessionID string) (*Session, error) {
-	if !isCanonicalSessionSecret(oldSessionID) {
+	if m == nil || !isCanonicalSessionSecret(oldSessionID) {
 		return nil, errSessionNotFound
 	}
 	newID, newCSRF, err := generateSessionSecrets()
@@ -319,9 +492,12 @@ func (m *SessionManager) RotateAfterReauthentication(oldSessionID string) (*Sess
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return nil, errSessionNotFound
+	}
 	record, ok := m.sessions[oldSessionID]
 	if !ok || m.expiredLocked(record, now) {
-		delete(m.sessions, oldSessionID)
+		m.deleteRecordLocked(oldSessionID)
 		return nil, errSessionNotFound
 	}
 	rotated := record.session
@@ -329,20 +505,26 @@ func (m *SessionManager) RotateAfterReauthentication(oldSessionID string) (*Sess
 	rotated.CSRFToken = newCSRF
 	rotated.LastSeenAt = now
 	rotated.ReauthenticatedAt = now
+	// Move the existing record itself so its root lease remains owned exactly
+	// once and is never released during credential rotation.
 	delete(m.sessions, oldSessionID)
-	m.sessions[newID] = &sessionRecord{session: rotated}
+	record.session = rotated
+	m.sessions[newID] = record
 	return cloneSession(&rotated), nil
 }
 
 func (m *SessionManager) ValidateCSRF(sessionID, token string) bool {
-	if !isCanonicalSessionSecret(sessionID) || !isCanonicalSessionSecret(token) {
+	if m == nil || !isCanonicalSessionSecret(sessionID) || !isCanonicalSessionSecret(token) {
 		return false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return false
+	}
 	record, ok := m.sessions[sessionID]
 	if !ok || m.expiredLocked(record, m.now()) {
-		delete(m.sessions, sessionID)
+		m.deleteRecordLocked(sessionID)
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(record.session.CSRFToken), []byte(token)) == 1
@@ -361,15 +543,18 @@ func isCanonicalSessionSecret(value string) bool {
 }
 
 func (m *SessionManager) IsRecent(sessionID string) bool {
-	if !isCanonicalSessionSecret(sessionID) {
+	if m == nil || !isCanonicalSessionSecret(sessionID) {
 		return false
 	}
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return false
+	}
 	record, ok := m.sessions[sessionID]
 	if !ok || m.expiredLocked(record, now) {
-		delete(m.sessions, sessionID)
+		m.deleteRecordLocked(sessionID)
 		return false
 	}
 	return now.Sub(record.session.ReauthenticatedAt) <= m.config.RecentAuthAge
@@ -385,18 +570,18 @@ func (m *SessionManager) expiredLocked(record *sessionRecord, now time.Time) boo
 func (m *SessionManager) purgeExpiredLocked(now time.Time) {
 	for id, record := range m.sessions {
 		if m.expiredLocked(record, now) {
-			delete(m.sessions, id)
+			m.deleteRecordLocked(id)
 		}
 	}
 }
 
-func (m *SessionManager) evictOldestForUserLocked(username string) {
+func (m *SessionManager) evictOldestForOwnerLocked(owner string) {
 	for {
 		count := 0
 		oldestID := ""
 		var oldest time.Time
 		for id, record := range m.sessions {
-			if record.session.Username != username {
+			if sessionOwnerKey(record.session) != owner {
 				continue
 			}
 			count++
@@ -408,7 +593,27 @@ func (m *SessionManager) evictOldestForUserLocked(username string) {
 		if count < m.config.MaxConcurrent || oldestID == "" {
 			return
 		}
-		delete(m.sessions, oldestID)
+		m.deleteRecordLocked(oldestID)
+	}
+}
+
+func sessionOwnerKey(session Session) string {
+	if session.UserID != "" {
+		return "user-id\x00" + session.UserID
+	}
+	return "username\x00" + session.Username
+}
+
+func (m *SessionManager) deleteRecordLocked(sessionID string) {
+	record := m.sessions[sessionID]
+	if record == nil {
+		return
+	}
+	delete(m.sessions, sessionID)
+	root := record.root
+	record.root = nil
+	if root != nil {
+		root.Release()
 	}
 }
 
@@ -423,11 +628,45 @@ func cloneSession(session *Session) *Session {
 // GetSessionFromRequest rejects duplicate/shadow cookies and requires the
 // __Host- cookie on HTTPS.
 func (m *SessionManager) GetSessionFromRequest(r *http.Request) (*Session, bool) {
+	if m == nil || r == nil {
+		return nil, false
+	}
 	sessionID, err := sessionIDFromRequest(r)
 	if err != nil {
 		return nil, false
 	}
 	return m.GetSession(sessionID)
+}
+
+func (m *SessionManager) borrowVaultSessionFromRequest(r *http.Request) (*Session, *requestVaultLease, bool) {
+	if m == nil || r == nil {
+		return nil, nil, false
+	}
+	sessionID, err := sessionIDFromRequest(r)
+	if err != nil || !isCanonicalSessionSecret(sessionID) {
+		return nil, nil, false
+	}
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil, nil, false
+	}
+	record, ok := m.sessions[sessionID]
+	if !ok || m.expiredLocked(record, now) {
+		m.deleteRecordLocked(sessionID)
+		return nil, nil, false
+	}
+	if record.root == nil || record.session.UserID == "" {
+		return nil, nil, false
+	}
+	child, err := record.root.Borrow()
+	if err != nil {
+		m.deleteRecordLocked(sessionID)
+		return nil, nil, false
+	}
+	record.session.LastSeenAt = now
+	return cloneSession(&record.session), child, true
 }
 
 func sessionIDFromRequest(r *http.Request) (string, error) {
@@ -516,6 +755,77 @@ func SessionAuthMiddleware(sessionManager *SessionManager, next http.Handler) ht
 	})
 }
 
+// CurrentUserStore is the minimum control-plane lookup required by the
+// request-scoped vault middleware. control.Store implements it directly.
+type CurrentUserStore interface {
+	GetUser(context.Context, string) (control.UserSummary, error)
+}
+
+// VaultSessionAuthMiddleware authenticates a multi-user session, borrows a
+// request child from its server-owned root lease, refreshes control-plane user
+// state/role, and installs the bound core Service. The child is released even
+// when the handler panics. The legacy SessionAuthMiddleware remains available
+// for Desktop and existing single-user server tests.
+func VaultSessionAuthMiddleware(sessionManager *SessionManager, users CurrentUserStore, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !requiresSessionAuth(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		session, child, ok := sessionManager.borrowVaultSessionFromRequest(r)
+		if !ok {
+			writeAuthRequired(w)
+			return
+		}
+		defer child.Release()
+
+		if users == nil {
+			writeVaultRoutingUnavailable(w)
+			return
+		}
+		currentUser, err := users.GetUser(r.Context(), session.UserID)
+		if err != nil {
+			if errors.Is(err, control.ErrNotFound) {
+				sessionManager.DeleteAllSessionsForUser(session.UserID)
+				writeAuthRequired(w)
+				return
+			}
+			writeVaultRoutingUnavailable(w)
+			return
+		}
+		if currentUser.ID != session.UserID || currentUser.State != control.UserActive ||
+			(currentUser.Role != control.RoleAdmin && currentUser.Role != control.RoleUser) {
+			sessionManager.DeleteAllSessionsForUser(session.UserID)
+			writeAuthRequired(w)
+			return
+		}
+		session.Username = currentUser.Email
+		session.Email = currentUser.Email
+		session.DisplayName = currentUser.DisplayName
+		session.Role = currentUser.Role
+		service := child.Service()
+		if service == nil {
+			sessionManager.DeleteAllSessionsForUser(session.UserID)
+			writeVaultRoutingUnavailable(w)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), sessionKey, session)
+		ctx = context.WithValue(ctx, authenticatedUserContextKey{}, currentUser)
+		ctx = context.WithValue(ctx, coreServiceContextKey{}, service)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func writeVaultRoutingUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": "ユーザーデータを安全に開けません",
+	})
+}
+
 func requiresSessionAuth(r *http.Request) bool {
 	path := r.URL.Path
 	if !strings.HasPrefix(path, "/api/") {
@@ -541,12 +851,36 @@ func writeAuthRequired(w http.ResponseWriter) {
 }
 
 func SessionFromContext(ctx context.Context) (*Session, bool) {
+	if ctx == nil {
+		return nil, false
+	}
 	raw := ctx.Value(sessionKey)
 	session, ok := raw.(*Session)
 	if !ok || session == nil {
 		return nil, false
 	}
 	return session, true
+}
+
+// AuthenticatedUserFromContext returns the current control-plane user loaded
+// for this request, not the role cached when the session was created.
+func AuthenticatedUserFromContext(ctx context.Context) (control.UserSummary, bool) {
+	if ctx == nil {
+		return control.UserSummary{}, false
+	}
+	user, ok := ctx.Value(authenticatedUserContextKey{}).(control.UserSummary)
+	return user, ok && user.ID != ""
+}
+
+// CoreServiceFromContext returns the business service bound to the request's
+// borrowed vault child. Financial handlers should use this service and never a
+// caller-supplied user or vault identifier.
+func CoreServiceFromContext(ctx context.Context) (*core.Service, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	service, ok := ctx.Value(coreServiceContextKey{}).(*core.Service)
+	return service, ok && service != nil
 }
 
 // SessionMaxAgeFromEnv remains for source compatibility. New code should use

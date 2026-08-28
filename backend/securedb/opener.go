@@ -45,7 +45,12 @@ type Opener struct {
 func NewPlainOpener() *Opener { return &Opener{} }
 
 func NewEncryptedOpener(key RawKey) *Opener {
-	return &Opener{key: key, encrypted: true}
+	opener := &Opener{key: key, encrypted: true}
+	// RawKey is passed by value, so this destroys the constructor's temporary
+	// copy after the opener has taken ownership of its own copy. Callers must
+	// still destroy their original value.
+	key.Destroy()
+	return opener
 }
 
 func (o *Opener) Encrypted() bool {
@@ -139,7 +144,7 @@ func (c *encryptedConnector) Connect(context.Context) (driver.Conn, error) {
 	}
 	defer key.Destroy()
 
-	keySpec := rawKeySpec(key)
+	keySpec := rawKeySpec(&key)
 	query := url.Values{"key": []string{string(keySpec)}}
 	if c.purpose == Snapshot {
 		query.Set("mode", "rw")
@@ -201,7 +206,10 @@ func (c *encryptedConnector) Connect(context.Context) (driver.Conn, error) {
 
 func (c *encryptedConnector) Driver() driver.Driver { return &sqlite3.SQLiteDriver{} }
 
-func rawKeySpec(key RawKey) []byte {
+func rawKeySpec(key *RawKey) []byte {
+	if key == nil {
+		return nil
+	}
 	spec := make([]byte, 2+hex.EncodedLen(len(key)))
 	spec[0] = 'x'
 	spec[1] = '\''
