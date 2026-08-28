@@ -220,8 +220,15 @@ func getTransactionTagsForFilteredTransactions(db *sql.DB, whereClause string, a
 // INSERT後にrecalculateBalanceで口座全体の残高を再計算するため、
 // INSERT時のbalanceは仮値（0）で挿入する。
 func AddTransaction(req models.TransactionRequest) (*models.TransactionResponse, error) {
+	return AddTransactionContext(context.Background(), req)
+}
+
+func AddTransactionContext(ctx context.Context, req models.TransactionRequest) (*models.TransactionResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	db := database.GetDB()
-	prepared, err := prepareTransactionInsert(req)
+	prepared, err := prepareTransactionInsertContext(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +261,10 @@ type preparedTransactionInsert struct {
 // decoding before a SQL write transaction is opened. Both UI and AI writes use
 // this exact path so their ledger semantics remain identical.
 func prepareTransactionInsert(req models.TransactionRequest) (preparedTransactionInsert, error) {
+	return prepareTransactionInsertContext(context.Background(), req)
+}
+
+func prepareTransactionInsertContext(ctx context.Context, req models.TransactionRequest) (preparedTransactionInsert, error) {
 	date, err := parseTransactionDate(req.Date, req.Time)
 	if err != nil {
 		return preparedTransactionInsert{}, err
@@ -261,7 +272,7 @@ func prepareTransactionInsert(req models.TransactionRequest) (preparedTransactio
 	if err := validateTransactionData(req); err != nil {
 		return preparedTransactionInsert{}, err
 	}
-	preparedImages, err := prepareTransactionImages(req.Images)
+	preparedImages, err := prepareTransactionImagesContext(ctx, req.Images)
 	if err != nil {
 		return preparedTransactionInsert{}, err
 	}
@@ -313,6 +324,13 @@ func addPreparedTransactionIn(tx *sql.Tx, prepared preparedTransactionInsert) (*
 
 // UpdateTransaction は既存の取引を更新する
 func UpdateTransaction(id int64, req models.TransactionRequest) (*models.TransactionResponse, error) {
+	return UpdateTransactionContext(context.Background(), id, req)
+}
+
+func UpdateTransactionContext(ctx context.Context, id int64, req models.TransactionRequest) (*models.TransactionResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	db := database.GetDB()
 
 	date, err := parseTransactionDate(req.Date, req.Time)
@@ -323,7 +341,7 @@ func UpdateTransaction(id int64, req models.TransactionRequest) (*models.Transac
 	if err := validateTransactionData(req); err != nil {
 		return nil, err
 	}
-	preparedImages, err := prepareTransactionImages(req.Images)
+	preparedImages, err := prepareTransactionImagesContext(ctx, req.Images)
 	if err != nil {
 		return nil, err
 	}
@@ -1110,8 +1128,15 @@ func buildBalanceHistory(rows interface {
 
 // AddTransactionImage は取引に画像を追加する
 func AddTransactionImage(transactionID int64, img models.TransactionImageRequest) (*models.TransactionImageResponse, error) {
+	return AddTransactionImageContext(context.Background(), transactionID, img)
+}
+
+func AddTransactionImageContext(ctx context.Context, transactionID int64, img models.TransactionImageRequest) (*models.TransactionImageResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	db := database.GetDB()
-	prepared, err := prepareTransactionImages([]models.TransactionImageRequest{img})
+	prepared, err := prepareTransactionImagesContext(ctx, []models.TransactionImageRequest{img})
 	if err != nil {
 		return nil, err
 	}
@@ -1155,8 +1180,15 @@ func AddTransactionImage(transactionID int64, img models.TransactionImageRequest
 
 // GetTransactionImages は取引の画像一覧を返す
 func GetTransactionImages(transactionID int64) ([]models.TransactionImageResponse, error) {
+	return GetTransactionImagesContext(context.Background(), transactionID)
+}
+
+func GetTransactionImagesContext(ctx context.Context, transactionID int64) ([]models.TransactionImageResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	db := database.GetDB()
-	rows, err := db.Query(
+	rows, err := db.QueryContext(ctx,
 		"SELECT id, filename, data, mime_type, created_at FROM transaction_images WHERE transaction_id = ? ORDER BY created_at",
 		transactionID,
 	)
@@ -1179,7 +1211,7 @@ func GetTransactionImages(transactionID int64) ([]models.TransactionImageRespons
 			MimeType:  mimeType,
 			CreatedAt: createdAt,
 		}
-		prepared, validationErr := prepareDecodedTransactionImage(filename, mimeType, data)
+		prepared, validationErr := prepareDecodedTransactionImageContext(ctx, filename, mimeType, data)
 		if validationErr != nil {
 			// 旧バージョンで保存された不正BLOBをブラウザへ返さない。
 			response.Invalid = true

@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
@@ -20,7 +21,12 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
-const maxImageFilenameBytes = 255
+const (
+	maxImageFilenameBytes = 255
+	maxConcurrentImageDecodes = 4
+)
+
+var imageDecodeSlots = make(chan struct{}, maxConcurrentImageDecodes)
 
 var imageMIMEByExtension = map[string]string{
 	".jpg":  "image/jpeg",
@@ -44,6 +50,10 @@ type preparedTransactionImage struct {
 }
 
 func prepareTransactionImages(images []models.TransactionImageRequest) ([]preparedTransactionImage, error) {
+	return prepareTransactionImagesContext(context.Background(), images)
+}
+
+func prepareTransactionImagesContext(ctx context.Context, images []models.TransactionImageRequest) ([]preparedTransactionImage, error) {
 	if len(images) == 0 {
 		return nil, nil
 	}
@@ -54,7 +64,7 @@ func prepareTransactionImages(images []models.TransactionImageRequest) ([]prepar
 	prepared := make([]preparedTransactionImage, 0, len(images))
 	var totalBytes int64
 	for i, request := range images {
-		image, err := prepareTransactionImage(request)
+		image, err := prepareTransactionImageContext(ctx, request)
 		if err != nil {
 			return nil, fmt.Errorf("画像%d: %w", i+1, err)
 		}
@@ -68,6 +78,10 @@ func prepareTransactionImages(images []models.TransactionImageRequest) ([]prepar
 }
 
 func prepareTransactionImage(request models.TransactionImageRequest) (preparedTransactionImage, error) {
+	return prepareTransactionImageContext(context.Background(), request)
+}
+
+func prepareTransactionImageContext(ctx context.Context, request models.TransactionImageRequest) (preparedTransactionImage, error) {
 	filename, mimeType, err := normalizeImageMetadata(request.Filename, request.MimeType)
 	if err != nil {
 		return preparedTransactionImage{}, err
@@ -86,15 +100,19 @@ func prepareTransactionImage(request models.TransactionImageRequest) (preparedTr
 	if int64(len(data)) > models.MaxImageBytes {
 		return preparedTransactionImage{}, fmt.Errorf("画像は1件につき%d MiBまでです", models.MaxImageBytes/(1024*1024))
 	}
-	return validateDecodedTransactionImage(filename, mimeType, data)
+	return validateDecodedTransactionImageContext(ctx, filename, mimeType, data)
 }
 
 func prepareDecodedTransactionImage(rawFilename, rawMIMEType string, data []byte) (preparedTransactionImage, error) {
+	return prepareDecodedTransactionImageContext(context.Background(), rawFilename, rawMIMEType, data)
+}
+
+func prepareDecodedTransactionImageContext(ctx context.Context, rawFilename, rawMIMEType string, data []byte) (preparedTransactionImage, error) {
 	filename, mimeType, err := normalizeImageMetadata(rawFilename, rawMIMEType)
 	if err != nil {
 		return preparedTransactionImage{}, err
 	}
-	return validateDecodedTransactionImage(filename, mimeType, data)
+	return validateDecodedTransactionImageContext(ctx, filename, mimeType, data)
 }
 
 func normalizeImageMetadata(rawFilename, rawMIMEType string) (string, string, error) {
@@ -118,6 +136,10 @@ func normalizeImageMetadata(rawFilename, rawMIMEType string) (string, string, er
 }
 
 func validateDecodedTransactionImage(filename, mimeType string, data []byte) (preparedTransactionImage, error) {
+	return validateDecodedTransactionImageContext(context.Background(), filename, mimeType, data)
+}
+
+func validateDecodedTransactionImageContext(ctx context.Context, filename, mimeType string, data []byte) (preparedTransactionImage, error) {
 	if len(data) == 0 {
 		return preparedTransactionImage{}, fmt.Errorf("画像データが空です")
 	}
@@ -132,6 +154,14 @@ func validateDecodedTransactionImage(filename, mimeType string, data []byte) (pr
 	if err := validateImageContainer(mimeType, data); err != nil {
 		return preparedTransactionImage{}, err
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	release, err := acquireImageDecodeSlot(ctx)
+	if err != nil {
+		return preparedTransactionImage{}, err
+	}
+	defer release()
 
 	config, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil || format != imageFormatByMIME[mimeType] {
@@ -151,6 +181,18 @@ func validateDecodedTransactionImage(filename, mimeType string, data []byte) (pr
 	}
 
 	return preparedTransactionImage{filename: filename, mimeType: mimeType, data: data}, nil
+}
+
+func acquireImageDecodeSlot(ctx context.Context) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case imageDecodeSlots <- struct{}{}:
+		return func() { <-imageDecodeSlots }, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("画像処理の待機が中断されました")
+	}
 }
 
 func validateImageFilename(filename string) error {
