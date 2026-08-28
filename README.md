@@ -111,7 +111,7 @@ wails build
 
 デスクトップモードでは、SQLite データベースは OS 標準のアプリケーションデータディレクトリに保存されます。
 
-DB、SQLiteの一時ファイル、スナップショット、デスクトップ版が書き出すCSVは、所有者だけが読み書きできる権限で作成します。desktop modeではOSのFileVault、BitLocker、LUKS等を有効にしてください。server modeは外部暗号化volumeの期限付きattestationがなければDBを開く前に起動を拒否します。設定、復旧試験、key rotation、廃棄手順は[保存時暗号化volumeの運用contract](docs/at-rest-encryption.md)を参照してください。
+DB、SQLiteの一時ファイル、スナップショット、デスクトップ版が書き出すCSVは、所有者だけが読み書きできる権限で作成します。desktop modeではOSのFileVault、BitLocker、LUKS等を有効にしてください。server modeはSQLCipher 4.18.0でDB・WAL・snapshotを暗号化し、さらに外部暗号化volumeの期限付きattestationも検証します。どちらか一方でも無効ならDBを開く前に起動を拒否します。鍵の作成と復旧は[SQLCipher鍵の運用](docs/sqlcipher-key-operations.md)、volumeの設定と復旧試験は[保存時暗号化volumeの運用contract](docs/at-rest-encryption.md)を参照してください。
 
 - macOS: `~/Library/Application Support/OmniMoney/omni_money.db`
 - Windows: `%APPDATA%/OmniMoney/omni_money.db`
@@ -122,14 +122,21 @@ DB、SQLiteの一時ファイル、スナップショット、デスクトップ
 フロントエンドをビルドしてから、`server` ビルドタグ付きで Go サーバーを起動します。
 
 ```bash
+sudo apt-get install -y build-essential curl tcl libssl-dev
+SQLCIPHER_PREFIX="$PWD/.build/sqlcipher" sh scripts/build-sqlcipher-linux.sh
 cd frontend
+npm ci --ignore-scripts
 npm run build
 cd ..
+DB_ENCRYPTION_KEY_FILE='/secure-config/database.key' \
 AUTH_PASSWORD_HASH='<bcrypt-hash>' \
 ALLOWED_HOSTS='localhost:4000,127.0.0.1:4000' \
 DATA_AT_REST_MODE='external-encrypted-volume' \
 DATA_AT_REST_ATTESTATION_FILE='/secure-config/omni-data-at-rest.json' \
-go run -tags server ./server.go
+CGO_CFLAGS="-I$PWD/.build/sqlcipher/include" \
+CGO_LDFLAGS="-L$PWD/.build/sqlcipher/lib" \
+LD_LIBRARY_PATH="$PWD/.build/sqlcipher/lib" \
+go run -tags 'server libsqlite3 sqlite_omit_load_extension' ./server.go
 ```
 
 `<bcrypt-hash>` は実際に作成した bcrypt ハッシュへ置き換えてください。作成方法は[利用ガイド](docs/how-to-use.md#21-bcrypt-ハッシュを作成する)を参照してください。
@@ -195,7 +202,8 @@ TOTPを有効化した場合でも、通常操作中に定期的なコード入�
 
 | 変数 | 既定値 | 説明 |
 | --- | --- | --- |
-| `DB_PATH` | `omni_money.db` | SQLite データベースの保存先 |
+| `DB_PATH` | `omni_money.db` | SQLCipher データベースの保存先 |
+| `DB_ENCRYPTION_KEY_FILE` | なし（serverでは必須） | 32 byteのSQLCipher鍵をhexまたはBase64で保存した秘密ファイル |
 | `DATA_AT_REST_MODE` | なし（serverでは必須） | `external-encrypted-volume`だけを許可 |
 | `DATA_AT_REST_ATTESTATION_FILE` | なし（serverでは必須） | data root、非秘密key ID、検証・復旧・rotation時刻を記録したfile |
 | `HOST_IP` | `127.0.0.1` | 直接起動時の待受アドレス（Docker内部は `0.0.0.0`） |
@@ -230,8 +238,10 @@ TOTPを有効化した場合でも、通常操作中に定期的なコード入�
 ```bash
 docker build -t omni-money .
 # 先に docs/at-rest-encryption.md に従って暗号化volumeと
-# secrets/omni_data_at_rest.json を準備する。
-mkdir -p data
+# secrets/omni_data_at_rest.json とSQLCipher鍵を準備する。
+umask 077
+mkdir -p data secrets
+openssl rand -hex 32 > secrets/database.key
 export AUTH_PASSWORD_HASH='<bcrypt-hash>'
 docker run --rm \
   --user "$(id -u):$(id -g)" \
@@ -239,7 +249,9 @@ docker run --rm \
   -e ALLOWED_HOSTS='localhost:4000,127.0.0.1:4000' \
   -e DATA_AT_REST_MODE=external-encrypted-volume \
   -e DATA_AT_REST_ATTESTATION_FILE=/run/secrets/omni_data_at_rest.json \
+  -e DB_ENCRYPTION_KEY_FILE=/run/secrets/omni_database_key \
   --mount "type=bind,src=$(pwd)/secrets/omni_data_at_rest.json,dst=/run/secrets/omni_data_at_rest.json,readonly" \
+  --mount "type=bind,src=$(pwd)/secrets/database.key,dst=/run/secrets/omni_database_key,readonly" \
   -e ALLOW_INSECURE_HTTP=true \
   -p 127.0.0.1:4000:4000 \
   -v "$(pwd)/data:/app/data" \
@@ -257,8 +269,11 @@ AI APIも利用する場合は、資格情報・監査HMAC keyring・CA・サー
 
 ```bash
 cp .env.example .env
-# .env の AUTH_PASSWORD_HASH、ALLOWED_HOSTS、TRUSTED_PROXIES、OMNI_DATA_DIR を編集
-mkdir -p ./data
+# .env の AUTH_PASSWORD_HASH、ALLOWED_HOSTS、TRUSTED_PROXIES、OMNI_DATA_DIR、
+# OMNI_AT_REST_ATTESTATION_FILE、OMNI_DB_ENCRYPTION_KEY_FILE を編集
+umask 077
+mkdir -p ./data ./secrets
+test -s ./secrets/database.key || openssl rand -hex 32 > ./secrets/database.key
 docker compose up -d --build
 ```
 
