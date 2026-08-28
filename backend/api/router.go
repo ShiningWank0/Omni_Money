@@ -224,7 +224,7 @@ func handleTransactions(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 			return
 		}
-		resp, err := core.AddTransaction(req)
+		resp, err := core.AddTransactionContext(r.Context(), req)
 		if err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
@@ -255,7 +255,7 @@ func handleTransactionByID(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 			return
 		}
-		resp, err := core.UpdateTransaction(id, req)
+		resp, err := core.UpdateTransactionContext(r.Context(), id, req)
 		if err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
@@ -567,7 +567,7 @@ func handleTransactionImages(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		images, err := core.GetTransactionImages(txID)
+		images, err := core.GetTransactionImagesContext(r.Context(), txID)
 		if err != nil {
 			jsonError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -580,7 +580,7 @@ func handleTransactionImages(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 			return
 		}
-		resp, err := core.AddTransactionImage(txID, img)
+		resp, err := core.AddTransactionImageContext(r.Context(), txID, img)
 		if err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
