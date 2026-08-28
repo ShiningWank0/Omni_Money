@@ -4,11 +4,16 @@ export function isDesktopVaultUnlocked(status) {
 }
 
 export function desktopVaultNeedsSetup(status) {
-  return status?.state === 'needs_setup' || status?.configured === false
+  if (status?.state) return status.state === 'needs_setup'
+  return status?.configured === false && status?.legacy_migration_required !== true
 }
 
 export function desktopVaultNeedsLegacyMigration(status) {
   return status?.state === 'legacy_migration_required' || status?.legacy_migration_required === true
+}
+
+export function canConfirmDesktopRecoveryDelivery({ recoveryCode, recoverySaved, busy }) {
+  return typeof recoveryCode === 'string' && recoveryCode.length > 0 && recoverySaved === true && busy !== true
 }
 
 export function validateNewDesktopPassword(password, confirmation) {

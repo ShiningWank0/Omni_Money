@@ -156,6 +156,63 @@ func TestRecoverDesktopVaultRequiresStrictRawURLRecoveryCode(t *testing.T) {
 	}
 }
 
+func TestMigrateLegacyDesktopVaultClearsPasswordAndRequiresDeliveryAcknowledgement(t *testing.T) {
+	coordinator := &fakeDesktopCoordinator{
+		status:             desktopaccount.Status{LegacyMigrationRequired: true},
+		nextRecoverySecret: bytesOf(0x6b, keyenvelope.RecoverySecretSize),
+	}
+	app := newAppWithCoordinator(coordinator)
+
+	response, err := app.MigrateLegacyDesktopVault("migration-password")
+	if err != nil {
+		t.Fatalf("MigrateLegacyDesktopVault: %v", err)
+	}
+	if !response.Status.Unlocked || !response.Status.Configured {
+		t.Fatalf("migration response did not report the opened vault: %+v", response.Status)
+	}
+	wantCode := base64.RawURLEncoding.EncodeToString(bytesOf(0x6b, keyenvelope.RecoverySecretSize))
+	if response.RecoveryCode != wantCode {
+		t.Fatalf("recovery code = %q, want %q", response.RecoveryCode, wantCode)
+	}
+	if app.generation != 1 {
+		t.Fatalf("generation after migration = %d, want 1", app.generation)
+	}
+	for i, value := range coordinator.migratedPassword {
+		if value != 0 {
+			t.Fatalf("migration password copy byte %d was not cleared", i)
+		}
+	}
+	if coordinator.acknowledgeCalls != 0 {
+		t.Fatal("migration implicitly acknowledged recovery delivery")
+	}
+
+	status, err := app.AcknowledgeDesktopVaultRecovery()
+	if err != nil {
+		t.Fatalf("AcknowledgeDesktopVaultRecovery: %v", err)
+	}
+	if !status.Unlocked || coordinator.acknowledgeCalls != 1 {
+		t.Fatalf("acknowledgement status/calls = %+v/%d", status, coordinator.acknowledgeCalls)
+	}
+	if app.generation != 2 {
+		t.Fatalf("generation after acknowledgement = %d, want 2", app.generation)
+	}
+}
+
+func TestAcknowledgeDesktopVaultRecoveryIsUsableWithoutMigrationJournal(t *testing.T) {
+	coordinator := &fakeDesktopCoordinator{
+		status: desktopaccount.Status{Configured: true, Unlocked: true, Role: desktopaccount.RoleAdmin},
+	}
+	app := newAppWithCoordinator(coordinator)
+
+	status, err := app.AcknowledgeDesktopVaultRecovery()
+	if err != nil {
+		t.Fatalf("AcknowledgeDesktopVaultRecovery: %v", err)
+	}
+	if !status.Unlocked || coordinator.acknowledgeCalls != 1 {
+		t.Fatalf("idempotent acknowledgement status/calls = %+v/%d", status, coordinator.acknowledgeCalls)
+	}
+}
+
 func bytesOf(value byte, length int) []byte {
 	result := make([]byte, length)
 	for i := range result {
@@ -169,6 +226,8 @@ type fakeDesktopCoordinator struct {
 	status             desktopaccount.Status
 	serviceCalls       int
 	recoveredWith      []byte
+	migratedPassword   []byte
+	acknowledgeCalls   int
 	nextRecoverySecret []byte
 }
 
@@ -183,6 +242,23 @@ func (c *fakeDesktopCoordinator) Setup([]byte) ([]byte, error) {
 	defer c.mu.Unlock()
 	c.status = desktopaccount.Status{Configured: true, Unlocked: true, Role: desktopaccount.RoleAdmin}
 	return bytesOf(1, keyenvelope.RecoverySecretSize), nil
+}
+
+func (c *fakeDesktopCoordinator) MigrateLegacy(password []byte) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Retain the exact temporary argument so the test can verify that the App
+	// clears its byte copy after the coordinator call returns.
+	c.migratedPassword = password
+	c.status = desktopaccount.Status{Configured: true, Unlocked: true, Role: desktopaccount.RoleAdmin}
+	return append([]byte(nil), c.nextRecoverySecret...), nil
+}
+
+func (c *fakeDesktopCoordinator) AcknowledgeRecovery() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.acknowledgeCalls++
+	return nil
 }
 
 func (c *fakeDesktopCoordinator) Unlock([]byte) error {
