@@ -21,6 +21,9 @@ import (
 	"omni_money/backend/validation"
 )
 
+const writableSQLiteQuery = "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
+const snapshotSQLiteQuery = "mode=rw&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
+
 var (
 	db     *sql.DB
 	dbPath string
@@ -82,7 +85,7 @@ func initDBLocked(path string) error {
 	}
 
 	var err error
-	db, err = sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON")
+	db, err = sql.Open("sqlite3", writableSQLiteDSN(path))
 	if err != nil {
 		return fmt.Errorf("データベース接続エラー: %w", err)
 	}
@@ -92,6 +95,11 @@ func initDBLocked(path string) error {
 		db.Close()
 		db = nil
 		return fmt.Errorf("データベースping失敗: %w", err)
+	}
+	if err := requireFullSynchronous(db); err != nil {
+		db.Close()
+		db = nil
+		return fmt.Errorf("データベース耐久性設定エラー: %w", err)
 	}
 	// SQLite creates the file on first open.  Restrict an existing database as
 	// well: it may contain the user's complete financial history.
@@ -542,11 +550,14 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	}
 
 	// --- 手順5: 再接続と現行スキーマの再適用 ---
-	newDB, err := sql.Open("sqlite3", currentPath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON")
+	newDB, err := sql.Open("sqlite3", writableSQLiteDSN(currentPath))
 	if err != nil {
 		return fmt.Errorf("復元後のDB接続エラー: %w", err)
 	}
 	candidateDB = newDB
+	if err := requireFullSynchronous(newDB); err != nil {
+		return fmt.Errorf("復元後のDB耐久性設定エラー: %w", err)
+	}
 
 	// 破損DBへDDLを適用しないよう、移行前にも整合性を確認する。
 	if err := checkIntegrity(newDB); err != nil {
@@ -570,6 +581,27 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	os.Remove(backupPath)
 
 	log.Printf("スナップショット復元完了: %s (integrity_check: ok)", snapshotName)
+	return nil
+}
+
+func writableSQLiteDSN(path string) string {
+	u := &url.URL{Scheme: "file", Path: path, RawQuery: writableSQLiteQuery}
+	return u.String()
+}
+
+func snapshotSQLiteDSN(path string) string {
+	u := &url.URL{Scheme: "file", Path: path, RawQuery: snapshotSQLiteQuery}
+	return u.String()
+}
+
+func requireFullSynchronous(target *sql.DB) error {
+	var synchronous int
+	if err := target.QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil {
+		return fmt.Errorf("PRAGMA synchronous検査エラー: %w", err)
+	}
+	if synchronous != 2 {
+		return fmt.Errorf("PRAGMA synchronous=%d; FULL (2) が必要です", synchronous)
+	}
 	return nil
 }
 
@@ -782,12 +814,14 @@ func backupSQLiteDatabase(source *sql.DB, snapshotPath string) (err error) {
 		}
 	}()
 
-	snapshotURI := (&url.URL{Scheme: "file", Path: snapshotPath}).String() + "?mode=rw&_busy_timeout=5000"
-	destination, err := sql.Open("sqlite3", snapshotURI)
+	destination, err := sql.Open("sqlite3", snapshotSQLiteDSN(snapshotPath))
 	if err != nil {
 		return err
 	}
 	defer func() { _ = destination.Close() }()
+	if err := requireFullSynchronous(destination); err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
