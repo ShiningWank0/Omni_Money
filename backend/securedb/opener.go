@@ -132,11 +132,7 @@ func (c *encryptedConnector) Connect(context.Context) (driver.Conn, error) {
 	}
 	defer key.Destroy()
 
-	keySpec := make([]byte, 2+hex.EncodedLen(len(key)))
-	keySpec[0] = 'x'
-	keySpec[1] = '\''
-	hex.Encode(keySpec[2:], key[:])
-	keySpec = append(keySpec, '\'')
+	keySpec := rawKeySpec(key)
 	query := url.Values{"key": []string{string(keySpec)}}
 	if c.purpose == Snapshot {
 		query.Set("mode", "rw")
@@ -197,6 +193,14 @@ func (c *encryptedConnector) Connect(context.Context) (driver.Conn, error) {
 }
 
 func (c *encryptedConnector) Driver() driver.Driver { return &sqlite3.SQLiteDriver{} }
+
+func rawKeySpec(key RawKey) []byte {
+	spec := make([]byte, 2+hex.EncodedLen(len(key)))
+	spec[0] = 'x'
+	spec[1] = '\''
+	hex.Encode(spec[2:], key[:])
+	return append(spec, '\'')
+}
 
 func driverQueryString(conn *sqlite3.SQLiteConn, query string) (string, error) {
 	value, err := driverQueryValue(conn, query)
