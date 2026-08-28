@@ -260,7 +260,15 @@ func rewriteTestAttestation(t *testing.T, path string, mutate func(*attestationD
 
 func writeTestAttestation(t *testing.T, now time.Time, mutate func(*attestationDocument)) (string, string, string) {
 	t.Helper()
-	parent := t.TempDir()
+	parent, err := os.MkdirTemp(".", ".atrest-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	parent, err = filepath.Abs(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
 	root := filepath.Join(parent, "data")
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
