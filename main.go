@@ -4,6 +4,7 @@ package main
 
 import (
 	"embed"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,8 +13,6 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
-
-	"omni_money/backend/database"
 )
 
 //go:embed all:frontend/dist
@@ -22,17 +21,16 @@ var assets embed.FS
 // version はCI/CDビルド時に -ldflags で埋め込まれる（§8.3準拠）
 var version = "dev"
 
-// getAppDataDBPath はOS標準のアプリケーションデータディレクトリ内のDBパスを返す。
+// getAppDataRoot はOS標準のアプリケーションデータディレクトリを返す。
 // Finder/open コマンドで起動するとcwdが "/" になるため、相対パスは使えない。
-func getAppDataDBPath() string {
+func getAppDataRoot() (string, error) {
 	var baseDir string
 	switch runtime.GOOS {
 	case "darwin":
 		// macOS: ~/Library/Application Support/OmniMoney/
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			log.Printf("ホームディレクトリ取得失敗、カレントディレクトリにフォールバック: %v", err)
-			return "omni_money.db"
+			return "", fmt.Errorf("ホームディレクトリ取得失敗: %w", err)
 		}
 		baseDir = filepath.Join(homeDir, "Library", "Application Support", "OmniMoney")
 	case "windows":
@@ -41,7 +39,7 @@ func getAppDataDBPath() string {
 		if appData == "" {
 			homeDir, err := os.UserHomeDir()
 			if err != nil {
-				return "omni_money.db"
+				return "", fmt.Errorf("ホームディレクトリ取得失敗: %w", err)
 			}
 			appData = filepath.Join(homeDir, "AppData", "Roaming")
 		}
@@ -52,29 +50,34 @@ func getAppDataDBPath() string {
 		if dataHome == "" {
 			homeDir, err := os.UserHomeDir()
 			if err != nil {
-				return "omni_money.db"
+				return "", fmt.Errorf("ホームディレクトリ取得失敗: %w", err)
 			}
 			dataHome = filepath.Join(homeDir, ".local", "share")
 		}
 		baseDir = filepath.Join(dataHome, "OmniMoney")
 	}
-	return filepath.Join(baseDir, "omni_money.db")
+	absolute, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", fmt.Errorf("アプリケーションデータディレクトリ解決失敗: %w", err)
+	}
+	return absolute, nil
 }
 
 func main() {
-	// デスクトップアプリ用: OS標準のアプリケーションデータディレクトリにDBを保存
-	// Finder/open起動時はcwdが "/" になるため、相対パスは使えない
-	dbPath := getAppDataDBPath()
-	if err := database.InitDB(dbPath); err != nil {
-		log.Fatalf("データベース初期化エラー: %v", err)
+	dataRoot, err := getAppDataRoot()
+	if err != nil {
+		log.Fatalf("アプリケーションデータディレクトリ取得エラー: %v", err)
 	}
-	defer database.CloseDB()
 
-	// アプリケーション構造体を作成
-	app := NewApp()
+	// Coordinator construction reads only public account metadata. The
+	// SQLCipher vault remains closed until the user explicitly unlocks it.
+	app, err := NewApp(dataRoot)
+	if err != nil {
+		log.Fatalf("Desktopアカウント初期化エラー: %v", err)
+	}
 
 	// Wailsアプリケーションを起動
-	err := wails.Run(&options.App{
+	err = wails.Run(&options.App{
 		Title:  "Omni Money",
 		Width:  1280,
 		Height: 800,
@@ -83,6 +86,7 @@ func main() {
 		},
 		BackgroundColour: &options.RGBA{R: 102, G: 126, B: 234, A: 1},
 		OnStartup:        app.startup,
+		OnShutdown:       app.shutdown,
 		Bind: []interface{}{
 			app,
 		},

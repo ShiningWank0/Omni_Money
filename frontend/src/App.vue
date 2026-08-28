@@ -1,5 +1,13 @@
 <template>
   <div id="app">
+    <DesktopVaultGate
+      v-if="isWailsMode && !desktopVaultUnlocked"
+      :status="desktopVaultStatus"
+      :loading="desktopVaultLoading"
+      :fatal-error="desktopVaultError"
+      @unlocked="handleDesktopVaultUnlocked"
+    />
+    <template v-else>
     <div v-if="idleScreenLocked" class="idle-lock-curtain" role="status" aria-live="polite">
       <div class="idle-lock-message">無操作タイムアウトのため画面をロックしました</div>
     </div>
@@ -79,6 +87,7 @@
         <button class="menu-btn" @click="openTagChart">タグ別分析</button>
         <button v-if="serverFeatures.snapshots" class="menu-btn menu-group-start" @click="openSnapshotManager">スナップショット管理</button>
         <button v-if="serverFeatures.admin" class="menu-btn menu-group-start" @click="openServerAccountAdmin">サーバーユーザー管理</button>
+        <button v-if="isWailsMode" class="menu-btn logout-btn" @click="lockDesktopVaultNow">保管庫をロック</button>
         <button v-if="!isWailsMode" class="menu-btn logout-btn" @click="logout">ログアウト</button>
       </nav>
     </div>
@@ -254,6 +263,7 @@
         {{ toast.message }}
       </div>
     </Transition>
+    </template>
   </div>
 </template>
 
@@ -261,7 +271,9 @@
 import { ref, computed, defineAsyncComponent, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useAppStore } from './store/index'
 import TransactionModal from './components/TransactionModal.vue'
+import DesktopVaultGate from './components/DesktopVaultGate.vue'
 import { csvExportWarning } from './utils/csvSafety'
+import { isDesktopVaultUnlocked } from './utils/desktopVaultSafety'
 
 // 初期表示に不要な管理・分析モーダルは、開いた時だけ読み込む。
 const CSVImportModal = defineAsyncComponent(() => import('./components/CSVImportModal.vue'))
@@ -282,6 +294,8 @@ import {
   isWailsMode,
   logout as apiLogout,
   getAuthStatus,
+  getDesktopVaultStatus,
+  lockDesktopVault,
   reauthenticate,
   keepAlive
 } from './utils/api'
@@ -311,6 +325,10 @@ const idleTimeoutSeconds = ref(0)
 const serverFeatures = ref({ admin: false, ai: false, snapshots: isWailsMode })
 const currentServerUserId = ref('')
 const idleScreenLocked = ref(false)
+const desktopVaultStatus = ref(null)
+const desktopVaultLoading = ref(isWailsMode)
+const desktopVaultError = ref('')
+const desktopVaultUnlocked = computed(() => !isWailsMode || isDesktopVaultUnlocked(desktopVaultStatus.value))
 let idleTimer = null
 let lastUserActivityAt = 0
 let idleLockInProgress = false
@@ -698,6 +716,44 @@ async function fetchPrivateData() {
   await store.fetchTransactions()
 }
 
+async function handleDesktopVaultUnlocked() {
+  if (!isWailsMode) return
+  desktopVaultLoading.value = true
+  desktopVaultError.value = ''
+  try {
+    const confirmed = await getDesktopVaultStatus()
+    if (!isDesktopVaultUnlocked(confirmed)) {
+      throw new Error('保管庫のロック解除を確認できませんでした')
+    }
+    desktopVaultStatus.value = confirmed
+    await fetchPrivateData()
+    isInitialLoading.value = false
+  } catch (error) {
+    clearSensitiveStateForIdle()
+    desktopVaultStatus.value = { state: 'locked', configured: true, unlocked: false }
+    desktopVaultError.value = error?.message || '保管庫を安全に開けませんでした'
+  } finally {
+    desktopVaultLoading.value = false
+  }
+}
+
+async function lockDesktopVaultNow() {
+  if (!isWailsMode) return
+  showMenu.value = false
+  isInitialLoading.value = true
+  desktopVaultError.value = ''
+  desktopVaultStatus.value = { ...(desktopVaultStatus.value || {}), state: 'locked', configured: true, unlocked: false }
+  clearSensitiveStateForIdle()
+  // Let Vue replace the ledger with the lock gate before waiting for DB close.
+  await nextTick()
+  try {
+    await lockDesktopVault()
+    desktopVaultStatus.value = await getDesktopVaultStatus()
+  } catch (error) {
+    desktopVaultError.value = error?.message || '保管庫を安全にロックできませんでした'
+  }
+}
+
 function applyServerAuthStatus(status) {
   if (isWailsMode || !status?.features) return
   serverFeatures.value = {
@@ -1015,6 +1071,22 @@ onMounted(async () => {
   window.addEventListener('omni-money:session-expired', handleSessionExpired)
   window.addEventListener('pageshow', handlePageShow)
   reauthListenerRegistered = true
+  if (isWailsMode) {
+    try {
+      desktopVaultStatus.value = await getDesktopVaultStatus()
+      if (desktopVaultUnlocked.value) {
+        await fetchPrivateData()
+      }
+    } catch (error) {
+      clearSensitiveStateForIdle()
+      desktopVaultError.value = error?.message || '保管庫の状態を安全に確認できませんでした'
+      desktopVaultStatus.value = { state: 'error', configured: true, unlocked: false }
+    } finally {
+      desktopVaultLoading.value = false
+      isInitialLoading.value = false
+    }
+    return
+  }
   try {
     const authStatus = await getAuthStatus()
     if (componentMounted) applyServerAuthStatus(authStatus)
