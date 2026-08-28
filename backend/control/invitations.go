@@ -39,7 +39,7 @@ func (s *Store) CreateInvitation(
 	if err := validateTokenHash(input.TokenHash); err != nil {
 		return Invitation{}, err
 	}
-	expiresAt, err := validateExpiry(now, input.ExpiresAt)
+	expiresAt, err := validateInvitationExpiry(now, input.ExpiresAt)
 	if err != nil {
 		return Invitation{}, err
 	}

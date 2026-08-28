@@ -65,6 +65,13 @@ The following invariants apply:
 - a server request receives its database instance from the authenticated principal; financial APIs do not accept a caller-supplied user ID;
 - the control key, an administrator password, or an administrator session alone cannot open another user's vault.
 
+A live server session owns one root vault lease. Each authenticated request
+borrows a child lease and receives only a guarded business service, never the
+raw database instance. Logging out, disabling the account, expiry, eviction, or
+server shutdown releases the root. Releasing the last root immediately blocks
+new borrows, waits for requests already in flight, then closes the SQLCipher
+database and destroys its in-memory opener key.
+
 ## Threat boundary
 
 This design protects stopped databases, snapshots, copied files, and the product's
@@ -83,9 +90,12 @@ encrypted off-host backups remain required layers.
 The multi-vault change is intentionally split into reviewable stages:
 
 1. database instances, key envelopes, encrypted control store, and an internal vault manager;
-2. first-admin bootstrap, invitations, login/recovery/reset, request-scoped vault selection, and legacy single-user migration;
-3. per-user AI credentials bound cryptographically to their owner vault;
-4. the desktop single-user vault setup, unlock, recovery, and lock lifecycle.
+2. instance-bound business services, atomic credential/reset mutations, and
+   session/request vault lease ownership;
+3. first-admin HTTP bootstrap, invitations, login/recovery/reset, production
+   route selection, and legacy single-user migration;
+4. per-user AI credentials bound cryptographically to their owner vault;
+5. the desktop single-user vault setup, unlock, recovery, and lock lifecycle.
 
 The first stage exposes no multi-user HTTP endpoints. Issue #62 remains open until
 the server and desktop flows are complete and verified on the latest `main`.

@@ -275,7 +275,7 @@ func (s *Store) DisableUser(ctx context.Context, actorID, targetID string, now t
 			return err
 		}
 		if state == UserDisabled {
-			return nil
+			return revokePendingCapabilities(ctx, connection, targetID, now)
 		}
 		if role == RoleAdmin {
 			if err := requireAnotherActiveAdmin(ctx, connection, targetID); err != nil {
@@ -348,15 +348,16 @@ func (s *Store) SetUserRole(ctx context.Context, actorID, targetID string, role 
 	})
 }
 
-func revokePendingCapabilities(ctx context.Context, connection *sql.Conn, issuerID string, now time.Time) error {
+func revokePendingCapabilities(ctx context.Context, connection *sql.Conn, userID string, now time.Time) error {
 	if _, err := connection.ExecContext(ctx, `UPDATE invitations
 		SET state = 'revoked', resolved_at_ms = ?
-		WHERE created_by = ? AND state = 'pending'`, now.UnixMilli(), issuerID); err != nil {
+		WHERE created_by = ? AND state = 'pending'`, now.UnixMilli(), userID); err != nil {
 		return fmt.Errorf("revoke issued invitations: %w", err)
 	}
 	if _, err := connection.ExecContext(ctx, `UPDATE password_reset_tickets
 		SET state = 'revoked', resolved_at_ms = ?
-		WHERE created_by = ? AND state = 'pending'`, now.UnixMilli(), issuerID); err != nil {
+		WHERE (created_by = ? OR user_id = ?) AND state = 'pending'`,
+		now.UnixMilli(), userID, userID); err != nil {
 		return fmt.Errorf("revoke issued password reset tickets: %w", err)
 	}
 	return nil
