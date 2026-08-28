@@ -10,7 +10,7 @@ const (
 	aiFailedAuthAuditWindowDuration    = time.Minute
 	aiFailedAuthAuditMaxDetailedWindow = 4096
 	aiFailedAuthAuditOperationCount    = 3
-	aiFailedAuthAuditReasonCount       = 2
+	aiFailedAuthAuditReasonCount       = 6
 )
 
 type aiNowFunc func() time.Time
@@ -18,6 +18,7 @@ type aiNowFunc func() time.Time
 type aiAuditLogFunc func(aiAuditRecord)
 
 type aiFailedAuthAuditKey struct {
+	credentialID   string
 	remoteIP        string
 	mtlsFingerprint string
 	operation       string
@@ -60,6 +61,7 @@ func (aggregator *aiFailedAuthAuditAggregator) record(record aiAuditRecord, now 
 
 	emissions := aggregator.sweepExpiredLocked(now)
 	key := aiFailedAuthAuditKey{
+		credentialID:   record.CredentialID,
 		remoteIP:        record.RemoteIP,
 		mtlsFingerprint: record.MTLSClientSHA256,
 		operation:       normalizeAIAuditOperation(record.Operation),
@@ -124,6 +126,7 @@ func (aggregator *aiFailedAuthAuditAggregator) sweepAllExpiredLocked(now time.Ti
 }
 
 func (aggregator *aiFailedAuthAuditAggregator) recordOverflowLocked(record aiAuditRecord, now time.Time) []aiAuditRecord {
+	record.CredentialID = ""
 	record.RemoteIP = ""
 	record.MTLSClientSHA256 = ""
 	record.Operation = normalizeAIAuditOperation(record.Operation)
@@ -177,7 +180,13 @@ func aiFailedAuthAuditWindowExpired(window aiFailedAuthAuditWindow, now time.Tim
 }
 
 func isAggregatedFailedAuthReason(reason string) bool {
-	return reason == "authentication_failed" || reason == "authentication_rate_limited"
+	switch reason {
+	case "authentication_failed", "authentication_rate_limited",
+		"method_forbidden", "path_not_allowed", "scope_forbidden", "console_relay_forbidden":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeAIAuditOperation(operation string) string {
@@ -198,8 +207,17 @@ func aiFailedAuthAuditOverflowIndex(operation, reason string) int {
 		operationIndex = 1
 	}
 	reasonIndex := 0
-	if reason == "authentication_rate_limited" {
+	switch reason {
+	case "authentication_rate_limited":
 		reasonIndex = 1
+	case "method_forbidden":
+		reasonIndex = 2
+	case "path_not_allowed":
+		reasonIndex = 3
+	case "scope_forbidden":
+		reasonIndex = 4
+	case "console_relay_forbidden":
+		reasonIndex = 5
 	}
 	return reasonIndex*aiFailedAuthAuditOperationCount + operationIndex
 }

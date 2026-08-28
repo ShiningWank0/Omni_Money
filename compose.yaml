@@ -17,6 +17,11 @@ services:
     cpus: "${OMNI_CPU_LIMIT:-2.0}"
     mem_limit: "${OMNI_MEMORY_LIMIT:-1g}"
     pids_limit: "${OMNI_PIDS_LIMIT:-256}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "${OMNI_LOG_MAX_SIZE:-10m}"
+        max-file: "${OMNI_LOG_MAX_FILES:-3}"
     # Pangolin/Newt から同じ Docker network 上のサービス名で接続する。
     # ホストへの ports 公開は行わない。ローカル開発時だけ compose.local.yaml
     # を重ねて、Webポートを127.0.0.1へ公開する。
