@@ -201,6 +201,10 @@ func exportEncrypted(ctx context.Context, source *sql.DB, targetPath string, key
 	if _, err := conn.ExecContext(ctx, "PRAGMA encrypted.cipher_memory_security = ON"); err != nil {
 		return err
 	}
+	var cipherStatus string
+	if err := conn.QueryRowContext(ctx, "PRAGMA encrypted.cipher_status").Scan(&cipherStatus); err != nil || strings.TrimSpace(cipherStatus) != "1" {
+		return ErrCipherInactive
+	}
 	var exported any
 	if err := conn.QueryRowContext(ctx, "SELECT sqlcipher_export('encrypted')").Scan(&exported); err != nil {
 		return fmt.Errorf("export plaintext database into SQLCipher: %w", err)
@@ -212,6 +216,19 @@ func exportEncrypted(ctx context.Context, source *sql.DB, targetPath string, key
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
 			return err
 		}
+	}
+	rows, err := conn.QueryContext(ctx, "PRAGMA encrypted.cipher_integrity_check")
+	if err != nil {
+		return fmt.Errorf("verify attached migration target: %w", err)
+	}
+	if rows.Next() {
+		var detail string
+		_ = rows.Scan(&detail)
+		_ = rows.Close()
+		return fmt.Errorf("%w: %s", ErrCipherIntegrity, detail)
+	}
+	if err := rows.Close(); err != nil {
+		return err
 	}
 	if _, err := conn.ExecContext(ctx, "DETACH DATABASE encrypted"); err != nil {
 		return err
