@@ -129,13 +129,40 @@ async function throwIfNotOk(response, fallbackMessage) {
  */
 export async function getAuthStatus() {
   if (isWails) {
-    return { authenticated: true }
+    const status = await getDesktopVaultStatus()
+    const authenticated = status?.state ? status.state === 'unlocked' : status?.unlocked === true
+    return { ...status, authenticated }
   }
 
   const res = await apiFetch('/api/auth/status', {}, { skipAuthRedirect: true })
   const data = await res.json()
   rememberAuthToken(data)
   return data
+}
+
+export async function getDesktopVaultStatus() {
+  if (!isWails) throw new Error('この操作はDesktopモード専用です')
+  return await window.go.main.App.GetDesktopVaultStatus()
+}
+
+export async function setupDesktopVault(password) {
+  if (!isWails) throw new Error('この操作はDesktopモード専用です')
+  return await window.go.main.App.SetupDesktopVault(password)
+}
+
+export async function unlockDesktopVault(password) {
+  if (!isWails) throw new Error('この操作はDesktopモード専用です')
+  return await window.go.main.App.UnlockDesktopVault(password)
+}
+
+export async function recoverDesktopVault(recoveryCode, newPassword) {
+  if (!isWails) throw new Error('この操作はDesktopモード専用です')
+  return await window.go.main.App.RecoverDesktopVault(recoveryCode, newPassword)
+}
+
+export async function lockDesktopVault() {
+  if (!isWails) throw new Error('この操作はDesktopモード専用です')
+  return await window.go.main.App.LockDesktopVault()
 }
 
 /**
@@ -537,7 +564,7 @@ export async function saveBankAccountSettings(items) {
  */
 export async function backupToCSV() {
   if (isWails) {
-    return await window.go.main.App.BackupToCSV()
+    throw new Error('Desktop版のCSVは保存先を選ぶ安全なファイル出力のみ利用できます')
   }
   const res = await apiFetch('/api/backup_csv')
   await validateCSVResponse(res)

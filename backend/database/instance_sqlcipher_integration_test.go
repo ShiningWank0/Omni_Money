@@ -54,12 +54,12 @@ func TestEncryptedInstancesKeepKeysAndSnapshotsIsolated(t *testing.T) {
 	if err := first.Close(); err != nil {
 		t.Fatalf("close first encrypted instance: %v", err)
 	}
-	wrongKeyInstance, err := OpenEncryptedInstance(firstPath, secondKey)
+	wrongKeyInstance, err := OpenExistingEncryptedInstance(firstPath, secondKey)
 	if err == nil {
 		_ = wrongKeyInstance.Close()
 		t.Fatal("opened first encrypted instance with second instance key")
 	}
-	reopened, err := OpenEncryptedInstance(firstPath, firstKey)
+	reopened, err := OpenExistingEncryptedInstance(firstPath, firstKey)
 	if err != nil {
 		t.Fatalf("reopen first encrypted instance: %v", err)
 	}

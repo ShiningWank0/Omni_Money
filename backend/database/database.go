@@ -81,6 +81,29 @@ func OpenEncryptedInstance(path string, key securedb.RawKey) (*Instance, error) 
 	return openInstance(path, securedb.NewEncryptedOpener(key), true)
 }
 
+// OpenExistingEncryptedInstance opens only an existing SQLCipher database.
+// Unlike OpenEncryptedInstance it never creates a database or migrates a
+// plaintext replacement. Desktop unlock uses this strict boundary after a
+// manifest has been activated so a downgrade or path substitution fails
+// closed instead of being silently adopted.
+func OpenExistingEncryptedInstance(path string, key securedb.RawKey) (*Instance, error) {
+	defer key.Destroy()
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("encrypted database path is required")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect existing encrypted database: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("existing encrypted database must be a regular non-symlink file")
+	}
+	if err := securedb.RequireEncryptedHeader(path); err != nil {
+		return nil, fmt.Errorf("reject non-encrypted database: %w", err)
+	}
+	return openInstance(path, securedb.NewEncryptedOpener(key), false)
+}
+
 func openInstance(path string, opener *securedb.Opener, migratePlaintext bool) (*Instance, error) {
 	instance := newInstance()
 	if err := instance.initialize(path, opener, migratePlaintext); err != nil {
