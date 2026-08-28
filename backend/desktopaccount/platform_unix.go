@@ -19,6 +19,23 @@ func openRegularNoFollow(path string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), path), nil
 }
 
+func createPrivateTemp(directory, pattern string) (*os.File, error) {
+	file, err := os.CreateTemp(directory, pattern)
+	if err != nil {
+		return nil, err
+	}
+	if err := file.Chmod(0600); err != nil { // #nosec G302 -- secrets must be owner-only.
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+		return nil, err
+	}
+	return file, nil
+}
+
+func hardenPrivateDirectory(path string) error {
+	return os.Chmod(path, 0700) // #nosec G302 -- financial data must be owner-only.
+}
+
 func replaceFileAtomic(source, target string) error {
 	return os.Rename(source, target)
 }
