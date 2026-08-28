@@ -239,8 +239,9 @@ jobs:
           attestation_file="$(mktemp)"
           control_key_file="$(mktemp)"
           setup_token_file="$(mktemp)"
+          docker_run_error="$(mktemp)"
           container_id=""
-          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true; sudo rm -rf "$runtime_data"; sudo rm -f "$attestation_file" "$control_key_file" "$setup_token_file"' EXIT
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true; sudo rm -rf "$runtime_data"; sudo rm -f "$attestation_file" "$control_key_file" "$setup_token_file" "$docker_run_error"' EXIT
           chmod 700 "$runtime_data"
           sudo chown 10001:10001 "$runtime_data"
           jq -n \
@@ -258,16 +259,15 @@ jobs:
               recovery_tested_at: $recovery_tested_at,
               next_rotation_at: $next_rotation_at
             }' > "$attestation_file"
-          chmod 0444 "$attestation_file"
           head -c 32 /dev/urandom | base64 > "$control_key_file"
           head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n' > "$setup_token_file"
-          # Native Linux bind mounts retain numeric ownership. Exercise the
-          # documented fixed service UID and owner-only secret permissions.
-          sudo chown 10001:10001 "$control_key_file" "$setup_token_file"
-          sudo chmod 0400 "$control_key_file" "$setup_token_file"
-          sudo chown 0:0 "$attestation_file"
+          # Docker Compose secrets are mounted root-owned and world-readable
+          # inside the container. The reader accepts this only below
+          # /run/secrets; native deployments still use UID 10001 and mode 0400.
+          sudo chown 0:0 "$attestation_file" "$control_key_file" "$setup_token_file"
+          sudo chmod 0444 "$attestation_file" "$control_key_file" "$setup_token_file"
 
-          container_id="$(docker run -d \
+          if ! container_id="$(docker run -d \
             --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
             --cap-drop ALL \
@@ -288,7 +288,10 @@ jobs:
             --env DATA_AT_REST_ATTESTATION_FILE=/run/secrets/omni_data_at_rest_attestation.json \
             --env HOST_IP=127.0.0.1 \
             --env ALLOWED_HOSTS=127.0.0.1:4000 \
-            omni-money:ci)"
+            omni-money:ci 2>"$docker_run_error")"; then
+            cat "$docker_run_error"
+            exit 1
+          fi
 
           for _ in $(seq 1 90); do
             if ! health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id" 2>/dev/null)"; then
