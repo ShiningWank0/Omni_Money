@@ -18,8 +18,9 @@ type aiNowFunc func() time.Time
 type aiAuditLogFunc func(aiAuditRecord)
 
 type aiFailedAuthAuditKey struct {
-	remoteIP  string
-	operation string
+	remoteIP        string
+	mtlsFingerprint string
+	operation       string
 	reason    string
 	status    int
 }
@@ -29,8 +30,6 @@ type aiFailedAuthAuditWindow struct {
 	suppressedFirst time.Time
 	lastSeen        time.Time
 	suppressed      uint64
-	mtlsFingerprint string
-	mixedMTLS       bool
 	last            aiAuditRecord
 }
 
@@ -61,8 +60,9 @@ func (aggregator *aiFailedAuthAuditAggregator) record(record aiAuditRecord, now 
 
 	emissions := aggregator.sweepExpiredLocked(now)
 	key := aiFailedAuthAuditKey{
-		remoteIP:  record.RemoteIP,
-		operation: normalizeAIAuditOperation(record.Operation),
+		remoteIP:        record.RemoteIP,
+		mtlsFingerprint: record.MTLSClientSHA256,
+		operation:       normalizeAIAuditOperation(record.Operation),
 		reason:    record.Reason,
 		status:    record.Status,
 	}
@@ -84,10 +84,9 @@ func (aggregator *aiFailedAuthAuditAggregator) record(record aiAuditRecord, now 
 	}
 
 	aggregator.windows[key] = aiFailedAuthAuditWindow{
-		started:         now,
-		lastSeen:        now,
-		mtlsFingerprint: record.MTLSClientSHA256,
-		last:            record,
+		started:  now,
+		lastSeen: now,
+		last:     record,
 	}
 	return append(emissions, record)
 }
@@ -155,12 +154,6 @@ func suppressAIFailedAuthAudit(window aiFailedAuthAuditWindow, record aiAuditRec
 	}
 	if window.suppressed < math.MaxUint64 {
 		window.suppressed++
-	}
-	if !window.mixedMTLS && record.MTLSClientSHA256 != window.mtlsFingerprint {
-		window.mixedMTLS = true
-	}
-	if window.mixedMTLS {
-		record.MTLSClientSHA256 = ""
 	}
 	window.lastSeen = now
 	window.last = record
