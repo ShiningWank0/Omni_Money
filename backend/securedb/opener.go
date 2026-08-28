@@ -92,7 +92,14 @@ func (o *Opener) Open(ctx context.Context, path string, purpose Purpose) (*sql.D
 	if o == nil {
 		return nil, ErrDestroyed
 	}
-	if !o.Encrypted() {
+	o.mu.RLock()
+	destroyed := o.destroyed
+	encrypted := o.encrypted
+	o.mu.RUnlock()
+	if destroyed {
+		return nil, ErrDestroyed
+	}
+	if !encrypted {
 		return openPlain(path, purpose)
 	}
 
