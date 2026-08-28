@@ -87,7 +87,24 @@ func (o *Opener) Backup(ctx context.Context, source *sql.DB, snapshotPath string
 	if err != nil {
 		return err
 	}
-	if err := o.CheckIntegrity(ctx, destination); err != nil {
+	// Release the exact connections used by sqlite3_backup before reopening
+	// the destination for verification. This prevents a pooled connection from
+	// observing pager state that predates backup.Finish().
+	if err := destinationConn.Close(); err != nil {
+		return err
+	}
+	if err := sourceConn.Close(); err != nil {
+		return err
+	}
+	if err := destination.Close(); err != nil {
+		return err
+	}
+	verified, err := o.Open(ctx, snapshotPath, Snapshot)
+	if err != nil {
+		return err
+	}
+	defer verified.Close()
+	if err := o.CheckIntegrity(ctx, verified); err != nil {
 		return err
 	}
 	if err := os.Chmod(snapshotPath, 0600); err != nil {
