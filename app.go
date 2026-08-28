@@ -2,228 +2,542 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"sync"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"omni_money/backend/core"
-	"omni_money/backend/database"
+	"omni_money/backend/desktopaccount"
+	"omni_money/backend/keyenvelope"
 	"omni_money/backend/models"
 )
 
-// App はWailsバインディング用のアプリケーション構造体
+var ErrDesktopVaultChanged = errors.New("Desktop vault was locked or reopened while the operation was awaiting input")
+
+type desktopVaultCoordinator interface {
+	Status() desktopaccount.Status
+	Setup(password []byte) ([]byte, error)
+	Unlock(password []byte) error
+	Recover(recoverySecret, newPassword []byte) ([]byte, error)
+	ChangePassword(currentPassword, newPassword []byte) error
+	RotateRecovery(currentPassword []byte) ([]byte, error)
+	Service() (*desktopaccount.ServiceLease, error)
+	CreateSnapshot() (string, error)
+	ListSnapshots() ([]string, error)
+	RestoreSnapshot(name string) error
+	Lock() error
+	Close() error
+}
+
+// DesktopVaultRecoveryResponse returns non-secret status plus a one-time
+// recovery code. The code must be saved outside Omni Money before continuing.
+type DesktopVaultRecoveryResponse struct {
+	Status       desktopaccount.Status `json:"status"`
+	RecoveryCode string                `json:"recovery_code"`
+}
+
+// App is the Wails binding surface. It owns only the Desktop account
+// coordinator; the encrypted database is opened only after explicit setup,
+// unlock, or recovery.
 type App struct {
-	ctx context.Context
+	mu                 sync.Mutex
+	ctx                context.Context
+	coordinator        desktopVaultCoordinator
+	generation         uint64
+	chooseCSVDirectory func(context.Context) (string, error)
 }
 
-// NewApp は新しいAppインスタンスを作成する
-func NewApp() *App {
-	return &App{}
+// NewApp prepares the Desktop account coordinator without opening a vault.
+func NewApp(dataRoot string) (*App, error) {
+	coordinator, err := desktopaccount.New(dataRoot)
+	if err != nil {
+		return nil, err
+	}
+	return newAppWithCoordinator(coordinator), nil
 }
 
-// startup はアプリ起動時に呼ばれるコールバック
+func newAppWithCoordinator(coordinator desktopVaultCoordinator) *App {
+	return &App{
+		coordinator: coordinator,
+		chooseCSVDirectory: func(ctx context.Context) (string, error) {
+			return wailsRuntime.OpenDirectoryDialog(ctx, wailsRuntime.OpenDialogOptions{
+				Title:                "CSVの保存先（暗号化されたボリューム）を選択",
+				CanCreateDirectories: true,
+				ResolvesAliases:      true,
+			})
+		},
+	}
+}
+
+// startup records the Wails context but deliberately leaves the vault locked.
 func (a *App) startup(ctx context.Context) {
+	a.mu.Lock()
 	a.ctx = ctx
+	a.mu.Unlock()
 }
 
-// --- 口座関連 ---
+func (a *App) shutdown(_ context.Context) {
+	a.mu.Lock()
+	coordinator := a.coordinator
+	a.generation++
+	a.ctx = nil
+	a.mu.Unlock()
+	if coordinator != nil {
+		_ = coordinator.Close()
+	}
+}
 
-// GetAccounts はデータベースから口座名のリストを返す
+func (a *App) borrowService() (*core.Service, func(), error) {
+	if a == nil || a.coordinator == nil {
+		return nil, nil, desktopaccount.ErrClosed
+	}
+	lease, err := a.coordinator.Service()
+	if err != nil {
+		return nil, nil, err
+	}
+	service, err := lease.Core()
+	if err != nil {
+		lease.Release()
+		return nil, nil, err
+	}
+	return service, lease.Release, nil
+}
+
+func clearBytes(value []byte) {
+	for i := range value {
+		value[i] = 0
+	}
+}
+
+func recoveryResponse(status desktopaccount.Status, secret []byte) DesktopVaultRecoveryResponse {
+	return DesktopVaultRecoveryResponse{
+		Status:       status,
+		RecoveryCode: base64.RawURLEncoding.EncodeToString(secret),
+	}
+}
+
+// GetDesktopVaultStatus is the only data-bearing call the frontend needs
+// before unlock. Status contains no secret material and never opens the vault.
+func (a *App) GetDesktopVaultStatus() desktopaccount.Status {
+	if a == nil || a.coordinator == nil {
+		return desktopaccount.Status{}
+	}
+	return a.coordinator.Status()
+}
+
+func (a *App) SetupDesktopVault(password string) (DesktopVaultRecoveryResponse, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	passwordBytes := []byte(password)
+	defer clearBytes(passwordBytes)
+	secret, err := a.coordinator.Setup(passwordBytes)
+	if err != nil {
+		return DesktopVaultRecoveryResponse{}, err
+	}
+	defer clearBytes(secret)
+	a.generation++
+	return recoveryResponse(a.coordinator.Status(), secret), nil
+}
+
+func (a *App) UnlockDesktopVault(password string) (desktopaccount.Status, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	passwordBytes := []byte(password)
+	defer clearBytes(passwordBytes)
+	if err := a.coordinator.Unlock(passwordBytes); err != nil {
+		return a.coordinator.Status(), err
+	}
+	a.generation++
+	return a.coordinator.Status(), nil
+}
+
+func (a *App) RecoverDesktopVault(recoveryCode, newPassword string) (DesktopVaultRecoveryResponse, error) {
+	recoverySecret, err := base64.RawURLEncoding.Strict().DecodeString(recoveryCode)
+	if err != nil || len(recoverySecret) != keyenvelope.RecoverySecretSize {
+		clearBytes(recoverySecret)
+		return DesktopVaultRecoveryResponse{}, keyenvelope.ErrAuthentication
+	}
+	defer clearBytes(recoverySecret)
+	passwordBytes := []byte(newPassword)
+	defer clearBytes(passwordBytes)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	nextSecret, err := a.coordinator.Recover(recoverySecret, passwordBytes)
+	if err != nil {
+		return DesktopVaultRecoveryResponse{}, err
+	}
+	defer clearBytes(nextSecret)
+	a.generation++
+	return recoveryResponse(a.coordinator.Status(), nextSecret), nil
+}
+
+func (a *App) LockDesktopVault() (desktopaccount.Status, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.coordinator.Lock(); err != nil {
+		return a.coordinator.Status(), err
+	}
+	a.generation++
+	return a.coordinator.Status(), nil
+}
+
+func (a *App) ChangeDesktopVaultPassword(currentPassword, newPassword string) (desktopaccount.Status, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	currentBytes := []byte(currentPassword)
+	newBytes := []byte(newPassword)
+	defer clearBytes(currentBytes)
+	defer clearBytes(newBytes)
+	if err := a.coordinator.ChangePassword(currentBytes, newBytes); err != nil {
+		return a.coordinator.Status(), err
+	}
+	return a.coordinator.Status(), nil
+}
+
+func (a *App) RotateDesktopVaultRecovery(currentPassword string) (DesktopVaultRecoveryResponse, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	passwordBytes := []byte(currentPassword)
+	defer clearBytes(passwordBytes)
+	secret, err := a.coordinator.RotateRecovery(passwordBytes)
+	if err != nil {
+		return DesktopVaultRecoveryResponse{}, err
+	}
+	defer clearBytes(secret)
+	return recoveryResponse(a.coordinator.Status(), secret), nil
+}
+
+// --- Accounts ---
+
 func (a *App) GetAccounts() ([]string, error) {
-	return core.GetAccounts()
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetAccounts()
 }
 
-// --- 取引関連 ---
+// --- Transactions ---
 
-// GetTransactions は取引履歴を返す
 func (a *App) GetTransactions(account string, search string) ([]models.TransactionResponse, error) {
-	return core.GetTransactions(account, search)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetTransactions(account, search)
 }
 
-// AddTransaction は新しい取引を追加する
 func (a *App) AddTransaction(req models.TransactionRequest) (*models.TransactionResponse, error) {
-	return core.AddTransaction(req)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.AddTransaction(req)
 }
 
-// UpdateTransaction は既存の取引を更新する
 func (a *App) UpdateTransaction(id int64, req models.TransactionRequest) (*models.TransactionResponse, error) {
-	return core.UpdateTransaction(id, req)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.UpdateTransaction(id, req)
 }
 
-// DeleteTransaction は取引を削除する
 func (a *App) DeleteTransaction(id int64) error {
-	return core.DeleteTransaction(id)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return service.DeleteTransaction(id)
 }
 
-// --- 残高関連 ---
+// --- Balances ---
 
-// GetBalanceHistory は残高推移データを返す
 func (a *App) GetBalanceHistory() (*models.BalanceHistoryResponse, error) {
-	return core.GetBalanceHistory()
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetBalanceHistory()
 }
 
-// GetBalanceHistoryFiltered はクレジットカード除外を考慮した残高推移データを返す
 func (a *App) GetBalanceHistoryFiltered(fundItems []string) (*models.BalanceHistoryResponse, error) {
-	return core.GetBalanceHistoryFiltered(fundItems)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetBalanceHistoryFiltered(fundItems)
 }
 
-// --- 項目関連 ---
+// --- Items and settings ---
 
-// GetItems は項目名のリストを返す
 func (a *App) GetItems(account string) ([]string, error) {
-	return core.GetItems(account)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetItems(account)
 }
 
-// --- クレジットカード設定 ---
-
-// GetCreditCardSettings はクレジットカード設定を取得する
 func (a *App) GetCreditCardSettings() ([]string, error) {
-	return core.GetCreditCardSettings()
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetCreditCardSettings()
 }
 
-// SaveCreditCardSettings はクレジットカード設定を保存する
 func (a *App) SaveCreditCardSettings(items []string) error {
-	return core.SaveCreditCardSettings(items)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return service.SaveCreditCardSettings(items)
 }
 
-// GetBankAccountSettings はカード引き落とし元の銀行口座設定を取得する
 func (a *App) GetBankAccountSettings() ([]string, error) {
-	return core.GetBankAccountSettings()
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetBankAccountSettings()
 }
 
-// SaveBankAccountSettings はカード引き落とし元の銀行口座設定を保存する
 func (a *App) SaveBankAccountSettings(items []string) error {
-	return core.SaveBankAccountSettings(items)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return service.SaveBankAccountSettings(items)
 }
 
-// --- CSV関連 ---
+// --- CSV ---
 
-// BackupToCSV はCSVバックアップを作成する
-func (a *App) BackupToCSV() (string, error) {
-	return core.BackupToCSV()
-}
-
-// BackupToCSVFile asks the user for the encrypted destination directory before
-// writing a plaintext CSV. Cancellation returns an empty path without writing.
+// BackupToCSVFile does not retain a service lease while the native directory
+// dialog is open. It rejects the operation if a lock/reopen boundary occurred
+// while the user was choosing a destination.
 func (a *App) BackupToCSVFile() (string, error) {
-	destination, err := wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
-		Title:                "CSVの保存先（暗号化されたボリューム）を選択",
-		CanCreateDirectories: true,
-		ResolvesAliases:      true,
-	})
+	a.mu.Lock()
+	if !a.coordinator.Status().Unlocked {
+		a.mu.Unlock()
+		return "", desktopaccount.ErrLocked
+	}
+	ctx := a.ctx
+	generation := a.generation
+	chooser := a.chooseCSVDirectory
+	a.mu.Unlock()
+
+	if chooser == nil {
+		return "", errors.New("CSV directory chooser is unavailable")
+	}
+	destination, err := chooser(ctx)
 	if err != nil {
 		return "", fmt.Errorf("CSV保存先を選択できませんでした: %w", err)
 	}
 	if destination == "" {
 		return "", nil
 	}
-	return core.BackupToCSVDirectory(destination)
+
+	a.mu.Lock()
+	if generation != a.generation || !a.coordinator.Status().Unlocked {
+		a.mu.Unlock()
+		return "", ErrDesktopVaultChanged
+	}
+	lease, err := a.coordinator.Service()
+	a.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	defer lease.Release()
+	service, err := lease.Core()
+	if err != nil {
+		return "", err
+	}
+	return service.BackupToCSVDirectory(destination)
 }
 
-// ImportCSV はCSVファイルからデータをインポートする
 func (a *App) ImportCSV(content string, mode string) (int, error) {
-	return core.ImportCSV(content, mode)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	return service.ImportCSV(content, mode)
 }
 
-// --- スナップショット関連 ---
+// --- Snapshots ---
 
-// CreateSnapshot はデータベースのスナップショットを作成する
 func (a *App) CreateSnapshot() (string, error) {
-	return database.CreateSnapshot("")
+	return a.coordinator.CreateSnapshot()
 }
 
-// ListSnapshots はスナップショットの一覧を返す
 func (a *App) ListSnapshots() ([]string, error) {
-	return database.ListSnapshots("")
+	return a.coordinator.ListSnapshots()
 }
 
-// RestoreSnapshot はスナップショットからデータベースを復元する
 func (a *App) RestoreSnapshot(name string) error {
-	return database.RestoreSnapshot("", name)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.coordinator.RestoreSnapshot(name); err != nil {
+		return err
+	}
+	a.generation++
+	return nil
 }
 
-// Greet は挨拶を返す（テスト用）
-func (a *App) Greet(name string) string {
-	return fmt.Sprintf("Hello %s, Omni Moneyへようこそ!", name)
-}
+// --- Transaction images ---
 
-// --- 画像関連 (Agent.md §6.5) ---
-
-// AddTransactionImage は取引に画像を追加する
 func (a *App) AddTransactionImage(transactionID int64, img models.TransactionImageRequest) (*models.TransactionImageResponse, error) {
-	return core.AddTransactionImage(transactionID, img)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.AddTransactionImage(transactionID, img)
 }
 
-// GetTransactionImages は取引の画像一覧を返す
 func (a *App) GetTransactionImages(transactionID int64) ([]models.TransactionImageResponse, error) {
-	return core.GetTransactionImages(transactionID)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetTransactionImages(transactionID)
 }
 
-// DeleteTransactionImage は取引から画像を削除する
 func (a *App) DeleteTransactionImage(imageID int64) error {
-	return core.DeleteTransactionImage(imageID)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return service.DeleteTransactionImage(imageID)
 }
 
-// --- タグ関連 (Agent.md §6.6) ---
+// --- Tags ---
 
-// CreateTag は新しいタグを作成する
 func (a *App) CreateTag(name string, parentID *int64) (*models.Tag, error) {
-	return core.CreateTag(name, parentID)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.CreateTag(name, parentID)
 }
 
-// CreateTagByPath は「/」区切りのパスからタグを階層的に作成する
 func (a *App) CreateTagByPath(path string) (*models.Tag, error) {
-	return core.CreateTagByPath(path)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.CreateTagByPath(path)
 }
 
-// GetTags はタグ一覧をツリー構造で返す
 func (a *App) GetTags() ([]models.Tag, error) {
-	return core.GetTags()
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetTags()
 }
 
-// UpdateTag はタグ名を更新する
 func (a *App) UpdateTag(id int64, name string) error {
-	return core.UpdateTag(id, name)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return service.UpdateTag(id, name)
 }
 
-// DeleteTag はタグを削除する
 func (a *App) DeleteTag(id int64) error {
-	return core.DeleteTag(id)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return service.DeleteTag(id)
 }
 
-// GetTransactionTags は取引に紐付いたタグを返す
 func (a *App) GetTransactionTags(transactionID int64) ([]models.Tag, error) {
-	return core.GetTransactionTags(transactionID)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetTransactionTags(transactionID)
 }
 
-// AddTransactionTags は取引にタグを追加する
 func (a *App) AddTransactionTags(transactionID int64, tagIDs []int64) error {
-	return core.AddTransactionTags(transactionID, tagIDs)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return service.AddTransactionTags(transactionID, tagIDs)
 }
 
-// RemoveTransactionTag は取引からタグを削除する
 func (a *App) RemoveTransactionTag(transactionID, tagID int64) error {
-	return core.RemoveTransactionTag(transactionID, tagID)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return service.RemoveTransactionTag(transactionID, tagID)
 }
 
-// GetTagSummary はタグ別集計データを返す（円グラフ用）
 func (a *App) GetTagSummary(txType, startDate, endDate string) ([]models.TagSummary, error) {
-	return core.GetTagSummary(txType, startDate, endDate)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetTagSummary(txType, startDate, endDate)
 }
 
-// --- 取引紐付け関連 (Agent.md §6.2) ---
+// --- Transaction links ---
 
-// GetTransactionLinks は取引に紐付いた取引の一覧を返す
 func (a *App) GetTransactionLinks(transactionID int64) ([]models.LinkedTransactionResponse, error) {
-	return core.GetTransactionLinks(transactionID)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetTransactionLinks(transactionID)
 }
 
-// AddTransactionLink は取引同士を紐付ける
 func (a *App) AddTransactionLink(parentID, childID int64) error {
-	return core.AddTransactionLink(parentID, childID)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return service.AddTransactionLink(parentID, childID)
 }
 
-// RemoveTransactionLink は取引の紐付けを解除する
 func (a *App) RemoveTransactionLink(transactionID, linkedID int64) error {
-	return core.RemoveTransactionLink(transactionID, linkedID)
+	service, release, err := a.borrowService()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return service.RemoveTransactionLink(transactionID, linkedID)
 }

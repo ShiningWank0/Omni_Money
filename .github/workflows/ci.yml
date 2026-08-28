@@ -70,7 +70,7 @@ jobs:
           CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib
           LD_LIBRARY_PATH: /tmp/omni-sqlcipher/lib
           OMNI_REQUIRE_SQLCIPHER_TESTS: "1"
-        run: go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/securedb ./backend/database ./backend/control ./backend/vault ./backend/api
+        run: go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/securedb ./backend/database ./backend/control ./backend/vault ./backend/desktopaccount ./backend/api
       - name: Cross-build Windows secret boundaries
         env:
           CGO_ENABLED: "0"
