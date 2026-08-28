@@ -127,9 +127,9 @@ The multi-vault change is intentionally split into reviewable stages:
 1. database instances, key envelopes, encrypted control store, and an internal vault manager;
 2. instance-bound business services, atomic credential/reset mutations, and
    session/request vault lease ownership;
-3. first-admin HTTP bootstrap, invitations, login/recovery/reset, and production
-   route selection (delivered); legacy single-user migration and the admin UI
-   remain follow-up work;
+3. first-admin HTTP bootstrap, invitations, login/recovery/reset, production
+   route selection, and the account-only admin UI (delivered); legacy
+   single-user migration remains follow-up work;
 4. per-user AI credentials bound cryptographically to their owner vault;
 5. the desktop single-user vault setup, unlock, recovery, and lock lifecycle.
 
