@@ -42,7 +42,7 @@ const (
 	maxPasswordSize  = 1024 * 1024
 	maxContextIDSize = 4096
 
-	passwordKDF = "argon2id-hkdf-sha256"
+	passwordKDF = "argon2id-hkdf-sha256" // #nosec G101 -- public algorithm identifier, not a credential.
 	recoveryKDF = "hkdf-sha256"
 )
 
@@ -445,7 +445,9 @@ func authenticatedData(context Context, kind Kind, version uint8) []byte {
 
 func appendLengthPrefixed(destination, value []byte) []byte {
 	var length [4]byte
-	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+	// All callers pass validated identifiers capped at 4096 bytes or a fixed
+	// envelope kind. The conversion cannot truncate under that invariant.
+	binary.BigEndian.PutUint32(length[:], uint32(len(value))) // #nosec G115 -- bounded above before this helper is called.
 	destination = append(destination, length[:]...)
 	return append(destination, value...)
 }

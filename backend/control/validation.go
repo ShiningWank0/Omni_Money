@@ -139,7 +139,7 @@ func validateOpaque(value []byte, name string, minimum, maximum int) error {
 }
 
 const (
-	passwordEnvelopeKDF = "argon2id-hkdf-sha256"
+	passwordEnvelopeKDF = "argon2id-hkdf-sha256" // #nosec G101 -- public algorithm identifier, not a credential.
 	recoveryEnvelopeKDF = "hkdf-sha256"
 )
 

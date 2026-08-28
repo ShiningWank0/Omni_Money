@@ -9,7 +9,7 @@ import (
 )
 
 const passwordResetColumns = `id, user_id, state, created_by,
-	created_at_ms, expires_at_ms, resolved_at_ms`
+	created_at_ms, expires_at_ms, resolved_at_ms` // #nosec G101 -- static SQL column projection, not a credential.
 
 func (s *Store) CreatePasswordResetTicket(
 	ctx context.Context,
