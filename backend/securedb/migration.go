@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -71,7 +70,7 @@ func migratePlaintext(ctx context.Context, path string, opener *Opener) (retErr 
 	if err != nil {
 		return fmt.Errorf("create private migration directory: %w", err)
 	}
-	if err := os.Chmod(stageDir, 0700); err != nil {
+	if err := os.Chmod(stageDir, 0700); err != nil { // #nosec G302 -- this is a directory and must be traversable only by its owner.
 		_ = os.RemoveAll(stageDir)
 		return fmt.Errorf("secure migration directory: %w", err)
 	}
@@ -185,12 +184,11 @@ func exportEncrypted(ctx context.Context, source *sql.DB, targetPath string, key
 		return err
 	}
 	defer conn.Close()
-	hexKey := make([]byte, hex.EncodedLen(len(key)))
-	hex.Encode(hexKey, key[:])
-	attach := `ATTACH DATABASE '` + sqliteQuote(targetPath) + `' AS encrypted KEY "x'` + string(hexKey) + `'"`
-	clear(hexKey)
-	if _, err := conn.ExecContext(ctx, attach); err != nil {
-		return fmt.Errorf("attach encrypted migration target: %w", err)
+	keySpec := rawKeySpec(key)
+	_, attachErr := conn.ExecContext(ctx, "ATTACH DATABASE ? AS encrypted KEY ?", targetPath, string(keySpec))
+	clear(keySpec)
+	if attachErr != nil {
+		return fmt.Errorf("attach encrypted migration target: %w", attachErr)
 	}
 	attached := true
 	defer func() {
@@ -236,8 +234,6 @@ func exportEncrypted(ctx context.Context, source *sql.DB, targetPath string, key
 	attached = false
 	return nil
 }
-
-func sqliteQuote(value string) string { return strings.ReplaceAll(value, "'", "''") }
 
 func compareLogicalDatabases(ctx context.Context, source, target *sql.DB) error {
 	tables, err := listTables(ctx, source)
@@ -286,7 +282,7 @@ func listTables(ctx context.Context, db *sql.DB) ([]string, error) {
 
 func tableDigest(ctx context.Context, db *sql.DB, table string) ([32]byte, int64, error) {
 	hash := sha256.New()
-	query := "SELECT * FROM " + quoteIdentifier(table) + " ORDER BY rowid"
+	query := "SELECT * FROM " + quoteIdentifier(table) + " ORDER BY rowid" // #nosec G202 -- table is read from sqlite_schema and escaped as an identifier.
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return [32]byte{}, 0, err
