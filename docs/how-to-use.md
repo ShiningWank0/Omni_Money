@@ -76,9 +76,9 @@ data directoryはcontainer UID/GID `10001:10001`だけが書けるようにし�
 ```bash
 sudo chown 10001:10001 data secrets/control-database.key secrets/initial-admin-setup.token
 sudo chown root:root secrets/omni_data_at_rest.json
-chmod 700 data
-chmod 400 secrets/control-database.key secrets/initial-admin-setup.token
-chmod 444 secrets/omni_data_at_rest.json
+sudo chmod 700 data
+sudo chmod 400 secrets/control-database.key secrets/initial-admin-setup.token
+sudo chmod 444 secrets/omni_data_at_rest.json
 docker compose -f compose.yaml -f compose.bootstrap.yaml -f compose.local.yaml up -d --build
 ```
 
