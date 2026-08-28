@@ -593,7 +593,7 @@ func TestServiceDisableUserCommitsBeforeInvalidationAndVaultClose(t *testing.T) 
 	}
 }
 
-func TestUnknownLoginsForSameCanonicalEmailAreSerialized(t *testing.T) {
+func TestUnknownLoginsForSameCanonicalEmailRejectConcurrentWaiters(t *testing.T) {
 	const canonicalEmail = "unknown@example.com"
 	firstLookupEntered := make(chan struct{})
 	releaseFirstLookup := make(chan struct{})
@@ -636,31 +636,31 @@ func TestUnknownLoginsForSameCanonicalEmailAreSerialized(t *testing.T) {
 		results <- err
 	}()
 
-	lockKey := "email:" + canonicalEmail
-	waitForServerAuthCondition(t, 2*time.Second, func() bool {
-		service.locksMu.Lock()
-		defer service.locksMu.Unlock()
-		entry := service.locks[lockKey]
-		return entry != nil && entry.refs == 2
-	}, "second canonical-email login did not join the first login lock")
+	select {
+	case err := <-results:
+		if !errors.Is(err, ErrAuthenticationBusy) {
+			t.Fatalf("concurrent unknown login error = %v, want ErrAuthenticationBusy", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("concurrent unknown login blocked instead of failing busy")
+	}
 	if calls := lookupCalls.Load(); calls != 1 {
 		t.Fatalf("unknown account lookup ran concurrently %d times, want 1", calls)
 	}
 
 	releaseFirst()
-	for index := 0; index < 2; index++ {
-		select {
-		case err := <-results:
-			if !errors.Is(err, ErrInvalidCredentials) {
-				t.Fatalf("unknown login error = %v, want ErrInvalidCredentials", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("serialized unknown login did not complete")
+	select {
+	case err := <-results:
+		if !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("unknown login error = %v, want ErrInvalidCredentials", err)
 		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first unknown login did not complete")
 	}
-	if calls := lookupCalls.Load(); calls != 2 {
-		t.Fatalf("unknown account lookup calls = %d, want 2", calls)
+	if calls := lookupCalls.Load(); calls != 1 {
+		t.Fatalf("unknown account lookup calls = %d, want 1", calls)
 	}
+	lockKey := "email:" + canonicalEmail
 	waitForServerAuthCondition(t, time.Second, func() bool {
 		service.locksMu.Lock()
 		defer service.locksMu.Unlock()

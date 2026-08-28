@@ -136,6 +136,10 @@ func resolveRateLimitBucket(req *http.Request) (bucket string, limit int) {
 	switch {
 	case req.Method == http.MethodPost && path == "/api/auth/login":
 		return "login", loginRateLimitPerMinute
+	case req.Method == http.MethodPost && path == "/api/auth/reauth":
+		return "reauth", loginRateLimitPerMinute
+	case req.Method == http.MethodPost && isPublicServerAuthRequest(req):
+		return "account-auth", loginRateLimitPerMinute
 	case req.Method == http.MethodPost && path == "/api/v1/ai/transactions":
 		return "ai-transactions", aiTxRateLimitPerMinute
 	default:

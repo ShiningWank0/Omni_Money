@@ -236,13 +236,14 @@ func (lease *requestVaultLease) Service() *core.Service {
 // SessionManager uses one mutex for lookup/touch/delete/rotation. This avoids
 // a Load-then-Store race that could resurrect a session after logout.
 type SessionManager struct {
-	config    SessionConfig
-	mu        sync.Mutex
-	sessions  map[string]*sessionRecord
-	now       func() time.Time
-	done      chan struct{}
-	closeOnce sync.Once
-	closed    bool
+	config     SessionConfig
+	mu         sync.Mutex
+	sessions   map[string]*sessionRecord
+	now        func() time.Time
+	done       chan struct{}
+	closedDone chan struct{}
+	closeOnce  sync.Once
+	closed     bool
 }
 
 // NewSessionManager preserves the previous test-facing constructor while
@@ -276,10 +277,11 @@ func NewSessionManagerWithConfig(config SessionConfig) *SessionManager {
 		config.MaxConcurrent = defaults.MaxConcurrent
 	}
 	sm := &SessionManager{
-		config:   config,
-		sessions: make(map[string]*sessionRecord),
-		now:      time.Now,
-		done:     make(chan struct{}),
+		config:     config,
+		sessions:   make(map[string]*sessionRecord),
+		now:        time.Now,
+		done:       make(chan struct{}),
+		closedDone: make(chan struct{}),
 	}
 	go sm.cleanupLoop()
 	return sm
@@ -293,8 +295,18 @@ func minDuration(a, b time.Duration) time.Duration {
 }
 
 func (m *SessionManager) Close() {
+	_ = m.CloseContext(context.Background())
+}
+
+// CloseContext invalidates every session immediately, then releases root
+// vault leases within the caller's shutdown budget. Release continues in the
+// background after a deadline so later cleanup stages are never skipped.
+func (m *SessionManager) CloseContext(ctx context.Context) error {
 	if m == nil {
-		return
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	m.closeOnce.Do(func() {
 		close(m.done)
@@ -305,8 +317,17 @@ func (m *SessionManager) Close() {
 			roots = append(roots, m.deleteRecordLocked(id))
 		}
 		m.mu.Unlock()
-		releaseSessionVaultRoots(roots)
+		go func() {
+			releaseSessionVaultRoots(roots)
+			close(m.closedDone)
+		}()
 	})
+	select {
+	case <-m.closedDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // IdleTimeoutSeconds returns the server-enforced inactivity timeout in whole
@@ -870,17 +891,36 @@ func writeVaultRoutingUnavailable(w http.ResponseWriter) {
 }
 
 func requiresSessionAuth(r *http.Request) bool {
-	path := r.URL.Path
-	if !strings.HasPrefix(path, "/api/") {
+	if !strings.HasPrefix(r.URL.Path, "/api/") {
 		return false
 	}
-	if path == "/api/auth/login" && r.Method == http.MethodPost {
-		return false
-	}
-	if path == "/api/auth/status" && r.Method == http.MethodGet {
+	if isPublicServerAuthRequest(r) {
 		return false
 	}
 	return true
+}
+
+// isPublicServerAuthRequest is an exact method/path allowlist. Tokens and
+// account secrets are accepted only in bounded POST bodies; a prefix match or
+// trailing-slash variant must never become an authentication bypass.
+func isPublicServerAuthRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	switch {
+	case r.URL.Path == "/api/auth/status" && r.Method == http.MethodGet:
+		return true
+	case r.URL.Path == "/api/auth/login" && r.Method == http.MethodPost:
+		return true
+	case r.URL.Path == "/api/auth/setup" && r.Method == http.MethodPost:
+		return true
+	case r.URL.Path == "/api/auth/invitations/accept" && r.Method == http.MethodPost:
+		return true
+	case r.URL.Path == "/api/auth/password-reset/complete" && r.Method == http.MethodPost:
+		return true
+	default:
+		return false
+	}
 }
 
 func writeAuthRequired(w http.ResponseWriter) {

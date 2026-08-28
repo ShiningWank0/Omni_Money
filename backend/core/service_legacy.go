@@ -24,6 +24,13 @@ func newLegacyService() (*Service, error) {
 	}, nil
 }
 
+// NewLegacyService returns an explicit Service backed by the historical
+// package-level Desktop database. Only compatibility wiring such as the legacy
+// router may use it; multi-user server code must use a request vault Service.
+func NewLegacyService() (*Service, error) {
+	return newLegacyService()
+}
+
 func GetAccounts() ([]string, error) {
 	s, err := newLegacyService()
 	if err != nil {

@@ -82,33 +82,12 @@ func NewRouterWithError() (http.Handler, error) {
 	mux.HandleFunc("/api/ai-console/transactions", methodGuard(http.MethodPost, handleAIConsoleProxy("/api/v1/ai/transactions")))
 	mux.HandleFunc("/api/ai-console/analysis", methodGuard(http.MethodPost, handleAIConsoleProxy("/api/v1/ai/analysis")))
 
-	// API エンドポイント（メソッド制約付き）
-	mux.HandleFunc("/api/accounts", methodGuard(http.MethodGet, handleAccounts))
-	mux.HandleFunc("/api/items", methodGuard(http.MethodGet, handleItems))
-	mux.HandleFunc("/api/transactions", handleTransactions)
-	mux.HandleFunc("/api/transactions/", handleTransactionByID)
-	mux.HandleFunc("/api/balance_history", methodGuard(http.MethodGet, handleBalanceHistory))
-	mux.HandleFunc("/api/balance_history_filtered", methodGuard(http.MethodGet, handleBalanceHistoryFiltered))
-	mux.HandleFunc("/api/credit_card_settings", handleCreditCardSettings)
-	mux.HandleFunc("/api/bank_account_settings", handleBankAccountSettings)
-	mux.HandleFunc("/api/backup_csv", methodGuard(http.MethodGet, handleBackupCSV))
-	mux.HandleFunc("/api/import_csv", methodGuard(http.MethodPost, handleImportCSV))
+	registerFinancialRoutes(mux)
+
+	// Snapshot lifecycle remains on the legacy router until the dedicated
+	// per-vault restore coordinator is introduced.
 	mux.HandleFunc("/api/snapshots", handleSnapshots)
 	mux.HandleFunc("/api/snapshots/restore", methodGuard(http.MethodPost, handleSnapshotRestore))
-
-	// 画像API（Agent.md §6.5）
-	mux.HandleFunc("/api/transaction_images/", handleTransactionImages)
-	mux.HandleFunc("/api/image_storage", methodGuard(http.MethodGet, handleImageStorageUsage))
-
-	// タグAPI（Agent.md §6.6）
-	mux.HandleFunc("/api/tags", handleTags)
-	mux.HandleFunc("/api/tags/", handleTagByID)
-	mux.HandleFunc("/api/tags/path", handleCreateTagByPath)
-	mux.HandleFunc("/api/tags/summary", handleTagSummary)
-	mux.HandleFunc("/api/transaction_tags/", handleTransactionTagsAPI)
-
-	// 取引紐付けAPI（Agent.md §6.2）
-	mux.HandleFunc("/api/transaction_links/", handleTransactionLinksAPI)
 
 	// 公開WebポートではAI APIを提供しない。認証済みセッションからアクセスしても404。
 	mux.HandleFunc("/api/v1/ai/", http.NotFound)
@@ -119,7 +98,7 @@ func NewRouterWithError() (http.Handler, error) {
 	})
 
 	// サーバーモード用ミドルウェアの適用
-	var handler http.Handler = mux
+	var handler http.Handler = middleware.LegacyCoreServiceMiddleware(mux)
 	handler = middleware.RecentAuthMiddleware(sessionManager, handler)
 	handler = middleware.CSRFMiddleware(sessionManager, handler)
 	handler = middleware.SessionAuthMiddleware(sessionManager, handler)
@@ -131,6 +110,30 @@ func NewRouterWithError() (http.Handler, error) {
 	handler = middleware.ProxyMiddleware(proxyConfig, handler)
 	handler = middleware.CacheControlMiddleware(handler)
 	return handler, nil
+}
+
+// registerFinancialRoutes installs browser routes that must always operate on
+// the request-scoped core Service. The legacy router explicitly installs one;
+// multi-user server routers obtain one only from VaultSessionAuthMiddleware.
+func registerFinancialRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/accounts", methodGuard(http.MethodGet, handleAccounts))
+	mux.HandleFunc("/api/items", methodGuard(http.MethodGet, handleItems))
+	mux.HandleFunc("/api/transactions", handleTransactions)
+	mux.HandleFunc("/api/transactions/", handleTransactionByID)
+	mux.HandleFunc("/api/balance_history", methodGuard(http.MethodGet, handleBalanceHistory))
+	mux.HandleFunc("/api/balance_history_filtered", methodGuard(http.MethodGet, handleBalanceHistoryFiltered))
+	mux.HandleFunc("/api/credit_card_settings", handleCreditCardSettings)
+	mux.HandleFunc("/api/bank_account_settings", handleBankAccountSettings)
+	mux.HandleFunc("/api/backup_csv", methodGuard(http.MethodGet, handleBackupCSV))
+	mux.HandleFunc("/api/import_csv", methodGuard(http.MethodPost, handleImportCSV))
+	mux.HandleFunc("/api/transaction_images/", handleTransactionImages)
+	mux.HandleFunc("/api/image_storage", methodGuard(http.MethodGet, handleImageStorageUsage))
+	mux.HandleFunc("/api/tags", handleTags)
+	mux.HandleFunc("/api/tags/", handleTagByID)
+	mux.HandleFunc("/api/tags/path", handleCreateTagByPath)
+	mux.HandleFunc("/api/tags/summary", handleTagSummary)
+	mux.HandleFunc("/api/transaction_tags/", handleTransactionTagsAPI)
+	mux.HandleFunc("/api/transaction_links/", handleTransactionLinksAPI)
 }
 
 func totpVerifierFromEnv() (middleware.OneTimeCodeVerifier, error) {
@@ -187,33 +190,76 @@ func methodGuard(method string, handler http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+const (
+	financialServiceUnavailableMessage = "ユーザーデータを安全に開けません"
+	financialInvalidRequestMessage     = "リクエストデータが無効です"
+	financialInternalErrorMessage      = "サーバー内部でエラーが発生しました"
+)
+
+func financialService(w http.ResponseWriter, r *http.Request) (*core.Service, bool) {
+	service, ok := middleware.CoreServiceFromContext(r.Context())
+	if !ok {
+		jsonError(w, financialServiceUnavailableMessage, http.StatusServiceUnavailable)
+		return nil, false
+	}
+	return service, true
+}
+
+func writeFinancialError(w http.ResponseWriter, err error, status int) {
+	if errors.Is(err, core.ErrServiceUnavailable) {
+		jsonError(w, financialServiceUnavailableMessage, http.StatusServiceUnavailable)
+		return
+	}
+	if status >= http.StatusInternalServerError {
+		jsonError(w, financialInternalErrorMessage, status)
+		return
+	}
+	jsonError(w, financialInvalidRequestMessage, status)
+}
+
 func handleAccounts(w http.ResponseWriter, r *http.Request) {
-	accounts, err := core.GetAccounts()
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
+	accounts, err := service.GetAccounts()
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		writeFinancialError(w, err, http.StatusInternalServerError)
 		return
 	}
 	jsonResponse(w, accounts, http.StatusOK)
 }
 
 func handleItems(w http.ResponseWriter, r *http.Request) {
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
 	account := r.URL.Query().Get("account")
-	items, err := core.GetItems(account)
+	items, err := service.GetItems(account)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		writeFinancialError(w, err, http.StatusInternalServerError)
 		return
 	}
 	jsonResponse(w, items, http.StatusOK)
 }
 
 func handleTransactions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		search := r.URL.Query().Get("search")
 		account := r.URL.Query().Get("account")
-		transactions, err := core.GetTransactions(account, search)
+		transactions, err := service.GetTransactions(account, search)
 		if err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, transactions, http.StatusOK)
@@ -224,9 +270,9 @@ func handleTransactions(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 			return
 		}
-		resp, err := core.AddTransactionContext(r.Context(), req)
+		resp, err := service.AddTransactionContext(r.Context(), req)
 		if err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
 		jsonResponse(w, map[string]interface{}{
@@ -234,12 +280,18 @@ func handleTransactions(w http.ResponseWriter, r *http.Request) {
 			"transaction": resp,
 		}, http.StatusCreated)
 
-	default:
-		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func handleTransactionByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut && r.Method != http.MethodPatch && r.Method != http.MethodDelete {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
 	// "/api/transactions/123" からIDを抽出
 	path := strings.TrimPrefix(r.URL.Path, "/api/transactions/")
 	id, err := strconv.ParseInt(path, 10, 64)
@@ -255,9 +307,9 @@ func handleTransactionByID(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 			return
 		}
-		resp, err := core.UpdateTransactionContext(r.Context(), id, req)
+		resp, err := service.UpdateTransactionContext(r.Context(), id, req)
 		if err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
 		jsonResponse(w, map[string]interface{}{
@@ -266,42 +318,55 @@ func handleTransactionByID(w http.ResponseWriter, r *http.Request) {
 		}, http.StatusOK)
 
 	case http.MethodDelete:
-		if err := core.DeleteTransaction(id); err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+		if err := service.DeleteTransaction(id); err != nil {
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "取引が削除されました"}, http.StatusOK)
-
-	default:
-		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func handleBalanceHistory(w http.ResponseWriter, r *http.Request) {
-	resp, err := core.GetBalanceHistory()
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
+	resp, err := service.GetBalanceHistory()
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		writeFinancialError(w, err, http.StatusInternalServerError)
 		return
 	}
 	jsonResponse(w, resp, http.StatusOK)
 }
 
 func handleBalanceHistoryFiltered(w http.ResponseWriter, r *http.Request) {
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
 	fundItems := r.URL.Query()["fund_items"]
-	resp, err := core.GetBalanceHistoryFiltered(fundItems)
+	resp, err := service.GetBalanceHistoryFiltered(fundItems)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		writeFinancialError(w, err, http.StatusInternalServerError)
 		return
 	}
 	jsonResponse(w, resp, http.StatusOK)
 }
 
 func handleCreditCardSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		items, err := core.GetCreditCardSettings()
+		items, err := service.GetCreditCardSettings()
 		if err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, items, http.StatusOK)
@@ -314,8 +379,8 @@ func handleCreditCardSettings(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 			return
 		}
-		if err := core.SaveCreditCardSettings(body.CreditCardItems); err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+		if err := service.SaveCreditCardSettings(body.CreditCardItems); err != nil {
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, map[string]interface{}{
@@ -323,17 +388,23 @@ func handleCreditCardSettings(w http.ResponseWriter, r *http.Request) {
 			"credit_card_items": body.CreditCardItems,
 		}, http.StatusOK)
 
-	default:
-		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func handleBankAccountSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		items, err := core.GetBankAccountSettings()
+		items, err := service.GetBankAccountSettings()
 		if err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, items, http.StatusOK)
@@ -346,8 +417,8 @@ func handleBankAccountSettings(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 			return
 		}
-		if err := core.SaveBankAccountSettings(body.BankAccountItems); err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+		if err := service.SaveBankAccountSettings(body.BankAccountItems); err != nil {
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, map[string]interface{}{
@@ -355,15 +426,17 @@ func handleBankAccountSettings(w http.ResponseWriter, r *http.Request) {
 			"bank_account_items": body.BankAccountItems,
 		}, http.StatusOK)
 
-	default:
-		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func handleBackupCSV(w http.ResponseWriter, r *http.Request) {
-	csvContent, err := core.BackupToCSV()
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
+	csvContent, err := service.BackupToCSV()
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		writeFinancialError(w, err, http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
@@ -375,6 +448,10 @@ func handleBackupCSV(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleImportCSV(w http.ResponseWriter, r *http.Request) {
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
 	var body struct {
 		Content string `json:"content"`
 		Mode    string `json:"mode"`
@@ -387,7 +464,7 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 		body.Mode = "append"
 	}
 
-	count, err := core.ImportCSV(body.Content, body.Mode)
+	count, err := service.ImportCSV(body.Content, body.Mode)
 	if err != nil {
 		if errors.Is(err, core.ErrAIIdempotencyConflict) {
 			jsonError(w, "Idempotency-Keyは別のリクエストで使用済みです", http.StatusConflict)
@@ -399,7 +476,7 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "AI経由の取引追加が日次上限に達しました", http.StatusTooManyRequests)
 			return
 		}
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		writeFinancialError(w, err, http.StatusBadRequest)
 		return
 	}
 
@@ -555,6 +632,14 @@ func jsonError(w http.ResponseWriter, message string, status int) {
 // --- 画像API ハンドラー (Agent.md §6.5) ---
 
 func handleTransactionImages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
 	// /api/transaction_images/{txId} or /api/transaction_images/{txId}/{imgId}
 	path := strings.TrimPrefix(r.URL.Path, "/api/transaction_images/")
 	parts := strings.SplitN(path, "/", 2)
@@ -567,9 +652,9 @@ func handleTransactionImages(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		images, err := core.GetTransactionImagesContext(r.Context(), txID)
+		images, err := service.GetTransactionImagesContext(r.Context(), txID)
 		if err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, images, http.StatusOK)
@@ -580,9 +665,9 @@ func handleTransactionImages(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 			return
 		}
-		resp, err := core.AddTransactionImageContext(r.Context(), txID, img)
+		resp, err := service.AddTransactionImageContext(r.Context(), txID, img)
 		if err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
 		jsonResponse(w, resp, http.StatusCreated)
@@ -597,21 +682,23 @@ func handleTransactionImages(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "無効な画像IDです", http.StatusBadRequest)
 			return
 		}
-		if err := core.DeleteTransactionImageForTransaction(txID, imgID); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
+		if err := service.DeleteTransactionImageForTransaction(txID, imgID); err != nil {
+			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "画像を削除しました"}, http.StatusOK)
 
-	default:
-		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func handleImageStorageUsage(w http.ResponseWriter, _ *http.Request) {
-	usage, err := core.GetImageStorageUsage()
+func handleImageStorageUsage(w http.ResponseWriter, r *http.Request) {
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
+	usage, err := service.GetImageStorageUsage()
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		writeFinancialError(w, err, http.StatusInternalServerError)
 		return
 	}
 	jsonResponse(w, usage, http.StatusOK)
@@ -620,11 +707,19 @@ func handleImageStorageUsage(w http.ResponseWriter, _ *http.Request) {
 // --- タグAPI ハンドラー (Agent.md §6.6) ---
 
 func handleTags(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		tags, err := core.GetTags()
+		tags, err := service.GetTags()
 		if err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, tags, http.StatusOK)
@@ -638,21 +733,23 @@ func handleTags(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 			return
 		}
-		tag, err := core.CreateTag(body.Name, body.ParentID)
+		tag, err := service.CreateTag(body.Name, body.ParentID)
 		if err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
 		jsonResponse(w, tag, http.StatusCreated)
 
-	default:
-		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func handleCreateTagByPath(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	service, ok := financialService(w, r)
+	if !ok {
 		return
 	}
 	var body struct {
@@ -662,9 +759,9 @@ func handleCreateTagByPath(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 		return
 	}
-	tag, err := core.CreateTagByPath(body.Path)
+	tag, err := service.CreateTagByPath(body.Path)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		writeFinancialError(w, err, http.StatusBadRequest)
 		return
 	}
 	jsonResponse(w, tag, http.StatusCreated)
@@ -675,6 +772,14 @@ func handleTagByID(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/tags/")
 	if path == "summary" {
 		handleTagSummary(w, r)
+		return
+	}
+	if r.Method != http.MethodPut && r.Method != http.MethodDelete {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	service, ok := financialService(w, r)
+	if !ok {
 		return
 	}
 
@@ -693,21 +798,19 @@ func handleTagByID(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 			return
 		}
-		if err := core.UpdateTag(id, body.Name); err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+		if err := service.UpdateTag(id, body.Name); err != nil {
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "タグを更新しました"}, http.StatusOK)
 
 	case http.MethodDelete:
-		if err := core.DeleteTag(id); err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+		if err := service.DeleteTag(id); err != nil {
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "タグを削除しました"}, http.StatusOK)
 
-	default:
-		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -716,20 +819,32 @@ func handleTagSummary(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
 
 	txType := r.URL.Query().Get("type")
 	startDate := r.URL.Query().Get("start_date")
 	endDate := r.URL.Query().Get("end_date")
 
-	summaries, err := core.GetTagSummary(txType, startDate, endDate)
+	summaries, err := service.GetTagSummary(txType, startDate, endDate)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		writeFinancialError(w, err, http.StatusInternalServerError)
 		return
 	}
 	jsonResponse(w, summaries, http.StatusOK)
 }
 
 func handleTransactionTagsAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
 	// /api/transaction_tags/{txId} or /api/transaction_tags/{txId}/{tagId}
 	path := strings.TrimPrefix(r.URL.Path, "/api/transaction_tags/")
 	parts := strings.SplitN(path, "/", 2)
@@ -742,9 +857,9 @@ func handleTransactionTagsAPI(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		tags, err := core.GetTransactionTags(txID)
+		tags, err := service.GetTransactionTags(txID)
 		if err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, tags, http.StatusOK)
@@ -757,8 +872,8 @@ func handleTransactionTagsAPI(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 			return
 		}
-		if err := core.AddTransactionTags(txID, body.TagIDs); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
+		if err := service.AddTransactionTags(txID, body.TagIDs); err != nil {
+			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "タグを追加しました"}, http.StatusOK)
@@ -773,20 +888,26 @@ func handleTransactionTagsAPI(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "無効なタグIDです", http.StatusBadRequest)
 			return
 		}
-		if err := core.RemoveTransactionTag(txID, tagID); err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+		if err := service.RemoveTransactionTag(txID, tagID); err != nil {
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "タグを削除しました"}, http.StatusOK)
 
-	default:
-		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 // --- 取引紐付けAPI ハンドラー (Agent.md §6.2) ---
 
 func handleTransactionLinksAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	service, ok := financialService(w, r)
+	if !ok {
+		return
+	}
 	// /api/transaction_links/{txId} or /api/transaction_links/{txId}/{linkedId}
 	path := strings.TrimPrefix(r.URL.Path, "/api/transaction_links/")
 	parts := strings.SplitN(path, "/", 2)
@@ -799,9 +920,9 @@ func handleTransactionLinksAPI(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		links, err := core.GetTransactionLinks(txID)
+		links, err := service.GetTransactionLinks(txID)
 		if err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, links, http.StatusOK)
@@ -814,8 +935,8 @@ func handleTransactionLinksAPI(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 			return
 		}
-		if err := core.AddTransactionLink(txID, body.LinkedID); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
+		if err := service.AddTransactionLink(txID, body.LinkedID); err != nil {
+			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "紐付けを追加しました"}, http.StatusOK)
@@ -830,14 +951,12 @@ func handleTransactionLinksAPI(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "無効な取引IDです", http.StatusBadRequest)
 			return
 		}
-		if err := core.RemoveTransactionLink(txID, linkedID); err != nil {
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+		if err := service.RemoveTransactionLink(txID, linkedID); err != nil {
+			writeFinancialError(w, err, http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "紐付けを解除しました"}, http.StatusOK)
 
-	default:
-		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
 

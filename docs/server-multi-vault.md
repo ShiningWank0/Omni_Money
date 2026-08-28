@@ -12,7 +12,6 @@ data/
   control/omni_control.db          SQLCipher, opened with the server control key
   vaults/<opaque-vault-id>/
     ledger.db                      SQLCipher, opened with that user's vault key
-    snapshots/*.db                 encrypted with the same vault key
 ```
 
 The control database contains identities, roles, account state, one-way token
@@ -48,7 +47,9 @@ deleted or replaced.
 The first server administrator is created only through an explicit bootstrap
 flow protected by a secret read from `INITIAL_ADMIN_SETUP_TOKEN_FILE`. A fresh
 public server must never make the first unauthenticated HTTP caller an
-administrator.
+administrator. Compose deployments supply it only through
+`compose.bootstrap.yaml`, then recreate the service without that overlay and
+retire the token after the first administrator is confirmed.
 
 Administrators create invitations, not user passwords or vault keys. The invited
 user chooses the password and receives the recovery secret while their vault is
@@ -72,6 +73,40 @@ server shutdown releases the root. Releasing the last root immediately blocks
 new borrows, waits for requests already in flight, then closes the SQLCipher
 database and destroys its in-memory opener key.
 
+## Production startup and HTTP boundary
+
+The production server no longer accepts the legacy `DB_PATH`,
+`DB_ENCRYPTION_KEY_FILE`, `AUTH_PASSWORD_HASH`, or TOTP environment settings.
+It requires these process-level values before opening a listener:
+
+- `CONTROL_DB_PATH`: SQLCipher control database below the attested data root;
+- `CONTROL_DB_ENCRYPTION_KEY_FILE`: an independent 32-byte control key stored outside the data root;
+- `VAULT_ROOT`: a dedicated real directory below the same attested data root;
+- `INITIAL_ADMIN_SETUP_TOKEN_FILE`: required only while the control database has no users;
+- `DATA_AT_REST_MODE` and `DATA_AT_REST_ATTESTATION_FILE`;
+- the existing session, host, proxy, and HTTPS settings.
+
+On a fresh deployment the login page generates a 32-byte recovery secret in
+the browser, shows it before submission, and requires the operator to confirm
+that it has been saved. Passwords, recovery secrets, bearer tokens, and the
+setup token cross the JSON boundary as Base64-decoded byte fields. The server
+clears its owned request buffers after each operation. The setup token is read
+only on an unbootstrapped control database and its in-memory digest is destroyed
+during shutdown.
+
+Public account routes are exact method/path matches for status, bootstrap,
+login, invitation acceptance, and password-reset completion. Every other API
+route requires a server-side session. Financial handlers receive only the
+request's guarded `core.Service`; absence of that service is a fixed 503 and
+never falls back to the Desktop/global database. Admin actor IDs come only from
+the refreshed authenticated user context, never a request field.
+
+Per-user snapshot restore and AI delegation are not yet safely expressible
+through the vault manager. Server routes report snapshots unavailable, omit the
+AI console/listener, and startup rejects legacy AI environment settings. These
+features remain disabled until they have manager-exclusive or user-bound
+capabilities.
+
 ## Threat boundary
 
 This design protects stopped databases, snapshots, copied files, and the product's
@@ -92,8 +127,9 @@ The multi-vault change is intentionally split into reviewable stages:
 1. database instances, key envelopes, encrypted control store, and an internal vault manager;
 2. instance-bound business services, atomic credential/reset mutations, and
    session/request vault lease ownership;
-3. first-admin HTTP bootstrap, invitations, login/recovery/reset, production
-   route selection, and legacy single-user migration;
+3. first-admin HTTP bootstrap, invitations, login/recovery/reset, and production
+   route selection (delivered); legacy single-user migration and the admin UI
+   remain follow-up work;
 4. per-user AI credentials bound cryptographically to their owner vault;
 5. the desktop single-user vault setup, unlock, recovery, and lock lifecycle.
 

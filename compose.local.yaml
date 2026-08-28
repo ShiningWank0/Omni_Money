@@ -7,6 +7,7 @@ services:
     environment:
       FORCE_HTTPS: "false"
       ALLOW_INSECURE_HTTP: "true"
+      WEB_EXTERNAL_HOST: "127.0.0.1"
       TRUSTED_PROXIES: ""
       ALLOWED_HOSTS: "localhost:${OMNI_WEB_PORT:-4000},127.0.0.1:${OMNI_WEB_PORT:-4000}"
     ports:

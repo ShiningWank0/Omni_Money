@@ -102,36 +102,42 @@ jobs:
 
       - name: Validate Docker Compose configuration
         env:
-          AUTH_PASSWORD_HASH: '$2y$12$abcdefghijklmnopqrstuvabcdefghijklmnopqrstuv12'
-          AI_API_TOKEN: '0123456789abcdef0123456789abcdef'
           ALLOWED_HOSTS: 'money.example.com'
           OMNI_AT_REST_ATTESTATION_FILE: '/tmp/omni-data-at-rest.json'
-          OMNI_DB_ENCRYPTION_KEY_FILE: '/tmp/omni-database.key'
-        run: docker compose config --quiet
+          OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE: '/tmp/omni-control-database.key'
+          OMNI_INITIAL_ADMIN_SETUP_TOKEN_FILE: '/tmp/omni-initial-admin-setup.token'
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.yaml -f compose.bootstrap.yaml config --quiet
+          docker compose -f compose.yaml -f compose.bootstrap.yaml -f compose.local.yaml config --quiet
 
       - name: Assert Pangolin network isolation
         env:
-          AUTH_PASSWORD_HASH: '$2y$12$abcdefghijklmnopqrstuvabcdefghijklmnopqrstuv12'
-          AI_API_TOKEN: '0123456789abcdef0123456789abcdef'
           ALLOWED_HOSTS: 'money.example.com'
           OMNI_AT_REST_ATTESTATION_FILE: '/tmp/omni-data-at-rest.json'
-          OMNI_DB_ENCRYPTION_KEY_FILE: '/tmp/omni-database.key'
+          OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE: '/tmp/omni-control-database.key'
+          OMNI_INITIAL_ADMIN_SETUP_TOKEN_FILE: '/tmp/omni-initial-admin-setup.token'
         run: |
           set -euo pipefail
           base_config="$(mktemp)"
           local_config="$(mktemp)"
-          trap 'rm -f "$base_config" "$local_config"' EXIT
+          bootstrap_config="$(mktemp)"
+          trap 'rm -f "$base_config" "$local_config" "$bootstrap_config"' EXIT
 
           docker compose config --format json > "$base_config"
           docker compose -f compose.yaml -f compose.local.yaml config --format json > "$local_config"
+          docker compose -f compose.yaml -f compose.bootstrap.yaml config --format json > "$bootstrap_config"
 
           # The default deployment must be reachable only through the shared
           # Pangolin/Newt network and must not publish any host port.
           jq -e '
             .services["omni-money"].ports == null and
             .services["omni-money"].expose == ["4000"] and
-            .services["omni-money"].environment.AI_HOST_IP == "127.0.0.1" and
-            .services["omni-money"].environment.AI_ALLOW_REMOTE == "false" and
+            .services["omni-money"].environment.CONTROL_DB_PATH == "/app/data/control/omni_control.db" and
+            .services["omni-money"].environment.CONTROL_DB_ENCRYPTION_KEY_FILE == "/run/secrets/omni_control_database_key" and
+            .services["omni-money"].environment.VAULT_ROOT == "/app/data/vaults" and
+            (.services["omni-money"].environment | has("INITIAL_ADMIN_SETUP_TOKEN_FILE") | not) and
+            (.secrets | has("omni_initial_admin_setup_token") | not) and
             .services["omni-money"].environment.FORCE_HTTPS == "true" and
             .services["omni-money"].environment.ALLOW_INSECURE_HTTP == "false" and
             .services["omni-money"].environment.TRUSTED_PROXIES == "172.30.240.3/32" and
@@ -151,6 +157,7 @@ jobs:
           jq -e '
             .services["omni-money"].environment.FORCE_HTTPS == "false" and
             .services["omni-money"].environment.ALLOW_INSECURE_HTTP == "true" and
+            .services["omni-money"].environment.WEB_EXTERNAL_HOST == "127.0.0.1" and
             .services["omni-money"].environment.TRUSTED_PROXIES == "" and
             .services["omni-money"].environment.ALLOWED_HOSTS == "localhost:4000,127.0.0.1:4000" and
             (.services["omni-money"].ports | length) == 1 and
@@ -158,6 +165,14 @@ jobs:
             .services["omni-money"].ports[0].published == "4000" and
             .services["omni-money"].ports[0].host_ip == "127.0.0.1"
           ' "$local_config"
+
+          # The one-time setup token exists only in the explicit bootstrap
+          # overlay and can be retired without breaking later base restarts.
+          jq -e '
+            .services["omni-money"].environment.INITIAL_ADMIN_SETUP_TOKEN_FILE == "/run/secrets/omni_initial_admin_setup_token" and
+            .secrets.omni_initial_admin_setup_token != null and
+            ([.services["omni-money"].secrets[].source] | index("omni_initial_admin_setup_token")) != null
+          ' "$bootstrap_config"
 
   frontend:
     name: Frontend build
@@ -203,14 +218,14 @@ jobs:
       - name: Build pinned multi-stage image
         run: docker build --build-arg VERSION=ci --tag omni-money:ci .
 
-      - name: Assert non-root runtime and bundled TOTP helper
+      - name: Assert non-root multi-vault runtime
         run: |
           set -euo pipefail
           docker run --rm --entrypoint /bin/sh omni-money:ci -c '
             test "$(id -u)" = "10001"
             test "$(id -g)" = "10001"
             test -x /app/omni_money_server
-            test -x /app/omni-totp
+            test ! -e /app/omni-totp
           '
           docker image inspect omni-money:ci | jq -e '
             .[0].Config.ExposedPorts == {"4000/tcp": {}} and
@@ -222,9 +237,11 @@ jobs:
           set -euo pipefail
           runtime_data="$(mktemp -d)"
           attestation_file="$(mktemp)"
-          database_key_file="$(mktemp)"
+          control_key_file="$(mktemp)"
+          setup_token_file="$(mktemp)"
+          docker_run_error="$(mktemp)"
           container_id=""
-          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true; sudo rm -rf "$runtime_data"; sudo rm -f "$attestation_file" "$database_key_file"' EXIT
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true; sudo rm -rf "$runtime_data"; sudo rm -f "$attestation_file" "$control_key_file" "$setup_token_file" "$docker_run_error"' EXIT
           chmod 700 "$runtime_data"
           sudo chown 10001:10001 "$runtime_data"
           jq -n \
@@ -242,51 +259,66 @@ jobs:
               recovery_tested_at: $recovery_tested_at,
               next_rotation_at: $next_rotation_at
             }' > "$attestation_file"
-          chmod 0444 "$attestation_file"
-          head -c 32 /dev/urandom | base64 > "$database_key_file"
-          chmod 0444 "$database_key_file"
-          # Docker/Compose secrets are root-owned inside the container. Keep
-          # the bind-mounted CI fixtures equivalent so owner validation is
-          # exercised rather than bypassed.
-          sudo chown 0:0 "$attestation_file" "$database_key_file"
+          head -c 32 /dev/urandom | base64 > "$control_key_file"
+          head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n' > "$setup_token_file"
+          # Docker Compose secrets are mounted root-owned and world-readable
+          # inside the container. The reader accepts this only below
+          # /run/secrets; native deployments still use UID 10001 and mode 0400.
+          sudo chown 0:0 "$attestation_file" "$control_key_file" "$setup_token_file"
+          sudo chmod 0444 "$attestation_file" "$control_key_file" "$setup_token_file"
 
-          container_id="$(docker run -d \
+          if ! container_id="$(docker run -d \
             --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
             --cap-drop ALL \
             --security-opt no-new-privileges \
             --health-interval 1s \
-            --health-start-period 1s \
+            --health-start-period 20s \
             --health-timeout 2s \
-            --health-retries 5 \
+            --health-retries 10 \
             --mount "type=bind,src=$runtime_data,dst=/app/data" \
             --mount "type=bind,src=$attestation_file,dst=/run/secrets/omni_data_at_rest_attestation.json,readonly" \
-            --mount "type=bind,src=$database_key_file,dst=/run/secrets/omni_database_key,readonly" \
-            --env DB_PATH=/app/data/omni_money.db \
-            --env DB_ENCRYPTION_KEY_FILE=/run/secrets/omni_database_key \
+            --mount "type=bind,src=$control_key_file,dst=/run/secrets/omni_control_database_key,readonly" \
+            --mount "type=bind,src=$setup_token_file,dst=/run/secrets/omni_initial_admin_setup_token,readonly" \
+            --env CONTROL_DB_PATH=/app/data/control/omni_control.db \
+            --env CONTROL_DB_ENCRYPTION_KEY_FILE=/run/secrets/omni_control_database_key \
+            --env VAULT_ROOT=/app/data/vaults \
+            --env INITIAL_ADMIN_SETUP_TOKEN_FILE=/run/secrets/omni_initial_admin_setup_token \
             --env DATA_AT_REST_MODE=external-encrypted-volume \
             --env DATA_AT_REST_ATTESTATION_FILE=/run/secrets/omni_data_at_rest_attestation.json \
             --env HOST_IP=127.0.0.1 \
             --env ALLOWED_HOSTS=127.0.0.1:4000 \
-            --env 'AUTH_PASSWORD_HASH=$2y$12$TMw6R8z61SPOp1Y/4t3mLu/LVqe3.L5d5.H9piLwdDjKpSytNxaEi' \
-            omni-money:ci)"
+            omni-money:ci 2>"$docker_run_error")"; then
+            cat "$docker_run_error"
+            exit 1
+          fi
 
-          for _ in $(seq 1 30); do
-            health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
+          for _ in $(seq 1 90); do
+            if ! health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id" 2>/dev/null)"; then
+              docker ps -a --no-trunc
+              docker logs "$container_id" || true
+              exit 1
+            fi
             if [ "$health" = "healthy" ]; then
-              if sudo head -c 16 "$runtime_data/omni_money.db" | LC_ALL=C grep -q "SQLite format 3"; then
+              if sudo head -c 16 "$runtime_data/control/omni_control.db" | LC_ALL=C grep -q "SQLite format 3"; then
                 echo "database retained a plaintext SQLite header"
                 exit 1
               fi
+              sudo test -d "$runtime_data/vaults"
+              echo "hardened runtime is healthy with an encrypted control database"
               exit 0
             fi
             if [ "$health" = "unhealthy" ]; then
-              docker logs "$container_id"
+              docker inspect --format '{{json .State}}' "$container_id" || true
+              docker inspect --format '{{json .State.Health}}' "$container_id" || true
+              docker logs "$container_id" || true
               exit 1
             fi
             sleep 1
           done
-          docker logs "$container_id"
+          docker inspect --format '{{json .State}}' "$container_id" || true
+          docker inspect --format '{{json .State.Health}}' "$container_id" || true
+          docker logs "$container_id" || true
           exit 1
 
       - name: Scan image for fixable high-severity vulnerabilities

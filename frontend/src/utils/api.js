@@ -23,6 +23,16 @@ function isUnsafeMethod(method) {
   return !['GET', 'HEAD', 'OPTIONS'].includes(method)
 }
 
+function bytesToBase64(bytes) {
+  let binary = ''
+  for (const value of bytes) binary += String.fromCharCode(value)
+  return window.btoa(binary)
+}
+
+function textToBase64(value) {
+  return bytesToBase64(new TextEncoder().encode(value))
+}
+
 function requestReauthentication() {
   if (pendingReauthentication) return pendingReauthentication
 
@@ -77,7 +87,13 @@ export async function apiFetch(url, options = {}, config = {}) {
   }
 
   if (!isWailsMode && !skipAuthRedirect && response.status === 401) {
-    const skipPaths = new Set(['/api/auth/login', '/api/auth/status'])
+    const skipPaths = new Set([
+      '/api/auth/login',
+      '/api/auth/status',
+      '/api/auth/setup',
+      '/api/auth/invitations/accept',
+      '/api/auth/password-reset/complete'
+    ])
     if (!skipPaths.has(path) && window.location.pathname !== '/login') {
       window.location.replace('/login')
     }
@@ -119,11 +135,11 @@ export async function getAuthStatus() {
 
 /**
  * ログイン
+ * @param {string} email
  * @param {string} password
- * @param {string} totpCode
  * @returns {Promise<object>}
  */
-export async function login(password, totpCode = '') {
+export async function login(email, password) {
   if (isWails) {
     return { authenticated: true, message: 'デスクトップモードでは認証不要です' }
   }
@@ -131,7 +147,7 @@ export async function login(password, totpCode = '') {
   const res = await apiFetch('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password, totp_code: totpCode })
+    body: JSON.stringify({ email, password_b64: textToBase64(password) })
   }, { skipAuthRedirect: true })
 
   const data = await res.json()
@@ -139,6 +155,32 @@ export async function login(password, totpCode = '') {
     throw new Error(data?.error || 'ログインに失敗しました')
   }
   rememberAuthToken(data)
+  return data
+}
+
+/**
+ * Create the one and only initial administrator. recoverySecret must be a
+ * client-generated 32-byte value that the user saved before this call.
+ */
+export async function setupInitialAdmin({ setupToken, email, displayName, password, recoverySecret }) {
+  if (isWails) return { user: null }
+
+  const res = await apiFetch('/api/auth/setup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      setup_token_b64: textToBase64(setupToken),
+      email,
+      display_name: displayName,
+      password_b64: textToBase64(password),
+      recovery_secret_b64: bytesToBase64(recoverySecret)
+    })
+  }, { skipAuthRedirect: true, skipReauth: true })
+
+  const data = await res.json()
+  if (!res.ok) {
+    throw new Error(data?.error || '初期管理者の作成に失敗しました')
+  }
   return data
 }
 
@@ -153,7 +195,7 @@ export async function reauthenticate(password) {
   const res = await apiFetch('/api/auth/reauth', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password })
+    body: JSON.stringify({ password_b64: textToBase64(password) })
   }, { skipAuthRedirect: true, skipReauth: true })
   const data = await res.json()
   // A wrong password should keep the confirmation dialog open, but the

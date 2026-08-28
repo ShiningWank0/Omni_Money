@@ -20,9 +20,10 @@ func CSRFMiddleware(sessionManager *SessionManager, next http.Handler) http.Hand
 			return
 		}
 
-		// Login has no authenticated session yet. Exact Origin/Fetch Metadata
-		// checks above prevent browser login-CSRF; global/IP limits handle abuse.
-		if r.URL.Path == "/api/auth/login" && r.Method == http.MethodPost {
+		// Public account bootstrap/login/recovery calls have no session token.
+		// Exact Origin/Fetch Metadata checks above still prevent browser CSRF;
+		// possession of the setup/invitation/reset secret authorizes its flow.
+		if isPublicServerAuthRequest(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -135,6 +136,8 @@ func requiresRecentAuthentication(r *http.Request) bool {
 	case path == "/api/snapshots" && method == http.MethodPost:
 		return true
 	case path == "/api/auth/logout-all" && method == http.MethodPost:
+		return true
+	case strings.HasPrefix(path, "/api/admin/") && isUnsafeMethod(method):
 		return true
 	case (path == "/api/ai-console/transactions" || path == "/api/ai-console/analysis") && method == http.MethodPost:
 		return true

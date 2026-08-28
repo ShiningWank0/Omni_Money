@@ -4,13 +4,13 @@ Omni Moneyのserver modeは、SQLite DB、WAL、snapshotを置くdata rootが外
 
 attestationは暗号化そのものでも暗号学的な証明でもありません。アプリからhostのLUKS key slot、ZFS native encryption、cloud block-volume keyを一律に検証できないためです。必ずhost側で暗号化を設定・検証してから作成してください。環境変数だけで保護済みと見なすことはできません。
 
-`DB_PATH` はattested `data_root`の直下またはその子directoryに置きます。`data_root`からDBまでの既存path componentにsymbolic link、通常directory以外のparent、group/otherから書込み可能なdirectoryを含めることはできません。まだ存在しないDBや子directoryは初回起動で作成できます。Dockerの通常のbind mountで`data_root`が`0755`でも、group/otherの書込みbitがなければ利用できます。
+`CONTROL_DB_PATH` と `VAULT_ROOT` は同じattested `data_root`の子directoryに置きます。`data_root`から各pathまでの既存componentにsymbolic link、通常directory以外のparent、group/otherから書込み可能なdirectoryを含めることはできません。まだ存在しないDBや子directoryは初回起動で作成できます。Dockerの通常のbind mountで`data_root`が`0755`でも、group/otherの書込みbitがなければ利用できます。control鍵とinitial-admin setup tokenはdata root外のsecret mountへ置きます。
 
 attestation file自身と、filesystem rootからその親directoryまでの各component（symlinkがある場合は解決前と解決後の双方）は、rootまたはserver実行UIDが所有し、group/otherから書込み不可でなければなりません。`/tmp`などの共有書込みdirectory配下には置かず、server専用の設定directoryまたはread-only secret mountを使用してください。
 
 ## 対象
 
-- server modeの`DB_PATH`、SQLite WAL/SHM、同じdata root配下のsnapshot
+- server modeのcontrol DB、ユーザーvault、SQLite WAL/SHM（snapshot APIは現在無効）
 - volumeの複製、host snapshot、外部backup
 - serverから取得したCSVを保存する媒体
 
@@ -50,7 +50,10 @@ data rootの外にowner-writableな通常fileとして置きます。Composeはr
 `key_id`は非秘密の識別子で、raw key/passphraseを入れません。`verified_at`は31日以内、`recovery_tested_at`は185日以内、`next_rotation_at`は将来かつ400日以内が必要です。unknown/duplicate field、symlink、不安全な書込み権限は拒否されます。
 
 ```bash
+# native serverを同じownerで動かす場合
 chmod 600 /secure-config/omni-data-at-rest.json
+# 固定UID 10001のComposeへbind mountする場合は非秘密documentとして
+# root所有・read-onlyにする: chown root:root ... && chmod 444 ...
 export OMNI_DATA_DIR=/srv/omni-money
 export OMNI_AT_REST_ATTESTATION_FILE=/secure-config/omni-data-at-rest.json
 docker compose up -d --build
@@ -60,7 +63,7 @@ Composeを使わないserver modeでは`DATA_AT_REST_MODE=external-encrypted-vol
 
 ## 復旧試験とrotation
 
-本番data rootを直接変更せず、暗号化backupの複製を別の隔離volumeでunlockします。DBとsnapshotを復元し、外部公開せず起動して`PRAGMA integrity_check`、代表的な残高・画像・tag、snapshot restoreを確認します。試験用copyを廃棄した実施時刻だけを`recovery_tested_at`へ記録します。
+本番data rootを直接変更せず、暗号化backupの複製を別の隔離volumeでunlockします。control DBとuser vaultを復元し、外部公開せず起動して`PRAGMA integrity_check`、代表的な残高・画像・tag、user本人のrecovery codeによるvault復旧を確認します。multi-user serverのsnapshot routeは現在無効なので、snapshot restoreを復旧手順に含めません。試験用copyを廃棄した実施時刻だけを`recovery_tested_at`へ記録します。
 
 rotation前に現行keyで復旧できるbackupを作り、新key slot/versionを追加します。新keyで別sessionからunlockできることを確認してから`key_id`と`next_rotation_at`を更新し、recovery期間後に旧keyをretireします。key喪失時にOmni Moneyから復元する方法はありません。
 

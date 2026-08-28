@@ -93,7 +93,7 @@ type Service struct {
 }
 
 type accountLock struct {
-	mu   sync.Mutex
+	gate chan struct{}
 	refs int
 }
 
@@ -211,7 +211,10 @@ func (s *Service) AcceptInvitation(ctx context.Context, input AcceptInvitationIn
 	if err != nil {
 		return control.UserSummary{}, err
 	}
-	unlock := s.lockAccount("invitation:" + invitation.ID)
+	unlock, err := s.lockAccount("invitation:" + invitation.ID)
+	if err != nil {
+		return control.UserSummary{}, err
+	}
 	defer unlock()
 	if err := validateNewPassword(input.Password); err != nil {
 		return control.UserSummary{}, err
@@ -275,12 +278,16 @@ func (s *Service) Login(ctx context.Context, email string, password []byte, now 
 		}
 		return nil, ErrInvalidCredentials
 	}
-	unlockEmail := s.lockAccount("email:" + email)
-	defer unlockEmail()
 	releaseKDF, err := s.reserveKDF(ctx)
 	if err != nil {
 		return nil, err
 	}
+	unlockEmail, err := s.lockAccount("email:" + email)
+	if err != nil {
+		releaseKDF()
+		return nil, err
+	}
+	defer unlockEmail()
 	user, lookupErr := s.store.GetUserByEmail(ctx, email)
 	if lookupErr != nil {
 		s.runDummyPasswordWork(password)
@@ -290,7 +297,11 @@ func (s *Service) Login(ctx context.Context, email string, password []byte, now 
 		}
 		return nil, lookupErr
 	}
-	unlock := s.lockAccount("user:" + user.ID)
+	unlock, err := s.lockAccount("user:" + user.ID)
+	if err != nil {
+		releaseKDF()
+		return nil, err
+	}
 	defer unlock()
 	user, err = s.store.GetUser(ctx, user.ID)
 	if err != nil || user.State != control.UserActive {
@@ -359,7 +370,10 @@ func (s *Service) Reauthenticate(ctx context.Context, userID string, password []
 	if !s.ready() {
 		return ErrServiceUnavailable
 	}
-	unlock := s.lockAccount("user:" + userID)
+	unlock, err := s.lockAccount("user:" + userID)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	if validateNewPassword(password) != nil {
 		if err := s.runDummyPassword(ctx, password); err != nil {
@@ -473,7 +487,10 @@ func (s *Service) CompletePasswordReset(
 	if err != nil {
 		return control.PasswordResetTicket{}, err
 	}
-	unlock := s.lockAccount("user:" + ticket.UserID)
+	unlock, err := s.lockAccount("user:" + ticket.UserID)
+	if err != nil {
+		return control.PasswordResetTicket{}, err
+	}
 	result, waitForDrain, err := s.completePasswordResetLocked(ctx, input, hash, ticket, now)
 	unlock()
 	if err != nil {
@@ -565,7 +582,10 @@ func (s *Service) DisableUser(ctx context.Context, actorID, targetUserID string,
 	if !s.ready() {
 		return ErrServiceUnavailable
 	}
-	unlock := s.lockAccount("user:" + targetUserID)
+	unlock, err := s.lockAccount("user:" + targetUserID)
+	if err != nil {
+		return err
+	}
 	if err := s.store.DisableUser(ctx, actorID, targetUserID, now); err != nil {
 		unlock()
 		return err
@@ -659,20 +679,34 @@ func (s *Service) reserveKDF(ctx context.Context) (func(), error) {
 	}
 }
 
-func (s *Service) lockAccount(key string) func() {
+// lockAccount has no waiter queue. Password work is deliberately expensive;
+// blocking arbitrary requests on a mutex would let a distributed login flood
+// accumulate unbounded goroutines for one account.
+func (s *Service) lockAccount(key string) (func(), error) {
 	s.locksMu.Lock()
 	entry := s.locks[key]
 	if entry == nil {
-		entry = &accountLock{}
+		entry = &accountLock{gate: make(chan struct{}, 1)}
+		entry.gate <- struct{}{}
 		s.locks[key] = entry
 	}
 	entry.refs++
 	s.locksMu.Unlock()
-	entry.mu.Lock()
+	select {
+	case <-entry.gate:
+	default:
+		s.locksMu.Lock()
+		entry.refs--
+		if entry.refs == 0 && s.locks[key] == entry {
+			delete(s.locks, key)
+		}
+		s.locksMu.Unlock()
+		return nil, ErrAuthenticationBusy
+	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			entry.mu.Unlock()
+			entry.gate <- struct{}{}
 			s.locksMu.Lock()
 			entry.refs--
 			if entry.refs == 0 && s.locks[key] == entry {
@@ -680,5 +714,5 @@ func (s *Service) lockAccount(key string) func() {
 			}
 			s.locksMu.Unlock()
 		})
-	}
+	}, nil
 }

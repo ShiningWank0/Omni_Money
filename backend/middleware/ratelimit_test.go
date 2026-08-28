@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -26,6 +28,24 @@ func TestRateLimiterBoundsClientKeyMapAndUsesOverflowBucket(t *testing.T) {
 	}
 	if got := len(limiter.overflowWindows); got != 1 {
 		t.Fatalf("overflow map size = %d, want 1", got)
+	}
+}
+
+func TestPasswordVerificationRoutesUseTightRateBuckets(t *testing.T) {
+	tests := []struct {
+		path       string
+		wantBucket string
+	}{
+		{path: "/api/auth/login", wantBucket: "login"},
+		{path: "/api/auth/reauth", wantBucket: "reauth"},
+		{path: "/api/auth/setup", wantBucket: "account-auth"},
+	}
+	for _, test := range tests {
+		request := httptest.NewRequest(http.MethodPost, "https://money.example"+test.path, nil)
+		bucket, limit := resolveRateLimitBucket(request)
+		if bucket != test.wantBucket || limit != loginRateLimitPerMinute {
+			t.Errorf("%s bucket/limit = %q/%d, want %q/%d", test.path, bucket, limit, test.wantBucket, loginRateLimitPerMinute)
+		}
 	}
 }
 

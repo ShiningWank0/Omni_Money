@@ -38,7 +38,7 @@ func TestDockerBaseImagesUsePinnedSupportedVersions(t *testing.T) {
 	}
 }
 
-func TestComposeAppliesRuntimeSandbox(t *testing.T) {
+func TestComposeAppliesRuntimeSandboxAndMultiVaultBoundaries(t *testing.T) {
 	contents, err := os.ReadFile("compose.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -57,9 +57,29 @@ func TestComposeAppliesRuntimeSandbox(t *testing.T) {
 		"type: tmpfs\n        target: /tmp",
 		`size: "${OMNI_TMPFS_SIZE:-128m}"`,
 		"mode: 0o1777",
+		"CONTROL_DB_PATH: /app/data/control/omni_control.db",
+		"CONTROL_DB_ENCRYPTION_KEY_FILE: /run/secrets/omni_control_database_key",
+		"VAULT_ROOT: /app/data/vaults",
 	} {
 		if !strings.Contains(compose, required) {
 			t.Errorf("compose runtime sandbox is missing %q", required)
+		}
+	}
+	if strings.Contains(compose, "INITIAL_ADMIN_SETUP_TOKEN_FILE") || strings.Contains(compose, "omni_initial_admin_setup_token") {
+		t.Error("base compose must not retain the one-time initial administrator setup token")
+	}
+	bootstrapContents, err := os.ReadFile("compose.bootstrap.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrap := string(bootstrapContents)
+	for _, required := range []string{
+		"INITIAL_ADMIN_SETUP_TOKEN_FILE: /run/secrets/omni_initial_admin_setup_token",
+		"source: omni_initial_admin_setup_token",
+		"target: omni_initial_admin_setup_token",
+	} {
+		if !strings.Contains(bootstrap, required) {
+			t.Errorf("bootstrap compose overlay is missing %q", required)
 		}
 	}
 
@@ -69,5 +89,10 @@ func TestComposeAppliesRuntimeSandbox(t *testing.T) {
 	}
 	if strings.Contains(string(dockerfile), "/app/snapshots") {
 		t.Error("Dockerfile must not create the unused root-filesystem snapshot directory")
+	}
+	for _, forbidden := range []string{"AUTH_PASSWORD_HASH", "DB_PATH=/app/data/omni_money.db", "AI_HOST_IP", "/omni-totp"} {
+		if strings.Contains(string(dockerfile), forbidden) || strings.Contains(compose, forbidden) {
+			t.Errorf("multi-user runtime contains legacy/unscoped setting %q", forbidden)
+		}
 	}
 }

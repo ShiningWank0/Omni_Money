@@ -1,0 +1,14 @@
+# Initial-administrator bootstrap overlay. Use this only while the control DB
+# has zero users, then recreate the service without this file and retire the
+# setup token. The server also enforces the zero-user transition atomically.
+services:
+  omni-money:
+    environment:
+      INITIAL_ADMIN_SETUP_TOKEN_FILE: /run/secrets/omni_initial_admin_setup_token
+    secrets:
+      - source: omni_initial_admin_setup_token
+        target: omni_initial_admin_setup_token
+
+secrets:
+  omni_initial_admin_setup_token:
+    file: "${OMNI_INITIAL_ADMIN_SETUP_TOKEN_FILE:?OMNI_INITIAL_ADMIN_SETUP_TOKEN_FILE is required for bootstrap}"
