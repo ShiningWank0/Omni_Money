@@ -46,7 +46,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+          sudo apt-get install -y build-essential curl tcl libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Build frontend assets for Go embed
         working-directory: frontend
@@ -57,6 +57,20 @@ jobs:
 
       - name: Run Go tests
         run: go test ./...
+
+      - name: Build checksum-pinned SQLCipher
+        env:
+          SQLCIPHER_PREFIX: /tmp/omni-sqlcipher
+          SQLCIPHER_BUILD_JOBS: "2"
+        run: sh scripts/build-sqlcipher-linux.sh
+
+      - name: Test fail-closed SQLCipher integration
+        env:
+          CGO_CFLAGS: -I/tmp/omni-sqlcipher/include
+          CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib
+          LD_LIBRARY_PATH: /tmp/omni-sqlcipher/lib
+          OMNI_REQUIRE_SQLCIPHER_TESTS: "1"
+        run: go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/securedb ./backend/database
       - name: Cross-build Windows secret boundaries
         env:
           CGO_ENABLED: "0"
@@ -79,8 +93,12 @@ jobs:
       - name: Scan reachable Go vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
-      - name: Build server entrypoint
-        run: go build -tags server -o /tmp/omni_money_server ./server.go
+      - name: Build SQLCipher-linked server entrypoint
+        env:
+          CGO_CFLAGS: -I/tmp/omni-sqlcipher/include
+          CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib
+          LD_LIBRARY_PATH: /tmp/omni-sqlcipher/lib
+        run: go build -tags "server libsqlite3 sqlite_omit_load_extension" -o /tmp/omni_money_server ./server.go
 
       - name: Validate Docker Compose configuration
         env:
@@ -88,6 +106,7 @@ jobs:
           AI_API_TOKEN: '0123456789abcdef0123456789abcdef'
           ALLOWED_HOSTS: 'money.example.com'
           OMNI_AT_REST_ATTESTATION_FILE: '/tmp/omni-data-at-rest.json'
+          OMNI_DB_ENCRYPTION_KEY_FILE: '/tmp/omni-database.key'
         run: docker compose config --quiet
 
       - name: Assert Pangolin network isolation
@@ -96,6 +115,7 @@ jobs:
           AI_API_TOKEN: '0123456789abcdef0123456789abcdef'
           ALLOWED_HOSTS: 'money.example.com'
           OMNI_AT_REST_ATTESTATION_FILE: '/tmp/omni-data-at-rest.json'
+          OMNI_DB_ENCRYPTION_KEY_FILE: '/tmp/omni-database.key'
         run: |
           set -euo pipefail
           base_config="$(mktemp)"
@@ -202,8 +222,9 @@ jobs:
           set -euo pipefail
           runtime_data="$(mktemp -d)"
           attestation_file="$(mktemp)"
+          database_key_file="$(mktemp)"
           container_id=""
-          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true; sudo rm -rf "$runtime_data"; rm -f "$attestation_file"' EXIT
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true; sudo rm -rf "$runtime_data"; rm -f "$attestation_file" "$database_key_file"' EXIT
           chmod 700 "$runtime_data"
           sudo chown 10001:10001 "$runtime_data"
           jq -n \
@@ -222,6 +243,8 @@ jobs:
               next_rotation_at: $next_rotation_at
             }' > "$attestation_file"
           chmod 0444 "$attestation_file"
+          head -c 32 /dev/urandom | base64 > "$database_key_file"
+          chmod 0444 "$database_key_file"
 
           container_id="$(docker run -d \
             --read-only \
@@ -234,7 +257,9 @@ jobs:
             --health-retries 5 \
             --mount "type=bind,src=$runtime_data,dst=/app/data" \
             --mount "type=bind,src=$attestation_file,dst=/run/secrets/omni_data_at_rest_attestation.json,readonly" \
+            --mount "type=bind,src=$database_key_file,dst=/run/secrets/omni_database_key,readonly" \
             --env DB_PATH=/app/data/omni_money.db \
+            --env DB_ENCRYPTION_KEY_FILE=/run/secrets/omni_database_key \
             --env DATA_AT_REST_MODE=external-encrypted-volume \
             --env DATA_AT_REST_ATTESTATION_FILE=/run/secrets/omni_data_at_rest_attestation.json \
             --env HOST_IP=127.0.0.1 \
@@ -245,6 +270,10 @@ jobs:
           for _ in $(seq 1 30); do
             health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
             if [ "$health" = "healthy" ]; then
+              if sudo head -c 16 "$runtime_data/omni_money.db" | LC_ALL=C grep -q "SQLite format 3"; then
+                echo "database retained a plaintext SQLite header"
+                exit 1
+              fi
               exit 0
             fi
             if [ "$health" = "unhealthy" ]; then

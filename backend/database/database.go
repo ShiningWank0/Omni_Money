@@ -16,9 +16,8 @@ import (
 	"sync"
 	"time"
 
-	sqlite3 "github.com/mattn/go-sqlite3"
-
 	"omni_money/backend/models"
+	"omni_money/backend/securedb"
 	"omni_money/backend/validation"
 )
 
@@ -28,10 +27,11 @@ const writableSQLiteQuery = "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=
 const snapshotSQLiteQuery = "mode=rw&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 
 var (
-	db     *sql.DB
-	dbPath string
-	mu     sync.RWMutex
-	umask  sync.Once
+	db       *sql.DB
+	dbPath   string
+	dbOpener *securedb.Opener
+	mu       sync.RWMutex
+	umask    sync.Once
 
 	// snapshotLifecycle serializes database lifecycle changes with snapshot
 	// operations.  A snapshot keeps a database handle and path for the whole
@@ -49,17 +49,34 @@ var (
 // wails build でバインディング生成時にも呼ばれるため、sync.Once は使わない。
 // 既に接続がある場合はまず閉じてから再接続する。
 func InitDB(path string) error {
+	return initializeDB(path, securedb.NewPlainOpener(), false)
+}
+
+// InitEncryptedDB はSQLCipher鍵を接続ごとに適用し、平文DBが存在する場合は
+// 検証済みの暗号化コピーへ原子的に移行してから初期化する。
+func InitEncryptedDB(path string, key securedb.RawKey) error {
+	return initializeDB(path, securedb.NewEncryptedOpener(key), true)
+}
+
+func initializeDB(path string, opener *securedb.Opener, migratePlaintext bool) error {
 	beginDBLifecycle()
 	defer endDBLifecycle()
 
 	mu.Lock()
 	defer mu.Unlock()
-	return initDBLocked(path)
+	if err := initDBLocked(path, opener, migratePlaintext); err != nil {
+		if dbOpener == opener {
+			dbOpener = nil
+		}
+		opener.Destroy()
+		return err
+	}
+	return nil
 }
 
 // initDBLocked は mu.Lock() を保持した状態で呼び出す前提の初期化本体。
 // RestoreSnapshot のようにロックを保持したまま再初期化する経路と共有する。
-func initDBLocked(path string) error {
+func initDBLocked(path string, opener *securedb.Opener, migratePlaintext bool) error {
 	// SQLiteが後から作成するWAL/SHM/rollback journalも所有者だけが読めるよう、
 	// プロセスのファイル作成マスクを一度だけ制限する。
 	umask.Do(setRestrictiveUmask)
@@ -69,6 +86,13 @@ func initDBLocked(path string) error {
 		db.Close()
 		db = nil
 	}
+	if opener == nil {
+		return fmt.Errorf("データベースopenerが初期化されていません")
+	}
+	if dbOpener != nil && dbOpener != opener {
+		dbOpener.Destroy()
+	}
+	dbOpener = opener
 
 	if path == "" {
 		path = "omni_money.db"
@@ -83,12 +107,17 @@ func initDBLocked(path string) error {
 			return fmt.Errorf("データベースディレクトリ作成エラー: %w", err)
 		}
 	}
+	if migratePlaintext {
+		if err := securedb.EnsureEncrypted(context.Background(), path, opener); err != nil {
+			return fmt.Errorf("SQLCipher移行エラー: %w", err)
+		}
+	}
 	if err := preparePrivateDatabaseFile(path); err != nil {
 		return fmt.Errorf("データベースファイル準備エラー: %w", err)
 	}
 
 	var err error
-	db, err = sql.Open("sqlite3", writableSQLiteDSN(path))
+	db, err = opener.Open(context.Background(), path, securedb.Writable)
 	if err != nil {
 		return fmt.Errorf("データベース接続エラー: %w", err)
 	}
@@ -119,6 +148,11 @@ func initDBLocked(path string) error {
 	if err := hardenSQLiteFiles(path); err != nil {
 		return fmt.Errorf("データベース権限設定エラー: %w", err)
 	}
+	if opener.Encrypted() {
+		if err := securedb.RequireEncryptedHeader(path); err != nil {
+			return fmt.Errorf("SQLCipher暗号化検証エラー: %w", err)
+		}
+	}
 
 	log.Printf("データベース初期化完了: %s", path)
 	return nil
@@ -142,6 +176,10 @@ func CloseDB() {
 		db.Close()
 		db = nil
 		log.Println("データベース接続を閉じました")
+	}
+	if dbOpener != nil {
+		dbOpener.Destroy()
+		dbOpener = nil
 	}
 }
 
@@ -397,12 +435,13 @@ func createSnapshot(snapshotDir string) (string, error) {
 
 	currentPath := dbPath
 	currentDB := db
+	currentOpener := dbOpener
 
 	if currentPath == "" {
 		return "", fmt.Errorf("データベースが初期化されていません")
 	}
 
-	if currentDB == nil {
+	if currentDB == nil || currentOpener == nil {
 		return "", fmt.Errorf("データベースが初期化されていません")
 	}
 
@@ -448,7 +487,7 @@ func createSnapshot(snapshotDir string) (string, error) {
 
 	// sqlite3_backup APIはWALを含む一貫した状態をオンラインで複製する。
 	// TRUNCATE checkpointを実行しないため、直後の取引更新と競合しない。
-	if err := backupSQLiteDatabase(currentDB, snapshotPath); err != nil {
+	if err := backupSQLiteDatabase(currentOpener, currentDB, snapshotPath); err != nil {
 		return "", fmt.Errorf("スナップショット作成エラー: %w", err)
 	}
 	if err := pruneSnapshots(snapshotDir, 30, budget, snapshotPath); err != nil {
@@ -551,7 +590,7 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 				log.Printf("退避データベースの復旧エラー: %v", err)
 				return
 			}
-			if err := initDBLocked(currentPath); err != nil {
+			if err := initDBLocked(currentPath, dbOpener, false); err != nil {
 				log.Printf("復旧後のDB再接続エラー: %v", err)
 			}
 		}
@@ -561,7 +600,7 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if err := os.Rename(currentPath, backupPath); err != nil {
 		// リネーム失敗時はそのまま再接続して返す
 		restoreFailed = false
-		initDBLocked(currentPath)
+		initDBLocked(currentPath, dbOpener, false)
 		return fmt.Errorf("データベース退避エラー: %w", err)
 	}
 
@@ -575,7 +614,10 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	}
 
 	// --- 手順5: 再接続と現行スキーマの再適用 ---
-	newDB, err := sql.Open("sqlite3", writableSQLiteDSN(currentPath))
+	if dbOpener == nil {
+		return fmt.Errorf("データベースopenerが初期化されていません")
+	}
+	newDB, err := dbOpener.Open(context.Background(), currentPath, securedb.Writable)
 	if err != nil {
 		return fmt.Errorf("復元後のDB接続エラー: %w", err)
 	}
@@ -631,12 +673,11 @@ func requireFullSynchronous(target *sql.DB) error {
 }
 
 func checkIntegrity(target *sql.DB) error {
-	var integrityResult string
-	if err := target.QueryRow("PRAGMA integrity_check").Scan(&integrityResult); err != nil {
-		return fmt.Errorf("整合性チェック実行エラー: %w", err)
+	if dbOpener == nil {
+		return fmt.Errorf("データベースopenerが初期化されていません")
 	}
-	if integrityResult != "ok" {
-		return fmt.Errorf("整合性チェック失敗: %s", integrityResult)
+	if err := dbOpener.CheckIntegrity(context.Background(), target); err != nil {
+		return fmt.Errorf("整合性チェック失敗: %w", err)
 	}
 	return nil
 }
@@ -892,89 +933,13 @@ func hardenSQLiteFiles(path string) error {
 }
 
 // backupSQLiteDatabase はSQLiteのオンラインBackup APIで一貫した複製を作る。
-func backupSQLiteDatabase(source *sql.DB, snapshotPath string) (err error) {
-	// 先にprivate directory内へ排他的に作成し、既存ファイルやsymlinkを上書きしない。
-	placeholder, err := os.OpenFile(snapshotPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- path is generated inside the configured private snapshot directory.
-	if err != nil {
-		return err
+func backupSQLiteDatabase(opener *securedb.Opener, source *sql.DB, snapshotPath string) error {
+	if opener == nil {
+		return fmt.Errorf("データベースopenerが初期化されていません")
 	}
-	if err := placeholder.Close(); err != nil {
-		_ = os.Remove(snapshotPath)
-		return err
-	}
-
-	succeeded := false
-	defer func() {
-		if !succeeded {
-			_ = os.Remove(snapshotPath)
-		}
-	}()
-
-	destination, err := sql.Open("sqlite3", snapshotSQLiteDSN(snapshotPath))
-	if err != nil {
-		return err
-	}
-	defer func() { _ = destination.Close() }()
-	if err := requireFullSynchronous(destination); err != nil {
-		return err
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	sourceConn, err := source.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer sourceConn.Close()
-
-	destinationConn, err := destination.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer destinationConn.Close()
-
-	err = destinationConn.Raw(func(destinationDriverConn any) error {
-		destinationSQLiteConn, ok := destinationDriverConn.(*sqlite3.SQLiteConn)
-		if !ok {
-			return fmt.Errorf("unexpected destination SQLite driver connection %T", destinationDriverConn)
-		}
-		return sourceConn.Raw(func(sourceDriverConn any) error {
-			sourceSQLiteConn, ok := sourceDriverConn.(*sqlite3.SQLiteConn)
-			if !ok {
-				return fmt.Errorf("unexpected source SQLite driver connection %T", sourceDriverConn)
-			}
-
-			backup, err := destinationSQLiteConn.Backup("main", sourceSQLiteConn, "main")
-			if err != nil {
-				return err
-			}
-			for {
-				done, stepErr := backup.Step(128)
-				if stepErr != nil {
-					_ = backup.Finish()
-					return stepErr
-				}
-				if done {
-					return backup.Finish()
-				}
-				select {
-				case <-ctx.Done():
-					_ = backup.Finish()
-					return ctx.Err()
-				case <-time.After(10 * time.Millisecond):
-				}
-			}
-		})
-	})
-	if err != nil {
-		return err
-	}
-	if err := os.Chmod(snapshotPath, 0600); err != nil {
-		return err
-	}
-	succeeded = true
-	return nil
+	return opener.Backup(ctx, source, snapshotPath)
 }
 
 // copyFile はファイルをコピーする

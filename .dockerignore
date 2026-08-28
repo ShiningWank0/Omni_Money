@@ -15,6 +15,9 @@
 !cmd/omni-totp/
 !cmd/omni-totp/**
 
+!scripts/
+!scripts/build-sqlcipher-linux.sh
+
 !frontend/
 !frontend/package.json
 !frontend/package-lock.json
