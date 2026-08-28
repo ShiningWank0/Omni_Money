@@ -10,22 +10,53 @@ import (
 	"omni_money/backend/keyenvelope"
 )
 
-// RecordSuccessfulLogin records a monotonic last-login timestamp only while
-// the user is active. Authentication may happen outside the store, but the
-// state check and timestamp mutation are intentionally one immediate
-// transaction so a concurrent disable cannot race a successful login record.
-func (s *Store) RecordSuccessfulLogin(ctx context.Context, userID string, now time.Time) error {
+// RecordSuccessfulLogin commits a password login only if the exact credential
+// verified by the caller is still current and the user is still active. The
+// expensive password KDF must run before this call; matching the envelope and
+// updated-at revision inside one immediate transaction prevents a password
+// change or recovery reset that wins that race from being followed by a login
+// using the stale password credential.
+func (s *Store) RecordSuccessfulLogin(
+	ctx context.Context,
+	userID string,
+	expected PasswordCredential,
+	now time.Time,
+) error {
 	userID, err := normalizeID(userID)
 	if err != nil {
 		return err
+	}
+	if expected.UserID != userID {
+		return ErrCredentialConflict
+	}
+	expectedJSON, err := encodeKeyEnvelope(expected.Envelope, keyenvelope.KindPassword)
+	if err != nil {
+		return fmt.Errorf("expected password credential: %w", err)
+	}
+	expectedUpdatedAt, err := validateOperationTime(expected.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("expected password credential revision: %w", err)
 	}
 	now, err = validateOperationTime(now)
 	if err != nil {
 		return err
 	}
+	if now.Before(expectedUpdatedAt) {
+		return fmt.Errorf("%w: login time predates the credential revision", ErrCredentialConflict)
+	}
 	return s.withImmediate(ctx, func(connection *sql.Conn) error {
 		if err := requireActiveUser(ctx, connection, userID); err != nil {
 			return err
+		}
+		var credentialMatches bool
+		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM password_credentials
+			WHERE user_id = ? AND envelope_json = ? AND updated_at_ms = ?
+		)`, userID, expectedJSON, expectedUpdatedAt.UnixMilli()).Scan(&credentialMatches); err != nil {
+			return fmt.Errorf("verify successful login credential revision: %w", err)
+		}
+		if !credentialMatches {
+			return ErrCredentialConflict
 		}
 		result, err := connection.ExecContext(ctx, `UPDATE users
 			SET last_login_at_ms = CASE

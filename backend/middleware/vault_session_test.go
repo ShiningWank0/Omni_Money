@@ -172,6 +172,64 @@ func TestVaultSessionCreationFailureLeavesRootWithCaller(t *testing.T) {
 	}
 }
 
+func TestSlowVaultRootReleaseDoesNotHoldSessionManagerMutex(t *testing.T) {
+	manager := NewSessionManagerWithConfig(securityTestSessionConfig())
+	releaseStarted := make(chan struct{})
+	allowRelease := make(chan struct{})
+	var allowOnce sync.Once
+	unblockRelease := func() { allowOnce.Do(func() { close(allowRelease) }) }
+	t.Cleanup(func() {
+		unblockRelease()
+		manager.Close()
+	})
+
+	user := testControlUser(testVaultSessionUserID)
+	blockingRoot := &sessionVaultRoot{
+		userID: user.ID,
+		release: func() {
+			close(releaseStarted)
+			<-allowRelease
+		},
+	}
+	blocked := createTestVaultSession(t, manager, user, blockingRoot)
+	other, err := manager.CreateSession("independent-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deleteDone := make(chan struct{})
+	go func() {
+		manager.DeleteSession(blocked.ID)
+		close(deleteDone)
+	}()
+	select {
+	case <-releaseStarted:
+	case <-time.After(time.Second):
+		t.Fatal("vault root release did not start")
+	}
+
+	lookupDone := make(chan bool, 1)
+	go func() {
+		_, ok := manager.GetSession(other.ID)
+		lookupDone <- ok
+	}()
+	select {
+	case ok := <-lookupDone:
+		if !ok {
+			t.Fatal("independent session disappeared during another root release")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow vault root release held the global session mutex")
+	}
+
+	unblockRelease()
+	select {
+	case <-deleteDone:
+	case <-time.After(time.Second):
+		t.Fatal("DeleteSession did not finish after root release unblocked")
+	}
+}
+
 type fakeCurrentUserStore struct {
 	mu    sync.Mutex
 	user  control.UserSummary
