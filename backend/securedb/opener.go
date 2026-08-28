@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -217,11 +218,18 @@ func driverQueryInt64(conn *sqlite3.SQLiteConn, query string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	result, ok := value.(int64)
-	if !ok {
+	switch result := value.(type) {
+	case int64:
+		return result, nil
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(result), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("unexpected SQLite integer result %q", result)
+		}
+		return parsed, nil
+	default:
 		return 0, fmt.Errorf("unexpected SQLite result type %T", value)
 	}
-	return result, nil
 }
 
 func driverQueryValue(conn *sqlite3.SQLiteConn, query string) (driver.Value, error) {
