@@ -30,7 +30,12 @@ function bytesToBase64(bytes) {
 }
 
 function textToBase64(value) {
-  return bytesToBase64(new TextEncoder().encode(value))
+  const bytes = new TextEncoder().encode(value)
+  try {
+    return bytesToBase64(bytes)
+  } finally {
+    bytes.fill(0)
+  }
 }
 
 function requestReauthentication() {
@@ -271,6 +276,84 @@ export async function logoutAll() {
     throw new Error(await parseError(res, '全セッションのログアウトに失敗しました'))
   }
   csrfToken = null
+}
+
+/**
+ * 招待を受諾する。token はURLではなくユーザーが貼り付けた値を渡す。
+ */
+export async function acceptServerInvitation({ token, displayName, password, recoverySecret }) {
+  if (isWails) throw new Error('この操作はサーバーモード専用です')
+
+  const res = await apiFetch('/api/auth/invitations/accept', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      token_b64: textToBase64(token),
+      display_name: displayName,
+      password_b64: textToBase64(password),
+      recovery_secret_b64: bytesToBase64(recoverySecret)
+    })
+  }, { skipAuthRedirect: true, skipReauth: true })
+  await throwIfNotOk(res, '招待を受諾できませんでした')
+  return await res.json()
+}
+
+/**
+ * 管理者から受け取ったreset tokenと既存回復secretでcredentialを更新する。
+ */
+export async function completeServerPasswordReset({ token, recoverySecret, newPassword, newRecoverySecret }) {
+  if (isWails) throw new Error('この操作はサーバーモード専用です')
+
+  const res = await apiFetch('/api/auth/password-reset/complete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      token_b64: textToBase64(token),
+      recovery_secret_b64: bytesToBase64(recoverySecret),
+      new_password_b64: textToBase64(newPassword),
+      new_recovery_secret_b64: bytesToBase64(newRecoverySecret)
+    })
+  }, { skipAuthRedirect: true, skipReauth: true })
+  await throwIfNotOk(res, 'パスワードを再設定できませんでした')
+  return await res.json()
+}
+
+export async function listServerUsers() {
+  if (isWails) return []
+  const res = await apiFetch('/api/admin/users')
+  await throwIfNotOk(res, 'ユーザー一覧を取得できませんでした')
+  const data = await res.json()
+  return Array.isArray(data?.users) ? data.users : []
+}
+
+export async function createServerInvitation({ email, role = 'user', expiresInSeconds = 86400 }) {
+  if (isWails) throw new Error('この操作はサーバーモード専用です')
+  const res = await apiFetch('/api/admin/invitations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, role, expires_in_seconds: expiresInSeconds })
+  })
+  await throwIfNotOk(res, '招待を作成できませんでした')
+  return await res.json()
+}
+
+export async function disableServerUser(userID) {
+  if (isWails) throw new Error('この操作はサーバーモード専用です')
+  const res = await apiFetch(`/api/admin/users/${encodeURIComponent(userID)}/disable`, {
+    method: 'POST'
+  })
+  await throwIfNotOk(res, 'ユーザーを無効化できませんでした')
+}
+
+export async function createServerPasswordReset(userID, expiresInSeconds = 900) {
+  if (isWails) throw new Error('この操作はサーバーモード専用です')
+  const res = await apiFetch('/api/admin/password-resets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target_user_id: userID, expires_in_seconds: expiresInSeconds })
+  })
+  await throwIfNotOk(res, 'パスワード再設定を開始できませんでした')
+  return await res.json()
 }
 
 /**

@@ -78,6 +78,7 @@
         <button class="menu-btn menu-group-start" @click="showGraphModal">残高推移グラフ表示</button>
         <button class="menu-btn" @click="openTagChart">タグ別分析</button>
         <button v-if="serverFeatures.snapshots" class="menu-btn menu-group-start" @click="openSnapshotManager">スナップショット管理</button>
+        <button v-if="serverFeatures.admin" class="menu-btn menu-group-start" @click="openServerAccountAdmin">サーバーユーザー管理</button>
         <button v-if="!isWailsMode" class="menu-btn logout-btn" @click="logout">ログアウト</button>
       </nav>
     </div>
@@ -207,11 +208,17 @@
       @restored="handleSnapshotRestored"
     />
 
+    <ServerAccountAdminModal
+      v-if="showServerAccountAdmin"
+      :current-user-id="currentServerUserId"
+      @close="showServerAccountAdmin = false"
+    />
+
     <!-- 最近の認証が必要な操作用の再認証ダイアログ -->
     <div v-if="showReauthModal" class="reauth-overlay" @click.self="cancelReauthentication">
       <div class="reauth-card" role="dialog" aria-modal="true" aria-labelledby="reauth-title">
         <h3 id="reauth-title">重要な操作の確認</h3>
-        <p class="reauth-description">一括取り込み・書き出し、復元など重要な操作を実行するため、Omni Moneyのパスワードを入力してください。</p>
+        <p class="reauth-description">ユーザー管理、一括取り込み・書き出し、復元など重要な操作を実行するため、Omni Moneyのパスワードを入力してください。</p>
         <form @submit.prevent="submitReauthentication">
           <label class="reauth-label" for="reauth-password">パスワード</label>
           <input
@@ -262,6 +269,7 @@ const BalanceChart = defineAsyncComponent(() => import('./components/BalanceChar
 const SnapshotManager = defineAsyncComponent(() => import('./components/SnapshotManager.vue'))
 const TagPieChart = defineAsyncComponent(() => import('./components/TagPieChart.vue'))
 const AIAPIConsoleModal = defineAsyncComponent(() => import('./components/AIAPIConsoleModal.vue'))
+const ServerAccountAdminModal = defineAsyncComponent(() => import('./components/ServerAccountAdminModal.vue'))
 import {
   addTransaction,
   updateTransaction,
@@ -290,6 +298,7 @@ const showGraph = ref(false)
 const showSnapshotModal = ref(false)
 const showTagChart = ref(false)
 const showAIAPIConsole = ref(false)
+const showServerAccountAdmin = ref(false)
 const showReauthModal = ref(false)
 const reauthLoading = ref(false)
 const reauthPassword = ref('')
@@ -298,7 +307,8 @@ const reauthPasswordInput = ref(null)
 let reauthRequest = null
 let reauthListenerRegistered = false
 const idleTimeoutSeconds = ref(0)
-const serverFeatures = ref({ ai: false, snapshots: isWailsMode })
+const serverFeatures = ref({ admin: false, ai: false, snapshots: isWailsMode })
+const currentServerUserId = ref('')
 const idleScreenLocked = ref(false)
 let idleTimer = null
 let lastUserActivityAt = 0
@@ -580,6 +590,11 @@ function openSnapshotManager() {
   showSnapshotModal.value = true
 }
 
+function openServerAccountAdmin() {
+  showMenu.value = false
+  showServerAccountAdmin.value = true
+}
+
 async function logout() {
   showMenu.value = false
   try {
@@ -645,6 +660,7 @@ function clearSensitiveStateForIdle() {
   showSnapshotModal.value = false
   showTagChart.value = false
   showAIAPIConsole.value = false
+  showServerAccountAdmin.value = false
   showReauthModal.value = false
   reauthLoading.value = false
   reauthPassword.value = ''
@@ -655,6 +671,7 @@ function clearSensitiveStateForIdle() {
   selectedCreditCardItems.value = []
   selectedBankAccountItems.value = []
   balanceHistoryData.value = null
+  currentServerUserId.value = ''
   toast.value = { visible: false, message: '', type: 'success' }
   clearTimeout(toastTimer)
   toastTimer = null
@@ -674,6 +691,16 @@ async function fetchPrivateData() {
   await store.fetchTransactions()
 }
 
+function applyServerAuthStatus(status) {
+  if (isWailsMode || !status?.features) return
+  serverFeatures.value = {
+    admin: Boolean(status.features.admin),
+    ai: Boolean(status.features.ai),
+    snapshots: Boolean(status.features.snapshots)
+  }
+  currentServerUserId.value = typeof status?.user?.id === 'string' ? status.user.id : ''
+}
+
 async function handlePageShow(event) {
   if (isWailsMode || !event.persisted) return
 
@@ -681,12 +708,7 @@ async function handlePageShow(event) {
   clearSensitiveStateForIdle()
   try {
     const authStatus = await getAuthStatus()
-    if (componentMounted && !isWailsMode && authStatus?.features) {
-      serverFeatures.value = {
-        ai: Boolean(authStatus.features.ai),
-        snapshots: Boolean(authStatus.features.snapshots)
-      }
-    }
+    if (componentMounted) applyServerAuthStatus(authStatus)
     if (!authStatus?.authenticated) {
       window.location.replace('/login')
       return
@@ -988,12 +1010,7 @@ onMounted(async () => {
   reauthListenerRegistered = true
   try {
     const authStatus = await getAuthStatus()
-    if (componentMounted && !isWailsMode && authStatus?.features) {
-      serverFeatures.value = {
-        ai: Boolean(authStatus.features.ai),
-        snapshots: Boolean(authStatus.features.snapshots)
-      }
-    }
+    if (componentMounted) applyServerAuthStatus(authStatus)
     if (componentMounted && !isWailsMode && authStatus?.authenticated) {
       const serverIdleSeconds = Number(authStatus?.idle_timeout_seconds)
       if (Number.isFinite(serverIdleSeconds) && serverIdleSeconds > 0) {

@@ -100,7 +100,16 @@ recovery codeはpassword manager等へ保存してください。serverは平文
 docker compose -f compose.yaml -f compose.local.yaml up -d --force-recreate
 ```
 
-現段階では最初のAdmin作成UIまで実装済みで、invite・password resetのHTTP APIはありますが管理UIは開発中です。
+ログイン後、Adminはメニューの「サーバーユーザー管理」から次を実行できます。
+
+- userのemailとroleを指定して、24時間有効の一度だけ表示されるinvite tokenを作る
+- active userへ15分有効のpassword reset tokenを作る
+- 自分以外のactive userを無効化し、そのuserのsessionと開いているvaultを失効させる
+
+invite/reset tokenはURLへ入れず、安全な別経路で本人へ渡してください。本人は `/login?mode=invite` または
+`/login?mode=reset` を開いてtokenを手動で貼り付けます。招待されたuserは自分のpasswordとrecovery codeを作り、
+password resetにはAdminのtokenに加えて本人だけが保持する既存recovery codeが必要です。Admin UIが扱うのはaccount状態だけで、
+他userの取引、vault path、password、recovery code、暗号鍵を表示または復号する機能はありません。
 
 ### 停止、再開、更新
 
