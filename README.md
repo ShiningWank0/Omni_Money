@@ -141,7 +141,7 @@ LD_LIBRARY_PATH="$PWD/.build/sqlcipher/lib" \
 go run -tags 'server libsqlite3 sqlite_omit_load_extension' ./server.go
 ```
 
-control鍵とinitial-admin setup tokenは別々のowner-only secretとして生成します。setup tokenは32 byte以上のbase64url文字列にしてください。初回アクセスではブラウザがユーザーvault用の回復コードを生成して、保存確認後に最初のAdminを作成します。Adminのパスワードやcontrol鍵だけでは他ユーザーのvaultを開けません。
+control鍵とinitial-admin setup tokenは別々のowner-only secretとして生成します。setup tokenは32 byte以上のbase64url文字列にしてください。初回アクセスではブラウザがユーザーvault用の回復コードを生成して、保存確認後に最初のAdminを作成します。ログイン後は「サーバーユーザー管理」から招待、password reset token発行、user無効化を行えます。invite/reset tokenはURLに含めず本人へ安全に渡してください。Adminのパスワードやcontrol鍵だけでは他ユーザーのvaultを開けません。
 
 直接起動した公開Webは標準で `127.0.0.1:4000` で待ち受けます。`ALLOWED_HOSTS` は直接起動でも必須です。非loopback平文HTTPは許可されず、TLSまたは固定したtrusted proxy経由のHTTPSが必要です。同梱のComposeはPangolin/Newt専用構成で、ホストへポートを公開しません。ローカル利用時だけ `compose.local.yaml` を重ねます。
 
