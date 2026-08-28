@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"bytes"
 	"encoding/json"
 	"math"
@@ -123,31 +124,28 @@ func TestAIFailedAuthAuditAggregatorSeparatesKeysAndPassesOtherAudits(t *testing
 			t.Fatalf("distinct failed-auth key was suppressed: %#v", record)
 		}
 	}
-	// A client-certificate change on the same IP must not create another
-	// detailed bucket. The summary clears the fingerprint if sources differ.
-	if emitted := aggregator.record(aiAuditRecord{
+	// A different client certificate on the same IP is a different audit
+	// subject and must retain its own first/summary sequence.
+	secondSubject := aiAuditRecord{
 		Operation: "analysis", RemoteIP: "192.0.2.1", Reason: "authentication_failed",
 		Status: 401, MTLSClientSHA256: "different-client",
-	}, now); len(emitted) != 0 {
-		t.Fatalf("mTLS cardinality bypass emitted=%#v", emitted)
+	}
+	if emitted := aggregator.record(secondSubject, now); len(emitted) != 1 || emitted[0].MTLSClientSHA256 != "different-client" {
+		t.Fatalf("separate mTLS subject was not emitted independently: %#v", emitted)
+	}
+	if emitted := aggregator.record(secondSubject, now); len(emitted) != 0 {
+		t.Fatalf("same mTLS subject was not aggregated: %#v", emitted)
 	}
 	later := now.Add(time.Minute)
-	emitted := aggregator.record(aiAuditRecord{
-		Operation: "analysis", RemoteIP: "192.0.2.1", Reason: "authentication_failed",
-		Status: 401, MTLSClientSHA256: "third-client",
-	}, later)
-	mixedSummaryFound := false
+	emitted := aggregator.record(secondSubject, later)
+	summaryFound := false
 	for _, output := range emitted {
-		if output.RemoteIP == "192.0.2.1" && output.Operation == "analysis" &&
-			output.Reason == "authentication_failed" && output.Occurrences == 1 {
-			mixedSummaryFound = true
-			if output.MTLSClientSHA256 != "" {
-				t.Fatalf("mixed-mTLS summary retained fingerprint: %#v", output)
-			}
+		if output.MTLSClientSHA256 == "different-client" && output.Occurrences == 1 {
+			summaryFound = true
 		}
 	}
-	if !mixedSummaryFound {
-		t.Fatalf("mixed-mTLS summary missing from %#v", emitted)
+	if !summaryFound {
+		t.Fatalf("mTLS subject summary missing from %#v", emitted)
 	}
 
 	for _, reason := range []string{"scope_forbidden", "rate_limited", ""} {
@@ -304,4 +302,25 @@ func assertAIFailedAuthSummary(t *testing.T, records []aiAuditRecord, reason str
 		return
 	}
 	t.Fatalf("summary reason=%q occurrences=%d not found in %#v", reason, occurrences, records)
+}
+
+func TestAIFailedAuthAuditAggregatorBoundsManyFingerprintsBehindOneIP(t *testing.T) {
+	now := time.Date(2026, 8, 9, 5, 0, 0, 0, time.UTC)
+	aggregator := newAIFailedAuthAuditAggregator()
+	for index := 0; index < aiFailedAuthAuditMaxDetailedWindow+1000; index++ {
+		record := aiAuditRecord{
+			Operation: "analysis", RemoteIP: "192.0.2.50",
+			MTLSClientSHA256: fmt.Sprintf("%064x", index+1),
+			Reason: "authentication_failed", Status: http.StatusUnauthorized,
+		}
+		aggregator.record(record, now)
+	}
+	if len(aggregator.windows) != aiFailedAuthAuditMaxDetailedWindow {
+		t.Fatalf("detailed windows=%d", len(aggregator.windows))
+	}
+	for _, window := range aggregator.overflow {
+		if window.last.MTLSClientSHA256 != "" {
+			t.Fatalf("overflow retained fingerprint: %#v", window.last)
+		}
+	}
 }
