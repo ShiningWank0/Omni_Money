@@ -12,7 +12,7 @@ archive="$work_dir/sqlcipher.tar.gz"
 curl --fail --location --silent --show-error --retry 5 \
   "https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v${SQLCIPHER_VERSION}.tar.gz" \
   --output "$archive"
-printf '%s  %s\n' "$SQLCIPHER_SHA256" "$archive" | sha256sum --check --status
+printf '%s  %s\n' "$SQLCIPHER_SHA256" "$archive" | sha256sum -c -
 tar -xzf "$archive" -C "$work_dir"
 
 source_dir="$work_dir/sqlcipher-${SQLCIPHER_VERSION}"
