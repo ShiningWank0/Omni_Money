@@ -159,6 +159,166 @@ func TestCloseUserWaitsForLeaseAndRejectsNewLease(t *testing.T) {
 	}
 }
 
+func TestBeginUserDrainRejectsNewLeasesAndWaitsForExistingChild(t *testing.T) {
+	manager := newPlainTestManager(t)
+	root, err := manager.Acquire("user-1", testVaultID, testKey(0x26))
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := root.Borrow()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wait, err := manager.BeginUserDrain("user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Acquire("user-1", testVaultID, testKey(0x26)); !errors.Is(err, ErrDraining) {
+		t.Fatalf("Acquire after BeginUserDrain error = %v", err)
+	}
+	if _, err := root.Borrow(); !errors.Is(err, ErrDraining) {
+		t.Fatalf("Borrow after BeginUserDrain error = %v", err)
+	}
+
+	drained := make(chan error, 1)
+	go func() { drained <- wait(context.Background()) }()
+	root.Release()
+	select {
+	case err := <-drained:
+		t.Fatalf("drain waiter returned while an existing child was live: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	if leaseDB(child) == nil {
+		t.Fatal("BeginUserDrain revoked an already-borrowed child")
+	}
+	child.Release()
+	if err := <-drained; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBeginUserDrainWaiterStaysBoundToObservedEntry(t *testing.T) {
+	manager := newPlainTestManager(t)
+	oldRoot, err := manager.Acquire("user-1", testVaultID, testKey(0x27))
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleWaiter, err := manager.BeginUserDrain("user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closingWaiter, err := manager.BeginUserDrain("user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRoot.Release()
+	if err := closingWaiter(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	newRoot, err := manager.Acquire("user-1", secondTestVaultID, testKey(0x28))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		newRoot.Release()
+		if err := manager.Close(context.Background()); err != nil {
+			t.Error(err)
+		}
+	}()
+	if err := staleWaiter(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if leaseDB(newRoot) == nil {
+		t.Fatal("waiter for the old entry closed the replacement entry")
+	}
+	child, err := newRoot.Borrow()
+	if err != nil {
+		t.Fatalf("replacement entry was left draining: %v", err)
+	}
+	child.Release()
+}
+
+func TestBeginUserDrainWithoutEntryReturnsNoOpWaiter(t *testing.T) {
+	manager := newPlainTestManager(t)
+	wait, err := manager.BeginUserDrain("user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := wait(ctx); err != nil {
+		t.Fatalf("no-op drain waiter error = %v", err)
+	}
+	lease, err := manager.Acquire("user-1", testVaultID, testKey(0x29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.Release()
+	if err := manager.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCanceledDrainWaiterStillClosesOnFinalChildRelease(t *testing.T) {
+	manager := newPlainTestManager(t)
+	root, err := manager.Acquire("user-1", testVaultID, testKey(0x2a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := root.Borrow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldEntry := child.entry
+	oldInstance := leaseInstance(child)
+	if oldEntry == nil || oldInstance == nil {
+		t.Fatal("initial vault entry was not open")
+	}
+	wait, err := manager.BeginUserDrain("user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root.Release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := wait(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled drain waiter error = %v", err)
+	}
+	if oldInstance.DB() == nil {
+		t.Fatal("canceled drain waiter closed an entry with a live child")
+	}
+
+	child.Release()
+	if oldInstance.DB() != nil {
+		t.Fatal("final child Release returned before closing the drained instance")
+	}
+	manager.mu.Lock()
+	entryStillMapped := manager.entries["user-1"] == oldEntry || manager.byVault[testVaultID] == oldEntry
+	fingerprintCleared := true
+	for _, value := range oldEntry.keyFingerprint {
+		fingerprintCleared = fingerprintCleared && value == 0
+	}
+	manager.mu.Unlock()
+	if entryStillMapped || !fingerprintCleared {
+		t.Fatalf("final child Release did not remove and zeroize old entry: mapped=%t zeroized=%t", entryStillMapped, fingerprintCleared)
+	}
+
+	reopened, err := manager.Acquire("user-1", testVaultID, testKey(0x2a))
+	if err != nil {
+		t.Fatalf("reacquire after canceled drain: %v", err)
+	}
+	if leaseInstance(reopened) == oldInstance || leaseDB(reopened) == nil {
+		t.Fatal("reacquire did not open a fresh vault instance")
+	}
+	reopened.Release()
+	if err := manager.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBorrowKeepsVaultAliveAfterRootRelease(t *testing.T) {
 	manager := newPlainTestManager(t)
 	root, err := manager.Acquire("user-1", testVaultID, testKey(0x22))

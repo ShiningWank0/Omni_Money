@@ -354,40 +354,56 @@ func (l *Lease) Release() {
 				if current.rootReferences == 0 && !current.draining {
 					// A root lease represents an unlocked session. Once the last
 					// root disappears, reject new acquisitions immediately and
-					// close after any already-borrowed request children finish.
+					// let the final outstanding reference close the entry.
 					current.draining = true
-					autoClose = true
 				}
 			}
 			if current.references == 0 {
 				close(current.idle)
+				autoClose = current.draining
 			}
 		}
 		m.mu.Unlock()
 		if autoClose {
-			go func() { _ = m.closeEntry(context.Background(), current) }()
+			_ = m.closeEntry(context.Background(), current)
 		}
 	})
 }
 
-// CloseUser prevents new leases for a user, waits for in-flight leases, then
-// closes and zeroizes the SQLCipher opener owned by the database instance.
-func (m *Manager) CloseUser(ctx context.Context, userID string) error {
+// BeginUserDrain prevents new root and child leases for a user immediately.
+// The returned waiter is bound to the exact entry observed by this call; it
+// waits for that entry's in-flight references and closes it without affecting
+// a replacement entry that may later be opened for the same user. A user with
+// no current entry returns a safe no-op waiter.
+func (m *Manager) BeginUserDrain(userID string) (func(context.Context) error, error) {
+	noOp := func(context.Context) error { return nil }
 	if m == nil {
-		return nil
+		return noOp, nil
 	}
 	if err := validateUserID(userID); err != nil {
-		return err
+		return nil, err
 	}
 	m.mu.Lock()
 	current := m.entries[userID]
 	if current == nil {
 		m.mu.Unlock()
-		return nil
+		return noOp, nil
 	}
 	current.draining = true
 	m.mu.Unlock()
-	return m.closeEntry(ctx, current)
+	return func(ctx context.Context) error {
+		return m.closeEntry(ctx, current)
+	}, nil
+}
+
+// CloseUser prevents new leases for a user, waits for in-flight leases, then
+// closes and zeroizes the SQLCipher opener owned by the database instance.
+func (m *Manager) CloseUser(ctx context.Context, userID string) error {
+	wait, err := m.BeginUserDrain(userID)
+	if err != nil {
+		return err
+	}
+	return wait(ctx)
 }
 
 // Close drains every vault and permanently prevents new acquisitions.
