@@ -350,14 +350,17 @@ func (s *Store) SetUserRole(ctx context.Context, actorID, targetID string, role 
 
 func revokePendingCapabilities(ctx context.Context, connection *sql.Conn, userID string, now time.Time) error {
 	if _, err := connection.ExecContext(ctx, `UPDATE invitations
-		SET state = 'revoked', resolved_at_ms = ?
-		WHERE created_by = ? AND state = 'pending'`, now.UnixMilli(), userID); err != nil {
+		SET state = 'revoked',
+			resolved_at_ms = CASE WHEN created_at_ms > ? THEN created_at_ms ELSE ? END
+		WHERE created_by = ? AND state = 'pending'`,
+		now.UnixMilli(), now.UnixMilli(), userID); err != nil {
 		return fmt.Errorf("revoke issued invitations: %w", err)
 	}
 	if _, err := connection.ExecContext(ctx, `UPDATE password_reset_tickets
-		SET state = 'revoked', resolved_at_ms = ?
+		SET state = 'revoked',
+			resolved_at_ms = CASE WHEN created_at_ms > ? THEN created_at_ms ELSE ? END
 		WHERE (created_by = ? OR user_id = ?) AND state = 'pending'`,
-		now.UnixMilli(), userID, userID); err != nil {
+		now.UnixMilli(), now.UnixMilli(), userID, userID); err != nil {
 		return fmt.Errorf("revoke issued password reset tickets: %w", err)
 	}
 	return nil

@@ -18,11 +18,11 @@ import (
 
 const (
 	ModeExternalEncryptedVolume = "external-encrypted-volume"
-	maxAttestationBytes          = 16 * 1024
-	verificationMaxAge           = 31 * 24 * time.Hour
-	recoveryTestMaxAge           = 185 * 24 * time.Hour
-	rotationPlanMaxHorizon       = 400 * 24 * time.Hour
-	clockSkewAllowance           = 5 * time.Minute
+	maxAttestationBytes         = 16 * 1024
+	verificationMaxAge          = 31 * 24 * time.Hour
+	recoveryTestMaxAge          = 185 * 24 * time.Hour
+	rotationPlanMaxHorizon      = 400 * 24 * time.Hour
+	clockSkewAllowance          = 5 * time.Minute
 )
 
 var (
@@ -61,6 +61,16 @@ func RequireServerProtection(dbPath, mode, attestationPath string, now time.Time
 	}
 	if !filepath.IsAbs(attestationPath) {
 		return Status{}, errors.New("DATA_AT_REST_ATTESTATION_FILE must be an absolute path")
+	}
+	if err := validateAttestationParents(attestationPath); err != nil {
+		return Status{}, err
+	}
+	attestationInfo, err := os.Lstat(attestationPath)
+	if err != nil {
+		return Status{}, fmt.Errorf("inspect data-at-rest attestation owner: %w", err)
+	}
+	if !trustedAttestationOwner(attestationInfo) {
+		return Status{}, errors.New("data-at-rest attestation must be owned by root or the server user")
 	}
 	content, err := secretfile.ReadIntegrityProtected(attestationPath, maxAttestationBytes)
 	if err != nil {
@@ -103,18 +113,30 @@ func RequireServerProtection(dbPath, mode, attestationPath string, now time.Time
 	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
 		return Status{}, errors.New("attested data_root must be a real directory, not a symlink")
 	}
+	if rootInfo.Mode().Perm()&0o022 != 0 {
+		return Status{}, fmt.Errorf("attested data_root must not be writable by group or other users: %04o", rootInfo.Mode().Perm())
+	}
 	absoluteDB, err := filepath.Abs(dbPath)
 	if err != nil {
 		return Status{}, fmt.Errorf("resolve DB_PATH: %w", err)
 	}
-	if !pathContains(dataRoot, filepath.Clean(absoluteDB)) {
-		return Status{}, errors.New("DB_PATH is outside the attested encrypted data_root")
+	absoluteDB = filepath.Clean(absoluteDB)
+	if err := validateDataPath(dataRoot, absoluteDB); err != nil {
+		return Status{}, err
 	}
 	absoluteAttestation, err := filepath.Abs(attestationPath)
 	if err != nil {
 		return Status{}, fmt.Errorf("resolve attestation path: %w", err)
 	}
-	if pathContains(dataRoot, filepath.Clean(absoluteAttestation)) {
+	resolvedRoot, err := filepath.EvalSymlinks(dataRoot)
+	if err != nil {
+		return Status{}, fmt.Errorf("resolve attested data_root: %w", err)
+	}
+	resolvedAttestation, err := filepath.EvalSymlinks(filepath.Clean(absoluteAttestation))
+	if err != nil {
+		return Status{}, fmt.Errorf("resolve attestation path: %w", err)
+	}
+	if pathContains(filepath.Clean(resolvedRoot), filepath.Clean(resolvedAttestation)) {
 		return Status{}, errors.New("attestation must be stored outside the financial data root")
 	}
 	if now.IsZero() {
@@ -141,6 +163,96 @@ func RequireServerProtection(dbPath, mode, attestationPath string, now time.Time
 		RecoveryTestedAt: document.RecoveryTestedAt.UTC(),
 		NextRotationAt:   document.NextRotationAt.UTC(),
 	}, nil
+}
+
+// validateAttestationParents prevents a different OS user from replacing an
+// otherwise read-only attestation by renaming it through a shared writable
+// directory. Both the configured lexical chain and the resolved chain are
+// checked. This permits protected system aliases such as macOS /var while
+// rejecting aliases placed in, or targeting, a shared writable directory. A
+// process with the same UID remains inside the operator trust boundary.
+func validateAttestationParents(path string) error {
+	parent := filepath.Clean(filepath.Dir(path))
+	if err := validateAttestationDirectoryChain(parent, true); err != nil {
+		return err
+	}
+	resolved, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return fmt.Errorf("resolve attestation parent directory: %w", err)
+	}
+	return validateAttestationDirectoryChain(filepath.Clean(resolved), false)
+}
+
+func validateAttestationDirectoryChain(current string, allowProtectedSymlinks bool) error {
+	for {
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect attestation parent directory: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if !allowProtectedSymlinks {
+				return errors.New("resolved attestation parent path must contain only real directories")
+			}
+		} else if !info.IsDir() {
+			return errors.New("attestation parent path must contain only real directories")
+		} else if !trustedAttestationOwner(info) {
+			return errors.New("attestation parent directory must be owned by root or the server user")
+		} else if info.Mode().Perm()&0o022 != 0 {
+			return fmt.Errorf("attestation parent directory must not be writable by group or other users: %04o", info.Mode().Perm())
+		}
+		next := filepath.Dir(current)
+		if next == current {
+			return nil
+		}
+		current = next
+	}
+}
+
+// validateDataPath verifies both lexical containment and every existing path
+// component below dataRoot. A path such as dataRoot/link/database.db must not
+// pass merely because its spelling is contained when link redirects to another
+// volume. Missing components are allowed so a fresh deployment can create its
+// database after this preflight; the deepest existing parent is still checked.
+func validateDataPath(dataRoot, candidate string) error {
+	relative, err := filepath.Rel(dataRoot, candidate)
+	if err != nil || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("DB_PATH is outside the attested encrypted data_root")
+	}
+	if relative == "." {
+		return errors.New("DB_PATH must name a file below the attested encrypted data_root")
+	}
+
+	components := strings.Split(relative, string(filepath.Separator))
+	current := dataRoot
+	for index, component := range components {
+		if component == "" || component == "." || component == ".." {
+			return errors.New("DB_PATH contains an invalid path component")
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			// filepath.Join cannot escape after the lexical check above. Any
+			// remaining components will be created below this checked parent.
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect DB_PATH component: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("DB_PATH must not contain symbolic links below the attested data_root")
+		}
+		isLeaf := index == len(components)-1
+		if !isLeaf && !info.IsDir() {
+			return errors.New("DB_PATH parent component must be a directory")
+		}
+		if isLeaf && !info.Mode().IsRegular() {
+			return errors.New("existing DB_PATH must be a regular file")
+		}
+		if info.Mode().Perm()&0o022 != 0 {
+			return fmt.Errorf("DB_PATH component must not be writable by group or other users: %04o", info.Mode().Perm())
+		}
+	}
+	return nil
 }
 
 func validatePastTimestamp(name string, value, now time.Time, maxAge time.Duration) error {

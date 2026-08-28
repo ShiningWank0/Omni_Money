@@ -300,10 +300,12 @@ func (m *SessionManager) Close() {
 		close(m.done)
 		m.mu.Lock()
 		m.closed = true
+		roots := make([]*sessionVaultRoot, 0, len(m.sessions))
 		for id := range m.sessions {
-			m.deleteRecordLocked(id)
+			roots = append(roots, m.deleteRecordLocked(id))
 		}
 		m.mu.Unlock()
+		releaseSessionVaultRoots(roots)
 	})
 }
 
@@ -329,8 +331,9 @@ func (m *SessionManager) cleanupLoop() {
 			return
 		case <-ticker.C:
 			m.mu.Lock()
-			m.purgeExpiredLocked(m.now())
+			roots := m.purgeExpiredLocked(m.now())
 			m.mu.Unlock()
+			releaseSessionVaultRoots(roots)
 		}
 	}
 }
@@ -382,14 +385,17 @@ func (m *SessionManager) createSession(username string, user *control.UserSummar
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return nil, ErrSessionManagerClosed
 	}
-	m.purgeExpiredLocked(now)
-	m.evictOldestForOwnerLocked(sessionOwnerKey(session))
+	roots := m.purgeExpiredLocked(now)
+	roots = append(roots, m.evictOldestForOwnerLocked(sessionOwnerKey(session))...)
 	m.sessions[sessionID] = &sessionRecord{session: session, root: root}
-	return cloneSession(&session), nil
+	result := cloneSession(&session)
+	m.mu.Unlock()
+	releaseSessionVaultRoots(roots)
+	return result, nil
 }
 
 func generateSessionSecrets() (string, string, error) {
@@ -422,17 +428,21 @@ func (m *SessionManager) GetSession(sessionID string) (*Session, bool) {
 	}
 	now := m.now()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return nil, false
 	}
 	record, ok := m.sessions[sessionID]
 	if !ok || m.expiredLocked(record, now) {
-		m.deleteRecordLocked(sessionID)
+		root := m.deleteRecordLocked(sessionID)
+		m.mu.Unlock()
+		root.Release()
 		return nil, false
 	}
 	record.session.LastSeenAt = now
-	return cloneSession(&record.session), true
+	result := cloneSession(&record.session)
+	m.mu.Unlock()
+	return result, true
 }
 
 func (m *SessionManager) DeleteSession(sessionID string) {
@@ -440,8 +450,9 @@ func (m *SessionManager) DeleteSession(sessionID string) {
 		return
 	}
 	m.mu.Lock()
-	m.deleteRecordLocked(sessionID)
+	root := m.deleteRecordLocked(sessionID)
 	m.mu.Unlock()
+	root.Release()
 }
 
 func (m *SessionManager) DeleteAllSessions(username string) int {
@@ -449,14 +460,16 @@ func (m *SessionManager) DeleteAllSessions(username string) int {
 		return 0
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	deleted := 0
+	var roots []*sessionVaultRoot
 	for id, record := range m.sessions {
 		if record.session.Username == username {
-			m.deleteRecordLocked(id)
+			roots = append(roots, m.deleteRecordLocked(id))
 			deleted++
 		}
 	}
+	m.mu.Unlock()
+	releaseSessionVaultRoots(roots)
 	return deleted
 }
 
@@ -468,14 +481,16 @@ func (m *SessionManager) DeleteAllSessionsForUser(userID string) int {
 		return 0
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	deleted := 0
+	var roots []*sessionVaultRoot
 	for id, record := range m.sessions {
 		if record.session.UserID == userID {
-			m.deleteRecordLocked(id)
+			roots = append(roots, m.deleteRecordLocked(id))
 			deleted++
 		}
 	}
+	m.mu.Unlock()
+	releaseSessionVaultRoots(roots)
 	return deleted
 }
 
@@ -491,13 +506,15 @@ func (m *SessionManager) RotateAfterReauthentication(oldSessionID string) (*Sess
 	}
 	now := m.now()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return nil, errSessionNotFound
 	}
 	record, ok := m.sessions[oldSessionID]
 	if !ok || m.expiredLocked(record, now) {
-		m.deleteRecordLocked(oldSessionID)
+		root := m.deleteRecordLocked(oldSessionID)
+		m.mu.Unlock()
+		root.Release()
 		return nil, errSessionNotFound
 	}
 	rotated := record.session
@@ -510,7 +527,9 @@ func (m *SessionManager) RotateAfterReauthentication(oldSessionID string) (*Sess
 	delete(m.sessions, oldSessionID)
 	record.session = rotated
 	m.sessions[newID] = record
-	return cloneSession(&rotated), nil
+	result := cloneSession(&rotated)
+	m.mu.Unlock()
+	return result, nil
 }
 
 func (m *SessionManager) ValidateCSRF(sessionID, token string) bool {
@@ -518,16 +537,20 @@ func (m *SessionManager) ValidateCSRF(sessionID, token string) bool {
 		return false
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return false
 	}
 	record, ok := m.sessions[sessionID]
 	if !ok || m.expiredLocked(record, m.now()) {
-		m.deleteRecordLocked(sessionID)
+		root := m.deleteRecordLocked(sessionID)
+		m.mu.Unlock()
+		root.Release()
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(record.session.CSRFToken), []byte(token)) == 1
+	valid := subtle.ConstantTimeCompare([]byte(record.session.CSRFToken), []byte(token)) == 1
+	m.mu.Unlock()
+	return valid
 }
 
 func isCanonicalSessionSecret(value string) bool {
@@ -548,16 +571,20 @@ func (m *SessionManager) IsRecent(sessionID string) bool {
 	}
 	now := m.now()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return false
 	}
 	record, ok := m.sessions[sessionID]
 	if !ok || m.expiredLocked(record, now) {
-		m.deleteRecordLocked(sessionID)
+		root := m.deleteRecordLocked(sessionID)
+		m.mu.Unlock()
+		root.Release()
 		return false
 	}
-	return now.Sub(record.session.ReauthenticatedAt) <= m.config.RecentAuthAge
+	recent := now.Sub(record.session.ReauthenticatedAt) <= m.config.RecentAuthAge
+	m.mu.Unlock()
+	return recent
 }
 
 func (m *SessionManager) expiredLocked(record *sessionRecord, now time.Time) bool {
@@ -567,15 +594,18 @@ func (m *SessionManager) expiredLocked(record *sessionRecord, now time.Time) boo
 	return !now.Before(record.session.ExpiresAt) || now.Sub(record.session.LastSeenAt) >= m.config.IdleTimeout
 }
 
-func (m *SessionManager) purgeExpiredLocked(now time.Time) {
+func (m *SessionManager) purgeExpiredLocked(now time.Time) []*sessionVaultRoot {
+	var roots []*sessionVaultRoot
 	for id, record := range m.sessions {
 		if m.expiredLocked(record, now) {
-			m.deleteRecordLocked(id)
+			roots = append(roots, m.deleteRecordLocked(id))
 		}
 	}
+	return roots
 }
 
-func (m *SessionManager) evictOldestForOwnerLocked(owner string) {
+func (m *SessionManager) evictOldestForOwnerLocked(owner string) []*sessionVaultRoot {
+	var roots []*sessionVaultRoot
 	for {
 		count := 0
 		oldestID := ""
@@ -591,9 +621,9 @@ func (m *SessionManager) evictOldestForOwnerLocked(owner string) {
 			}
 		}
 		if count < m.config.MaxConcurrent || oldestID == "" {
-			return
+			return roots
 		}
-		m.deleteRecordLocked(oldestID)
+		roots = append(roots, m.deleteRecordLocked(oldestID))
 	}
 }
 
@@ -604,15 +634,21 @@ func sessionOwnerKey(session Session) string {
 	return "username\x00" + session.Username
 }
 
-func (m *SessionManager) deleteRecordLocked(sessionID string) {
+// deleteRecordLocked removes a record and transfers ownership of its root to
+// the caller. The caller must unlock SessionManager.mu before invoking Release.
+func (m *SessionManager) deleteRecordLocked(sessionID string) *sessionVaultRoot {
 	record := m.sessions[sessionID]
 	if record == nil {
-		return
+		return nil
 	}
 	delete(m.sessions, sessionID)
 	root := record.root
 	record.root = nil
-	if root != nil {
+	return root
+}
+
+func releaseSessionVaultRoots(roots []*sessionVaultRoot) {
+	for _, root := range roots {
 		root.Release()
 	}
 }
@@ -648,25 +684,32 @@ func (m *SessionManager) borrowVaultSessionFromRequest(r *http.Request) (*Sessio
 	}
 	now := m.now()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return nil, nil, false
 	}
 	record, ok := m.sessions[sessionID]
 	if !ok || m.expiredLocked(record, now) {
-		m.deleteRecordLocked(sessionID)
+		root := m.deleteRecordLocked(sessionID)
+		m.mu.Unlock()
+		root.Release()
 		return nil, nil, false
 	}
 	if record.root == nil || record.session.UserID == "" {
+		m.mu.Unlock()
 		return nil, nil, false
 	}
 	child, err := record.root.Borrow()
 	if err != nil {
-		m.deleteRecordLocked(sessionID)
+		root := m.deleteRecordLocked(sessionID)
+		m.mu.Unlock()
+		root.Release()
 		return nil, nil, false
 	}
 	record.session.LastSeenAt = now
-	return cloneSession(&record.session), child, true
+	result := cloneSession(&record.session)
+	m.mu.Unlock()
+	return result, child, true
 }
 
 func sessionIDFromRequest(r *http.Request) (string, error) {

@@ -431,6 +431,91 @@ func TestAdminStateInvariants(t *testing.T) {
 	}
 }
 
+func TestAdminMutationRevokesCapabilitiesCreatedAfterMutationTime(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Store, string, string, time.Time) error
+		assert func(*testing.T, UserSummary)
+	}{
+		{
+			name: "demotion",
+			mutate: func(store *Store, actorID, targetID string, now time.Time) error {
+				return store.SetUserRole(context.Background(), actorID, targetID, RoleUser, now)
+			},
+			assert: func(t *testing.T, user UserSummary) {
+				t.Helper()
+				if user.Role != RoleUser || user.State != UserActive {
+					t.Fatalf("demoted user = %#v", user)
+				}
+			},
+		},
+		{
+			name: "disable",
+			mutate: func(store *Store, actorID, targetID string, now time.Time) error {
+				return store.DisableUser(context.Background(), actorID, targetID, now)
+			},
+			assert: func(t *testing.T, user UserSummary) {
+				t.Helper()
+				if user.Role != RoleAdmin || user.State != UserDisabled {
+					t.Fatalf("disabled user = %#v", user)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := openTestStore(t)
+			admin := bootstrapTestAdmin(t, store)
+			target := inviteAndAccept(t, store, admin.ID, testSecondID, "future-capability-admin@example.com", RoleAdmin, 54)
+			createdAt := testNow.Add(20 * time.Minute)
+			mutationTime := testNow.Add(10 * time.Minute)
+
+			invitationHash := testTokenHash(t, 55)
+			if _, err := store.CreateInvitation(context.Background(), target.ID, CreateInvitationInput{
+				Email:     "future-capability-member@example.com",
+				Role:      RoleUser,
+				TokenHash: invitationHash,
+				ExpiresAt: createdAt.Add(time.Hour),
+			}, createdAt); err != nil {
+				t.Fatalf("create future invitation: %v", err)
+			}
+
+			resetHash := testTokenHash(t, 56)
+			if _, err := store.CreatePasswordResetTicket(
+				context.Background(),
+				target.ID,
+				target.ID,
+				CreatePasswordResetTicketInput{
+					TokenHash: resetHash,
+					ExpiresAt: createdAt.Add(30 * time.Minute),
+				},
+				createdAt,
+			); err != nil {
+				t.Fatalf("create future password reset: %v", err)
+			}
+
+			if err := test.mutate(store, admin.ID, target.ID, mutationTime); err != nil {
+				t.Fatalf("%s admin with future capabilities: %v", test.name, err)
+			}
+			updated, err := store.GetUser(context.Background(), target.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.assert(t, updated)
+
+			invitation, err := store.GetInvitationByTokenHash(context.Background(), invitationHash)
+			if err != nil || invitation.State != InvitationRevoked || invitation.ResolvedAt == nil || !invitation.ResolvedAt.Equal(createdAt) {
+				t.Fatalf("future invitation after %s = %#v, %v", test.name, invitation, err)
+			}
+			reset, err := store.GetPasswordResetTicketByTokenHash(context.Background(), resetHash)
+			if err != nil || reset.State != PasswordResetRevoked || reset.ResolvedAt == nil || !reset.ResolvedAt.Equal(createdAt) {
+				t.Fatalf("future password reset after %s = %#v, %v", test.name, reset, err)
+			}
+		})
+	}
+}
+
 func TestPasswordResetTicketIsHashedAndSuperseded(t *testing.T) {
 	store := openTestStore(t)
 	admin := bootstrapTestAdmin(t, store)

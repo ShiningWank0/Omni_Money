@@ -224,7 +224,7 @@ jobs:
           attestation_file="$(mktemp)"
           database_key_file="$(mktemp)"
           container_id=""
-          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true; sudo rm -rf "$runtime_data"; rm -f "$attestation_file" "$database_key_file"' EXIT
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true; sudo rm -rf "$runtime_data"; sudo rm -f "$attestation_file" "$database_key_file"' EXIT
           chmod 700 "$runtime_data"
           sudo chown 10001:10001 "$runtime_data"
           jq -n \
@@ -245,6 +245,10 @@ jobs:
           chmod 0444 "$attestation_file"
           head -c 32 /dev/urandom | base64 > "$database_key_file"
           chmod 0444 "$database_key_file"
+          # Docker/Compose secrets are root-owned inside the container. Keep
+          # the bind-mounted CI fixtures equivalent so owner validation is
+          # exercised rather than bypassed.
+          sudo chown 0:0 "$attestation_file" "$database_key_file"
 
           container_id="$(docker run -d \
             --read-only \

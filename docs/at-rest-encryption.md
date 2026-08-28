@@ -4,6 +4,10 @@ Omni Moneyのserver modeは、SQLite DB、WAL、snapshotを置くdata rootが外
 
 attestationは暗号化そのものでも暗号学的な証明でもありません。アプリからhostのLUKS key slot、ZFS native encryption、cloud block-volume keyを一律に検証できないためです。必ずhost側で暗号化を設定・検証してから作成してください。環境変数だけで保護済みと見なすことはできません。
 
+`DB_PATH` はattested `data_root`の直下またはその子directoryに置きます。`data_root`からDBまでの既存path componentにsymbolic link、通常directory以外のparent、group/otherから書込み可能なdirectoryを含めることはできません。まだ存在しないDBや子directoryは初回起動で作成できます。Dockerの通常のbind mountで`data_root`が`0755`でも、group/otherの書込みbitがなければ利用できます。
+
+attestation file自身と、filesystem rootからその親directoryまでの各component（symlinkがある場合は解決前と解決後の双方）は、rootまたはserver実行UIDが所有し、group/otherから書込み不可でなければなりません。`/tmp`などの共有書込みdirectory配下には置かず、server専用の設定directoryまたはread-only secret mountを使用してください。
+
 ## 対象
 
 - server modeの`DB_PATH`、SQLite WAL/SHM、同じdata root配下のsnapshot

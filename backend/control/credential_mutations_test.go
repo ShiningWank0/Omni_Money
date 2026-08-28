@@ -64,11 +64,15 @@ func TestPurposeSpecificExpiryLimits(t *testing.T) {
 func TestRecordSuccessfulLoginRequiresActiveUserAndIsMonotonic(t *testing.T) {
 	store := openTestStore(t)
 	admin := bootstrapTestAdmin(t, store)
-	latest := testNow.Add(3 * time.Minute)
-	if err := store.RecordSuccessfulLogin(context.Background(), admin.ID, latest); err != nil {
+	adminCredential, err := store.GetPasswordCredential(context.Background(), admin.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordSuccessfulLogin(context.Background(), admin.ID, testNow.Add(2*time.Minute)); err != nil {
+	latest := testNow.Add(3 * time.Minute)
+	if err := store.RecordSuccessfulLogin(context.Background(), admin.ID, adminCredential, latest); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordSuccessfulLogin(context.Background(), admin.ID, adminCredential, testNow.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := store.GetUser(context.Background(), admin.ID)
@@ -77,15 +81,170 @@ func TestRecordSuccessfulLoginRequiresActiveUserAndIsMonotonic(t *testing.T) {
 	}
 
 	member := inviteAndAccept(t, store, admin.ID, testMemberID, "disabled-login@example.com", RoleUser, 84)
+	memberCredential, err := store.GetPasswordCredential(context.Background(), member.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := store.DisableUser(context.Background(), admin.ID, member.ID, testNow.Add(4*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordSuccessfulLogin(context.Background(), member.ID, testNow.Add(5*time.Minute)); !errors.Is(err, ErrForbidden) {
+	if err := store.RecordSuccessfulLogin(context.Background(), member.ID, memberCredential, testNow.Add(5*time.Minute)); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("disabled user login record error = %v", err)
 	}
 	member, err = store.GetUser(context.Background(), member.ID)
 	if err != nil || member.LastLoginAt != nil {
 		t.Fatalf("disabled user's last login changed: %#v, %v", member, err)
+	}
+}
+
+func TestRecordSuccessfulLoginRequiresExactCredentialEnvelopeAndRevision(t *testing.T) {
+	store := openTestStore(t)
+	admin := bootstrapTestAdmin(t, store)
+	verifiedCredential, err := store.GetPasswordCredential(context.Background(), admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		expected PasswordCredential
+	}{
+		{
+			name: "envelope",
+			expected: func() PasswordCredential {
+				changed := verifiedCredential
+				changed.Envelope = testCredential(120).Envelope
+				return changed
+			}(),
+		},
+		{
+			name: "updated-at revision",
+			expected: func() PasswordCredential {
+				changed := verifiedCredential
+				changed.UpdatedAt = changed.UpdatedAt.Add(time.Millisecond)
+				return changed
+			}(),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := store.RecordSuccessfulLogin(
+				context.Background(), admin.ID, test.expected, testNow.Add(time.Minute),
+			); !errors.Is(err, ErrCredentialConflict) {
+				t.Fatalf("credential CAS error = %v, want ErrCredentialConflict", err)
+			}
+		})
+	}
+	stored, err := store.GetUser(context.Background(), admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LastLoginAt != nil {
+		t.Fatalf("credential CAS failure changed last-login time: %v", stored.LastLoginAt)
+	}
+}
+
+func TestRecordSuccessfulLoginRejectsCredentialChangedDuringPasswordVerification(t *testing.T) {
+	store := openTestStore(t)
+	admin := bootstrapTestAdmin(t, store)
+	verifiedCredential, err := store.GetPasswordCredential(context.Background(), admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Model a slow password KDF: the login has already loaded and verified the
+	// old envelope when a password change commits before the login commit step.
+	passwordChanged := make(chan struct{})
+	changeErr := make(chan error, 1)
+	go func() {
+		changeErr <- store.ReplacePasswordCredential(
+			context.Background(),
+			admin.ID,
+			verifiedCredential,
+			testCredential(121),
+			testNow.Add(time.Minute),
+		)
+		close(passwordChanged)
+	}()
+	<-passwordChanged
+	if err := <-changeErr; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RecordSuccessfulLogin(
+		context.Background(), admin.ID, verifiedCredential, testNow.Add(2*time.Minute),
+	); !errors.Is(err, ErrCredentialConflict) {
+		t.Fatalf("stale credential login commit error = %v, want ErrCredentialConflict", err)
+	}
+	stored, err := store.GetUser(context.Background(), admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LastLoginAt != nil {
+		t.Fatalf("stale credential login changed last-login time: %v", stored.LastLoginAt)
+	}
+}
+
+func TestRecordSuccessfulLoginRejectsCredentialResetDuringPasswordVerification(t *testing.T) {
+	store := openTestStore(t)
+	admin := bootstrapTestAdmin(t, store)
+	member := inviteAndAccept(t, store, admin.ID, testMemberID, "login-reset-race@example.com", RoleUser, 122)
+	verifiedCredential, err := store.GetPasswordCredential(context.Background(), member.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedRecovery, err := store.GetActiveRecoveryEnvelope(context.Background(), member.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenHash := testTokenHash(t, 123)
+	if _, err := store.CreatePasswordResetTicket(
+		context.Background(),
+		admin.ID,
+		member.ID,
+		CreatePasswordResetTicketInput{
+			TokenHash: tokenHash,
+			ExpiresAt: testNow.Add(30 * time.Minute),
+		},
+		testNow.Add(time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	resetDone := make(chan struct{})
+	resetErr := make(chan error, 1)
+	go func() {
+		replacementRecovery := *testRecovery(124)
+		replacementRecovery.ID = "recovery_login_race_12345"
+		_, completeErr := store.CompletePasswordReset(
+			context.Background(),
+			CompletePasswordResetInput{
+				TokenHash:                tokenHash,
+				ExpectedRecoveryEnvelope: expectedRecovery,
+				PasswordCredential:       testCredential(124),
+				RecoveryEnvelope:         replacementRecovery,
+			},
+			testNow.Add(2*time.Minute),
+		)
+		resetErr <- completeErr
+		close(resetDone)
+	}()
+	<-resetDone
+	if err := <-resetErr; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RecordSuccessfulLogin(
+		context.Background(), member.ID, verifiedCredential, testNow.Add(3*time.Minute),
+	); !errors.Is(err, ErrCredentialConflict) {
+		t.Fatalf("pre-reset credential login commit error = %v, want ErrCredentialConflict", err)
+	}
+	stored, err := store.GetUser(context.Background(), member.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LastLoginAt != nil {
+		t.Fatalf("pre-reset credential login changed last-login time: %v", stored.LastLoginAt)
 	}
 }
 
@@ -250,7 +409,11 @@ func TestWithImmediateRollsBackAfterPanic(t *testing.T) {
 	if err != nil || after.DisplayName != before.DisplayName {
 		t.Fatalf("panic transaction was not rolled back: %#v, %v", after, err)
 	}
-	if err := store.RecordSuccessfulLogin(context.Background(), admin.ID, testNow.Add(time.Minute)); err != nil {
+	credential, err := store.GetPasswordCredential(context.Background(), admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordSuccessfulLogin(context.Background(), admin.ID, credential, testNow.Add(time.Minute)); err != nil {
 		t.Fatalf("transaction after panic remained locked: %v", err)
 	}
 }
