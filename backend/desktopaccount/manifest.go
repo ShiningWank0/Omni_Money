@@ -16,7 +16,7 @@ import (
 const (
 	manifestVersion  = 1
 	maxManifestBytes = 64 * 1024
-	passwordKDF      = "argon2id-hkdf-sha256"
+	passwordKDF      = "argon2id-hkdf-sha256" // #nosec G101 -- algorithm identifier, not a credential.
 	recoveryKDF      = "hkdf-sha256"
 )
 
