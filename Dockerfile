@@ -65,7 +65,7 @@ COPY --from=backend-builder /omni-totp ./omni-totp
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
 # DB、WAL、復元用backup、snapshotはすべてこの永続directory配下へ保存する。
-RUN mkdir -p /app/data && chown -R omni:omni /app
+RUN mkdir -p /app/data /run/secrets && chown -R omni:omni /app
 
 USER omni
 
