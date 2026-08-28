@@ -148,7 +148,7 @@ func TestAIFailedAuthAuditAggregatorSeparatesKeysAndPassesOtherAudits(t *testing
 		t.Fatalf("mTLS subject summary missing from %#v", emitted)
 	}
 
-	for _, reason := range []string{"scope_forbidden", "rate_limited", ""} {
+	for _, reason := range []string{"rate_limited", ""} {
 		for iteration := 0; iteration < 100; iteration++ {
 			record := aiAuditRecord{Operation: "analysis", Reason: reason, Status: 403}
 			if emitted := aggregator.record(record, now); len(emitted) != 1 || emitted[0] != record {
@@ -322,5 +322,58 @@ func TestAIFailedAuthAuditAggregatorBoundsManyFingerprintsBehindOneIP(t *testing
 		if window.last.MTLSClientSHA256 != "" {
 			t.Fatalf("overflow retained fingerprint: %#v", window.last)
 		}
+	}
+}
+
+func TestAuthenticatedRejectionAuditIsBoundedPerSubject(t *testing.T) {
+	now := time.Date(2026, 8, 9, 6, 0, 0, 0, time.UTC)
+	aggregator := newAIFailedAuthAuditAggregator()
+	record := aiAuditRecord{
+		CredentialID: "credential-a", Operation: "analysis", RemoteIP: "192.0.2.60",
+		MTLSClientSHA256: "client-a", Reason: "scope_forbidden", Status: http.StatusForbidden,
+	}
+	emittedCount := 0
+	for i := 0; i < 10_000; i++ {
+		emittedCount += len(aggregator.record(record, now))
+	}
+	if emittedCount != 1 {
+		t.Fatalf("10,000 identical authenticated rejections emitted %d records", emittedCount)
+	}
+	otherCredential := record
+	otherCredential.CredentialID = "credential-b"
+	if emitted := aggregator.record(otherCredential, now); len(emitted) != 1 {
+		t.Fatalf("different credential was not separated: %#v", emitted)
+	}
+	emitted := aggregator.record(record, now.Add(time.Minute))
+	summaryFound := false
+	for _, output := range emitted {
+		if output.CredentialID == "credential-a" && output.Reason == "scope_forbidden" && output.Occurrences == 9_999 {
+			summaryFound = true
+		}
+	}
+	if !summaryFound {
+		t.Fatalf("authenticated rejection summary missing: %#v", emitted)
+	}
+}
+
+func TestAuthenticatedRejectionOverflowRemovesSubjectMetadata(t *testing.T) {
+	now := time.Date(2026, 8, 9, 7, 0, 0, 0, time.UTC)
+	aggregator := newAIFailedAuthAuditAggregator()
+	for i := 0; i < aiFailedAuthAuditMaxDetailedWindow+100; i++ {
+		record := aiAuditRecord{
+			CredentialID: fmt.Sprintf("credential-%d", i),
+			Operation: "analysis", RemoteIP: fmt.Sprintf("192.0.2.%d", i),
+			MTLSClientSHA256: fmt.Sprintf("%064x", i+1),
+			Reason: "console_relay_forbidden", Status: http.StatusForbidden,
+		}
+		aggregator.record(record, now)
+	}
+	if len(aggregator.windows) != aiFailedAuthAuditMaxDetailedWindow {
+		t.Fatalf("detailed windows=%d", len(aggregator.windows))
+	}
+	index := aiFailedAuthAuditOverflowIndex("analysis", "console_relay_forbidden")
+	overflow := aggregator.overflow[index].last
+	if overflow.CredentialID != "" || overflow.RemoteIP != "" || overflow.MTLSClientSHA256 != "" {
+		t.Fatalf("overflow retained subject metadata: %#v", overflow)
 	}
 }
