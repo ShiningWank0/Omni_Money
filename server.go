@@ -15,13 +15,14 @@ import (
 	"time"
 
 	"omni_money/backend/aicredentials"
-	"omni_money/backend/atrest"
 	"omni_money/backend/aitransport"
 	"omni_money/backend/api"
+	"omni_money/backend/atrest"
 	"omni_money/backend/audithmac"
 	"omni_money/backend/config"
 	"omni_money/backend/database"
 	"omni_money/backend/middleware"
+	"omni_money/backend/securedb"
 )
 
 // version はCI/CDビルド時に -ldflags で埋め込まれる（§8.3準拠）
@@ -51,8 +52,17 @@ func main() {
 		log.Fatalf("保存時保護contractが無効です: %v", err)
 	}
 	log.Printf("保存時保護contract確認 (provider=%s key_id=%s)", atRestStatus.Provider, atRestStatus.KeyID)
-	if err := database.InitDB(dbPath); err != nil {
-		log.Fatalf("データベース初期化エラー: %v", err)
+	databaseKeyFile := strings.TrimSpace(os.Getenv("DB_ENCRYPTION_KEY_FILE"))
+	if databaseKeyFile == "" {
+		log.Fatal("DB_ENCRYPTION_KEY_FILE が未設定です（サーバーモードではSQLCipher鍵ファイルが必須）")
+	}
+	databaseKey, err := securedb.ReadRawKeyFile(databaseKeyFile)
+	if err != nil {
+		log.Fatalf("SQLCipher鍵ファイルが無効です: %v", err)
+	}
+	defer databaseKey.Destroy()
+	if err := database.InitEncryptedDB(dbPath, databaseKey); err != nil {
+		log.Fatalf("暗号化データベース初期化エラー: %v", err)
 	}
 	defer database.CloseDB()
 
