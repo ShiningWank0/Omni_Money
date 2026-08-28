@@ -115,7 +115,7 @@ jobs:
             { print cmp($1, $2) }
           ')
 
-          if [ "$comparison" -ne 1 ]; then
+          if [ "$comparison" -ne -1 ]; then
             echo "::error::バージョンが後退しています！ $OLD_VERSION → $NEW_VERSION"
             echo "::error::VERSIONは現在の $OLD_VERSION より大きい値にしてください。"
             exit 1
