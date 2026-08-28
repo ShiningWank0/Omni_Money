@@ -13,6 +13,10 @@ func validatePlatformConfidential(_ string) error {
 	return errors.New("confidential secret permission validation is unavailable on Windows")
 }
 
-// Public certificates and hashed credentials retain their existing Windows
-// behavior. Confidential raw keys are rejected above until DACL checks exist.
-func validatePlatformIntegrity(_ os.FileMode) error { return nil }
+// Integrity-protected documents contain authorization policy as well as hashes.
+// Until owner/DACL validation is implemented against the already-open handle,
+// Windows must fail closed instead of treating unavailable Unix mode bits as
+// proof that another local user cannot replace the file.
+func validatePlatformIntegrity(_ os.FileMode) error {
+	return errors.New("integrity-protected file permission validation is unavailable on Windows")
+}

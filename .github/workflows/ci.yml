@@ -57,6 +57,12 @@ jobs:
 
       - name: Run Go tests
         run: go test ./...
+      - name: Cross-build Windows secret boundaries
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          GOOS=windows GOARCH=amd64 go test -c ./backend/secretfile -o /tmp/secretfile-windows.test.exe
+          GOOS=windows GOARCH=amd64 go test -c ./backend/aicredentials -o /tmp/aicredentials-windows.test.exe
 
       - name: Run Go vet
         run: go vet ./...
