@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"time"
 
-	"omni_money/backend/database"
 	"omni_money/backend/models"
 )
 
@@ -43,9 +42,13 @@ type AITransactionResult struct {
 // AddAITransaction atomically combines idempotency claiming, persistent UTC
 // daily quota accounting, and the ledger mutation. A replay never consumes
 // quota and never requests another snapshot.
-func AddAITransaction(ctx context.Context, req models.TransactionRequest, identity AITransactionIdentity) (*AITransactionResult, error) {
+func (s *Service) AddAITransaction(ctx context.Context, req models.TransactionRequest, identity AITransactionIdentity) (*AITransactionResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	db, err := s.database()
+	if err != nil {
+		return nil, err
 	}
 	if identity.CredentialID == "" || identity.MaxTransactionsPerDay <= 0 || identity.Now.IsZero() {
 		return nil, errors.New("invalid AI transaction identity")
@@ -54,10 +57,6 @@ func AddAITransaction(ctx context.Context, req models.TransactionRequest, identi
 	prepared, err := prepareTransactionInsertContext(ctx, req)
 	if err != nil {
 		return nil, err
-	}
-	db := database.GetDB()
-	if db == nil {
-		return nil, errors.New("データベースが初期化されていません")
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -104,7 +103,7 @@ func AddAITransaction(ctx context.Context, req models.TransactionRequest, identi
 		return nil, fmt.Errorf("トランザクションコミットエラー: %w", err)
 	}
 
-	database.AutoSnapshot()
+	s.autoSnapshot()
 	return &AITransactionResult{Transaction: response}, nil
 }
 

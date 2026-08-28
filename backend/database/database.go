@@ -77,6 +77,7 @@ func OpenPlainInstance(path string) (*Instance, error) {
 // OpenEncryptedInstance opens a standalone SQLCipher instance, atomically
 // migrating an existing plaintext database before publishing the connection.
 func OpenEncryptedInstance(path string, key securedb.RawKey) (*Instance, error) {
+	defer key.Destroy()
 	return openInstance(path, securedb.NewEncryptedOpener(key), true)
 }
 
@@ -98,6 +99,7 @@ func InitDB(path string) error {
 // InitEncryptedDB はSQLCipher鍵を接続ごとに適用し、平文DBが存在する場合は
 // 検証済みの暗号化コピーへ原子的に移行してから初期化する。
 func InitEncryptedDB(path string, key securedb.RawKey) error {
+	defer key.Destroy()
 	return defaultInstance.initialize(path, securedb.NewEncryptedOpener(key), true)
 }
 

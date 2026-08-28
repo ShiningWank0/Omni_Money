@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"omni_money/backend/keyenvelope"
 )
 
 const passwordResetColumns = `id, user_id, state, created_by,
@@ -28,7 +30,7 @@ func (s *Store) CreatePasswordResetTicket(
 	if err := validateTokenHash(input.TokenHash); err != nil {
 		return PasswordResetTicket{}, err
 	}
-	expiresAt, err := validateExpiry(now, input.ExpiresAt)
+	expiresAt, err := validatePasswordResetExpiry(now, input.ExpiresAt)
 	if err != nil {
 		return PasswordResetTicket{}, err
 	}
@@ -44,8 +46,12 @@ func (s *Store) CreatePasswordResetTicket(
 		if err := requireActiveAdmin(ctx, connection, actorID); err != nil {
 			return err
 		}
-		if _, _, err := loadRoleAndState(ctx, connection, targetUserID); err != nil {
+		_, targetState, err := loadRoleAndState(ctx, connection, targetUserID)
+		if err != nil {
 			return err
+		}
+		if targetState != UserActive {
+			return ErrForbidden
 		}
 		// A new ticket invalidates every older bearer for the same user. Already
 		// expired records retain the more precise expired state; otherwise they
@@ -57,7 +63,7 @@ func (s *Store) CreatePasswordResetTicket(
 			now.UnixMilli(), now.UnixMilli(), targetUserID); err != nil {
 			return fmt.Errorf("invalidate prior password reset tickets: %w", err)
 		}
-		_, err := connection.ExecContext(ctx, `INSERT INTO password_reset_tickets(
+		_, err = connection.ExecContext(ctx, `INSERT INTO password_reset_tickets(
 			id, user_id, token_hash, state, created_by, created_at_ms, expires_at_ms
 		) VALUES (?, ?, ?, 'pending', ?, ?, ?)`,
 			id, targetUserID, cloneBytes(input.TokenHash), actorID,
@@ -73,53 +79,172 @@ func (s *Store) CreatePasswordResetTicket(
 	return result, err
 }
 
-// ConsumePasswordResetTicket marks the bearer token as single-use and returns
-// only its target. It does not replace credentials or unwrap a vault key; the
-// service layer must still require a valid recovery proof before doing either.
-func (s *Store) ConsumePasswordResetTicket(
+// GetPasswordResetTicketByTokenHash resolves reset preflight state without
+// consuming it. The returned DTO intentionally has no token-hash field.
+func (s *Store) GetPasswordResetTicketByTokenHash(
 	ctx context.Context,
 	tokenHash []byte,
-	now time.Time,
 ) (PasswordResetTicket, error) {
 	if err := validateTokenHash(tokenHash); err != nil {
 		return PasswordResetTicket{}, err
 	}
-	now, err := validateOperationTime(now)
+	db, err := s.database()
 	if err != nil {
 		return PasswordResetTicket{}, err
 	}
+	ticket, err := scanPasswordResetTicket(db.QueryRowContext(ctx,
+		`SELECT `+passwordResetColumns+` FROM password_reset_tickets WHERE token_hash = ?`,
+		cloneBytes(tokenHash)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return PasswordResetTicket{}, ErrNotFound
+	}
+	if err != nil {
+		return PasswordResetTicket{}, fmt.Errorf("get password reset ticket: %w", err)
+	}
+	return ticket, nil
+}
+
+// CompletePasswordReset commits the whole recovery transition atomically.
+// Recovery-secret authentication happens in the service before this call; the
+// expected envelope is still compared exactly to prevent a preflight/commit
+// race. Replacement envelopes must use the unchanged UserID/VaultID context.
+func (s *Store) CompletePasswordReset(
+	ctx context.Context,
+	input CompletePasswordResetInput,
+	now time.Time,
+) (PasswordResetTicket, error) {
+	if err := validateTokenHash(input.TokenHash); err != nil {
+		return PasswordResetTicket{}, err
+	}
+	expected := input.ExpectedRecoveryEnvelope
+	expectedUserID, err := normalizeID(expected.UserID)
+	if err != nil || expected.State != RecoveryEnvelopeActive {
+		return PasswordResetTicket{}, ErrRecoveryConflict
+	}
+	expectedID, err := normalizeID(expected.ID)
+	if err != nil {
+		return PasswordResetTicket{}, fmt.Errorf("expected recovery envelope id: %w", err)
+	}
+	expectedJSON, err := encodeKeyEnvelope(expected.Envelope, keyenvelope.KindRecovery)
+	if err != nil {
+		return PasswordResetTicket{}, fmt.Errorf("expected recovery envelope: %w", err)
+	}
+	expectedCreatedAt, err := validateOperationTime(expected.CreatedAt)
+	if err != nil {
+		return PasswordResetTicket{}, fmt.Errorf("expected recovery envelope revision: %w", err)
+	}
+	passwordJSON, err := encodeKeyEnvelope(input.PasswordCredential.Envelope, keyenvelope.KindPassword)
+	if err != nil {
+		return PasswordResetTicket{}, fmt.Errorf("replacement password credential: %w", err)
+	}
+	replacementRecoveryID, err := idOrGenerate(input.RecoveryEnvelope.ID)
+	if err != nil {
+		return PasswordResetTicket{}, fmt.Errorf("replacement recovery envelope id: %w", err)
+	}
+	if replacementRecoveryID == expectedID {
+		return PasswordResetTicket{}, errors.New("replacement recovery envelope must use a new id")
+	}
+	recoveryJSON, err := encodeKeyEnvelope(input.RecoveryEnvelope.Envelope, keyenvelope.KindRecovery)
+	if err != nil {
+		return PasswordResetTicket{}, fmt.Errorf("replacement recovery envelope: %w", err)
+	}
+	if recoveryJSON == expectedJSON {
+		return PasswordResetTicket{}, errors.New("replacement recovery envelope must differ from the current envelope")
+	}
+	now, err = validateOperationTime(now)
+	if err != nil {
+		return PasswordResetTicket{}, err
+	}
+	if now.Before(expectedCreatedAt) {
+		return PasswordResetTicket{}, fmt.Errorf("%w: reset time predates the current recovery envelope", ErrRecoveryConflict)
+	}
+
 	var result PasswordResetTicket
 	var semanticError error
 	err = s.withImmediate(ctx, func(connection *sql.Conn) error {
 		ticket, err := scanPasswordResetTicket(connection.QueryRowContext(ctx,
 			`SELECT `+passwordResetColumns+` FROM password_reset_tickets WHERE token_hash = ?`,
-			cloneBytes(tokenHash)))
+			cloneBytes(input.TokenHash)))
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
 		if err != nil {
-			return fmt.Errorf("load password reset ticket: %w", err)
+			return fmt.Errorf("load password reset ticket for completion: %w", err)
 		}
 		if ticket.State != PasswordResetPending {
 			return ErrResetTicketInactive
 		}
 		if !ticket.ExpiresAt.After(now) {
 			if _, err := connection.ExecContext(ctx, `UPDATE password_reset_tickets
-				SET state = 'expired', resolved_at_ms = ? WHERE id = ? AND state = 'pending'`,
-				now.UnixMilli(), ticket.ID); err != nil {
+				SET state = 'expired', resolved_at_ms = ?
+				WHERE id = ? AND state = 'pending'`, now.UnixMilli(), ticket.ID); err != nil {
 				return fmt.Errorf("expire password reset ticket: %w", err)
 			}
 			semanticError = ErrResetTicketExpired
 			return nil
 		}
+		if ticket.UserID != expectedUserID {
+			return ErrRecoveryConflict
+		}
+		if err := requireActiveUser(ctx, connection, ticket.UserID); err != nil {
+			return err
+		}
+
+		passwordUpdate, err := connection.ExecContext(ctx, `UPDATE password_credentials
+			SET envelope_json = ?, updated_at_ms = ?
+			WHERE user_id = ? AND updated_at_ms < ?`,
+			passwordJSON, now.UnixMilli(), ticket.UserID, now.UnixMilli())
+		if err != nil {
+			return fmt.Errorf("replace password credential during reset: %w", err)
+		}
+		passwordRows, err := passwordUpdate.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("verify password reset credential update: %w", err)
+		}
+		if passwordRows != 1 {
+			return ErrCredentialConflict
+		}
+
+		revoked, err := revokeExpectedRecoveryEnvelope(
+			ctx, connection, ticket.UserID, expectedID, expectedJSON, expectedCreatedAt, now,
+		)
+		if err != nil {
+			return err
+		}
+		if !revoked {
+			return ErrRecoveryConflict
+		}
+		if err := insertActiveRecoveryEnvelope(
+			ctx, connection, replacementRecoveryID, ticket.UserID, recoveryJSON, now,
+		); err != nil {
+			return err
+		}
+
+		consumed, err := connection.ExecContext(ctx, `UPDATE password_reset_tickets
+			SET state = 'consumed', resolved_at_ms = ?
+			WHERE id = ? AND state = 'pending'`, now.UnixMilli(), ticket.ID)
+		if err != nil {
+			return fmt.Errorf("consume completed password reset ticket: %w", err)
+		}
+		consumedRows, err := consumed.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("verify completed password reset ticket: %w", err)
+		}
+		if consumedRows != 1 {
+			return ErrResetTicketInactive
+		}
 		if _, err := connection.ExecContext(ctx, `UPDATE password_reset_tickets
-			SET state = 'consumed', resolved_at_ms = ? WHERE id = ? AND state = 'pending'`,
-			now.UnixMilli(), ticket.ID); err != nil {
-			return fmt.Errorf("consume password reset ticket: %w", err)
+			SET state = 'revoked', resolved_at_ms = ?
+			WHERE user_id = ? AND state = 'pending' AND id <> ?`,
+			now.UnixMilli(), ticket.UserID, ticket.ID); err != nil {
+			return fmt.Errorf("revoke sibling password reset tickets: %w", err)
+		}
+		if err := advanceUserUpdatedAt(ctx, connection, ticket.UserID, now); err != nil {
+			return err
 		}
 		ticket.State = PasswordResetConsumed
-		resolved := now
-		ticket.ResolvedAt = &resolved
+		resolvedAt := now
+		ticket.ResolvedAt = &resolvedAt
 		result = ticket
 		return nil
 	})

@@ -17,7 +17,11 @@ import (
 	"omni_money/backend/keyenvelope"
 )
 
-const tokenHashSize = 32
+const (
+	tokenHashSize            = 32
+	MaxInvitationLifetime    = 7 * 24 * time.Hour
+	MaxPasswordResetLifetime = time.Hour
+)
 
 // HashBearerToken converts a high-entropy invitation or reset bearer token to
 // the only form that may be persisted in the control database. Tokens should
@@ -120,6 +124,25 @@ func validateExpiry(now, expiresAt time.Time) (time.Time, error) {
 	}
 	if !expiresAt.After(now) {
 		return time.Time{}, errors.New("expiry time must be in the future")
+	}
+	return expiresAt, nil
+}
+
+func validateInvitationExpiry(now, expiresAt time.Time) (time.Time, error) {
+	return validateBoundedExpiry(now, expiresAt, MaxInvitationLifetime, "invitation")
+}
+
+func validatePasswordResetExpiry(now, expiresAt time.Time) (time.Time, error) {
+	return validateBoundedExpiry(now, expiresAt, MaxPasswordResetLifetime, "password reset")
+}
+
+func validateBoundedExpiry(now, expiresAt time.Time, maximum time.Duration, purpose string) (time.Time, error) {
+	expiresAt, err := validateExpiry(now, expiresAt)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if expiresAt.Sub(now) > maximum {
+		return time.Time{}, fmt.Errorf("%s expiry exceeds maximum lifetime of %s", purpose, maximum)
 	}
 	return expiresAt, nil
 }

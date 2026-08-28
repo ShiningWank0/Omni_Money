@@ -133,6 +133,17 @@ type CreatePasswordResetTicketInput struct {
 	ExpiresAt time.Time
 }
 
+// CompletePasswordResetInput contains already-verified replacement envelopes.
+// The service must first prove possession of ExpectedRecoveryEnvelope using
+// the recovery secret and must wrap both replacements with the unchanged
+// keyenvelope.Context{UserID, VaultID}. No recovery secret enters this store.
+type CompletePasswordResetInput struct {
+	TokenHash                []byte
+	ExpectedRecoveryEnvelope RecoveryEnvelope
+	PasswordCredential       PasswordCredentialInput
+	RecoveryEnvelope         RecoveryEnvelopeInput
+}
+
 // PasswordResetTicket does not carry the bearer-token hash.
 type PasswordResetTicket struct {
 	ID         string
