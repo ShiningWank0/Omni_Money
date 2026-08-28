@@ -69,4 +69,4 @@ rotation前に現行keyで復旧できるbackupを作り、新key slot/version�
 
 ## CSVと廃棄
 
-CSVは確認済みの暗号化volumeへ直接保存します。email、共有folder、平文USBへ一時保存してから移動する運用は避けます。snapshot/CSVの保持期限後は暗号化backupを削除し、媒体廃棄時は対応するkey versionもretireしてcryptographic eraseを成立させます。
+CSVは確認済みの暗号化volumeへ直接保存します。email、共有folder、平文USBへ一時保存してから移動する運用は避けます。browser downloadやSSDに対するfile削除だけでは完全消去を保証できません。snapshot/CSVの保持期限後は暗号化backupを削除し、媒体廃棄時は対応するkey versionもretireしてcryptographic eraseを成立させます。

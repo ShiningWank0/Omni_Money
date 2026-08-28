@@ -261,6 +261,7 @@
 import { ref, computed, defineAsyncComponent, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useAppStore } from './store/index'
 import TransactionModal from './components/TransactionModal.vue'
+import { csvExportWarning } from './utils/csvSafety'
 
 // 初期表示に不要な管理・分析モーダルは、開いた時だけ読み込む。
 const CSVImportModal = defineAsyncComponent(() => import('./components/CSVImportModal.vue'))
@@ -475,15 +476,21 @@ async function handleDeleteTransaction() {
 // CSV関連
 async function backupToCSV() {
   showMenu.value = false
+
+  const confirmed = window.confirm(csvExportWarning(isWailsMode))
+  if (!confirmed) return
+
   try {
     const filePath = await apiBackupToCSVFile()
     if (!filePath) {
-      showToast('バックアップデータが空です', 'error')
+      if (isWailsMode) showToast('CSV保存をキャンセルしました')
+      else showToast('CSVバックアップを作成できませんでした', 'error')
       return
     }
-    showToast('CSVバックアップを保存しました ✓')
-  } catch (e) {
-    console.error('CSVバックアップエラー:', e)
+    showToast(isWailsMode
+      ? 'CSVバックアップを保存しました ✓'
+      : 'CSVのダウンロードを開始しました。暗号化済みの保存先を確認してください ✓')
+  } catch {
     showToast('CSVバックアップに失敗しました', 'error')
   }
 }

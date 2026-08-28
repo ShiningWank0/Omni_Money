@@ -70,13 +70,14 @@ jobs:
           CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib
           LD_LIBRARY_PATH: /tmp/omni-sqlcipher/lib
           OMNI_REQUIRE_SQLCIPHER_TESTS: "1"
-        run: go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/securedb ./backend/database ./backend/control ./backend/vault
+        run: go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/securedb ./backend/database ./backend/control ./backend/vault ./backend/api
       - name: Cross-build Windows secret boundaries
         env:
           CGO_ENABLED: "0"
         run: |
           GOOS=windows GOARCH=amd64 go test -c ./backend/secretfile -o /tmp/secretfile-windows.test.exe
           GOOS=windows GOARCH=amd64 go test -c ./backend/aicredentials -o /tmp/aicredentials-windows.test.exe
+          GOOS=windows GOARCH=amd64 go test -c ./backend/fileprivacy -o /tmp/fileprivacy-windows.test.exe
 
       - name: Run Go vet
         run: go vet ./...
@@ -201,8 +202,33 @@ jobs:
       - name: Audit dependencies
         run: npm audit --audit-level=high
 
+      - name: Test frontend security boundaries
+        run: npm test
+
       - name: Build frontend
         run: npm run build
+
+  windows-security:
+    name: Windows security boundaries
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26.7'
+          cache: true
+
+      - name: Verify owner-only CSV DACL
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 -run '^TestCreateExclusivePrivateFileDACL$' ./backend/fileprivacy
 
   docker:
     name: Docker image build
