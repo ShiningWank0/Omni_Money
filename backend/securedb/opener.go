@@ -133,8 +133,7 @@ func openPlain(path string, purpose Purpose) (*sql.DB, error) {
 	default:
 		query.Set("_journal_mode", "WAL")
 	}
-	dsnURL := &url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}
-	return sql.Open("sqlite3", dsnURL.String())
+	return sql.Open("sqlite3", databaseFileURL(path, query))
 }
 
 type encryptedConnector struct {
@@ -157,8 +156,7 @@ func (c *encryptedConnector) Connect(context.Context) (driver.Conn, error) {
 	} else if c.purpose == ReadOnly {
 		query.Set("mode", "ro")
 	}
-	dsnURL := &url.URL{Scheme: "file", Path: c.path, RawQuery: query.Encode()}
-	dsn := dsnURL.String()
+	dsn := databaseFileURL(c.path, query)
 	clear(keySpec)
 
 	sqliteDriver := &sqlite3.SQLiteDriver{ConnectHook: func(conn *sqlite3.SQLiteConn) error {
@@ -215,6 +213,15 @@ func (c *encryptedConnector) Connect(context.Context) (driver.Conn, error) {
 }
 
 func (c *encryptedConnector) Driver() driver.Driver { return &sqlite3.SQLiteDriver{} }
+
+func databaseFileURL(path string, query url.Values) string {
+	dsnURL := &url.URL{
+		Scheme:   "file",
+		Path:     databaseFileURLPath(path),
+		RawQuery: query.Encode(),
+	}
+	return dsnURL.String()
+}
 
 func rawKeySpec(key *RawKey) []byte {
 	if key == nil {

@@ -6,25 +6,17 @@
 
 ### インストールと起動
 
-ReleasesからOS向けartifactを取得するか、開発環境ではrepository rootで次を実行します。
+ReleasesからOS向けartifactを取得します。配布artifactは固定版SQLCipherを静的に組み込み、暗号化DBの作成、誤った鍵の拒否、平文headerとcanaryの不在、load extensionの無効化をCIでartifact自身に実行させてから公開します。
 
-```bash
-wails dev
-```
+開発buildでも、通常のSQLiteを組み込むtagなしの `wails build` / `wails dev` は使わないでください。各OS向けの `scripts/build-sqlcipher-*.sh` でSQLCipherを作成し、release workflowと同じ `libsqlite3,sqlite_omit_load_extension` build tagとCGO設定で起動します。SQLCipherが不足・不正な場合、Desktopは平文DBへfallbackせず起動を拒否します。
 
-release buildは次のとおりです。
+Desktop版は単一ユーザー運用です。初回起動でローカルAdminのpasswordを設定し、1回だけ表示されるrecovery codeをpassword manager等へ保存します。取引データはOS標準のapplication data directory内のランダムなvault ID配下に、SQLCipher 4.18.0で暗号化して保存されます。
 
-```bash
-wails build
-```
+- macOS: `~/Library/Application Support/OmniMoney/vaults/<vault-id>/omni_money.db`
+- Windows: `%APPDATA%/OmniMoney/vaults/<vault-id>/omni_money.db`
+- Linux: `~/.local/share/OmniMoney/vaults/<vault-id>/omni_money.db`
 
-Desktop版は現在、単一ユーザー運用です。データはOS標準のapplication data directoryに保存されます。
-
-- macOS: `~/Library/Application Support/OmniMoney/omni_money.db`
-- Windows: `%APPDATA%/OmniMoney/omni_money.db`
-- Linux: `~/.local/share/OmniMoney/omni_money.db`
-
-現行releaseではDesktop DB自体のSQLCipher移行が完了していないため、FileVault、BitLocker、LUKS等のfull-disk encryptionを必ず有効にしてください。Desktop用のアカウント作成とSQLCipher vault化はIssue #62の残作業です。
+旧versionのroot直下 `omni_money.db`がある場合は、password入力後に明示的な移行を行います。元DBとsnapshotを検証しながらSQLCipher vaultへ複写し、移行後のrecovery codeを保存したことを確認するまでvaultは利用できません。FileVault、BitLocker、LUKS等のfull-disk encryptionも、アプリの鍵を窃取できる別processや未暗号化の一時領域に対するdefense in depthとして有効にしてください。
 
 ### 基本操作
 

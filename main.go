@@ -4,6 +4,7 @@ package main
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -64,20 +65,42 @@ func getAppDataRoot() (string, error) {
 }
 
 func main() {
-	dataRoot, err := getAppDataRoot()
-	if err != nil {
-		log.Fatalf("アプリケーションデータディレクトリ取得エラー: %v", err)
+	if len(os.Args) > 1 && os.Args[1] == "--self-test-sqlcipher" {
+		if len(os.Args) != 2 {
+			log.Fatal("--self-test-sqlcipher does not accept additional arguments")
+		}
+		report, err := runDesktopSQLCipherSelfTest()
+		if err != nil {
+			log.Fatalf("SQLCipher self-test failed: %v", err)
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+			log.Fatalf("encode SQLCipher self-test result: %v", err)
+		}
+		return
 	}
 
-	// Coordinator construction reads only public account metadata. The
-	// SQLCipher vault remains closed until the user explicitly unlocks it.
-	app, err := NewApp(dataRoot)
-	if err != nil {
-		log.Fatalf("Desktopアカウント初期化エラー: %v", err)
+	var app *App
+	if wailsBindingsMode {
+		// Wails executes the application with the `bindings` build tag while
+		// generating JavaScript bindings. That build-time helper must never
+		// inspect or create the builder's real Omni Money data directory.
+		app = &App{}
+	} else {
+		dataRoot, err := getAppDataRoot()
+		if err != nil {
+			log.Fatalf("アプリケーションデータディレクトリ取得エラー: %v", err)
+		}
+
+		// Coordinator construction reads only public account metadata. The
+		// SQLCipher vault remains closed until the user explicitly unlocks it.
+		app, err = NewApp(dataRoot)
+		if err != nil {
+			log.Fatalf("Desktopアカウント初期化エラー: %v", err)
+		}
 	}
 
 	// Wailsアプリケーションを起動
-	err = wails.Run(&options.App{
+	err := wails.Run(&options.App{
 		Title:  "Omni Money",
 		Width:  1280,
 		Height: 800,

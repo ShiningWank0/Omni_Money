@@ -91,7 +91,7 @@ go install github.com/wailsapp/wails/v2/cmd/wails@latest
 git clone <repository-url>
 cd Omni_Money
 cd frontend
-npm install
+npm ci --ignore-scripts
 cd ..
 ```
 
@@ -111,11 +111,11 @@ wails build
 
 デスクトップモードでは、SQLite データベースは OS 標準のアプリケーションデータディレクトリに保存されます。
 
-DB、SQLiteの一時ファイル、スナップショット、デスクトップ版が書き出すCSVは、所有者だけが読み書きできる権限で作成します。desktop modeではOSのFileVault、BitLocker、LUKS等を有効にしてください。server modeはSQLCipher 4.18.0でDB・WAL・snapshotを暗号化し、さらに外部暗号化volumeの期限付きattestationも検証します。どちらか一方でも無効ならDBを開く前に起動を拒否します。鍵の作成と復旧は[SQLCipher鍵の運用](docs/sqlcipher-key-operations.md)、volumeの設定と復旧試験は[保存時暗号化volumeの運用contract](docs/at-rest-encryption.md)を参照してください。
+DesktopとserverのDB、WAL、snapshotはSQLCipher 4.18.0で暗号化し、所有者だけが読み書きできる権限で作成します。SQLCipherが不足・不正な場合は平文DBへfallbackせず、DBを開く前に起動を拒否します。DesktopのCSV exportは平文のため、暗号化済みvolumeへ保存してください。server modeはさらに外部暗号化volumeの期限付きattestationも検証します。鍵の作成と復旧は[SQLCipher鍵の運用](docs/sqlcipher-key-operations.md)、volumeの設定と復旧試験は[保存時暗号化volumeの運用contract](docs/at-rest-encryption.md)を参照してください。FileVault、BitLocker、LUKSもdefense in depthとして有効にしてください。
 
-- macOS: `~/Library/Application Support/OmniMoney/omni_money.db`
-- Windows: `%APPDATA%/OmniMoney/omni_money.db`
-- Linux: `~/.local/share/OmniMoney/omni_money.db`
+- macOS: `~/Library/Application Support/OmniMoney/vaults/<vault-id>/omni_money.db`
+- Windows: `%APPDATA%/OmniMoney/vaults/<vault-id>/omni_money.db`
+- Linux: `~/.local/share/OmniMoney/vaults/<vault-id>/omni_money.db`
 
 ## サーバーモードで起動
 
