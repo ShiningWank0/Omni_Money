@@ -540,7 +540,17 @@ export async function backupToCSV() {
     return await window.go.main.App.BackupToCSV()
   }
   const res = await apiFetch('/api/backup_csv')
+  await validateCSVResponse(res)
   return await res.text()
+}
+
+async function validateCSVResponse(response) {
+  await throwIfNotOk(response, 'CSVバックアップの取得に失敗しました')
+
+  const contentType = response.headers.get('Content-Type') || ''
+  if (!/^text\/csv(?:\s*;|$)/i.test(contentType)) {
+    throw new Error('CSVではない応答を受信したため、バックアップを中止しました')
+  }
 }
 
 /**
@@ -553,18 +563,25 @@ export async function backupToCSVFile() {
   }
   // サーバーモード時はブラウザダウンロードにフォールバック
   const res = await apiFetch('/api/backup_csv')
-  const csvContent = await res.text()
-  const bom = '\uFEFF'
-  const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8;' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `transactions_backup_${new Date().toISOString().slice(0, 10)}.csv`
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-  return a.download
+  await validateCSVResponse(res)
+
+  const downloadName = `transactions_backup_${new Date().toISOString().slice(0, 10)}.csv`
+  let objectURL = null
+  let anchor = null
+  try {
+    const csvContent = await res.text()
+    const blob = new Blob(['\uFEFF', csvContent], { type: 'text/csv;charset=utf-8;' })
+    objectURL = URL.createObjectURL(blob)
+    anchor = document.createElement('a')
+    anchor.href = objectURL
+    anchor.download = downloadName
+    document.body.appendChild(anchor)
+    anchor.click()
+    return downloadName
+  } finally {
+    anchor?.remove()
+    if (objectURL) URL.revokeObjectURL(objectURL)
+  }
 }
 
 /**
@@ -582,7 +599,11 @@ export async function importCSV(content, mode = 'append') {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content, mode })
   })
+  await throwIfNotOk(res, 'CSVインポートに失敗しました')
   const data = await res.json()
+  if (!Number.isInteger(data?.imported_count) || data.imported_count < 0) {
+    throw new Error('CSVインポートの応答が不正です')
+  }
   return data.imported_count
 }
 
