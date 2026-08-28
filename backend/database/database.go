@@ -26,47 +26,99 @@ const defaultSnapshotMaxTotalBytes int64 = 2 * 1024 * 1024 * 1024
 const writableSQLiteQuery = "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 const snapshotSQLiteQuery = "mode=rw&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 
-var (
-	db       *sql.DB
-	dbPath   string
-	dbOpener *securedb.Opener
-	mu       sync.RWMutex
-	umask    sync.Once
+var umask sync.Once
+
+// Instance owns one database connection, its SQLCipher opener, and the entire
+// snapshot lifecycle. Multiple instances can therefore be used independently
+// (for example, one encrypted vault per server user) without sharing mutable
+// package state. An Instance must not be copied after first use.
+type Instance struct {
+	db     *sql.DB
+	path   string
+	opener *securedb.Opener
+	mu     sync.RWMutex
 
 	// snapshotLifecycle serializes database lifecycle changes with snapshot
-	// operations.  A snapshot keeps a database handle and path for the whole
-	// copy, so closing/reinitializing the database must wait for it to finish.
+	// operations. A snapshot keeps a database handle and path for the whole
+	// copy, so closing the database must wait for it to finish.
 	snapshotLifecycle sync.RWMutex
 	dbLifecycleMu     sync.Mutex
 	snapshotMu        sync.Mutex
-	snapshotCond      = sync.NewCond(&snapshotMu)
+	snapshotInit      sync.Once
+	snapshotCond      *sync.Cond
 	snapshotRunning   bool
 	snapshotPending   bool
 	snapshotClosing   bool
-)
+}
+
+func newInstance() *Instance {
+	instance := &Instance{}
+	instance.ensureSnapshotCond()
+	return instance
+}
+
+func (i *Instance) ensureSnapshotCond() {
+	i.snapshotInit.Do(func() {
+		i.snapshotCond = sync.NewCond(&i.snapshotMu)
+	})
+}
+
+// defaultInstance backs the historical package-level API used by Desktop and
+// existing services. New server code should hold an explicit Instance.
+var defaultInstance = newInstance()
+
+// OpenPlainInstance opens a standalone plaintext SQLite instance. This is
+// retained for compatibility and tests; server and Desktop vaults should use
+// OpenEncryptedInstance.
+func OpenPlainInstance(path string) (*Instance, error) {
+	return openInstance(path, securedb.NewPlainOpener(), false)
+}
+
+// OpenEncryptedInstance opens a standalone SQLCipher instance, atomically
+// migrating an existing plaintext database before publishing the connection.
+func OpenEncryptedInstance(path string, key securedb.RawKey) (*Instance, error) {
+	return openInstance(path, securedb.NewEncryptedOpener(key), true)
+}
+
+func openInstance(path string, opener *securedb.Opener, migratePlaintext bool) (*Instance, error) {
+	instance := newInstance()
+	if err := instance.initialize(path, opener, migratePlaintext); err != nil {
+		return nil, err
+	}
+	return instance, nil
+}
 
 // InitDB はSQLiteデータベースを初期化する。
 // wails build でバインディング生成時にも呼ばれるため、sync.Once は使わない。
 // 既に接続がある場合はまず閉じてから再接続する。
 func InitDB(path string) error {
-	return initializeDB(path, securedb.NewPlainOpener(), false)
+	return defaultInstance.initialize(path, securedb.NewPlainOpener(), false)
 }
 
 // InitEncryptedDB はSQLCipher鍵を接続ごとに適用し、平文DBが存在する場合は
 // 検証済みの暗号化コピーへ原子的に移行してから初期化する。
 func InitEncryptedDB(path string, key securedb.RawKey) error {
-	return initializeDB(path, securedb.NewEncryptedOpener(key), true)
+	return defaultInstance.initialize(path, securedb.NewEncryptedOpener(key), true)
 }
 
-func initializeDB(path string, opener *securedb.Opener, migratePlaintext bool) error {
-	beginDBLifecycle()
-	defer endDBLifecycle()
+func (i *Instance) initialize(path string, opener *securedb.Opener, migratePlaintext bool) error {
+	if i == nil {
+		opener.Destroy()
+		return fmt.Errorf("データベースinstanceが初期化されていません")
+	}
+	i.ensureSnapshotCond()
+	i.beginDBLifecycle()
+	defer i.endDBLifecycle()
 
-	mu.Lock()
-	defer mu.Unlock()
-	if err := initDBLocked(path, opener, migratePlaintext); err != nil {
-		if dbOpener == opener {
-			dbOpener = nil
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if err := i.initDBLocked(path, opener, migratePlaintext); err != nil {
+		if i.db != nil {
+			_ = i.db.Close()
+			i.db = nil
+		}
+		if i.opener == opener {
+			i.opener = nil
 		}
 		opener.Destroy()
 		return err
@@ -76,28 +128,28 @@ func initializeDB(path string, opener *securedb.Opener, migratePlaintext bool) e
 
 // initDBLocked は mu.Lock() を保持した状態で呼び出す前提の初期化本体。
 // RestoreSnapshot のようにロックを保持したまま再初期化する経路と共有する。
-func initDBLocked(path string, opener *securedb.Opener, migratePlaintext bool) error {
+func (i *Instance) initDBLocked(path string, opener *securedb.Opener, migratePlaintext bool) error {
 	// SQLiteが後から作成するWAL/SHM/rollback journalも所有者だけが読めるよう、
 	// プロセスのファイル作成マスクを一度だけ制限する。
 	umask.Do(setRestrictiveUmask)
 
 	// 既存の接続があればまず閉じる
-	if db != nil {
-		db.Close()
-		db = nil
+	if i.db != nil {
+		i.db.Close()
+		i.db = nil
 	}
 	if opener == nil {
 		return fmt.Errorf("データベースopenerが初期化されていません")
 	}
-	if dbOpener != nil && dbOpener != opener {
-		dbOpener.Destroy()
+	if i.opener != nil && i.opener != opener {
+		i.opener.Destroy()
 	}
-	dbOpener = opener
+	i.opener = opener
 
 	if path == "" {
 		path = "omni_money.db"
 	}
-	dbPath = path
+	i.path = path
 
 	// データベースディレクトリが存在しない場合はprivate権限で作成する。
 	// 既存ディレクトリのACLや共有設定はアプリから無条件に変更しない。
@@ -117,32 +169,32 @@ func initDBLocked(path string, opener *securedb.Opener, migratePlaintext bool) e
 	}
 
 	var err error
-	db, err = opener.Open(context.Background(), path, securedb.Writable)
+	i.db, err = opener.Open(context.Background(), path, securedb.Writable)
 	if err != nil {
 		return fmt.Errorf("データベース接続エラー: %w", err)
 	}
 
 	// 接続テスト
-	if err := db.Ping(); err != nil {
-		db.Close()
-		db = nil
+	if err := i.db.Ping(); err != nil {
+		i.db.Close()
+		i.db = nil
 		return fmt.Errorf("データベースping失敗: %w", err)
 	}
-	if err := requireFullSynchronous(db); err != nil {
-		db.Close()
-		db = nil
+	if err := requireFullSynchronous(i.db); err != nil {
+		i.db.Close()
+		i.db = nil
 		return fmt.Errorf("データベース耐久性設定エラー: %w", err)
 	}
 	// SQLite creates the file on first open.  Restrict an existing database as
 	// well: it may contain the user's complete financial history.
 	if err := os.Chmod(path, 0600); err != nil {
-		db.Close()
-		db = nil
+		i.db.Close()
+		i.db = nil
 		return fmt.Errorf("データベースファイル権限設定エラー: %w", err)
 	}
 
 	// テーブル作成
-	if err := createTables(); err != nil {
+	if err := createTablesOn(i.db); err != nil {
 		return fmt.Errorf("テーブル作成エラー: %w", err)
 	}
 	if err := hardenSQLiteFiles(path); err != nil {
@@ -160,32 +212,47 @@ func initDBLocked(path string, opener *securedb.Opener, migratePlaintext bool) e
 
 // GetDB はデータベース接続を返す
 func GetDB() *sql.DB {
-	mu.RLock()
-	defer mu.RUnlock()
-	return db
+	return defaultInstance.DB()
+}
+
+// DB returns this instance's current database handle, or nil after Close.
+func (i *Instance) DB() *sql.DB {
+	if i == nil {
+		return nil
+	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.db
 }
 
 // CloseDB はデータベース接続を閉じる
 func CloseDB() {
-	beginDBLifecycle()
-	defer endDBLifecycle()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if db != nil {
-		db.Close()
-		db = nil
-		log.Println("データベース接続を閉じました")
-	}
-	if dbOpener != nil {
-		dbOpener.Destroy()
-		dbOpener = nil
-	}
+	_ = defaultInstance.Close()
 }
 
-// createTables はデータベーステーブルを作成する
-func createTables() error {
-	return createTablesOn(db)
+// Close waits for snapshots, closes the connection, and destroys the opener's
+// in-memory key. It is safe to call more than once.
+func (i *Instance) Close() error {
+	if i == nil {
+		return nil
+	}
+	i.ensureSnapshotCond()
+	i.beginDBLifecycle()
+	defer i.endDBLifecycle()
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	var closeErr error
+	if i.db != nil {
+		closeErr = i.db.Close()
+		i.db = nil
+		log.Println("データベース接続を閉じました")
+	}
+	if i.opener != nil {
+		i.opener.Destroy()
+		i.opener = nil
+	}
+	return closeErr
 }
 
 // createTablesOn は指定した接続へ現行スキーマ、index、triggerを適用する。
@@ -408,10 +475,10 @@ func validateCriticalSchema(target *sql.DB) error {
 
 // getSnapshotDir はDBパスと同じディレクトリ配下の snapshots/ を返す。
 // ユーザーが保存場所を意識しなくて済むようにアプリデータ内に格納する。
-func getSnapshotDir() string {
-	mu.RLock()
-	p := dbPath
-	mu.RUnlock()
+func (i *Instance) getSnapshotDir() string {
+	i.mu.RLock()
+	p := i.path
+	i.mu.RUnlock()
 	if p == "" {
 		return "snapshots"
 	}
@@ -421,21 +488,29 @@ func getSnapshotDir() string {
 // CreateSnapshot は現在のDBファイルのスナップショットを作成する。
 // snapshotDir にタイムスタンプ付きのコピーを保存する。
 func CreateSnapshot(snapshotDir string) (string, error) {
-	snapshotLifecycle.RLock()
-	defer snapshotLifecycle.RUnlock()
-	return createSnapshot(snapshotDir)
+	return defaultInstance.CreateSnapshot(snapshotDir)
+}
+
+// CreateSnapshot creates a consistent snapshot of this instance.
+func (i *Instance) CreateSnapshot(snapshotDir string) (string, error) {
+	if i == nil {
+		return "", fmt.Errorf("データベースinstanceが初期化されていません")
+	}
+	i.snapshotLifecycle.RLock()
+	defer i.snapshotLifecycle.RUnlock()
+	return i.createSnapshot(snapshotDir)
 }
 
 // createSnapshot performs the copy while holding the database lock.  It is
 // called by CreateSnapshot and the auto-snapshot worker, both of which hold a
 // read lock on snapshotLifecycle for the duration of the operation.
-func createSnapshot(snapshotDir string) (string, error) {
-	mu.Lock()
-	defer mu.Unlock()
+func (i *Instance) createSnapshot(snapshotDir string) (string, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 
-	currentPath := dbPath
-	currentDB := db
-	currentOpener := dbOpener
+	currentPath := i.path
+	currentDB := i.db
+	currentOpener := i.opener
 
 	if currentPath == "" {
 		return "", fmt.Errorf("データベースが初期化されていません")
@@ -501,8 +576,17 @@ func createSnapshot(snapshotDir string) (string, error) {
 
 // ListSnapshots は利用可能なスナップショットのリストを返す
 func ListSnapshots(snapshotDir string) ([]string, error) {
+	return defaultInstance.ListSnapshots(snapshotDir)
+}
+
+// ListSnapshots returns snapshots belonging to this instance's default
+// snapshot directory, or to snapshotDir when explicitly provided.
+func (i *Instance) ListSnapshots(snapshotDir string) ([]string, error) {
+	if i == nil {
+		return nil, fmt.Errorf("データベースinstanceが初期化されていません")
+	}
 	if snapshotDir == "" {
-		snapshotDir = getSnapshotDir()
+		snapshotDir = i.getSnapshotDir()
 	}
 
 	entries, err := os.ReadDir(snapshotDir)
@@ -534,6 +618,15 @@ func ListSnapshots(snapshotDir string) ([]string, error) {
 //  6. PRAGMA integrity_check で整合性を検証
 //  7. 成功なら退避ファイルを削除、失敗なら退避から復旧
 func RestoreSnapshot(snapshotDir, snapshotName string) error {
+	return defaultInstance.RestoreSnapshot(snapshotDir, snapshotName)
+}
+
+// RestoreSnapshot replaces this instance's database with a validated
+// snapshot and reopens it with the same opener (and therefore the same key).
+func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
+	if i == nil {
+		return fmt.Errorf("データベースinstanceが初期化されていません")
+	}
 	// スナップショット名の検証（パストラバーサル防止）。
 	// APIから任意の名前が渡り得るため、ディレクトリ区切りや ".." を含む名前、
 	// snapshots/ 直下の .db ファイル以外は拒否する。
@@ -541,16 +634,16 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 		return err
 	}
 
-	beginDBLifecycle()
-	defer endDBLifecycle()
+	i.beginDBLifecycle()
+	defer i.endDBLifecycle()
 
 	// 復元中に他のリクエストが nil の DB 接続へアクセスして panic しないよう、
 	// ファイル差し替えと再接続が終わるまでロックを保持し続ける。
-	mu.Lock()
-	defer mu.Unlock()
+	i.mu.Lock()
+	defer i.mu.Unlock()
 
 	if snapshotDir == "" {
-		snapshotDir = filepath.Join(filepath.Dir(dbPath), "snapshots")
+		snapshotDir = filepath.Join(filepath.Dir(i.path), "snapshots")
 	}
 
 	snapshotPath := filepath.Join(snapshotDir, snapshotName)
@@ -559,12 +652,12 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	}
 
 	// --- 手順1: データベース接続の完全な遮断 ---
-	currentPath := dbPath
-	if db != nil {
+	currentPath := i.path
+	if i.db != nil {
 		// WALの内容をメインDBファイルにフラッシュしてからCloseする
-		db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
-		db.Close()
-		db = nil
+		i.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+		i.db.Close()
+		i.db = nil
 	}
 
 	backupPath := currentPath + ".bak"
@@ -579,9 +672,9 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 				_ = candidateDB.Close()
 				candidateDB = nil
 			}
-			if db != nil {
-				_ = db.Close()
-				db = nil
+			if i.db != nil {
+				_ = i.db.Close()
+				i.db = nil
 			}
 			os.Remove(currentPath)
 			os.Remove(currentPath + "-wal")
@@ -590,7 +683,7 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 				log.Printf("退避データベースの復旧エラー: %v", err)
 				return
 			}
-			if err := initDBLocked(currentPath, dbOpener, false); err != nil {
+			if err := i.initDBLocked(currentPath, i.opener, false); err != nil {
 				log.Printf("復旧後のDB再接続エラー: %v", err)
 			}
 		}
@@ -600,7 +693,7 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if err := os.Rename(currentPath, backupPath); err != nil {
 		// リネーム失敗時はそのまま再接続して返す
 		restoreFailed = false
-		initDBLocked(currentPath, dbOpener, false)
+		i.initDBLocked(currentPath, i.opener, false)
 		return fmt.Errorf("データベース退避エラー: %w", err)
 	}
 
@@ -614,10 +707,10 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	}
 
 	// --- 手順5: 再接続と現行スキーマの再適用 ---
-	if dbOpener == nil {
+	if i.opener == nil {
 		return fmt.Errorf("データベースopenerが初期化されていません")
 	}
-	newDB, err := dbOpener.Open(context.Background(), currentPath, securedb.Writable)
+	newDB, err := i.opener.Open(context.Background(), currentPath, securedb.Writable)
 	if err != nil {
 		return fmt.Errorf("復元後のDB接続エラー: %w", err)
 	}
@@ -627,7 +720,7 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	}
 
 	// 破損DBへDDLを適用しないよう、移行前にも整合性を確認する。
-	if err := checkIntegrity(newDB); err != nil {
+	if err := i.checkIntegrity(newDB); err != nil {
 		return err
 	}
 	if err := createTablesOn(newDB); err != nil {
@@ -635,14 +728,14 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 	}
 
 	// --- 手順6: スキーマ更新後の整合性の検査 ---
-	if err := checkIntegrity(newDB); err != nil {
+	if err := i.checkIntegrity(newDB); err != nil {
 		return err
 	}
 
 	// --- 手順7: 参照の更新と退避ファイルの削除 ---
-	db = newDB
+	i.db = newDB
 	candidateDB = nil
-	dbPath = currentPath
+	i.path = currentPath
 
 	restoreFailed = false
 	os.Remove(backupPath)
@@ -672,14 +765,20 @@ func requireFullSynchronous(target *sql.DB) error {
 	return nil
 }
 
-func checkIntegrity(target *sql.DB) error {
-	if dbOpener == nil {
+func (i *Instance) checkIntegrity(target *sql.DB) error {
+	if i.opener == nil {
 		return fmt.Errorf("データベースopenerが初期化されていません")
 	}
-	if err := dbOpener.CheckIntegrity(context.Background(), target); err != nil {
+	if err := i.opener.CheckIntegrity(context.Background(), target); err != nil {
 		return fmt.Errorf("整合性チェック失敗: %w", err)
 	}
 	return nil
+}
+
+// checkIntegrity preserves the package-internal compatibility path used by
+// the legacy default-instance tests.
+func checkIntegrity(target *sql.DB) error {
+	return defaultInstance.checkIntegrity(target)
 }
 
 // validateSnapshotName はスナップショット名として安全な形式かを検証する
@@ -698,16 +797,25 @@ func validateSnapshotName(name string) error {
 
 // CleanOldSnapshots は古いスナップショットを削除する（世代管理: 最新N件を残す）
 func CleanOldSnapshots(snapshotDir string, maxKeep int) error {
-	snapshotLifecycle.RLock()
-	defer snapshotLifecycle.RUnlock()
-	return cleanOldSnapshots(snapshotDir, maxKeep)
+	return defaultInstance.CleanOldSnapshots(snapshotDir, maxKeep)
 }
 
-func cleanOldSnapshots(snapshotDir string, maxKeep int) error {
+// CleanOldSnapshots applies generation and total-size retention to this
+// instance's snapshots.
+func (i *Instance) CleanOldSnapshots(snapshotDir string, maxKeep int) error {
+	if i == nil {
+		return fmt.Errorf("データベースinstanceが初期化されていません")
+	}
+	i.snapshotLifecycle.RLock()
+	defer i.snapshotLifecycle.RUnlock()
+	return i.cleanOldSnapshots(snapshotDir, maxKeep)
+}
+
+func (i *Instance) cleanOldSnapshots(snapshotDir string, maxKeep int) error {
 	if snapshotDir == "" {
-		mu.RLock()
-		path := dbPath
-		mu.RUnlock()
+		i.mu.RLock()
+		path := i.path
+		i.mu.RUnlock()
 		snapshotDir = filepath.Join(filepath.Dir(path), "snapshots")
 	}
 	if maxKeep <= 0 {
@@ -808,43 +916,59 @@ func pruneSnapshots(snapshotDir string, maxKeep int, maxBytes int64, protectedPa
 
 // AutoSnapshot は操作ごとに自動スナップショットを作成し、30世代を維持する
 func AutoSnapshot() {
-	snapshotMu.Lock()
-	defer snapshotMu.Unlock()
-	if snapshotClosing {
+	defaultInstance.StartAutoSnapshot()
+}
+
+// StartAutoSnapshot schedules an asynchronous snapshot for this instance.
+// Bursts are coalesced into at most one follow-up run.
+func (i *Instance) StartAutoSnapshot() {
+	if i == nil {
 		return
 	}
-	if snapshotRunning {
+	i.ensureSnapshotCond()
+	i.snapshotMu.Lock()
+	defer i.snapshotMu.Unlock()
+	if i.snapshotClosing {
+		return
+	}
+	i.mu.RLock()
+	ready := i.db != nil && i.opener != nil
+	i.mu.RUnlock()
+	if !ready {
+		return
+	}
+	if i.snapshotRunning {
 		// Coalesce bursts of writes into one follow-up snapshot.  This avoids
 		// spawning an unbounded number of goroutines while preserving the
 		// asynchronous API expected by callers.
-		snapshotPending = true
+		i.snapshotPending = true
 		return
 	}
-	snapshotRunning = true
-	go runAutoSnapshots()
+	i.snapshotRunning = true
+	go i.runAutoSnapshots()
 }
 
-func runAutoSnapshots() {
+func (i *Instance) runAutoSnapshots() {
 	for {
-		snapshotLifecycle.RLock()
-		_, err := createSnapshot("")
+		i.snapshotLifecycle.RLock()
+		_, err := i.createSnapshot("")
 		if err != nil {
 			log.Printf("自動スナップショット作成エラー: %v", err)
-		} else if err := cleanOldSnapshots("", 30); err != nil {
+		} else if err := i.cleanOldSnapshots("", 30); err != nil {
 			log.Printf("スナップショットクリーンアップエラー: %v", err)
 		}
-		snapshotLifecycle.RUnlock()
+		i.snapshotLifecycle.RUnlock()
 
-		snapshotMu.Lock()
-		if snapshotPending && !snapshotClosing {
-			snapshotPending = false
-			snapshotMu.Unlock()
+		i.snapshotMu.Lock()
+		if i.snapshotPending && !i.snapshotClosing {
+			i.snapshotPending = false
+			i.snapshotMu.Unlock()
 			continue
 		}
-		snapshotPending = false
-		snapshotRunning = false
-		snapshotCond.Broadcast()
-		snapshotMu.Unlock()
+		i.snapshotPending = false
+		i.snapshotRunning = false
+		i.snapshotCond.Broadcast()
+		i.snapshotMu.Unlock()
 		return
 	}
 }
@@ -853,29 +977,30 @@ func runAutoSnapshots() {
 // scheduled worker to finish before a database is closed or replaced.  The
 // lifecycle lock also waits for direct CreateSnapshot calls that are already
 // in progress.
-func beginDBLifecycle() {
+func (i *Instance) beginDBLifecycle() {
+	i.ensureSnapshotCond()
 	// Serialize lifecycle transitions themselves.  Without this outer mutex,
 	// two concurrent CloseDB/InitDB calls could both observe the closing state,
 	// and the first one to finish could reopen the window while the second still
 	// owns the database lifecycle lock.
-	dbLifecycleMu.Lock()
+	i.dbLifecycleMu.Lock()
 
-	snapshotMu.Lock()
-	snapshotClosing = true
-	for snapshotRunning {
-		snapshotCond.Wait()
+	i.snapshotMu.Lock()
+	i.snapshotClosing = true
+	for i.snapshotRunning {
+		i.snapshotCond.Wait()
 	}
-	snapshotMu.Unlock()
-	snapshotLifecycle.Lock()
+	i.snapshotMu.Unlock()
+	i.snapshotLifecycle.Lock()
 }
 
-func endDBLifecycle() {
-	snapshotLifecycle.Unlock()
-	snapshotMu.Lock()
-	snapshotClosing = false
-	snapshotCond.Broadcast()
-	snapshotMu.Unlock()
-	dbLifecycleMu.Unlock()
+func (i *Instance) endDBLifecycle() {
+	i.snapshotLifecycle.Unlock()
+	i.snapshotMu.Lock()
+	i.snapshotClosing = false
+	i.snapshotCond.Broadcast()
+	i.snapshotMu.Unlock()
+	i.dbLifecycleMu.Unlock()
 }
 
 func ensurePrivateDir(path string) error {
