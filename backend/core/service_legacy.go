@@ -151,6 +151,14 @@ func BackupToCSVFile() (string, error) {
 	return s.BackupToCSVFile()
 }
 
+func BackupToCSVDirectory(destination string) (string, error) {
+	s, err := newLegacyService()
+	if err != nil {
+		return "", err
+	}
+	return s.BackupToCSVDirectory(destination)
+}
+
 func ImportCSV(content, mode string) (int, error) {
 	s, err := newLegacyService()
 	if err != nil {

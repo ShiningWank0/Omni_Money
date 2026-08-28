@@ -7,7 +7,7 @@
       <div class="form-row">
         <label>CSVファイル：</label>
         <div>
-          <input type="file" accept=".csv" ref="csvFileInput" @change="onCSVFileSelected">
+          <input type="file" accept=".csv" ref="csvFileInput" :disabled="csvImporting" @change="onCSVFileSelected">
           <div v-if="csvFile" class="file-info">
             選択ファイル: {{ csvFile.name }}
           </div>
@@ -19,14 +19,23 @@
         <label>インポートモード：</label>
         <div class="radio-group">
           <label class="radio-label">
-            <input type="radio" v-model="csvImportMode" value="append">
+            <input type="radio" v-model="csvImportMode" value="append" :disabled="csvImporting" @change="onImportModeChanged">
             <span>追加 (既存データを保持)</span>
           </label>
           <label class="radio-label">
-            <input type="radio" v-model="csvImportMode" value="replace">
+            <input type="radio" v-model="csvImportMode" value="replace" :disabled="csvImporting" @change="onImportModeChanged">
             <span>置換 (既存データを削除)</span>
           </label>
         </div>
+      </div>
+
+      <div v-if="csvImportMode === 'replace'" class="replace-warning" role="alert">
+        <strong>破壊的操作です。</strong>
+        置換を実行すると、現在の取引データを削除してからCSVの内容に置き換えます。
+        <label class="replace-confirmation">
+          <input v-model="replaceConfirmed" type="checkbox" :disabled="csvImporting">
+          <span>現在の取引データが削除されることを理解し、置換を実行します</span>
+        </label>
       </div>
 
       <!-- CSV形式の説明 -->
@@ -60,8 +69,8 @@
       <!-- ボタン -->
       <div class="modal-buttons">
         <button class="cancel-btn" @click="$emit('close')" :disabled="csvImporting">キャンセル</button>
-        <button class="ok-btn" @click="importCSVFile" :disabled="!csvFile || csvImporting"
-          :style="{ opacity: (!csvFile || csvImporting) ? 0.5 : 1 }">
+        <button class="ok-btn" @click="importCSVFile" :disabled="importDisabled"
+          :style="{ opacity: importDisabled ? 0.5 : 1 }">
           {{ csvImporting ? 'インポート中...' : 'インポート実行' }}
         </button>
       </div>
@@ -70,8 +79,9 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { importCSV } from '../utils/api'
+import { canStartCSVImport } from '../utils/csvSafety'
 
 const emit = defineEmits(['imported', 'close'])
 
@@ -80,22 +90,41 @@ const csvImportMode = ref('append')
 const csvImporting = ref(false)
 const csvImportError = ref('')
 const csvImportSuccess = ref('')
+const replaceConfirmed = ref(false)
+const importDisabled = computed(() => !canStartCSVImport({
+  hasFile: Boolean(csvFile.value),
+  importing: csvImporting.value,
+  mode: csvImportMode.value,
+  replaceConfirmed: replaceConfirmed.value
+}))
 
 function onCSVFileSelected(e) {
   csvFile.value = e.target.files[0] || null
+  csvImportError.value = ''
+  csvImportSuccess.value = ''
+  replaceConfirmed.value = false
+}
+
+function onImportModeChanged() {
+  replaceConfirmed.value = false
   csvImportError.value = ''
   csvImportSuccess.value = ''
 }
 
 async function importCSVFile() {
   if (!csvFile.value) return
+  if (csvImportMode.value === 'replace' && !replaceConfirmed.value) {
+    csvImportError.value = '置換によって現在の取引データが削除されることを確認してください'
+    return
+  }
 
   csvImporting.value = true
   csvImportError.value = ''
   csvImportSuccess.value = ''
 
+  let content = ''
   try {
-    const content = await csvFile.value.text()
+    content = await csvFile.value.text()
     const count = await importCSV(content, csvImportMode.value)
     csvImportSuccess.value = `CSVインポート完了: ${count}件のトランザクションを${csvImportMode.value === 'replace' ? '置換' : '追加'}しました`
     setTimeout(() => {
@@ -104,6 +133,8 @@ async function importCSVFile() {
   } catch (e) {
     csvImportError.value = e.message || 'CSVインポートに失敗しました'
   } finally {
+    // JavaScript文字列自体の消去は保証できないが、不要な参照は保持しない。
+    content = ''
     csvImporting.value = false
   }
 }
@@ -154,6 +185,32 @@ async function importCSVFile() {
   margin-top: 4px;
   font-size: 0.85em;
   color: #666;
+}
+
+.replace-warning {
+  margin-bottom: 12px;
+  padding: 12px;
+  color: #721c24;
+  background: #fff3f3;
+  border: 1px solid #e0a0a6;
+  border-radius: 8px;
+  font-size: 0.9em;
+  line-height: 1.5;
+}
+
+.replace-confirmation {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  color: #721c24;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.replace-confirmation input {
+  flex: 0 0 auto;
+  margin-top: 4px;
 }
 
 .format-info {

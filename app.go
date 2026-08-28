@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
+
 	"omni_money/backend/core"
 	"omni_money/backend/database"
 	"omni_money/backend/models"
@@ -101,9 +103,21 @@ func (a *App) BackupToCSV() (string, error) {
 	return core.BackupToCSV()
 }
 
-// BackupToCSVFile はCSVバックアップファイルをダウンロードフォルダに保存する
+// BackupToCSVFile asks the user for the encrypted destination directory before
+// writing a plaintext CSV. Cancellation returns an empty path without writing.
 func (a *App) BackupToCSVFile() (string, error) {
-	return core.BackupToCSVFile()
+	destination, err := wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title:                "CSVの保存先（暗号化されたボリューム）を選択",
+		CanCreateDirectories: true,
+		ResolvesAliases:      true,
+	})
+	if err != nil {
+		return "", fmt.Errorf("CSV保存先を選択できませんでした: %w", err)
+	}
+	if destination == "" {
+		return "", nil
+	}
+	return core.BackupToCSVDirectory(destination)
 }
 
 // ImportCSV はCSVファイルからデータをインポートする

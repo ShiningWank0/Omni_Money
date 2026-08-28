@@ -21,6 +21,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"omni_money/backend/fileprivacy"
 	"omni_money/backend/models"
 	"omni_money/backend/validation"
 )
@@ -679,11 +680,6 @@ func (s *Service) BackupToCSV() (string, error) {
 
 // BackupToCSVFile はCSVバックアップファイルをユーザーのダウンロードフォルダに保存する
 func (s *Service) BackupToCSVFile() (string, error) {
-	csvContent, err := s.BackupToCSV()
-	if err != nil {
-		return "", err
-	}
-
 	downloadsDir, err := getDownloadsDir()
 	if err != nil {
 		return "", err
@@ -692,12 +688,40 @@ func (s *Service) BackupToCSVFile() (string, error) {
 	if err := os.MkdirAll(downloadsDir, 0700); err != nil {
 		return "", fmt.Errorf("ダウンロードフォルダ作成エラー: %w", err)
 	}
+	return s.BackupToCSVDirectory(downloadsDir)
+}
+
+// BackupToCSVDirectory writes a plaintext CSV directly into a directory the
+// user selected. The UI must warn that the destination needs storage-level
+// encryption; this method cannot attest an arbitrary mounted volume.
+func (s *Service) BackupToCSVDirectory(destination string) (string, error) {
+	if strings.TrimSpace(destination) == "" {
+		return "", fmt.Errorf("CSV保存先が選択されていません")
+	}
+	absolute, err := filepath.Abs(destination)
+	if err != nil {
+		return "", fmt.Errorf("CSV保存先の解決エラー: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", fmt.Errorf("CSV保存先の確認エラー: %w", err)
+	}
+	root, err := openVerifiedDirectoryRoot(resolved)
+	if err != nil {
+		return "", fmt.Errorf("CSV保存先の確認エラー: %w", err)
+	}
+	defer root.Close()
+
+	csvContent, err := s.BackupToCSV()
+	if err != nil {
+		return "", err
+	}
 
 	filename := fmt.Sprintf("transactions_backup_%s.csv", time.Now().Format("2006-01-02"))
 
 	// BOMを付与してExcel互換にする。既存ファイルやsymlinkは上書きしない。
 	bom := "\xEF\xBB\xBF"
-	filePath, err := writeUniquePrivateFile(downloadsDir, filename, []byte(bom+csvContent))
+	filePath, err := writeUniquePrivateFileAt(root, resolved, filename, []byte(bom+csvContent))
 	if err != nil {
 		return "", fmt.Errorf("CSVファイル書き出しエラー: %w", err)
 	}
@@ -708,6 +732,15 @@ func (s *Service) BackupToCSVFile() (string, error) {
 // writeUniquePrivateFile は既存ファイルやsymlinkを上書きせず、所有者だけが
 // 読み書きできる新規ファイルへ内容を保存する。
 func writeUniquePrivateFile(dir, filename string, data []byte) (string, error) {
+	root, err := openVerifiedDirectoryRoot(dir)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	return writeUniquePrivateFileAt(root, dir, filename, data)
+}
+
+func writeUniquePrivateFileAt(root *os.Root, dir, filename string, data []byte) (string, error) {
 	ext := filepath.Ext(filename)
 	base := strings.TrimSuffix(filename, ext)
 	for attempt := 0; attempt < 100; attempt++ {
@@ -715,8 +748,7 @@ func writeUniquePrivateFile(dir, filename string, data []byte) (string, error) {
 		if attempt > 0 {
 			candidateName = fmt.Sprintf("%s_%d%s", base, attempt, ext)
 		}
-		candidate := filepath.Join(dir, candidateName)
-		file, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- candidate is generated under the user's downloads directory and O_EXCL prevents symlink overwrite.
+		file, err := fileprivacy.CreateExclusive(root, dir, candidateName)
 		if err != nil {
 			if os.IsExist(err) {
 				continue
@@ -725,8 +757,20 @@ func writeUniquePrivateFile(dir, filename string, data []byte) (string, error) {
 		}
 
 		removePartial := func() {
+			createdInfo, statErr := file.Stat()
 			_ = file.Close()
-			_ = os.Remove(candidate)
+			if statErr != nil {
+				return
+			}
+			currentInfo, statErr := root.Lstat(candidateName)
+			if statErr == nil && os.SameFile(createdInfo, currentInfo) {
+				_ = root.Remove(candidateName)
+			}
+		}
+		// Tighten platform permissions before any plaintext bytes are written.
+		if err := fileprivacy.Harden(file); err != nil {
+			removePartial()
+			return "", err
 		}
 		if _, err := file.Write(data); err != nil {
 			removePartial()
@@ -736,17 +780,49 @@ func writeUniquePrivateFile(dir, filename string, data []byte) (string, error) {
 			removePartial()
 			return "", err
 		}
-		if err := file.Chmod(0600); err != nil {
+		createdInfo, err := file.Stat()
+		if err != nil {
 			removePartial()
 			return "", err
 		}
 		if err := file.Close(); err != nil {
-			_ = os.Remove(candidate)
+			currentInfo, statErr := root.Lstat(candidateName)
+			if statErr == nil && os.SameFile(createdInfo, currentInfo) {
+				_ = root.Remove(candidateName)
+			}
 			return "", err
 		}
-		return candidate, nil
+		return filepath.Join(dir, candidateName), nil
 	}
 	return "", fmt.Errorf("一意なバックアップファイル名を確保できませんでした")
+}
+
+// openVerifiedDirectoryRoot pins the checked directory to an OS handle. The
+// identity comparison closes the gap where another process replaces the path
+// between Lstat and OpenRoot.
+func openVerifiedDirectoryRoot(dir string) (*os.Root, error) {
+	before, err := os.Lstat(dir)
+	if err != nil {
+		return nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.IsDir() {
+		return nil, fmt.Errorf("保存先は実在するディレクトリを選択してください")
+	}
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	after, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	if !os.SameFile(before, after) {
+		_ = root.Close()
+		return nil, fmt.Errorf("保存先が選択後に変更されました")
+	}
+	return root, nil
 }
 
 // getDownloadsDir はOS標準のダウンロードフォルダパスを返す
