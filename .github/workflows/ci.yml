@@ -304,7 +304,8 @@ jobs:
                 echo "database retained a plaintext SQLite header"
                 exit 1
               fi
-              test -d "$runtime_data/vaults"
+              sudo test -d "$runtime_data/vaults"
+              echo "hardened runtime is healthy with an encrypted control database"
               exit 0
             fi
             if [ "$health" = "unhealthy" ]; then
