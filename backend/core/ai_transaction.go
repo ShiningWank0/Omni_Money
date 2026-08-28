@@ -51,7 +51,7 @@ func AddAITransaction(ctx context.Context, req models.TransactionRequest, identi
 		return nil, errors.New("invalid AI transaction identity")
 	}
 
-	prepared, err := prepareTransactionInsert(req)
+	prepared, err := prepareTransactionInsertContext(ctx, req)
 	if err != nil {
 		return nil, err
 	}
