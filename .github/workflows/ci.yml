@@ -87,6 +87,7 @@ jobs:
           AUTH_PASSWORD_HASH: '$2y$12$abcdefghijklmnopqrstuvabcdefghijklmnopqrstuv12'
           AI_API_TOKEN: '0123456789abcdef0123456789abcdef'
           ALLOWED_HOSTS: 'money.example.com'
+          OMNI_AT_REST_ATTESTATION_FILE: '/tmp/omni-data-at-rest.json'
         run: docker compose config --quiet
 
       - name: Assert Pangolin network isolation
@@ -94,6 +95,7 @@ jobs:
           AUTH_PASSWORD_HASH: '$2y$12$abcdefghijklmnopqrstuvabcdefghijklmnopqrstuv12'
           AI_API_TOKEN: '0123456789abcdef0123456789abcdef'
           ALLOWED_HOSTS: 'money.example.com'
+          OMNI_AT_REST_ATTESTATION_FILE: '/tmp/omni-data-at-rest.json'
         run: |
           set -euo pipefail
           base_config="$(mktemp)"
@@ -199,10 +201,27 @@ jobs:
         run: |
           set -euo pipefail
           runtime_data="$(mktemp -d)"
+          attestation_file="$(mktemp)"
           container_id=""
-          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true; sudo rm -rf "$runtime_data"' EXIT
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true; sudo rm -rf "$runtime_data"; rm -f "$attestation_file"' EXIT
           chmod 700 "$runtime_data"
           sudo chown 10001:10001 "$runtime_data"
+          jq -n \
+            --arg data_root "/app/data" \
+            --arg verified_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg recovery_tested_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg next_rotation_at "$(date -u -d '+180 days' +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              version: 1,
+              protection: "external-encrypted-volume",
+              provider: "ci-ephemeral-volume",
+              data_root: $data_root,
+              key_id: "ci-ephemeral-volume-2026",
+              verified_at: $verified_at,
+              recovery_tested_at: $recovery_tested_at,
+              next_rotation_at: $next_rotation_at
+            }' > "$attestation_file"
+          chmod 0444 "$attestation_file"
 
           container_id="$(docker run -d \
             --read-only \
@@ -214,7 +233,10 @@ jobs:
             --health-timeout 2s \
             --health-retries 5 \
             --mount "type=bind,src=$runtime_data,dst=/app/data" \
+            --mount "type=bind,src=$attestation_file,dst=/run/secrets/omni_data_at_rest_attestation.json,readonly" \
             --env DB_PATH=/app/data/omni_money.db \
+            --env DATA_AT_REST_MODE=external-encrypted-volume \
+            --env DATA_AT_REST_ATTESTATION_FILE=/run/secrets/omni_data_at_rest_attestation.json \
             --env HOST_IP=127.0.0.1 \
             --env ALLOWED_HOSTS=127.0.0.1:4000 \
             --env 'AUTH_PASSWORD_HASH=$2y$12$TMw6R8z61SPOp1Y/4t3mLu/LVqe3.L5d5.H9piLwdDjKpSytNxaEi' \

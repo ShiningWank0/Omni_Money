@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"omni_money/backend/aicredentials"
+	"omni_money/backend/atrest"
 	"omni_money/backend/aitransport"
 	"omni_money/backend/api"
 	"omni_money/backend/audithmac"
@@ -40,6 +41,16 @@ func main() {
 	if dbPath == "" {
 		dbPath = "omni_money.db"
 	}
+	atRestStatus, err := atrest.RequireServerProtection(
+		dbPath,
+		os.Getenv("DATA_AT_REST_MODE"),
+		os.Getenv("DATA_AT_REST_ATTESTATION_FILE"),
+		time.Now(),
+	)
+	if err != nil {
+		log.Fatalf("保存時保護contractが無効です: %v", err)
+	}
+	log.Printf("保存時保護contract確認 (provider=%s key_id=%s)", atRestStatus.Provider, atRestStatus.KeyID)
 	if err := database.InitDB(dbPath); err != nil {
 		log.Fatalf("データベース初期化エラー: %v", err)
 	}
