@@ -1,3 +1,63 @@
+export namespace desktopaccount {
+
+	export class Status {
+	    configured: boolean;
+	    unlocked: boolean;
+	    legacy_migration_required: boolean;
+	    role: string;
+
+	    static createFrom(source: any = {}) {
+	        return new Status(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.configured = source["configured"];
+	        this.unlocked = source["unlocked"];
+	        this.legacy_migration_required = source["legacy_migration_required"];
+	        this.role = source["role"];
+	    }
+	}
+
+}
+
+export namespace main {
+
+	export class DesktopVaultRecoveryResponse {
+	    status: desktopaccount.Status;
+	    recovery_code: string;
+
+	    static createFrom(source: any = {}) {
+	        return new DesktopVaultRecoveryResponse(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.status = this.convertValues(source["status"], desktopaccount.Status);
+	        this.recovery_code = source["recovery_code"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
 export namespace models {
 	
 	export class BalanceHistoryResponse {
@@ -140,6 +200,7 @@ export namespace models {
 	    mime_type: string;
 	    created_at: string;
 	    data_url?: string;
+	    invalid?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new TransactionImageResponse(source);
@@ -152,6 +213,7 @@ export namespace models {
 	        this.mime_type = source["mime_type"];
 	        this.created_at = source["created_at"];
 	        this.data_url = source["data_url"];
+	        this.invalid = source["invalid"];
 	    }
 	}
 	export class TransactionRequest {
@@ -252,4 +314,3 @@ export namespace models {
 	}
 
 }
-
