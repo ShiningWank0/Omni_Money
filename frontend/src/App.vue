@@ -73,11 +73,11 @@
         <button class="menu-btn" @click="backupToCSV">CSVバックアップ</button>
         <button class="menu-btn" @click="showImportCSVModalMethod">CSVインポート</button>
         <button class="menu-btn menu-group-start" @click="openCreditCardSettings">クレジットカード設定</button>
-        <button v-if="!isWailsMode" class="menu-btn" @click="openAIAPIConsole">AI API操作</button>
+        <button v-if="serverFeatures.ai" class="menu-btn" @click="openAIAPIConsole">AI API操作</button>
         <button class="menu-btn" @click="openBankAccountSettings">銀行口座設定</button>
         <button class="menu-btn menu-group-start" @click="showGraphModal">残高推移グラフ表示</button>
         <button class="menu-btn" @click="openTagChart">タグ別分析</button>
-        <button class="menu-btn menu-group-start" @click="openSnapshotManager">スナップショット管理</button>
+        <button v-if="serverFeatures.snapshots" class="menu-btn menu-group-start" @click="openSnapshotManager">スナップショット管理</button>
         <button v-if="!isWailsMode" class="menu-btn logout-btn" @click="logout">ログアウト</button>
       </nav>
     </div>
@@ -221,7 +221,7 @@
             class="reauth-input"
             type="password"
             autocomplete="current-password"
-            maxlength="72"
+            maxlength="256"
             required
           >
           <div v-if="reauthError" class="reauth-error">{{ reauthError }}</div>
@@ -298,6 +298,7 @@ const reauthPasswordInput = ref(null)
 let reauthRequest = null
 let reauthListenerRegistered = false
 const idleTimeoutSeconds = ref(0)
+const serverFeatures = ref({ ai: false, snapshots: isWailsMode })
 const idleScreenLocked = ref(false)
 let idleTimer = null
 let lastUserActivityAt = 0
@@ -680,6 +681,12 @@ async function handlePageShow(event) {
   clearSensitiveStateForIdle()
   try {
     const authStatus = await getAuthStatus()
+    if (componentMounted && !isWailsMode && authStatus?.features) {
+      serverFeatures.value = {
+        ai: Boolean(authStatus.features.ai),
+        snapshots: Boolean(authStatus.features.snapshots)
+      }
+    }
     if (!authStatus?.authenticated) {
       window.location.replace('/login')
       return
@@ -981,6 +988,12 @@ onMounted(async () => {
   reauthListenerRegistered = true
   try {
     const authStatus = await getAuthStatus()
+    if (componentMounted && !isWailsMode && authStatus?.features) {
+      serverFeatures.value = {
+        ai: Boolean(authStatus.features.ai),
+        snapshots: Boolean(authStatus.features.snapshots)
+      }
+    }
     if (componentMounted && !isWailsMode && authStatus?.authenticated) {
       const serverIdleSeconds = Number(authStatus?.idle_timeout_seconds)
       if (Number.isFinite(serverIdleSeconds) && serverIdleSeconds > 0) {
