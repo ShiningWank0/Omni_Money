@@ -28,9 +28,9 @@ func TestAutoSnapshotCloseWaitsAndResetsState(t *testing.T) {
 		t.Fatal("CloseDB returned before the scheduled snapshot completed")
 	}
 
-	snapshotMu.Lock()
-	running, pending := snapshotRunning, snapshotPending
-	snapshotMu.Unlock()
+	defaultInstance.snapshotMu.Lock()
+	running, pending := defaultInstance.snapshotRunning, defaultInstance.snapshotPending
+	defaultInstance.snapshotMu.Unlock()
 	if running || pending {
 		t.Fatalf("snapshot worker still active after CloseDB: running=%t pending=%t", running, pending)
 	}
