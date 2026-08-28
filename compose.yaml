@@ -29,6 +29,7 @@ services:
       - "4000"
     environment:
       DB_PATH: /app/data/omni_money.db
+      DB_ENCRYPTION_KEY_FILE: /run/secrets/omni_database_key
       TMPDIR: /tmp
       SQLITE_TMPDIR: /tmp
       SNAPSHOT_MAX_TOTAL_BYTES: "${SNAPSHOT_MAX_TOTAL_BYTES:-2147483648}"
@@ -64,6 +65,8 @@ services:
     secrets:
       - source: omni_data_at_rest_attestation
         target: omni_data_at_rest_attestation.json
+      - source: omni_database_key
+        target: omni_database_key
     volumes:
       - type: bind
         source: "${OMNI_DATA_DIR:-./data}"
@@ -84,6 +87,8 @@ services:
 secrets:
   omni_data_at_rest_attestation:
     file: "${OMNI_AT_REST_ATTESTATION_FILE:?OMNI_AT_REST_ATTESTATION_FILE is required}"
+  omni_database_key:
+    file: "${OMNI_DB_ENCRYPTION_KEY_FILE:?OMNI_DB_ENCRYPTION_KEY_FILE is required}"
 
 networks:
   # Newtを別Composeで動かす場合は、同名のexternal networkとして参照し、

@@ -10,8 +10,11 @@ RUN npm run build
 # ===== Stage 2: バックエンドのビルド =====
 FROM golang:1.26.7-alpine@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468 AS backend-builder
 
-# CGO有効化（SQLite用）
-RUN apk add --no-cache gcc musl-dev
+# SQLCipherは公式v4.18.0 source archiveをchecksum固定でbuildする。
+RUN apk add --no-cache build-base linux-headers curl tcl openssl-dev
+
+COPY scripts/build-sqlcipher-linux.sh /tmp/build-sqlcipher-linux.sh
+RUN SQLCIPHER_PREFIX=/usr/local SQLCIPHER_BUILD_JOBS=2 sh /tmp/build-sqlcipher-linux.sh
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -27,11 +30,15 @@ COPY cmd/omni-totp/ ./cmd/omni-totp/
 ARG VERSION=dev
 
 # サーバーモードでビルド（-tags server で server.go を使用）
-RUN CGO_ENABLED=1 go build \
-    -tags server \
+RUN CGO_ENABLED=1 \
+    CGO_CFLAGS="-I/usr/local/include" \
+    CGO_LDFLAGS="-L/usr/local/lib" \
+    go build \
+    -tags "server libsqlite3 sqlite_omit_load_extension" \
     -ldflags "-X main.version=${VERSION} -s -w" \
     -o /omni_money_server \
-    ./server.go
+    ./server.go && \
+    LD_LIBRARY_PATH=/usr/local/lib /omni_money_server 2>&1 | grep -q "AUTH_PASSWORD_HASH"
 
 # TOTP enrollment helper. This binary is copied into the runtime image so the
 # secret can be created by the same non-root UID that later reads it.
@@ -46,11 +53,12 @@ FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec4
 
 # バージョン情報を実行時環境変数として参照可能にする（§8.3準拠）
 ARG VERSION=dev
-ENV VERSION=${VERSION}
+ENV VERSION=${VERSION} \
+    LD_LIBRARY_PATH=/usr/local/lib
 
 # タイムゾーンとCA証明書。固定したAlpine系列内で公開済みのセキュリティ修正を適用する。
 RUN apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates tzdata
+    apk add --no-cache ca-certificates tzdata libcrypto3
 
 # セキュリティ: 非rootユーザーで実行。UID/GIDを固定し、bind mountの
 # ACLを事前に安全に設定できるようにする。
@@ -61,6 +69,7 @@ WORKDIR /app
 
 # バイナリとフロントエンド成果物をコピー
 COPY --from=backend-builder /omni_money_server ./omni_money_server
+COPY --from=backend-builder /usr/local/lib/libsqlite3.so /usr/local/lib/libsqlite3.so
 COPY --from=backend-builder /omni-totp ./omni-totp
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
