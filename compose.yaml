@@ -28,29 +28,22 @@ services:
     expose:
       - "4000"
     environment:
-      DB_PATH: /app/data/omni_money.db
-      DB_ENCRYPTION_KEY_FILE: /run/secrets/omni_database_key
+      CONTROL_DB_PATH: /app/data/control/omni_control.db
+      CONTROL_DB_ENCRYPTION_KEY_FILE: /run/secrets/omni_control_database_key
+      VAULT_ROOT: /app/data/vaults
+      AUTH_KDF_CONCURRENCY: "${AUTH_KDF_CONCURRENCY:-2}"
       TMPDIR: /tmp
       SQLITE_TMPDIR: /tmp
-      SNAPSHOT_MAX_TOTAL_BYTES: "${SNAPSHOT_MAX_TOTAL_BYTES:-2147483648}"
       DATA_AT_REST_MODE: external-encrypted-volume
       DATA_AT_REST_ATTESTATION_FILE: /run/secrets/omni_data_at_rest_attestation.json
       HOST_IP: 0.0.0.0
       PORT: 4000
-      AUTH_PASSWORD_HASH: "${AUTH_PASSWORD_HASH:?AUTH_PASSWORD_HASH is required}"
-      # AIリスナーはWebリスナーからの内部relayだけに限定する。専用networkへ
-      # 接続しているNewtや他のpeerから4001へ到達できないようにする。
-      AI_HOST_IP: 127.0.0.1
-      AI_PORT: 4001
-      AI_ALLOW_REMOTE: "false"
       SESSION_MAX_AGE_HOURS: "${SESSION_MAX_AGE_HOURS:-8}"
       SESSION_IDLE_TIMEOUT_MINUTES: "${SESSION_IDLE_TIMEOUT_MINUTES:-15}"
       # High-impact actions reuse a password confirmation briefly. This does
       # not cause periodic authentication during ordinary UI activity.
       SESSION_REAUTH_MAX_AGE_MINUTES: "${SESSION_REAUTH_MAX_AGE_MINUTES:-5}"
       SESSION_MAX_CONCURRENT: "${SESSION_MAX_CONCURRENT:-3}"
-      AUTH_TOTP_SECRET_FILE: "${AUTH_TOTP_SECRET_FILE:-}"
-      AUTH_REQUIRE_TOTP: "${AUTH_REQUIRE_TOTP:-false}"
       # Newt must use 172.30.240.3 on pangolin_target. Keep this /32 narrow.
       TRUSTED_PROXIES: "${TRUSTED_PROXIES:-172.30.240.3/32}"
       FORCE_HTTPS: "true"
@@ -65,8 +58,8 @@ services:
     secrets:
       - source: omni_data_at_rest_attestation
         target: omni_data_at_rest_attestation.json
-      - source: omni_database_key
-        target: omni_database_key
+      - source: omni_control_database_key
+        target: omni_control_database_key
     volumes:
       - type: bind
         source: "${OMNI_DATA_DIR:-./data}"
@@ -87,9 +80,8 @@ services:
 secrets:
   omni_data_at_rest_attestation:
     file: "${OMNI_AT_REST_ATTESTATION_FILE:?OMNI_AT_REST_ATTESTATION_FILE is required}"
-  omni_database_key:
-    file: "${OMNI_DB_ENCRYPTION_KEY_FILE:?OMNI_DB_ENCRYPTION_KEY_FILE is required}"
-
+  omni_control_database_key:
+    file: "${OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE:?OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE is required}"
 networks:
   # Newtを別Composeで動かす場合は、同名のexternal networkとして参照し、
   # Newtへ 172.30.240.3/32 を割り当てる。internalにより、このnetworkから

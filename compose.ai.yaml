@@ -1,5 +1,7 @@
-# AI APIを有効にするときだけ compose.yaml と重ねて使用する。
-# すべてのsecretはリポジトリ外に作成し、コミットしないこと。
+# LEGACY / CURRENTLY UNSUPPORTED.
+# Multi-user server credentials are not yet bound to a UserID/VaultID/DEK.
+# Applying this overlay intentionally makes startup fail closed; do not use it
+# until the per-user delegated AI capability stage of Issue #62 is complete.
 services:
   omni-money:
     ports:
