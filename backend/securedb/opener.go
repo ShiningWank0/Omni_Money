@@ -96,15 +96,10 @@ func (o *Opener) Open(ctx context.Context, path string, purpose Purpose) (*sql.D
 		return openPlain(path, purpose)
 	}
 
-	query := url.Values{}
-	if purpose == Snapshot {
-		query.Set("mode", "rw")
-	}
-	dsnURL := &url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}
-	db := sql.OpenDB(&encryptedConnector{opener: o, dsn: dsnURL.String(), purpose: purpose})
+	db := sql.OpenDB(&encryptedConnector{opener: o, path: path, purpose: purpose})
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, err
+		return nil, fmt.Errorf("initialize secure database connection: %w", err)
 	}
 	return db, nil
 }
@@ -126,7 +121,7 @@ func openPlain(path string, purpose Purpose) (*sql.DB, error) {
 
 type encryptedConnector struct {
 	opener  *Opener
-	dsn     string
+	path    string
 	purpose Purpose
 }
 
@@ -137,10 +132,20 @@ func (c *encryptedConnector) Connect(context.Context) (driver.Conn, error) {
 	}
 	defer key.Destroy()
 
+	keySpec := make([]byte, 2+hex.EncodedLen(len(key)))
+	keySpec[0] = 'x'
+	keySpec[1] = '\''
+	hex.Encode(keySpec[2:], key[:])
+	keySpec = append(keySpec, '\'')
+	query := url.Values{"key": []string{string(keySpec)}}
+	if c.purpose == Snapshot {
+		query.Set("mode", "rw")
+	}
+	dsnURL := &url.URL{Scheme: "file", Path: c.path, RawQuery: query.Encode()}
+	dsn := dsnURL.String()
+	clear(keySpec)
+
 	sqliteDriver := &sqlite3.SQLiteDriver{ConnectHook: func(conn *sqlite3.SQLiteConn) error {
-		if err := applyRawKey(conn, key); err != nil {
-			return fmt.Errorf("apply SQLCipher key: %w", ErrConnectionConfig)
-		}
 		if _, err := conn.Exec("PRAGMA cipher_memory_security = ON", nil); err != nil {
 			return ErrCipherMemorySecurity
 		}
@@ -172,7 +177,7 @@ func (c *encryptedConnector) Connect(context.Context) (driver.Conn, error) {
 		statements = append(statements, "PRAGMA synchronous = FULL")
 		for _, statement := range statements {
 			if _, err := conn.Exec(statement, nil); err != nil {
-				return ErrConnectionConfig
+				return fmt.Errorf("%w while applying %s: %v", ErrConnectionConfig, statement, err)
 			}
 		}
 		status, err := driverQueryInt64(conn, "PRAGMA cipher_status")
@@ -184,22 +189,14 @@ func (c *encryptedConnector) Connect(context.Context) (driver.Conn, error) {
 		}
 		return nil
 	}}
-	return sqliteDriver.Open(c.dsn)
+	connection, err := sqliteDriver.Open(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open SQLCipher database: %w", err)
+	}
+	return connection, nil
 }
 
 func (c *encryptedConnector) Driver() driver.Driver { return &sqlite3.SQLiteDriver{} }
-
-func applyRawKey(conn *sqlite3.SQLiteConn, key RawKey) error {
-	const prefix = `PRAGMA key = "x'`
-	const suffix = `'"`
-	command := make([]byte, len(prefix)+hex.EncodedLen(len(key))+len(suffix))
-	copy(command, prefix)
-	hex.Encode(command[len(prefix):len(prefix)+64], key[:])
-	copy(command[len(prefix)+64:], suffix)
-	defer clear(command)
-	_, err := conn.Exec(string(command), nil)
-	return err
-}
 
 func driverQueryString(conn *sqlite3.SQLiteConn, query string) (string, error) {
 	value, err := driverQueryValue(conn, query)
