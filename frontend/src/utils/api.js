@@ -150,6 +150,16 @@ export async function setupDesktopVault(password) {
   return await window.go.main.App.SetupDesktopVault(password)
 }
 
+export async function migrateLegacyDesktopVault(password) {
+  if (!isWails) throw new Error('この操作はDesktopモード専用です')
+  return await window.go.main.App.MigrateLegacyDesktopVault(password)
+}
+
+export async function acknowledgeDesktopVaultRecovery() {
+  if (!isWails) throw new Error('この操作はDesktopモード専用です')
+  return await window.go.main.App.AcknowledgeDesktopVaultRecovery()
+}
+
 export async function unlockDesktopVault(password) {
   if (!isWails) throw new Error('この操作はDesktopモード専用です')
   return await window.go.main.App.UnlockDesktopVault(password)

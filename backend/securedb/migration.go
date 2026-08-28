@@ -1,6 +1,7 @@
 package securedb
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -8,9 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
-	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -167,7 +169,7 @@ func migratePlaintext(ctx context.Context, path string, opener *Opener) (retErr 
 	return RequireEncryptedHeader(path)
 }
 
-func requireSQLCipherRuntime(ctx context.Context, db *sql.DB) error {
+func requireSQLCipherRuntime(ctx context.Context, db databaseQueryer) error {
 	var version string
 	if err := db.QueryRowContext(ctx, "PRAGMA cipher_version").Scan(&version); err != nil {
 		return ErrCipherUnavailable
@@ -184,6 +186,10 @@ func exportEncrypted(ctx context.Context, source *sql.DB, targetPath string, key
 		return err
 	}
 	defer conn.Close()
+	return exportEncryptedConnection(ctx, conn, targetPath, key, userVersion, applicationID)
+}
+
+func exportEncryptedConnection(ctx context.Context, conn *sql.Conn, targetPath string, key *RawKey, userVersion, applicationID int64) error {
 	keySpec := rawKeySpec(key)
 	_, attachErr := conn.ExecContext(ctx, "ATTACH DATABASE ? AS encrypted KEY ?", targetPath, string(keySpec))
 	clear(keySpec)
@@ -236,35 +242,62 @@ func exportEncrypted(ctx context.Context, source *sql.DB, targetPath string, key
 }
 
 func compareLogicalDatabases(ctx context.Context, source, target *sql.DB) error {
-	tables, err := listTables(ctx, source)
+	sourceFingerprint, err := logicalDatabaseFingerprint(ctx, source)
 	if err != nil {
 		return err
 	}
-	targetTables, err := listTables(ctx, target)
+	targetFingerprint, err := logicalDatabaseFingerprint(ctx, target)
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(tables, targetTables) {
-		return errors.New("migrated database schema table list differs")
-	}
-	for _, table := range tables {
-		sourceDigest, sourceRows, err := tableDigest(ctx, source, table)
-		if err != nil {
-			return err
-		}
-		targetDigest, targetRows, err := tableDigest(ctx, target, table)
-		if err != nil {
-			return err
-		}
-		if sourceRows != targetRows || sourceDigest != targetDigest {
-			return fmt.Errorf("migrated table %s differs", table)
-		}
+	if sourceFingerprint != targetFingerprint {
+		return errors.New("migrated database logical contents differ")
 	}
 	return nil
 }
 
-func listTables(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+func logicalDatabaseFingerprint(ctx context.Context, db databaseQueryer) ([32]byte, error) {
+	hash := sha256.New()
+	schemaDigest, schemaRows, err := queryDigest(ctx, db, "SELECT type, name, tbl_name, sql FROM sqlite_schema")
+	if err != nil {
+		return [32]byte{}, err
+	}
+	writeFramed(hash, []byte("schema"))
+	writeFramed(hash, strconv.AppendInt(nil, schemaRows, 10))
+	writeFramed(hash, schemaDigest[:])
+
+	for _, pragma := range []string{"application_id", "user_version"} {
+		var value int64
+		if err := db.QueryRowContext(ctx, "PRAGMA "+pragma).Scan(&value); err != nil { // #nosec G202 -- pragma names are fixed constants above.
+			return [32]byte{}, err
+		}
+		writeFramed(hash, []byte(pragma))
+		writeFramed(hash, strconv.AppendInt(nil, value, 10))
+	}
+
+	tables, err := listTables(ctx, db)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	writeUint64(hash, uint64(len(tables)))
+	for _, table := range tables {
+		digest, count, err := tableDigest(ctx, db, table)
+		if err != nil {
+			return [32]byte{}, fmt.Errorf("digest table %q: %w", table, err)
+		}
+		writeFramed(hash, []byte(table))
+		writeFramed(hash, strconv.AppendInt(nil, count, 10))
+		writeFramed(hash, digest[:])
+	}
+	var result [32]byte
+	copy(result[:], hash.Sum(nil))
+	return result, nil
+}
+
+func listTables(ctx context.Context, db databaseQueryer) ([]string, error) {
+	// Internal logical tables such as sqlite_sequence and sqlite_stat1 are
+	// intentionally included. sqlite_schema itself is represented separately.
+	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
@@ -280,9 +313,12 @@ func listTables(ctx context.Context, db *sql.DB) ([]string, error) {
 	return tables, rows.Err()
 }
 
-func tableDigest(ctx context.Context, db *sql.DB, table string) ([32]byte, int64, error) {
-	hash := sha256.New()
-	query := "SELECT * FROM " + quoteIdentifier(table) + " ORDER BY rowid" // #nosec G202 -- table is read from sqlite_schema and escaped as an identifier.
+func tableDigest(ctx context.Context, db databaseQueryer, table string) ([32]byte, int64, error) {
+	query := "SELECT * FROM " + quoteIdentifier(table) // #nosec G202 -- table is read from sqlite_schema and escaped as an identifier.
+	return queryDigest(ctx, db, query)
+}
+
+func queryDigest(ctx context.Context, db databaseQueryer, query string) ([32]byte, int64, error) {
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return [32]byte{}, 0, err
@@ -292,7 +328,11 @@ func tableDigest(ctx context.Context, db *sql.DB, table string) ([32]byte, int64
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
-	var count int64
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	rowDigests := make([][32]byte, 0)
 	for rows.Next() {
 		values := make([]any, len(columns))
 		destinations := make([]any, len(columns))
@@ -302,46 +342,86 @@ func tableDigest(ctx context.Context, db *sql.DB, table string) ([32]byte, int64
 		if err := rows.Scan(destinations...); err != nil {
 			return [32]byte{}, 0, err
 		}
+		rowHash := sha256.New()
+		writeUint64(rowHash, uint64(len(values)))
 		for _, value := range values {
-			writeDigestValue(hash, value)
+			if err := writeDigestValue(rowHash, value); err != nil {
+				return [32]byte{}, 0, err
+			}
 		}
-		count++
+		var rowDigest [32]byte
+		copy(rowDigest[:], rowHash.Sum(nil))
+		rowDigests = append(rowDigests, rowDigest)
 	}
 	if err := rows.Err(); err != nil {
 		return [32]byte{}, 0, err
 	}
+	sort.Slice(rowDigests, func(left, right int) bool {
+		return bytes.Compare(rowDigests[left][:], rowDigests[right][:]) < 0
+	})
+	hash := sha256.New()
+	writeUint64(hash, uint64(len(columns)))
+	for index, column := range columns {
+		writeFramed(hash, []byte(column))
+		writeFramed(hash, []byte(columnTypes[index].DatabaseTypeName()))
+	}
+	writeUint64(hash, uint64(len(rowDigests)))
+	for _, rowDigest := range rowDigests {
+		writeFramed(hash, rowDigest[:])
+	}
 	var digest [32]byte
 	copy(digest[:], hash.Sum(nil))
-	return digest, count, nil
+	return digest, int64(len(rowDigests)), nil
 }
 
 func quoteIdentifier(value string) string { return `"` + strings.ReplaceAll(value, `"`, `""`) + `"` }
 
-func writeDigestValue(writer io.Writer, value any) {
+func writeDigestValue(writer io.Writer, value any) error {
+	var tag byte
 	var encoded []byte
 	switch typed := value.(type) {
 	case nil:
-		encoded = []byte{0}
+		tag = 0
 	case int64:
-		encoded = []byte(strconv.FormatInt(typed, 10))
+		tag = 1
+		encoded = strconv.AppendInt(nil, typed, 10)
 	case float64:
-		encoded = []byte(strconv.FormatFloat(typed, 'g', -1, 64))
+		tag = 2
+		encoded = make([]byte, 8)
+		binary.BigEndian.PutUint64(encoded, math.Float64bits(typed))
 	case bool:
-		encoded = []byte(strconv.FormatBool(typed))
+		tag = 3
+		if typed {
+			encoded = []byte{1}
+		} else {
+			encoded = []byte{0}
+		}
 	case []byte:
+		tag = 4
 		encoded = typed
 	case string:
+		tag = 5
 		encoded = []byte(typed)
 	case time.Time:
+		tag = 6
 		encoded = []byte(typed.UTC().Format(time.RFC3339Nano))
 	default:
-		encoded = []byte(fmt.Sprintf("%T:%v", value, value))
+		return fmt.Errorf("unsupported SQLite value type %T", value)
 	}
-	var length [8]byte
-	binary.BigEndian.PutUint64(length[:], uint64(len(encoded)))
-	_, _ = writer.Write([]byte(fmt.Sprintf("%T", value)))
-	_, _ = writer.Write(length[:])
-	_, _ = writer.Write(encoded)
+	_, _ = writer.Write([]byte{tag})
+	writeFramed(writer, encoded)
+	return nil
+}
+
+func writeFramed(writer io.Writer, value []byte) {
+	writeUint64(writer, uint64(len(value)))
+	_, _ = writer.Write(value)
+}
+
+func writeUint64(writer io.Writer, value uint64) {
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], value)
+	_, _ = writer.Write(encoded[:])
 }
 
 func syncFile(path string) error {

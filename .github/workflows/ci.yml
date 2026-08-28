@@ -225,10 +225,12 @@ jobs:
           go-version: '1.26.7'
           cache: true
 
-      - name: Verify owner-only CSV DACL
+      - name: Verify Windows owner-only storage boundaries
         env:
           CGO_ENABLED: "0"
-        run: go test -count=1 -run '^TestCreateExclusivePrivateFileDACL$' ./backend/fileprivacy
+        run: |
+          go test -count=1 -run '^TestCreateExclusivePrivateFileDACL$' ./backend/fileprivacy
+          go test -count=1 -run '^TestWindows' ./backend/desktopaccount/platform_shared.go ./backend/desktopaccount/platform_windows.go ./backend/desktopaccount/platform_windows_test.go
 
   docker:
     name: Docker image build

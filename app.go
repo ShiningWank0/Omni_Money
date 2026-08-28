@@ -20,6 +20,8 @@ var ErrDesktopVaultChanged = errors.New("Desktop vault was locked or reopened wh
 type desktopVaultCoordinator interface {
 	Status() desktopaccount.Status
 	Setup(password []byte) ([]byte, error)
+	MigrateLegacy(password []byte) ([]byte, error)
+	AcknowledgeRecovery() error
 	Unlock(password []byte) error
 	Recover(recoverySecret, newPassword []byte) ([]byte, error)
 	ChangePassword(currentPassword, newPassword []byte) error
@@ -140,6 +142,37 @@ func (a *App) SetupDesktopVault(password string) (DesktopVaultRecoveryResponse, 
 	defer clearBytes(secret)
 	a.generation++
 	return recoveryResponse(a.coordinator.Status(), secret), nil
+}
+
+// MigrateLegacyDesktopVault performs the explicit, journaled conversion of a
+// historical plaintext Desktop database. The returned recovery code remains a
+// pending delivery until AcknowledgeDesktopVaultRecovery succeeds, so the UI
+// must not enter the financial application before that acknowledgement.
+func (a *App) MigrateLegacyDesktopVault(password string) (DesktopVaultRecoveryResponse, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	passwordBytes := []byte(password)
+	defer clearBytes(passwordBytes)
+	secret, err := a.coordinator.MigrateLegacy(passwordBytes)
+	if err != nil {
+		return DesktopVaultRecoveryResponse{}, err
+	}
+	defer clearBytes(secret)
+	a.generation++
+	return recoveryResponse(a.coordinator.Status(), secret), nil
+}
+
+// AcknowledgeDesktopVaultRecovery durably records that any pending migration
+// recovery code was delivered. It is intentionally idempotent for setup and
+// ordinary recovery, allowing the frontend to use one safe completion path.
+func (a *App) AcknowledgeDesktopVaultRecovery() (desktopaccount.Status, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.coordinator.AcknowledgeRecovery(); err != nil {
+		return a.coordinator.Status(), err
+	}
+	a.generation++
+	return a.coordinator.Status(), nil
 }
 
 func (a *App) UnlockDesktopVault(password string) (desktopaccount.Status, error) {

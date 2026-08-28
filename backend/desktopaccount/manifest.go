@@ -269,7 +269,7 @@ func writeManifestAtomic(path string, document *manifest) error {
 	}
 
 	directory := filepath.Dir(path)
-	temporary, err := os.CreateTemp(directory, ".desktop-account.tmp-")
+	temporary, err := createPrivateTemp(directory, ".desktop-account.tmp-")
 	if err != nil {
 		return fmt.Errorf("create Desktop account manifest temporary file: %w", err)
 	}
@@ -281,9 +281,6 @@ func writeManifestAtomic(path string, document *manifest) error {
 			_ = os.Remove(temporaryPath)
 		}
 	}()
-	if err := temporary.Chmod(0600); err != nil { // #nosec G302 -- manifest must be owner-only.
-		return fmt.Errorf("secure Desktop account manifest temporary file: %w", err)
-	}
 	if _, err := temporary.Write(content); err != nil {
 		return fmt.Errorf("write Desktop account manifest: %w", err)
 	}

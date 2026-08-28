@@ -13,15 +13,9 @@
         <span>データを上書きせず、アプリを終了してバックアップを確認してください。</span>
       </div>
 
-      <div v-else-if="legacyMigrationRequired" class="desktop-vault-warning" role="alert">
-        <strong>既存の平文データベースが見つかりました。</strong>
-        <span>安全な移行処理が完了するまで、このデータベースは自動で開いたり上書きしたりしません。</span>
-        <span>現在のファイルと snapshots フォルダーをバックアップしてから、移行対応版を使用してください。</span>
-      </div>
-
       <div v-else-if="recoveryCode" class="desktop-vault-form" aria-live="polite">
         <h2>回復コードを保存してください</h2>
-        <p>このコードは今だけ表示されます。パスワードを忘れた場合に必要で、Omni Money側では復元できません。</p>
+        <p>「保管庫を開く」を完了すると、このコードは再表示できません。パスワードを忘れた場合に必要で、Omni Money側では復元できません。</p>
         <label for="desktop-recovery-output">回復コード</label>
         <textarea id="desktop-recovery-output" :value="recoveryCode" readonly rows="3" spellcheck="false" @focus="$event.target.select()"></textarea>
         <button type="button" class="secondary-button" @click="copyRecoveryCode">{{ recoveryCopied ? 'コピーしました' : '回復コードをコピー' }}</button>
@@ -30,8 +24,29 @@
           <input v-model="recoverySaved" type="checkbox">
           <span>パスワード管理ツール等、Omni Moneyとは別の安全な場所に保存しました</span>
         </label>
-        <button type="button" class="primary-button" :disabled="!recoverySaved" @click="finishSetup">保管庫を開く</button>
+        <button type="button" class="primary-button" :disabled="!canFinishRecovery" @click="finishRecoveryDelivery">{{ busy ? '保存確認中…' : '保管庫を開く' }}</button>
       </div>
+
+      <form v-else-if="legacyMigrationRequired" class="desktop-vault-form" @submit.prevent="migrateLegacyVault">
+        <h2>{{ legacyMigrationResuming ? '中断した移行を再開' : '既存データを暗号化保管庫へ移行' }}</h2>
+        <div class="desktop-vault-warning" role="alert">
+          <strong>{{ legacyMigrationResuming ? '暗号化移行は完了していますが、回復コードの受け取り確認が残っています。' : '平文のデータベースが見つかりました。' }}</strong>
+          <span v-if="!legacyMigrationResuming">移行が完了するまで、現在のDBと既存スナップショットは平文のままです。その間はデバイスやバックアップ自体の暗号化で保護してください。</span>
+          <span v-else>移行時と同じパスワードで再開すると、未確認の回復コードを再表示できます。回復コードを保存するまで財務データは開きません。</span>
+          <span v-if="!legacyMigrationResuming">万一の電源断や容量不足に備え、Omni Moneyのデータフォルダー全体を別の安全な場所へバックアップしてから開始してください。このバックアップにも平文データが含まれます。</span>
+          <span v-else>回復コードの再配送は、暗号化移行をやり直す操作ではありません。現在のデータフォルダーをバックアップした上で再開してください。</span>
+        </div>
+        <label for="desktop-migration-password">{{ legacyMigrationResuming ? '移行時のパスワード' : '新しいパスワード（UTF-8で12 bytes以上）' }}</label>
+        <input id="desktop-migration-password" v-model="password" type="password" :autocomplete="legacyMigrationResuming ? 'current-password' : 'new-password'" maxlength="256" required autofocus>
+        <label for="desktop-migration-password-confirmation">パスワードの確認</label>
+        <input id="desktop-migration-password-confirmation" v-model="passwordConfirmation" type="password" :autocomplete="legacyMigrationResuming ? 'current-password' : 'new-password'" maxlength="256" required>
+        <label v-if="!legacyMigrationResuming" class="save-confirmation">
+          <input v-model="legacyBackupConfirmed" type="checkbox">
+          <span>{{ legacyMigrationResuming ? '現在のデータフォルダー全体を安全な場所へバックアップしました' : '平文データを含むデータフォルダー全体を、暗号化された安全な場所へバックアップしました' }}</span>
+        </label>
+        <div v-if="operationError" class="desktop-vault-error" role="alert">{{ operationError }}</div>
+        <button class="primary-button" type="submit" :disabled="busy || (!legacyMigrationResuming && !legacyBackupConfirmed)">{{ busy ? (legacyMigrationResuming ? '移行の再開を確認中…' : '暗号化して移行中…') : (legacyMigrationResuming ? '回復コードの受け取りを再開' : 'バックアップを確認し、移行を開始') }}</button>
+      </form>
 
       <form v-else-if="needsSetup" class="desktop-vault-form" @submit.prevent="setupVault">
         <h2>最初の管理者を作成</h2>
@@ -73,8 +88,19 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { recoverDesktopVault, setupDesktopVault, unlockDesktopVault } from '../utils/api'
-import { desktopVaultNeedsLegacyMigration, desktopVaultNeedsSetup, validateNewDesktopPassword } from '../utils/desktopVaultSafety'
+import {
+  acknowledgeDesktopVaultRecovery,
+  migrateLegacyDesktopVault,
+  recoverDesktopVault,
+  setupDesktopVault,
+  unlockDesktopVault
+} from '../utils/api'
+import {
+  canConfirmDesktopRecoveryDelivery,
+  desktopVaultNeedsLegacyMigration,
+  desktopVaultNeedsSetup,
+  validateNewDesktopPassword
+} from '../utils/desktopVaultSafety'
 
 const props = defineProps({
   status: { type: Object, default: null },
@@ -92,9 +118,17 @@ const enteredRecoveryCode = ref('')
 const recoveryCode = ref('')
 const recoverySaved = ref(false)
 const recoveryCopied = ref(false)
+const pendingUnlockedStatus = ref(null)
+const legacyBackupConfirmed = ref(false)
 
 const needsSetup = computed(() => desktopVaultNeedsSetup(props.status))
 const legacyMigrationRequired = computed(() => desktopVaultNeedsLegacyMigration(props.status))
+const legacyMigrationResuming = computed(() => legacyMigrationRequired.value && props.status?.configured === true)
+const canFinishRecovery = computed(() => canConfirmDesktopRecoveryDelivery({
+  recoveryCode: recoveryCode.value,
+  recoverySaved: recoverySaved.value,
+  busy: busy.value
+}))
 
 function validateNewPassword() {
   validateNewDesktopPassword(password.value, passwordConfirmation.value)
@@ -114,9 +148,28 @@ async function setupVault() {
     busy.value = true
     const result = await setupDesktopVault(password.value)
     recoveryCode.value = result?.recovery_code || ''
+    pendingUnlockedStatus.value = result?.status || null
     if (!recoveryCode.value) throw new Error('回復コードを受信できなかったため、保管庫を開けません')
   } catch (error) {
     operationError.value = error?.message || '暗号化保管庫を作成できませんでした'
+  } finally {
+    clearCredentials()
+    busy.value = false
+  }
+}
+
+async function migrateLegacyVault() {
+  if (busy.value || (!legacyMigrationResuming.value && !legacyBackupConfirmed.value)) return
+  operationError.value = ''
+  try {
+    validateNewPassword()
+    busy.value = true
+    const result = await migrateLegacyDesktopVault(password.value)
+    recoveryCode.value = result?.recovery_code || ''
+    pendingUnlockedStatus.value = result?.status || null
+    if (!recoveryCode.value) throw new Error('回復コードを受信できなかったため、移行した保管庫を開けません')
+  } catch (error) {
+    operationError.value = error?.message || '既存データを安全に移行できませんでした'
   } finally {
     clearCredentials()
     busy.value = false
@@ -146,6 +199,7 @@ async function recoverVault() {
     busy.value = true
     const result = await recoverDesktopVault(enteredRecoveryCode.value, password.value)
     recoveryCode.value = result?.recovery_code || ''
+    pendingUnlockedStatus.value = result?.status || null
     if (!recoveryCode.value) throw new Error('新しい回復コードを受信できなかったため、保管庫を開けません')
     recovering.value = false
   } catch (error) {
@@ -177,13 +231,30 @@ async function copyRecoveryCode() {
   }
 }
 
-function finishSetup() {
-  if (!recoverySaved.value) return
-  const status = { ...(props.status || {}), state: 'unlocked', configured: true, unlocked: true, role: 'admin' }
-  recoveryCode.value = ''
-  recoverySaved.value = false
-  recoveryCopied.value = false
-  emit('unlocked', status)
+async function finishRecoveryDelivery() {
+  if (!canFinishRecovery.value) return
+  operationError.value = ''
+  busy.value = true
+  try {
+    // Migration keeps a durable delivery record until this succeeds. Setup
+    // and ordinary recovery use the same call; the backend treats the absence
+    // of a pending delivery record as a successful idempotent acknowledgement.
+    const acknowledgedStatus = await acknowledgeDesktopVaultRecovery()
+    const status = acknowledgedStatus || pendingUnlockedStatus.value
+    if (!status?.unlocked && status?.state !== 'unlocked') {
+      throw new Error('回復コードの保存確認後も保管庫が開いていません')
+    }
+    recoveryCode.value = ''
+    recoverySaved.value = false
+    recoveryCopied.value = false
+    pendingUnlockedStatus.value = null
+    legacyBackupConfirmed.value = false
+    emit('unlocked', status)
+  } catch (error) {
+    operationError.value = error?.message || '回復コードの保存を確認できませんでした'
+  } finally {
+    busy.value = false
+  }
 }
 </script>
 

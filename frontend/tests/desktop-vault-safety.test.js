@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  canConfirmDesktopRecoveryDelivery,
   desktopVaultNeedsLegacyMigration,
   desktopVaultNeedsSetup,
   isDesktopVaultUnlocked,
@@ -20,7 +21,16 @@ test('setup and legacy migration states remain distinct', () => {
   assert.equal(desktopVaultNeedsSetup({ configured: false }), true)
   assert.equal(desktopVaultNeedsLegacyMigration({ state: 'legacy_migration_required' }), true)
   assert.equal(desktopVaultNeedsLegacyMigration({ legacy_migration_required: true }), true)
+  assert.equal(desktopVaultNeedsSetup({ configured: false, legacy_migration_required: true }), false)
+  assert.equal(desktopVaultNeedsSetup({ state: 'legacy_migration_required', configured: false }), false)
   assert.equal(desktopVaultNeedsSetup({ state: 'locked', configured: true }), false)
+})
+
+test('recovery delivery cannot be confirmed until the code is saved and no operation is running', () => {
+  assert.equal(canConfirmDesktopRecoveryDelivery({ recoveryCode: '', recoverySaved: true, busy: false }), false)
+  assert.equal(canConfirmDesktopRecoveryDelivery({ recoveryCode: 'one-time-code', recoverySaved: false, busy: false }), false)
+  assert.equal(canConfirmDesktopRecoveryDelivery({ recoveryCode: 'one-time-code', recoverySaved: true, busy: true }), false)
+  assert.equal(canConfirmDesktopRecoveryDelivery({ recoveryCode: 'one-time-code', recoverySaved: true, busy: false }), true)
 })
 
 test('desktop password policy is byte-based and requires confirmation', () => {

@@ -28,6 +28,7 @@ import (
 const (
 	RoleAdmin             = "admin"
 	manifestFileName      = "desktop-account.json"
+	migrationFileName     = "desktop-migration.json"
 	legacyDBFileName      = "omni_money.db"
 	vaultDBFileName       = "omni_money.db"
 	plaintextSQLiteHeader = "SQLite format 3\x00"
@@ -41,9 +42,9 @@ var (
 	ErrAlreadyConfigured       = errors.New("desktop account is already configured")
 	ErrLocked                  = errors.New("desktop account is locked")
 	ErrAlreadyUnlocked         = errors.New("desktop account is already unlocked")
-	ErrBusy                    = errors.New("desktop account lifecycle change is in progress")
 	ErrLeaseReleased           = errors.New("desktop account service lease is released")
 	ErrLegacyMigrationRequired = errors.New("legacy plaintext Desktop database requires explicit migration")
+	ErrMigrationPending        = errors.New("legacy Desktop migration recovery acknowledgment is pending")
 	ErrInvalidPassword         = errors.New("password must contain between 12 and 1024 bytes")
 )
 
@@ -59,21 +60,29 @@ type Status struct {
 
 type vaultOpener func(path string, key securedb.RawKey) (*database.Instance, error)
 type vaultVerifier func(path string) error
+type plaintextCopier func(sourcePath, destinationPath string, opener *securedb.Opener) error
+type plaintextVerifier func(sourcePath, destinationPath string, opener *securedb.Opener) error
+type encryptedVerifier func(path string, opener *securedb.Opener) error
 
 // Coordinator serializes setup, unlock, recovery, and credential rotation.
 // It deliberately does not retain the plaintext vault key: the live encrypted
 // database opener is the only long-lived owner of a key while unlocked.
 type Coordinator struct {
-	root         string
-	manifestPath string
-	legacyPath   string
-	openFresh    vaultOpener
-	openExisting vaultOpener
-	verifyVault  vaultVerifier
+	root               string
+	manifestPath       string
+	legacyPath         string
+	openFresh          vaultOpener
+	openExisting       vaultOpener
+	verifyVault        vaultVerifier
+	copyPlaintext      plaintextCopier
+	verifyPlaintext    plaintextVerifier
+	verifyEncrypted    encryptedVerifier
+	migrationFailpoint func(string) error
 
 	mu              sync.Mutex
 	cond            *sync.Cond
 	manifest        *manifest
+	migration       *migrationJournal
 	instance        *database.Instance
 	legacyMigration bool
 	active          int
@@ -128,12 +137,15 @@ func newCoordinator(root string, freshOpener, existingOpener vaultOpener, verifi
 	}
 
 	c := &Coordinator{
-		root:         absolute,
-		manifestPath: filepath.Join(absolute, manifestFileName),
-		legacyPath:   filepath.Join(absolute, legacyDBFileName),
-		openFresh:    freshOpener,
-		openExisting: existingOpener,
-		verifyVault:  verifier,
+		root:            absolute,
+		manifestPath:    filepath.Join(absolute, manifestFileName),
+		legacyPath:      filepath.Join(absolute, legacyDBFileName),
+		openFresh:       freshOpener,
+		openExisting:    existingOpener,
+		verifyVault:     verifier,
+		copyPlaintext:   defaultPlaintextCopier,
+		verifyPlaintext: defaultPlaintextVerifier,
+		verifyEncrypted: defaultEncryptedVerifier,
 	}
 	c.cond = sync.NewCond(&c.mu)
 
@@ -141,7 +153,29 @@ func newCoordinator(root string, freshOpener, existingOpener vaultOpener, verifi
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	pending, pendingErr := readMigrationJournal(filepath.Join(absolute, migrationFileName))
+	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
+		return nil, pendingErr
+	}
+	if pending != nil {
+		if err := pending.matchPublishedManifest(loaded); err != nil {
+			return nil, err
+		}
+		if err := pending.validateFilesystem(absolute, loaded != nil); err != nil {
+			return nil, err
+		}
+		c.manifest = loaded
+		c.migration = pending
+		c.legacyMigration = true
+		if loaded != nil {
+			c.generation = 1
+		}
+		return c, nil
+	}
 	if loaded != nil {
+		if err := rejectPlaintextArtifactsWithManifest(absolute); err != nil {
+			return nil, err
+		}
 		c.manifest = loaded
 		c.generation = 1
 		return c, nil
@@ -173,8 +207,8 @@ func (c *Coordinator) Status() Status {
 	}
 	return Status{
 		Configured:              configured,
-		Unlocked:                c.instance != nil && !c.draining && !c.closed,
-		LegacyMigrationRequired: !configured && c.legacyMigration,
+		Unlocked:                c.migration == nil && c.instance != nil && !c.draining && !c.closed,
+		LegacyMigrationRequired: c.legacyMigration,
 		Role:                    role,
 	}
 }
@@ -193,6 +227,9 @@ func (c *Coordinator) Setup(password []byte) (recoverySecret []byte, err error) 
 	defer c.mu.Unlock()
 	if err := c.requireMutableLocked(); err != nil {
 		return nil, err
+	}
+	if c.migration != nil {
+		return nil, ErrMigrationPending
 	}
 	if c.manifest != nil {
 		return nil, ErrAlreadyConfigured
@@ -298,6 +335,9 @@ func (c *Coordinator) Unlock(password []byte) error {
 	if err := c.requireMutableLocked(); err != nil {
 		return err
 	}
+	if c.migration != nil {
+		return ErrMigrationPending
+	}
 	if c.manifest == nil {
 		if c.legacyMigration {
 			return ErrLegacyMigrationRequired
@@ -341,6 +381,9 @@ func (c *Coordinator) Recover(recoverySecret, newPassword []byte) (nextRecoveryS
 	defer c.mu.Unlock()
 	if err := c.requireMutableLocked(); err != nil {
 		return nil, err
+	}
+	if c.migration != nil {
+		return nil, ErrMigrationPending
 	}
 	if c.manifest == nil {
 		return nil, ErrNotConfigured
@@ -618,6 +661,10 @@ func (c *Coordinator) Lock() error {
 	for c.draining {
 		c.cond.Wait()
 	}
+	if c.migration != nil {
+		c.mu.Unlock()
+		return ErrMigrationPending
+	}
 	if c.instance == nil {
 		c.mu.Unlock()
 		return nil
@@ -712,6 +759,9 @@ func (c *Coordinator) requireUnlockedLocked() error {
 	if err := c.requireMutableLocked(); err != nil {
 		return err
 	}
+	if c.migration != nil {
+		return ErrMigrationPending
+	}
 	if c.manifest == nil {
 		return ErrNotConfigured
 	}
@@ -773,7 +823,7 @@ func ensurePrivateDirectory(path string) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return errors.New("Desktop account data root must be a real directory")
 	}
-	if err := os.Chmod(path, 0700); err != nil { // #nosec G302 -- financial data root must be owner-only.
+	if err := hardenPrivateDirectory(path); err != nil {
 		return fmt.Errorf("secure Desktop account data root: %w", err)
 	}
 	return nil
@@ -832,13 +882,40 @@ func rejectOrphanLegacyArtifacts(root string) error {
 	return nil
 }
 
+func rejectPlaintextArtifactsWithManifest(root string) error {
+	for _, name := range []string{
+		legacyDBFileName,
+		legacyDBFileName + ".bak",
+		legacyDBFileName + "-wal",
+		legacyDBFileName + "-shm",
+		legacyDBFileName + "-journal",
+		legacyDBFileName + ".bak-wal",
+		legacyDBFileName + ".bak-shm",
+		legacyDBFileName + ".bak-journal",
+		"snapshots",
+		legacyWorkDir,
+		legacyQuarantineDir,
+	} {
+		if _, err := os.Lstat(filepath.Join(root, name)); err == nil {
+			return fmt.Errorf("legacy Desktop artifact %q exists beside a configured encrypted account", name)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect legacy Desktop artifact %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
 func ensureFreshVaultPath(path string) error {
 	if _, err := os.Lstat(path); err == nil {
 		return errors.New("generated Desktop vault path already exists")
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect generated Desktop vault path: %w", err)
 	}
-	return ensurePrivateDirectory(filepath.Dir(path))
+	vaultDirectory := filepath.Dir(path)
+	if err := ensurePrivateDirectory(filepath.Dir(vaultDirectory)); err != nil {
+		return err
+	}
+	return ensurePrivateDirectory(vaultDirectory)
 }
 
 func validatePrivateVaultFile(path string) error {
