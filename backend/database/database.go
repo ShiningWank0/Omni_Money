@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,8 @@ import (
 	"omni_money/backend/models"
 	"omni_money/backend/validation"
 )
+
+const defaultSnapshotMaxTotalBytes int64 = 2 * 1024 * 1024 * 1024
 
 const writableSQLiteQuery = "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 const snapshotSQLiteQuery = "mode=rw&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
@@ -417,6 +420,24 @@ func createSnapshot(snapshotDir string) (string, error) {
 		}
 	}
 
+	budget, err := snapshotMaxTotalBytes()
+	if err != nil {
+		return "", err
+	}
+	requiredBytes, err := sqliteDatabaseSize(currentDB)
+	if err != nil {
+		return "", fmt.Errorf("スナップショット必要容量取得エラー: %w", err)
+	}
+	if requiredBytes > budget {
+		return "", fmt.Errorf("スナップショット必要容量 %d bytes が総容量上限 %d bytes を超えます", requiredBytes, budget)
+	}
+	// Reserve both one generation slot and the estimated destination bytes
+	// before creating a new file. Only existing snapshot files are candidates;
+	// the live DB and any in-progress output are outside this deletion set.
+	if err := pruneSnapshots(snapshotDir, 29, budget-requiredBytes, ""); err != nil {
+		return "", fmt.Errorf("スナップショット容量確保エラー: %w", err)
+	}
+
 	// Nanosecond precision avoids same-process collisions.  copyFile also uses
 	// O_EXCL, so a collision or pre-existing symlink fails closed instead of
 	// overwriting an existing snapshot.
@@ -429,6 +450,10 @@ func createSnapshot(snapshotDir string) (string, error) {
 	// TRUNCATE checkpointを実行しないため、直後の取引更新と競合しない。
 	if err := backupSQLiteDatabase(currentDB, snapshotPath); err != nil {
 		return "", fmt.Errorf("スナップショット作成エラー: %w", err)
+	}
+	if err := pruneSnapshots(snapshotDir, 30, budget, snapshotPath); err != nil {
+		_ = os.Remove(snapshotPath)
+		return "", fmt.Errorf("スナップショット容量検査エラー: %w", err)
 	}
 
 	log.Printf("スナップショット作成完了: %s", snapshotPath)
@@ -647,24 +672,95 @@ func cleanOldSnapshots(snapshotDir string, maxKeep int) error {
 	if maxKeep <= 0 {
 		maxKeep = 30
 	}
-
-	snapshots, err := ListSnapshots(snapshotDir)
+	budget, err := snapshotMaxTotalBytes()
 	if err != nil {
 		return err
 	}
+	return pruneSnapshots(snapshotDir, maxKeep, budget, "")
+}
 
-	// snapshotsは名前でソート済み（古い順）
-	if len(snapshots) <= maxKeep {
-		return nil
+func snapshotMaxTotalBytes() (int64, error) {
+	raw := strings.TrimSpace(os.Getenv("SNAPSHOT_MAX_TOTAL_BYTES"))
+	if raw == "" {
+		return defaultSnapshotMaxTotalBytes, nil
 	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("SNAPSHOT_MAX_TOTAL_BYTES は正の整数で指定してください")
+	}
+	return value, nil
+}
 
-	// 古いものから削除
-	toDelete := snapshots[:len(snapshots)-maxKeep]
-	for _, name := range toDelete {
-		if err := os.Remove(filepath.Join(snapshotDir, name)); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("古いスナップショット削除エラー (%s): %w", name, err)
+func sqliteDatabaseSize(target *sql.DB) (int64, error) {
+	var pageCount, pageSize int64
+	if err := target.QueryRow("PRAGMA page_count").Scan(&pageCount); err != nil {
+		return 0, err
+	}
+	if err := target.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
+		return 0, err
+	}
+	if pageCount <= 0 || pageSize <= 0 || pageCount > (1<<63-1)/pageSize {
+		return 0, fmt.Errorf("SQLite page size is invalid")
+	}
+	return pageCount * pageSize, nil
+}
+
+type snapshotUsageEntry struct {
+	name string
+	path string
+	size int64
+}
+
+func pruneSnapshots(snapshotDir string, maxKeep int, maxBytes int64, protectedPath string) error {
+	if maxKeep <= 0 || maxBytes <= 0 {
+		return fmt.Errorf("スナップショット保持境界が無効です")
+	}
+	entries, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
 		}
-		log.Printf("古いスナップショットを削除: %s", name)
+		return err
+	}
+	usage := make([]snapshotUsageEntry, 0, len(entries))
+	var total int64
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".db") {
+			continue
+		}
+		path := filepath.Join(snapshotDir, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("スナップショットが通常ファイルではありません: %s", entry.Name())
+		}
+		if info.Size() < 0 || total > (1<<63-1)-info.Size() {
+			return fmt.Errorf("スナップショット容量が整数上限を超えました")
+		}
+		total += info.Size()
+		usage = append(usage, snapshotUsageEntry{name: entry.Name(), path: path, size: info.Size()})
+	}
+	sort.Slice(usage, func(i, j int) bool { return usage[i].name < usage[j].name })
+	for len(usage) > maxKeep || total > maxBytes {
+		candidate := -1
+		for index := range usage {
+			if usage[index].path != protectedPath {
+				candidate = index
+				break
+			}
+		}
+		if candidate < 0 {
+			return fmt.Errorf("保護対象を残したまま容量上限を満たせません")
+		}
+		victim := usage[candidate]
+		if err := os.Remove(victim.path); err != nil {
+			return fmt.Errorf("古いスナップショット削除エラー (%s): %w", victim.name, err)
+		}
+		total -= victim.size
+		usage = append(usage[:candidate], usage[candidate+1:]...)
+		log.Printf("古いスナップショットを削除: %s (remaining_bytes=%d)", victim.name, total)
 	}
 	return nil
 }

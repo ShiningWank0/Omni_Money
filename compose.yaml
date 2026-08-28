@@ -26,6 +26,7 @@ services:
       DB_PATH: /app/data/omni_money.db
       TMPDIR: /tmp
       SQLITE_TMPDIR: /tmp
+      SNAPSHOT_MAX_TOTAL_BYTES: "${SNAPSHOT_MAX_TOTAL_BYTES:-2147483648}"
       HOST_IP: 0.0.0.0
       PORT: 4000
       AUTH_PASSWORD_HASH: "${AUTH_PASSWORD_HASH:?AUTH_PASSWORD_HASH is required}"
