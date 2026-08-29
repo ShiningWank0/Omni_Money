@@ -34,6 +34,19 @@ type ServerControlStore interface {
 	ListUsers(context.Context) ([]control.UserSummary, error)
 }
 
+type ServerPasskeyService interface {
+	BeginPasskeyRegistration(context.Context, string, string) (serverauth.PasskeyRegistrationBegin, error)
+	FinishPasskeyRegistration(context.Context, string, serverauth.FinishPasskeyRegistrationInput, time.Time) (control.PasskeySummary, error)
+	BeginPasskeyLogin(context.Context, string, string) (serverauth.PasskeyLoginBegin, error)
+	FinishPasskeyLogin(context.Context, serverauth.FinishPasskeyLoginInput, time.Time) (*middleware.Session, error)
+	BeginPasskeyReauthentication(context.Context, string, string) (serverauth.PasskeyLoginBegin, error)
+	FinishPasskeyReauthentication(context.Context, string, serverauth.FinishPasskeyLoginInput, time.Time) error
+	ListPasskeys(context.Context, string) ([]control.PasskeySummary, error)
+	DeletePasskey(context.Context, string, []byte) error
+}
+
+var _ ServerPasskeyService = (*serverauth.Service)(nil)
+
 type ServerDependencies struct {
 	Accounts ServerAccountService
 	Sessions *middleware.SessionManager
@@ -74,6 +87,17 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 	mux.HandleFunc("/api/auth/logout-all", handleServerLogoutAll(dependencies))
 	mux.HandleFunc("/api/auth/reauth", handleServerReauthentication(dependencies))
 	mux.HandleFunc("/api/auth/keepalive", handleAuthKeepalive)
+	passkeys, passkeysAvailable := dependencies.Accounts.(ServerPasskeyService)
+	if passkeysAvailable {
+		mux.HandleFunc("/api/auth/passkeys/login/begin", handlePasskeyLoginBegin(dependencies, passkeys))
+		mux.HandleFunc("/api/auth/passkeys/login/finish", handlePasskeyLoginFinish(dependencies, passkeys))
+		mux.HandleFunc("/api/auth/passkeys/register/begin", handlePasskeyRegistrationBegin(dependencies, passkeys))
+		mux.HandleFunc("/api/auth/passkeys/register/finish", handlePasskeyRegistrationFinish(dependencies, passkeys))
+		mux.HandleFunc("/api/auth/passkeys/reauth/begin", handlePasskeyReauthenticationBegin(dependencies, passkeys))
+		mux.HandleFunc("/api/auth/passkeys/reauth/finish", handlePasskeyReauthenticationFinish(dependencies, passkeys))
+		mux.HandleFunc("/api/auth/passkeys", handlePasskeyList(passkeys))
+		mux.HandleFunc("/api/auth/passkeys/", handlePasskeyDelete(passkeys))
+	}
 
 	mux.HandleFunc("/api/admin/users", handleServerUsers(dependencies))
 	mux.HandleFunc("/api/admin/users/", handleServerUserAction(dependencies))
@@ -90,7 +114,11 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 	mux.HandleFunc("/api/ai-console/", http.NotFound)
 	mux.HandleFunc("/api/v1/ai/", http.NotFound)
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := dependencies.Control.IsBootstrapped(r.Context()); err != nil {
+			jsonResponse(w, map[string]string{"status": "unavailable"}, http.StatusServiceUnavailable)
+			return
+		}
 		jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
 	})
 

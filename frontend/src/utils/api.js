@@ -1,3 +1,5 @@
+import { authenticatePasskey, createPasskey } from './passkeys.js'
+
 // Wailsバインディングへのラッパー関数
 // デスクトップモード時はWailsのGoバインディングを直接呼び出し、
 // サーバーモード時はREST APIを呼び出すよう抽象化する
@@ -200,6 +202,74 @@ export async function login(email, password) {
   return data
 }
 
+export async function loginWithPasskey(email) {
+  if (isWails) throw new Error('パスキー認証はサーバーモード専用です')
+  const begin = await apiFetch('/api/auth/passkeys/login/begin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email })
+  }, { skipAuthRedirect: true, skipReauth: true })
+  await throwIfNotOk(begin, 'パスキー認証を開始できませんでした')
+  const ceremony = await begin.json()
+  const assertion = await authenticatePasskey(ceremony.options)
+  try {
+    const finish = await apiFetch('/api/auth/passkeys/login/finish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ceremony_id: ceremony.ceremony_id,
+        credential: assertion.credential,
+        prf_result_b64: bytesToBase64(assertion.prfResult)
+      })
+    }, { skipAuthRedirect: true, skipReauth: true })
+    const data = await finish.json()
+    if (!finish.ok) throw new Error(data?.error || 'パスキー認証に失敗しました')
+    rememberAuthToken(data)
+    return data
+  } finally {
+    assertion.prfResult.fill(0)
+  }
+}
+
+export async function listPasskeys() {
+  if (isWails) return []
+  const response = await apiFetch('/api/auth/passkeys')
+  await throwIfNotOk(response, 'パスキー一覧を取得できませんでした')
+  const data = await response.json()
+  return Array.isArray(data?.passkeys) ? data.passkeys : []
+}
+
+export async function registerPasskey({ name, password }) {
+  if (isWails) throw new Error('パスキー登録はサーバーモード専用です')
+  const begin = await apiFetch('/api/auth/passkeys/register/begin', { method: 'POST' })
+  await throwIfNotOk(begin, 'パスキー登録を開始できませんでした')
+  const ceremony = await begin.json()
+  const created = await createPasskey(ceremony.options)
+  try {
+    const finish = await apiFetch('/api/auth/passkeys/register/finish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ceremony_id: ceremony.ceremony_id,
+        name,
+        password_b64: textToBase64(password),
+        credential: created.credential,
+        prf_result_b64: bytesToBase64(created.prfResult)
+      })
+    }, { skipReauth: true })
+    await throwIfNotOk(finish, 'パスキーを登録できませんでした')
+    return await finish.json()
+  } finally {
+    created.prfResult.fill(0)
+  }
+}
+
+export async function deletePasskey(id) {
+  if (isWails) throw new Error('パスキー削除はサーバーモード専用です')
+  const response = await apiFetch(`/api/auth/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  if (!response.ok) throw new Error(await parseError(response, 'パスキーを削除できませんでした'))
+}
+
 /**
  * Create the one and only initial administrator. recoverySecret must be a
  * client-generated 32-byte value that the user saved before this call.
@@ -266,6 +336,41 @@ export async function reauthenticate(password) {
   }
   rememberAuthToken(data)
   return data
+}
+
+export async function reauthenticateWithPasskey() {
+  if (isWails) return { authenticated: true }
+  const begin = await apiFetch('/api/auth/passkeys/reauth/begin', {
+    method: 'POST'
+  }, { skipAuthRedirect: true, skipReauth: true })
+  await throwIfNotOk(begin, 'パスキー再認証を開始できませんでした')
+  const ceremony = await begin.json()
+  const assertion = await authenticatePasskey(ceremony.options)
+  try {
+    const finish = await apiFetch('/api/auth/passkeys/reauth/finish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ceremony_id: ceremony.ceremony_id,
+        credential: assertion.credential,
+        prf_result_b64: bytesToBase64(assertion.prfResult)
+      })
+    }, { skipAuthRedirect: true, skipReauth: true })
+    const data = await finish.json()
+    if (finish.status === 401 && data?.login_required) {
+      csrfToken = null
+      window.dispatchEvent(new CustomEvent('omni-money:session-expired', {
+        cancelable: true,
+        detail: { reason: 'session-expired' }
+      }))
+      throw new Error('セッションの有効期限が切れました')
+    }
+    if (!finish.ok) throw new Error(data?.error || 'パスキー再認証に失敗しました')
+    rememberAuthToken(data)
+    return data
+  } finally {
+    assertion.prfResult.fill(0)
+  }
 }
 
 /**

@@ -233,6 +233,34 @@ func TestRecoveryEnvelopeRequiresExactly256BitSecret(t *testing.T) {
 	}
 }
 
+func TestPasskeyEnvelopeRoundTripAndIsolation(t *testing.T) {
+	dek := testBytes(DEKSize, 0x61)
+	secret := testBytes(PasskeySecretSize, 0x72)
+	envelope, err := WrapWithPasskey(dek, secret, testContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Kind != KindPasskey || envelope.KDF != passkeyKDF {
+		t.Fatalf("unexpected passkey metadata: %+v", envelope)
+	}
+	got, err := UnwrapWithPasskey(envelope, secret, testContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(got)
+	if !bytes.Equal(got, dek) {
+		t.Fatal("passkey envelope returned the wrong DEK")
+	}
+	wrong := append([]byte(nil), secret...)
+	wrong[0] ^= 1
+	if _, err := UnwrapWithPasskey(envelope, wrong, testContext); !errors.Is(err, ErrAuthentication) {
+		t.Fatalf("wrong passkey secret: got %v", err)
+	}
+	if _, err := UnwrapWithRecovery(envelope, secret, testContext); !errors.Is(err, ErrInvalidEnvelope) {
+		t.Fatalf("passkey envelope was accepted as recovery envelope: %v", err)
+	}
+}
+
 func TestPurposeSeparatedHKDFKeys(t *testing.T) {
 	root := testBytes(DEKSize, 0xa5)
 	salt := testBytes(SaltSize, 0x5a)

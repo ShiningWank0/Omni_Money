@@ -38,7 +38,12 @@ func TestPasswordVerificationRoutesUseTightRateBuckets(t *testing.T) {
 	}{
 		{path: "/api/auth/login", wantBucket: "login"},
 		{path: "/api/auth/reauth", wantBucket: "reauth"},
+		{path: "/api/auth/passkeys/reauth/begin", wantBucket: "reauth"},
+		{path: "/api/auth/passkeys/reauth/finish", wantBucket: "reauth"},
 		{path: "/api/auth/setup", wantBucket: "account-auth"},
+		{path: "/api/auth/passkeys/register/finish", wantBucket: "account-auth"},
+		{path: "/api/auth/passkeys/login/begin", wantBucket: "account-auth"},
+		{path: "/api/auth/passkeys/login/finish", wantBucket: "account-auth"},
 	}
 	for _, test := range tests {
 		request := httptest.NewRequest(http.MethodPost, "https://money.example"+test.path, nil)

@@ -8,6 +8,8 @@ package control
 import (
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
+
 	"omni_money/backend/keyenvelope"
 )
 
@@ -75,6 +77,39 @@ type PasswordCredential struct {
 	Envelope  keyenvelope.Envelope
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// PasskeyCredential binds a verified WebAuthn credential and its PRF-derived
+// vault envelope. PRFSalt and VaultEnvelope are sensitive authentication
+// metadata and must never be returned from an administrative listing API.
+type PasskeyCredential struct {
+	ID            []byte
+	UserID        string
+	Name          string
+	Credential    webauthn.Credential
+	PRFSalt       []byte
+	VaultEnvelope keyenvelope.Envelope
+	Revision      int64
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	LastUsedAt    *time.Time
+}
+
+type PasskeyCredentialInput struct {
+	UserID        string
+	Name          string
+	Credential    webauthn.Credential
+	PRFSalt       []byte
+	VaultEnvelope keyenvelope.Envelope
+}
+
+// PasskeySummary is safe for the credential-management UI. Credential public
+// keys, PRF salts, and wrapped vault keys deliberately remain server-side.
+type PasskeySummary struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
 
 // RecoveryEnvelopeInput wraps the same random vault key independently of the

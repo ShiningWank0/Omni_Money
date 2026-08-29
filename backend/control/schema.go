@@ -6,9 +6,9 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
-var schemaStatements = []string{
+var schemaV1Statements = []string{
 	`CREATE TABLE IF NOT EXISTS users (
 		id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 16 AND 128),
 		email TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK(length(email) BETWEEN 3 AND 254),
@@ -78,6 +78,24 @@ var schemaStatements = []string{
 	 ON password_reset_tickets(state, expires_at_ms)`,
 }
 
+var schemaV2Statements = []string{
+	`CREATE TABLE IF NOT EXISTS passkey_credentials (
+		credential_id BLOB PRIMARY KEY CHECK(length(credential_id) BETWEEN 16 AND 1024),
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 120),
+		credential_json TEXT NOT NULL CHECK(length(credential_json) BETWEEN 2 AND 1048576 AND json_valid(credential_json)),
+		prf_salt BLOB NOT NULL CHECK(length(prf_salt) = 32),
+		vault_envelope_json TEXT NOT NULL CHECK(length(vault_envelope_json) BETWEEN 2 AND 8192 AND json_valid(vault_envelope_json)),
+		revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+		created_at_ms INTEGER NOT NULL CHECK(created_at_ms > 0),
+		updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= created_at_ms),
+		last_used_at_ms INTEGER,
+		CHECK(last_used_at_ms IS NULL OR last_used_at_ms >= created_at_ms)
+	) STRICT`,
+	`CREATE INDEX IF NOT EXISTS idx_passkey_credentials_user
+	 ON passkey_credentials(user_id, created_at_ms)`,
+}
+
 func initializeSchema(ctx context.Context, db *sql.DB) error {
 	var version int
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
@@ -92,13 +110,26 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("begin control schema transaction: %w", err)
 	}
 	defer tx.Rollback()
-	for _, statement := range schemaStatements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("initialize control schema: %w", err)
+	apply := func(statements []string, targetVersion int) error {
+		for _, statement := range statements {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("migrate control schema to version %d: %w", targetVersion, err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", targetVersion)); err != nil {
+			return fmt.Errorf("set control schema version %d: %w", targetVersion, err)
+		}
+		return nil
+	}
+	if version < 1 {
+		if err := apply(schemaV1Statements, 1); err != nil {
+			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 1"); err != nil {
-		return fmt.Errorf("set control schema version: %w", err)
+	if version < 2 {
+		if err := apply(schemaV2Statements, 2); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit control schema: %w", err)

@@ -33,6 +33,7 @@ const (
 
 	DEKSize             = 32
 	RecoverySecretSize  = 32
+	PasskeySecretSize   = 32
 	SaltSize            = 32
 	VerifierSize        = sha256.Size
 	Argon2idMemoryKiB   = 64 * 1024
@@ -44,6 +45,7 @@ const (
 
 	passwordKDF = "argon2id-hkdf-sha256" // #nosec G101 -- public algorithm identifier, not a credential.
 	recoveryKDF = "hkdf-sha256"
+	passkeyKDF  = "hkdf-sha256" // #nosec G101 -- public algorithm identifier, not a credential.
 )
 
 // Kind separates envelopes protected by a password from those protected by a
@@ -53,6 +55,7 @@ type Kind string
 const (
 	KindPassword Kind = "password"
 	KindRecovery Kind = "recovery"
+	KindPasskey  Kind = "passkey-prf"
 )
 
 var (
@@ -62,6 +65,7 @@ var (
 	ErrInvalidEnvelope       = errors.New("invalid key envelope")
 	ErrInvalidPassword       = errors.New("password must not be empty or excessively large")
 	ErrInvalidRecoverySecret = errors.New("recovery secret must be exactly 32 bytes")
+	ErrInvalidPasskeySecret  = errors.New("passkey PRF secret must be exactly 32 bytes")
 )
 
 // Argon2idProfile is persisted with password envelopes. Version 1 deliberately
@@ -304,6 +308,68 @@ func UnwrapWithRecovery(envelope *Envelope, recoverySecret []byte, context Conte
 	return dek, nil
 }
 
+// WrapWithPasskey encrypts dek with the 256-bit output of the WebAuthn PRF
+// extension. The PRF output is credential-bound high-entropy key material; it
+// is never persisted and is purpose-separated from password and recovery
+// envelopes by both HKDF info and authenticated envelope metadata.
+func WrapWithPasskey(dek, prfSecret []byte, context Context) (*Envelope, error) {
+	if err := validateDEK(dek); err != nil {
+		return nil, err
+	}
+	if err := validatePasskeySecret(prfSecret); err != nil {
+		return nil, err
+	}
+	if err := validateContext(context); err != nil {
+		return nil, err
+	}
+	salt, err := randomBytes(SaltSize)
+	if err != nil {
+		return nil, err
+	}
+	wrappingKey, err := deriveKey(prfSecret, salt, hkdfInfo(KindPasskey, "aead"))
+	if err != nil {
+		return nil, err
+	}
+	defer clear(wrappingKey)
+	aad := authenticatedData(context, KindPasskey, CurrentVersion)
+	defer clear(aad)
+	nonce, ciphertext, err := seal(wrappingKey, dek, aad)
+	if err != nil {
+		return nil, err
+	}
+	return &Envelope{
+		Version: CurrentVersion, Kind: KindPasskey, KDF: passkeyKDF,
+		Salt: salt, Nonce: nonce, Ciphertext: ciphertext,
+	}, nil
+}
+
+// UnwrapWithPasskey authenticates and decrypts a passkey envelope with a
+// freshly evaluated WebAuthn PRF result.
+func UnwrapWithPasskey(envelope *Envelope, prfSecret []byte, context Context) ([]byte, error) {
+	if err := validatePasskeyEnvelope(envelope); err != nil {
+		return nil, err
+	}
+	if err := validatePasskeySecret(prfSecret); err != nil {
+		return nil, ErrAuthentication
+	}
+	if err := validateContext(context); err != nil {
+		return nil, err
+	}
+	wrappingKey, err := deriveKey(prfSecret, envelope.Salt, hkdfInfo(KindPasskey, "aead"))
+	if err != nil {
+		return nil, err
+	}
+	defer clear(wrappingKey)
+	aad := authenticatedData(context, KindPasskey, envelope.Version)
+	defer clear(aad)
+	dek, err := open(wrappingKey, envelope.Nonce, envelope.Ciphertext, aad)
+	if err != nil || len(dek) != DEKSize {
+		clear(dek)
+		return nil, ErrAuthentication
+	}
+	return dek, nil
+}
+
 func validatePasswordEnvelope(envelope *Envelope) error {
 	if err := validateCommonEnvelope(envelope, KindPassword, passwordKDF); err != nil {
 		return err
@@ -323,6 +389,16 @@ func validateRecoveryEnvelope(envelope *Envelope) error {
 	}
 	if envelope.Profile != (Argon2idProfile{}) || len(envelope.Verifier) != 0 {
 		return fmt.Errorf("%w: recovery envelope contains password metadata", ErrInvalidEnvelope)
+	}
+	return nil
+}
+
+func validatePasskeyEnvelope(envelope *Envelope) error {
+	if err := validateCommonEnvelope(envelope, KindPasskey, passkeyKDF); err != nil {
+		return err
+	}
+	if envelope.Profile != (Argon2idProfile{}) || len(envelope.Verifier) != 0 {
+		return fmt.Errorf("%w: passkey envelope contains password metadata", ErrInvalidEnvelope)
 	}
 	return nil
 }
@@ -357,6 +433,13 @@ func validatePassword(password []byte) error {
 func validateRecoverySecret(secret []byte) error {
 	if len(secret) != RecoverySecretSize {
 		return ErrInvalidRecoverySecret
+	}
+	return nil
+}
+
+func validatePasskeySecret(secret []byte) error {
+	if len(secret) != PasskeySecretSize {
+		return ErrInvalidPasskeySecret
 	}
 	return nil
 }

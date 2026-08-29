@@ -10,5 +10,7 @@ services:
       WEB_EXTERNAL_HOST: "127.0.0.1"
       TRUSTED_PROXIES: ""
       ALLOWED_HOSTS: "localhost:${OMNI_WEB_PORT:-4000},127.0.0.1:${OMNI_WEB_PORT:-4000}"
+      PASSKEY_RP_ID: "localhost"
+      PASSKEY_ORIGINS: "http://localhost:${OMNI_WEB_PORT:-4000}"
     ports:
       - "127.0.0.1:${OMNI_WEB_PORT:-4000}:4000"

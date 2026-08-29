@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
+
 	"omni_money/backend/aitransport"
 	"omni_money/backend/api"
 	"omni_money/backend/atrest"
@@ -150,6 +152,19 @@ func newServerRuntime(
 	}
 	runtime.vaults = vaultManager
 	runtime.sessions = middleware.NewSessionManagerWithConfig(sessionConfig)
+	passkeyVerifier, err := webauthn.New(&webauthn.Config{
+		RPID:          serverConfig.Passkeys.RPID,
+		RPDisplayName: "Omni Money",
+		RPOrigins:     serverConfig.Passkeys.Origins,
+		RPTopOrigins:  serverConfig.Passkeys.Origins,
+		Timeouts: webauthn.TimeoutsConfig{
+			Login:        webauthn.TimeoutConfig{Enforce: true, Timeout: 5 * time.Minute, TimeoutUVD: 5 * time.Minute},
+			Registration: webauthn.TimeoutConfig{Enforce: true, Timeout: 5 * time.Minute, TimeoutUVD: 5 * time.Minute},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("passkey relying party設定が無効です: %w", err)
+	}
 
 	accountService, err := serverauth.NewService(serverauth.Dependencies{
 		Store:            controlStore,
@@ -158,6 +173,7 @@ func newServerRuntime(
 		Vaults:           vaultManager,
 		Setup:            runtime.setup,
 		MaxConcurrentKDF: serverConfig.AuthKDFConcurrency,
+		WebAuthn:         passkeyVerifier,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("server authenticationを初期化できません: %w", err)
