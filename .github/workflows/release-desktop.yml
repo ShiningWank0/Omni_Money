@@ -13,7 +13,9 @@ on:
       - '.github/workflows/release-desktop.yml'
   push:
     branches: [main]
-    paths: ['VERSION']
+    paths:
+      - 'VERSION'
+      - '.github/workflows/release-desktop.yml'
 
 permissions: {}
 
@@ -499,6 +501,7 @@ jobs:
           done
           mapfile -d '' RELEASE_FILES < <(find dist/ -type f -print0)
           gh release create "v${APP_VERSION}" \
+            --repo "$RELEASE_REPOSITORY" \
             --title "Omni Money v${APP_VERSION}" \
             --notes-file /tmp/release-notes.md \
             "${RELEASE_FLAGS[@]}" \
