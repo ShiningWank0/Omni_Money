@@ -141,7 +141,7 @@ LD_LIBRARY_PATH="$PWD/.build/sqlcipher/lib" \
 go run -tags 'server libsqlite3 sqlite_omit_load_extension' ./server.go
 ```
 
-control鍵とinitial-admin setup tokenは別々のowner-only secretとして生成します。setup tokenは32 byte以上のbase64url文字列にしてください。初回アクセスではブラウザがユーザーvault用の回復コードを生成して、保存確認後に最初のAdminを作成します。ログイン後は「サーバーユーザー管理」から招待、password reset token発行、user無効化を行えます。invite/reset tokenはURLに含めず本人へ安全に渡してください。Adminのパスワードやcontrol鍵だけでは他ユーザーのvaultを開けません。
+control鍵とinitial-admin setup tokenは別々のowner-only secretとして生成します。setup tokenは32 byte以上のbase64url文字列にしてください。初回アクセスではブラウザがユーザーvault用の回復コードを生成して、保存確認後に最初のAdminを作成します。ログイン後は「サーバーユーザー管理」から招待、password reset token発行、user無効化を行えます。各ユーザーは「パスキー設定」からPRF対応パスキーを登録でき、以後はパスワードまたはパスキーのどちらでも自分のVaultへログインし、重要操作を再認証できます。invite/reset tokenはURLに含めず本人へ安全に渡してください。Adminのパスワードやcontrol鍵だけでは他ユーザーのvaultを開けません。
 
 直接起動した公開Webは標準で `127.0.0.1:4000` で待ち受けます。`ALLOWED_HOSTS` は直接起動でも必須です。非loopback平文HTTPは許可されず、TLSまたは固定したtrusted proxy経由のHTTPSが必要です。同梱のComposeはPangolin/Newt専用構成で、ホストへポートを公開しません。ローカル利用時だけ `compose.local.yaml` を重ねます。
 
@@ -169,6 +169,8 @@ control鍵とinitial-admin setup tokenは別々のowner-only secretとして生�
 | `FORCE_HTTPS` | `false` | 公開WebのHTTPSリダイレクト |
 | `HTTPS_REDIRECT_HOST` | なし | HTTPSリダイレクト先 |
 | `ALLOWED_HOSTS` | なし（必須） | すべてのリクエストで許可する正確な公開Host |
+| `PASSKEY_RP_ID` | 公開Hostから導出 | パスキーのRelying Party ID（scheme/portなし） |
+| `PASSKEY_ORIGINS` | 公開Hostから導出 | WebAuthnを許可する正確なorigin（カンマ区切り） |
 | `ALLOW_INSECURE_HTTP` | `false` | loopbackだけへpublishするローカル構成用。非loopback平文HTTPは許可されない |
 | `CORS_ALLOWED_ORIGINS` | 同一オリジンのみ | 許可する CORS オリジンのカンマ区切りリスト |
 
@@ -242,6 +244,8 @@ docker compose -f compose.yaml -f compose.local.yaml up -d --force-recreate
 ```
 
 Composeはコンテナのroot filesystemをread-onlyにし、Linux capabilityをすべて削除して、権限昇格を禁止します。永続的に書き込めるアプリ領域は `/app/data` だけです。SQLiteの一時ファイルには再起動で消える `/tmp` tmpfsを使い、CPU・memory・PIDにも上限を設定します。既定値は `.env.example` の `OMNI_CPU_LIMIT`、`OMNI_MEMORY_LIMIT`、`OMNI_PIDS_LIMIT`、`OMNI_TMPFS_SIZE` で調整できます。上限を下げる場合は、最大サイズの画像処理やCSV取込を実データ量で検証してください。
+
+本番更新では固定version imageと[safe update手順](docs/safe-update.md)を使用してください。更新前のoffline checkpoint、ingressから隔離したhealthcheck、更新失敗時だけの旧data/image復元を自動化しています。`latest`を直接deployしたり、`down -v`を使ったりしないでください。
 
 TrueNAS Custom Appでは `compose.yaml` 相当の設定を使い、次を守ってください。
 

@@ -62,6 +62,8 @@ chmod 600 secrets/control-database.key secrets/initial-admin-setup.token
 - `OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE`
 - `OMNI_INITIAL_ADMIN_SETUP_TOKEN_FILE`
 - `ALLOWED_HOSTS`
+- `PASSKEY_RP_ID`（Pangolinの公開FQDN、scheme/portなし）
+- `PASSKEY_ORIGINS`（例: `https://money.example.com`）
 
 data directoryはcontainer UID/GID `10001:10001`だけが書けるようにします。macOS/ColimaではDocker Desktop/Colimaのfile sharingとvolume ownershipの差を確認してください。
 
@@ -103,16 +105,19 @@ invite/reset tokenはURLへ入れず、安全な別経路で本人へ渡して�
 password resetにはAdminのtokenに加えて本人だけが保持する既存recovery codeが必要です。Admin UIが扱うのはaccount状態だけで、
 他userの取引、vault path、password、recovery code、暗号鍵を表示または復号する機能はありません。
 
-### 停止、再開、更新
+各userはログイン後の「パスキー設定」で、現在のpasswordを確認してPRF対応パスキーを登録できます。登録後もpassword認証は無効にならず、login画面と重要操作の再認証でpasswordまたはpasskeyを選べます。passkeyはPangolin経由のHTTPS originに紐付くため、`PASSKEY_RP_ID`や公開FQDNを変更すると既存passkeyは使えなくなります。passwordとrecovery codeは引き続き安全に保管してください。
+
+### 停止、再開、安全な更新
 
 ```bash
 docker compose -f compose.yaml -f compose.local.yaml down
 docker compose -f compose.yaml -f compose.local.yaml up -d
 docker compose -f compose.yaml -f compose.local.yaml logs --tail=200 omni-money
-docker compose -f compose.yaml -f compose.local.yaml up -d --build
 ```
 
 `down -v`は使用しないでください。bind mountのdataを削除しなくても、control key、recovery code、暗号化volumeの復旧情報を失うと復号できません。
+
+Pangolin/TrueNAS本番のversion更新は、通常の`up --build`ではなく`./scripts/safe-update.sh <固定image:version>`を使います。data migrationはtransactionalに実行され、scriptは停止後のoffline checkpointを検証してからcandidateをingressに接続します。candidateがhealthyになる前に失敗した場合だけ、旧dataと旧imageへrollbackします。要件と復旧時の挙動は[安全な更新と限定ロールバック](safe-update.md)を参照してください。
 
 ## 4. Pangolin / TrueNAS
 

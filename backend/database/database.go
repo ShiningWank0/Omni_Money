@@ -22,6 +22,7 @@ import (
 )
 
 const defaultSnapshotMaxTotalBytes int64 = 2 * 1024 * 1024 * 1024
+const ledgerSchemaVersion = 1
 
 const writableSQLiteQuery = "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 const snapshotSQLiteQuery = "mode=rw&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
@@ -286,6 +287,20 @@ func createTablesOn(target *sql.DB) error {
 	if target == nil {
 		return fmt.Errorf("データベース接続が初期化されていません")
 	}
+	var version int
+	if err := target.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("スキーマversion取得エラー: %w", err)
+	}
+	if version > ledgerSchemaVersion {
+		return fmt.Errorf("データベースschema version %dは対応version %dより新しいため開けません", version, ledgerSchemaVersion)
+	}
+
+	tx, err := target.Begin()
+	if err != nil {
+		return fmt.Errorf("スキーマtransaction開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+
 	statements := []string{
 		// 取引テーブル
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS transactions (
@@ -423,19 +438,38 @@ func createTablesOn(target *sql.DB) error {
 			END`, validation.MaxTransactionAmount),
 	}
 
-	for _, stmt := range statements {
-		if _, err := target.Exec(stmt); err != nil {
-			return fmt.Errorf("SQL実行エラー (%s): %w", stmt[:50], err)
+	// Version 0 includes both a brand-new database and databases created by
+	// older releases before schema versions were recorded. Reapplying the
+	// idempotent declarations upgrades either case atomically.
+	if version < ledgerSchemaVersion {
+		for _, stmt := range statements {
+			if _, err := tx.Exec(stmt); err != nil {
+				return fmt.Errorf("SQL実行エラー (%s): %w", stmt[:50], err)
+			}
+		}
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", ledgerSchemaVersion)); err != nil {
+			return fmt.Errorf("スキーマversion更新エラー: %w", err)
 		}
 	}
-	if err := validateCriticalSchema(target); err != nil {
+	if err := validateCriticalSchema(tx); err != nil {
 		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("スキーマtransaction確定エラー: %w", err)
 	}
 
 	return nil
 }
 
-func validateCriticalSchema(target *sql.DB) error {
+type schemaQueryer interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func validateCriticalSchema(target schemaQueryer) error {
+	if target == nil {
+		return fmt.Errorf("データベース接続が初期化されていません")
+	}
 	requiredColumns := map[string][]string{
 		"transactions":               {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
 		"transaction_images":         {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},

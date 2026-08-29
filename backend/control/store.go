@@ -25,7 +25,7 @@ var (
 	ErrInvitationExpired   = errors.New("invitation has expired")
 	ErrResetTicketInactive = errors.New("password reset ticket is not pending")
 	ErrResetTicketExpired  = errors.New("password reset ticket has expired")
-	ErrCredentialConflict  = errors.New("password credential changed concurrently")
+	ErrCredentialConflict  = errors.New("authentication credential changed concurrently")
 	ErrRecoveryConflict    = errors.New("recovery envelope changed concurrently")
 )
 

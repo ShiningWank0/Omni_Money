@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
+
 	"omni_money/backend/control"
 	"omni_money/backend/keyenvelope"
 	"omni_money/backend/middleware"
@@ -53,6 +55,14 @@ type ControlStore interface {
 	DisableUser(context.Context, string, string, time.Time) error
 }
 
+type PasskeyControlStore interface {
+	CreatePasskeyCredential(context.Context, control.PasskeyCredentialInput, time.Time) (control.PasskeyCredential, error)
+	ListPasskeyCredentials(context.Context, string) ([]control.PasskeyCredential, error)
+	GetPasskeyCredential(context.Context, string, []byte) (control.PasskeyCredential, error)
+	RecordSuccessfulPasskeyUse(context.Context, control.PasskeyCredential, webauthn.Credential, time.Time, bool) error
+	DeletePasskeyCredential(context.Context, string, []byte) error
+}
+
 type SessionInvalidator interface {
 	DeleteAllSessionsForUser(string) int
 }
@@ -74,22 +84,27 @@ type Dependencies struct {
 	Vaults           VaultDrainer
 	Setup            *SetupAuthorizer
 	MaxConcurrentKDF int
+	WebAuthn         *webauthn.WebAuthn
 }
 
 // Service is the sole mutation coordinator for server account lifecycle. All
 // login, reset, and disable operations for a user share the same keyed lock so
 // session issuance cannot race credential revocation.
 type Service struct {
-	store       ControlStore
-	openSession OpenSessionFunc
-	sessions    SessionInvalidator
-	vaults      VaultDrainer
-	setup       *SetupAuthorizer
-	dummy       keyenvelope.Envelope
-	kdfSlots    chan struct{}
-	setupMu     sync.Mutex
-	locksMu     sync.Mutex
-	locks       map[string]*accountLock
+	store        ControlStore
+	passkeyStore PasskeyControlStore
+	openSession  OpenSessionFunc
+	sessions     SessionInvalidator
+	vaults       VaultDrainer
+	setup        *SetupAuthorizer
+	dummy        keyenvelope.Envelope
+	kdfSlots     chan struct{}
+	setupMu      sync.Mutex
+	locksMu      sync.Mutex
+	locks        map[string]*accountLock
+	webauthn     *webauthn.WebAuthn
+	passkeyMu    sync.Mutex
+	ceremonies   map[string]passkeyCeremony
 }
 
 type accountLock struct {
@@ -112,15 +127,19 @@ func NewService(dependencies Dependencies) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initialize constant-work password verifier: %w", err)
 	}
+	passkeyStore, _ := dependencies.Store.(PasskeyControlStore)
 	return &Service{
-		store:       dependencies.Store,
-		openSession: dependencies.OpenSession,
-		sessions:    dependencies.Sessions,
-		vaults:      dependencies.Vaults,
-		setup:       dependencies.Setup,
-		dummy:       *dummy,
-		kdfSlots:    make(chan struct{}, concurrency),
-		locks:       make(map[string]*accountLock),
+		store:        dependencies.Store,
+		passkeyStore: passkeyStore,
+		openSession:  dependencies.OpenSession,
+		sessions:     dependencies.Sessions,
+		vaults:       dependencies.Vaults,
+		setup:        dependencies.Setup,
+		dummy:        *dummy,
+		kdfSlots:     make(chan struct{}, concurrency),
+		locks:        make(map[string]*accountLock),
+		webauthn:     dependencies.WebAuthn,
+		ceremonies:   make(map[string]passkeyCeremony),
 	}, nil
 }
 

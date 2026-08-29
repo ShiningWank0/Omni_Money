@@ -229,7 +229,7 @@ func handleServerAuthStatus(dependencies ServerDependencies) http.HandlerFunc {
 		session, ok := dependencies.Sessions.GetSessionFromRequest(r)
 		if !ok || session.UserID == "" {
 			jsonResponse(w, map[string]interface{}{
-				"authenticated": false, "setup_required": !bootstrapped, "features": serverFeatureResponse(false),
+				"authenticated": false, "setup_required": !bootstrapped, "features": serverFeatureResponse(false, dependencies.Accounts),
 			}, http.StatusOK)
 			return
 		}
@@ -242,7 +242,7 @@ func handleServerAuthStatus(dependencies ServerDependencies) http.HandlerFunc {
 			dependencies.Sessions.DeleteAllSessionsForUser(session.UserID)
 			dependencies.Sessions.ClearSessionCookie(w, r)
 			jsonResponse(w, map[string]interface{}{
-				"authenticated": false, "setup_required": !bootstrapped, "features": serverFeatureResponse(false),
+				"authenticated": false, "setup_required": !bootstrapped, "features": serverFeatureResponse(false, dependencies.Accounts),
 			}, http.StatusOK)
 			return
 		}
@@ -250,14 +250,15 @@ func handleServerAuthStatus(dependencies ServerDependencies) http.HandlerFunc {
 			"authenticated": true, "setup_required": false, "user": serverUserResponse(user),
 			"expires_at": session.ExpiresAt.Format(time.RFC3339), "csrf_token": session.CSRFToken,
 			"idle_timeout_seconds": dependencies.Sessions.IdleTimeoutSeconds(),
-			"features":             serverFeatureResponse(user.Role == control.RoleAdmin),
+			"features":             serverFeatureResponse(user.Role == control.RoleAdmin, dependencies.Accounts),
 		}, http.StatusOK)
 	}
 }
 
-func serverFeatureResponse(admin bool) map[string]bool {
+func serverFeatureResponse(admin bool, accounts ServerAccountService) map[string]bool {
+	_, passkeys := accounts.(ServerPasskeyService)
 	return map[string]bool{
-		"admin": admin, "ai": false, "snapshots": false,
+		"admin": admin, "ai": false, "snapshots": false, "passkeys": passkeys,
 	}
 }
 

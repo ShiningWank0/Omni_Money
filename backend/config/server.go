@@ -37,6 +37,7 @@ type ServerConfig struct {
 	TLSKeyFile                 string
 	WebTransport               WebTransportConfig
 	ShutdownTimeout            time.Duration
+	Passkeys                   PasskeyConfig
 }
 
 var legacySingleUserServerEnv = []string{
@@ -183,6 +184,10 @@ func ServerConfigFromEnv() (ServerConfig, error) {
 	if mode == "" {
 		return ServerConfig{}, errors.New("DATA_AT_REST_MODE is required")
 	}
+	passkeys, err := passkeyConfigFromEnv(transport, host, strconv.Itoa(portNumber))
+	if err != nil {
+		return ServerConfig{}, err
+	}
 
 	return ServerConfig{
 		ControlDBPath:              controlDBPath,
@@ -198,6 +203,7 @@ func ServerConfigFromEnv() (ServerConfig, error) {
 		TLSKeyFile:                 tlsKeyFile,
 		WebTransport:               transport,
 		ShutdownTimeout:            time.Duration(shutdownSeconds) * time.Second,
+		Passkeys:                   passkeys,
 	}, nil
 }
 

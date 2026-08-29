@@ -14,11 +14,16 @@ func TestServerPublicAuthAllowlistIsExact(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/auth/status", true},
 		{http.MethodPost, "/api/auth/login", true},
+		{http.MethodPost, "/api/auth/passkeys/login/begin", true},
+		{http.MethodPost, "/api/auth/passkeys/login/finish", true},
 		{http.MethodPost, "/api/auth/setup", true},
 		{http.MethodPost, "/api/auth/invitations/accept", true},
 		{http.MethodPost, "/api/auth/password-reset/complete", true},
 		{http.MethodPost, "/api/auth/status", false},
 		{http.MethodGet, "/api/auth/login", false},
+		{http.MethodGet, "/api/auth/passkeys/login/begin", false},
+		{http.MethodPost, "/api/auth/passkeys/login/begin/", false},
+		{http.MethodPost, "/api/auth/passkeys/register/begin", false},
 		{http.MethodGet, "/api/auth/setup", false},
 		{http.MethodPost, "/api/auth/setup/", false},
 		{http.MethodPost, "/api/auth/invitations/accept/", false},
@@ -50,6 +55,8 @@ func TestPublicServerAuthStillRequiresValidBrowserBoundary(t *testing.T) {
 
 	for _, path := range []string{
 		"/api/auth/login",
+		"/api/auth/passkeys/login/begin",
+		"/api/auth/passkeys/login/finish",
 		"/api/auth/setup",
 		"/api/auth/invitations/accept",
 		"/api/auth/password-reset/complete",

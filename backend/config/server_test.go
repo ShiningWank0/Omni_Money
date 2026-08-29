@@ -27,6 +27,8 @@ func setValidServerEnvironment(t *testing.T) {
 		"TLS_KEY_FILE":                    "",
 		"AUTH_KDF_CONCURRENCY":            "",
 		"SERVER_SHUTDOWN_TIMEOUT_SECONDS": "",
+		"PASSKEY_RP_ID":                   "",
+		"PASSKEY_ORIGINS":                 "",
 	}
 	for _, name := range legacySingleUserServerEnv {
 		values[name] = ""
@@ -57,6 +59,32 @@ func TestServerConfigFromEnvParsesSecureDefaults(t *testing.T) {
 	}
 	if result.WebTransport.AllowInsecureHTTP {
 		t.Fatal("insecure HTTP unexpectedly enabled")
+	}
+}
+
+func TestServerConfigFromEnvParsesPasskeyBoundary(t *testing.T) {
+	setValidServerEnvironment(t)
+	t.Setenv("HOST_IP", "0.0.0.0")
+	t.Setenv("FORCE_HTTPS", "true")
+	t.Setenv("TRUSTED_PROXIES", "172.30.240.3/32")
+	t.Setenv("PASSKEY_RP_ID", "Money.Example.COM")
+	t.Setenv("PASSKEY_ORIGINS", "https://money.example.com,https://family.money.example.com")
+	result, err := ServerConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Passkeys.RPID != "money.example.com" || len(result.Passkeys.Origins) != 2 {
+		t.Fatalf("unexpected passkey config: %+v", result.Passkeys)
+	}
+
+	t.Setenv("PASSKEY_ORIGINS", "http://money.example.com")
+	if _, err := ServerConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("insecure remote passkey origin accepted: %v", err)
+	}
+
+	t.Setenv("PASSKEY_ORIGINS", "https://unrelated.example.net")
+	if _, err := ServerConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "outside RP ID") {
+		t.Fatalf("cross-site passkey origin accepted: %v", err)
 	}
 }
 

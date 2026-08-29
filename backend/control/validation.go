@@ -164,6 +164,7 @@ func validateOpaque(value []byte, name string, minimum, maximum int) error {
 const (
 	passwordEnvelopeKDF = "argon2id-hkdf-sha256" // #nosec G101 -- public algorithm identifier, not a credential.
 	recoveryEnvelopeKDF = "hkdf-sha256"
+	passkeyEnvelopeKDF  = "hkdf-sha256" // #nosec G101 -- public algorithm identifier, not a credential.
 )
 
 func validatePasswordCredential(value PasswordCredentialInput) error {
@@ -198,6 +199,10 @@ func validateKeyEnvelope(envelope *keyenvelope.Envelope, kind keyenvelope.Kind) 
 	case keyenvelope.KindRecovery:
 		if envelope.KDF != recoveryEnvelopeKDF || envelope.Profile != (keyenvelope.Argon2idProfile{}) || len(envelope.Verifier) != 0 {
 			return errors.New("recovery key envelope KDF profile is invalid")
+		}
+	case keyenvelope.KindPasskey:
+		if envelope.KDF != passkeyEnvelopeKDF || envelope.Profile != (keyenvelope.Argon2idProfile{}) || len(envelope.Verifier) != 0 {
+			return errors.New("passkey key envelope KDF profile is invalid")
 		}
 	default:
 		return errors.New("key envelope kind is invalid")

@@ -2,7 +2,7 @@ services:
   omni-money:
     build:
       context: .
-    image: omni-money:local
+    image: "${OMNI_IMAGE:-omni-money:local}"
     container_name: omni-money
     restart: unless-stopped
     # The Pangolin deployment is intentionally HTTPS-at-the-edge only. The
@@ -49,6 +49,9 @@ services:
       FORCE_HTTPS: "true"
       ALLOW_INSECURE_HTTP: "false"
       HTTPS_REDIRECT_HOST: "${HTTPS_REDIRECT_HOST:-}"
+      # WebAuthn identifiers must match the exact Pangolin public hostname.
+      PASSKEY_RP_ID: "${PASSKEY_RP_ID:-}"
+      PASSKEY_ORIGINS: "${PASSKEY_ORIGINS:-}"
       # Set this to the exact public Pangolin hostname(s), comma-separated.
       # Empty is allowed through Compose interpolation so compose.local.yaml
       # can supply its loopback allowlist. In the Pangolin base deployment the

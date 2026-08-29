@@ -20,8 +20,9 @@ does not contain balances, account names, transactions, receipt images, or a raw
 vault key.
 
 Each vault has an independent random 256-bit data-encryption key (DEK). The
-server control key never wraps a vault DEK. A user's password-derived key and
-recovery-derived key wrap the DEK independently with AES-256-GCM. The envelope
+server control key never wraps a vault DEK. A user's password-derived key,
+recovery-derived key, and each registered WebAuthn PRF output wrap the DEK
+independently with AES-256-GCM. The envelope
 authenticates the user ID, vault ID, purpose, and format version as associated
 data, so moving an envelope to another account or vault fails authentication.
 
@@ -41,6 +42,14 @@ An administrator-initiated password reset therefore creates a short-lived,
 single-use reset ticket. The user must also present the recovery secret to keep
 the old vault. Without it, the old vault remains encrypted and is not silently
 deleted or replaced.
+
+## Passkey authentication
+
+Passkeys are an alternative login path, not a replacement for password or recovery. Registration first verifies the current password, performs a WebAuthn ceremony with user verification required, and requires the authenticator's PRF extension. A credential-specific random salt produces a 32-byte PRF result; a purpose-separated HKDF key derived from that result wraps the unchanged vault DEK. The PRF result and plaintext DEK are never stored.
+
+Login begins after normalizing the supplied email so the server can send only that user's allowed credential IDs and credential-specific PRF salts. A signed WebAuthn assertion, required user verification, the correct PRF result, and the matching envelope are all needed before the Vault opens. The same assertion and envelope proof can satisfy recent reauthentication without creating a second Vault session. Ceremony state is one-use, short-lived, stored only in memory, and bound to the requesting client address. Authenticator counters are updated with a compare-and-swap transaction, and clone warnings fail authentication.
+
+Control-plane listings expose only a base64url credential ID, user-chosen name, creation time, and last-use time. Public keys, PRF salts, counters, and wrapped Vault keys remain server-side. Password login remains available after registration, and recovery still requires the separately saved recovery code.
 
 ## Administration boundary
 

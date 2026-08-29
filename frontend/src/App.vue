@@ -86,6 +86,7 @@
         <button class="menu-btn menu-group-start" @click="showGraphModal">残高推移グラフ表示</button>
         <button class="menu-btn" @click="openTagChart">タグ別分析</button>
         <button v-if="serverFeatures.snapshots" class="menu-btn menu-group-start" @click="openSnapshotManager">スナップショット管理</button>
+        <button v-if="!isWailsMode && serverFeatures.passkeys" class="menu-btn menu-group-start" @click="openPasskeySettings">パスキー設定</button>
         <button v-if="serverFeatures.admin" class="menu-btn menu-group-start" @click="openServerAccountAdmin">サーバーユーザー管理</button>
         <button v-if="isWailsMode" class="menu-btn logout-btn" @click="lockDesktopVaultNow">保管庫をロック</button>
         <button v-if="!isWailsMode" class="menu-btn logout-btn" @click="logout">ログアウト</button>
@@ -223,11 +224,16 @@
       @close="showServerAccountAdmin = false"
     />
 
+    <PasskeySettingsModal
+      v-if="showPasskeySettings"
+      @close="showPasskeySettings = false"
+    />
+
     <!-- 最近の認証が必要な操作用の再認証ダイアログ -->
     <div v-if="showReauthModal" class="reauth-overlay" @click.self="cancelReauthentication">
       <div class="reauth-card" role="dialog" aria-modal="true" aria-labelledby="reauth-title">
         <h3 id="reauth-title">重要な操作の確認</h3>
-        <p class="reauth-description">ユーザー管理、一括取り込み・書き出し、復元など重要な操作を実行するため、Omni Moneyのパスワードを入力してください。</p>
+        <p class="reauth-description">ユーザー管理、一括取り込み・書き出し、復元など重要な操作を実行するため、パスワードまたは登録済みパスキーで確認してください。</p>
         <form @submit.prevent="submitReauthentication">
           <label class="reauth-label" for="reauth-password">パスワード</label>
           <input
@@ -247,6 +253,12 @@
               {{ reauthLoading ? '確認中...' : '確認して実行' }}
             </button>
           </div>
+          <template v-if="canUsePasskeyReauth">
+            <div class="reauth-divider"><span>または</span></div>
+            <button type="button" class="reauth-passkey" :disabled="reauthLoading" @click="submitPasskeyReauthentication">
+              {{ reauthLoading ? '確認中...' : 'パスキーで確認' }}
+            </button>
+          </template>
         </form>
       </div>
     </div>
@@ -274,6 +286,7 @@ import TransactionModal from './components/TransactionModal.vue'
 import DesktopVaultGate from './components/DesktopVaultGate.vue'
 import { csvExportWarning } from './utils/csvSafety'
 import { isDesktopVaultUnlocked } from './utils/desktopVaultSafety'
+import { passkeysSupported } from './utils/passkeys'
 
 // 初期表示に不要な管理・分析モーダルは、開いた時だけ読み込む。
 const CSVImportModal = defineAsyncComponent(() => import('./components/CSVImportModal.vue'))
@@ -283,6 +296,7 @@ const SnapshotManager = defineAsyncComponent(() => import('./components/Snapshot
 const TagPieChart = defineAsyncComponent(() => import('./components/TagPieChart.vue'))
 const AIAPIConsoleModal = defineAsyncComponent(() => import('./components/AIAPIConsoleModal.vue'))
 const ServerAccountAdminModal = defineAsyncComponent(() => import('./components/ServerAccountAdminModal.vue'))
+const PasskeySettingsModal = defineAsyncComponent(() => import('./components/PasskeySettingsModal.vue'))
 import {
   addTransaction,
   updateTransaction,
@@ -297,6 +311,7 @@ import {
   getDesktopVaultStatus,
   lockDesktopVault,
   reauthenticate,
+  reauthenticateWithPasskey,
   keepAlive
 } from './utils/api'
 
@@ -314,6 +329,7 @@ const showSnapshotModal = ref(false)
 const showTagChart = ref(false)
 const showAIAPIConsole = ref(false)
 const showServerAccountAdmin = ref(false)
+const showPasskeySettings = ref(false)
 const showReauthModal = ref(false)
 const reauthLoading = ref(false)
 const reauthPassword = ref('')
@@ -322,7 +338,8 @@ const reauthPasswordInput = ref(null)
 let reauthRequest = null
 let reauthListenerRegistered = false
 const idleTimeoutSeconds = ref(0)
-const serverFeatures = ref({ admin: false, ai: false, snapshots: isWailsMode })
+const serverFeatures = ref({ admin: false, ai: false, snapshots: isWailsMode, passkeys: false })
+const canUsePasskeyReauth = computed(() => !isWailsMode && serverFeatures.value.passkeys && passkeysSupported())
 const currentServerUserId = ref('')
 const idleScreenLocked = ref(false)
 const desktopVaultStatus = ref(null)
@@ -620,6 +637,11 @@ function openServerAccountAdmin() {
   showServerAccountAdmin.value = true
 }
 
+function openPasskeySettings() {
+  showMenu.value = false
+  showPasskeySettings.value = true
+}
+
 async function logout() {
   showMenu.value = false
   try {
@@ -686,6 +708,7 @@ function clearSensitiveStateForIdle() {
   showTagChart.value = false
   showAIAPIConsole.value = false
   showServerAccountAdmin.value = false
+  showPasskeySettings.value = false
   showReauthModal.value = false
   reauthLoading.value = false
   reauthPassword.value = ''
@@ -759,7 +782,8 @@ function applyServerAuthStatus(status) {
   serverFeatures.value = {
     admin: Boolean(status.features.admin),
     ai: Boolean(status.features.ai),
-    snapshots: Boolean(status.features.snapshots)
+    snapshots: Boolean(status.features.snapshots),
+    passkeys: Boolean(status.features.passkeys)
   }
   currentServerUserId.value = typeof status?.user?.id === 'string' ? status.user.id : ''
 }
@@ -1042,6 +1066,23 @@ async function submitReauthentication() {
   }
 }
 
+async function submitPasskeyReauthentication() {
+  if (!reauthRequest || reauthLoading.value) return
+  reauthLoading.value = true
+  reauthError.value = ''
+  reauthPassword.value = ''
+  try {
+    await reauthenticateWithPasskey()
+    reauthRequest.resolve(true)
+    reauthRequest = null
+    showReauthModal.value = false
+  } catch (error) {
+    reauthError.value = error?.message || 'パスキー再認証に失敗しました'
+  } finally {
+    reauthLoading.value = false
+  }
+}
+
 async function handleSnapshotRestored() {
   // 全状態をリセットしてから再取得
   store.resetState()
@@ -1150,7 +1191,7 @@ onBeforeUnmount(() => {
 
 .reauth-overlay {
   position: fixed;
-  z-index: 1000;
+  z-index: 2000;
   inset: 0;
   display: flex;
   align-items: center;
@@ -1238,4 +1279,8 @@ onBeforeUnmount(() => {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: #fff;
 }
+.reauth-divider { display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0; color: #777; font-size: 0.8rem; }
+.reauth-divider::before, .reauth-divider::after { content: ''; flex: 1; height: 1px; background: #dde1f6; }
+.reauth-passkey { width: 100%; padding: 0.65rem; border: 1px solid #667eea; border-radius: 8px; color: #4d5fc7; background: #fff; cursor: pointer; }
+.reauth-passkey:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>
