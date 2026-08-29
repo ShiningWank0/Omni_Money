@@ -104,6 +104,8 @@ jobs:
       - name: Validate Docker Compose configuration
         env:
           ALLOWED_HOSTS: 'money.example.com'
+          PASSKEY_RP_ID: 'money.example.com'
+          PASSKEY_ORIGINS: 'https://money.example.com'
           OMNI_AT_REST_ATTESTATION_FILE: '/tmp/omni-data-at-rest.json'
           OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE: '/tmp/omni-control-database.key'
           OMNI_INITIAL_ADMIN_SETUP_TOKEN_FILE: '/tmp/omni-initial-admin-setup.token'
@@ -111,10 +113,14 @@ jobs:
           docker compose config --quiet
           docker compose -f compose.yaml -f compose.bootstrap.yaml config --quiet
           docker compose -f compose.yaml -f compose.bootstrap.yaml -f compose.local.yaml config --quiet
+          test -x scripts/safe-update.sh
+          bash -n scripts/safe-update.sh
 
       - name: Assert Pangolin network isolation
         env:
           ALLOWED_HOSTS: 'money.example.com'
+          PASSKEY_RP_ID: 'money.example.com'
+          PASSKEY_ORIGINS: 'https://money.example.com'
           OMNI_AT_REST_ATTESTATION_FILE: '/tmp/omni-data-at-rest.json'
           OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE: '/tmp/omni-control-database.key'
           OMNI_INITIAL_ADMIN_SETUP_TOKEN_FILE: '/tmp/omni-initial-admin-setup.token'
@@ -143,6 +149,8 @@ jobs:
             .services["omni-money"].environment.ALLOW_INSECURE_HTTP == "false" and
             .services["omni-money"].environment.TRUSTED_PROXIES == "172.30.240.3/32" and
             .services["omni-money"].environment.ALLOWED_HOSTS == "money.example.com" and
+            .services["omni-money"].environment.PASSKEY_RP_ID == "money.example.com" and
+            .services["omni-money"].environment.PASSKEY_ORIGINS == "https://money.example.com" and
             (.services["omni-money"].networks | keys) == ["pangolin_target"] and
             .services["omni-money"].networks.pangolin_target.ipv4_address == "172.30.240.2" and
             .networks.pangolin_target.internal == true and
@@ -161,6 +169,8 @@ jobs:
             .services["omni-money"].environment.WEB_EXTERNAL_HOST == "127.0.0.1" and
             .services["omni-money"].environment.TRUSTED_PROXIES == "" and
             .services["omni-money"].environment.ALLOWED_HOSTS == "localhost:4000,127.0.0.1:4000" and
+            .services["omni-money"].environment.PASSKEY_RP_ID == "localhost" and
+            .services["omni-money"].environment.PASSKEY_ORIGINS == "http://localhost:4000" and
             (.services["omni-money"].ports | length) == 1 and
             .services["omni-money"].ports[0].target == 4000 and
             .services["omni-money"].ports[0].published == "4000" and

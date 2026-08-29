@@ -83,6 +83,16 @@
             <span v-if="loading" class="loading-spinner"></span>
             <span>{{ submitLabel }}</span>
           </button>
+
+          <template v-if="mode === 'login' && !setupRequired">
+            <div class="auth-divider"><span>または</span></div>
+            <button type="button" class="passkey-button" :disabled="loading || !canUsePasskeys" @click="handlePasskeyLogin">
+              パスキーでログイン
+            </button>
+            <p v-if="!canUsePasskeys" class="field-hint passkey-hint">
+              パスキーはHTTPS接続の対応ブラウザで利用できます。
+            </p>
+          </template>
         </form>
       </div>
     </div>
@@ -97,8 +107,10 @@ import {
   getAuthStatus,
   isWailsMode,
   login,
+  loginWithPasskey,
   setupInitialAdmin
 } from '../utils/api'
+import { passkeysSupported } from '../utils/passkeys'
 import {
   destroySecretBytes,
   generateRecoverySecret,
@@ -122,6 +134,7 @@ const recoverySaved = ref(false)
 const loading = ref(false)
 const errorMessage = ref('')
 const infoMessage = ref('')
+const canUsePasskeys = passkeysSupported()
 
 const needsNewRecovery = computed(() => setupRequired.value || mode.value === 'invite' || mode.value === 'reset')
 const pageTitle = computed(() => {
@@ -290,6 +303,24 @@ async function handleSubmit() {
     loading.value = false
   }
 }
+
+async function handlePasskeyLogin() {
+  if (!email.value.trim()) {
+    errorMessage.value = 'メールアドレスを入力してください'
+    return
+  }
+  loading.value = true
+  errorMessage.value = ''
+  infoMessage.value = ''
+  try {
+    await loginWithPasskey(email.value.trim())
+    window.location.href = '/'
+  } catch (error) {
+    errorMessage.value = error?.message || 'パスキー認証に失敗しました'
+  } finally {
+    loading.value = false
+  }
+}
 </script>
 
 <style scoped>
@@ -310,6 +341,11 @@ async function handleSubmit() {
 .token-notice { margin-bottom: 1rem; padding: 0.75rem; border-radius: 8px; background: #fff8e8; color: #694d00; font-size: 0.84rem; line-height: 1.45; }
 .login-button { width: 100%; padding: 0.75rem; border: none; border-radius: 10px; color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
 .login-button:disabled { opacity: 0.65; cursor: not-allowed; }
+.auth-divider { display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0; color: #777; font-size: 0.8rem; }
+.auth-divider::before, .auth-divider::after { content: ''; flex: 1; height: 1px; background: rgba(102, 126, 234, 0.24); }
+.passkey-button { width: 100%; padding: 0.75rem; border: 1px solid #667eea; border-radius: 10px; color: #4d5fc7; font-size: 1rem; font-weight: 600; cursor: pointer; background: #fff; }
+.passkey-button:disabled { opacity: 0.55; cursor: not-allowed; }
+.passkey-hint { text-align: center; }
 .error-message, .info-message { padding: 0.75rem 1rem; border-radius: 10px; margin-bottom: 1rem; font-size: 0.9rem; }
 .error-message { background: rgba(255, 69, 58, 0.1); border: 1px solid rgba(255, 69, 58, 0.3); color: #d70015; }
 .info-message { background: rgba(52, 199, 89, 0.1); border: 1px solid rgba(52, 199, 89, 0.3); color: #176b2c; }
