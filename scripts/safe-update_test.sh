@@ -270,7 +270,16 @@ if [ "$1" = compose ]; then
     esac
   done
   case "$command_name" in
-    config) [ "$scenario" != compose_config_failure ] || exit 18; [ -z "${OMNI_DATA_DIR+x}" ] && [ -z "${OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE+x}" ] && [ -z "${ALLOWED_HOSTS+x}" ] && [ -z "${TRUSTED_PROXIES+x}" ] && [ -z "${PASSKEY_RP_ID+x}" ] && [ -z "${SESSION_MAX_AGE_HOURS+x}" ] && [ -z "${AUTH_KDF_CONCURRENCY+x}" ] || exit 28; cat "$MOCK_CONFIG";;
+    config)
+      [ "$scenario" != compose_config_failure ] || exit 18
+      [ -z "${OMNI_DATA_DIR+x}" ] && [ -z "${OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE+x}" ] && [ -z "${ALLOWED_HOSTS+x}" ] && [ -z "${TRUSTED_PROXIES+x}" ] && [ -z "${PASSKEY_RP_ID+x}" ] && [ -z "${SESSION_MAX_AGE_HOURS+x}" ] && [ -z "${AUTH_KDF_CONCURRENCY+x}" ] || exit 28
+      case "$scenario" in
+        compose_gpu_request) jq '.services["omni-money"].gpus = [{"driver":"nvidia","count":1}]' "$MOCK_CONFIG" ;;
+        compose_device_cgroup_rule) jq '.services["omni-money"].device_cgroup_rules = ["c 1:3 rwm"]' "$MOCK_CONFIG" ;;
+        compose_unapproved_runtime) jq '.services["omni-money"].runtime = "kata"' "$MOCK_CONFIG" ;;
+        *) cat "$MOCK_CONFIG" ;;
+      esac
+      ;;
     ps)
       [ "$all" -eq 1 ] || exit 17
       case "$(get phase)" in
@@ -311,9 +320,20 @@ case "$1" in
         service_env_json="$(jq -c '.services["omni-money"].environment | to_entries | map(.key + "=" + (.value|tostring))' "$MOCK_CONFIG")"
         config_user="10001:10001"; [ "$id" = candidate ] && [ "$scenario" = named_uid0_user ] && config_user=omni
         group_add='[]'; [ "$id" = candidate ] && [ "$scenario" = supplementary_group ] && group_add='["0"]'
-        jq -cn --arg version "$version" --arg user "$config_user" --argjson service_env "$service_env_json" --argjson cap_add "$cap_add" --argjson group_add "$group_add" --argjson mounts "$mounts_json" --argjson networks "$networks_json" '{Config:{User:$user,Entrypoint:["/entrypoint"],Cmd:["server"],WorkingDir:"/app",StopSignal:"SIGTERM",Healthcheck:{Test:["CMD","health"],Interval:1000000000,Timeout:1000000000,Retries:3},Env:($service_env + ["APP_MODE=server","VERSION="+$version,"SECRET_VALUE=private"]),Labels:{"com.example.role":"omni-money"}},HostConfig:{RestartPolicy:{Name:"unless-stopped",MaximumRetryCount:0},NetworkMode:"omni-money-pangolin",ReadonlyRootfs:true,Privileged:false,Init:false,CapDrop:["ALL"],CapAdd:$cap_add,GroupAdd:$group_add,Devices:[],PidMode:"",IpcMode:"",NanoCpus:2000000000,Memory:1073741824,PidsLimit:256,LogConfig:{Type:"json-file",Config:{"max-size":"10m","max-file":"3"}},SecurityOpt:["no-new-privileges:true"]},Mounts:$mounts,NetworkSettings:{Networks:$networks}}';;
+        device_requests='[]'; [ "$id" = candidate ] && [ "$scenario" = runtime_gpu_request ] && device_requests='[{"Driver":"nvidia","Count":1,"Capabilities":[["gpu"]]}]'
+        device_rules='[]'; [ "$id" = candidate ] && [ "$scenario" = runtime_device_cgroup_rule ] && device_rules='["c 1:3 rwm"]'
+        runtime=runc; [ "$id" = candidate ] && [ "$scenario" = runtime_unapproved_runtime ] && runtime=kata
+        jq -cn --arg version "$version" --arg user "$config_user" --arg runtime "$runtime" --argjson service_env "$service_env_json" --argjson cap_add "$cap_add" --argjson group_add "$group_add" --argjson device_requests "$device_requests" --argjson device_rules "$device_rules" --argjson mounts "$mounts_json" --argjson networks "$networks_json" '{Config:{User:$user,Entrypoint:["/entrypoint"],Cmd:["server"],WorkingDir:"/app",StopSignal:"SIGTERM",Healthcheck:{Test:["CMD","health"],Interval:1000000000,Timeout:1000000000,Retries:3},Env:($service_env + ["APP_MODE=server","VERSION="+$version,"SECRET_VALUE=private"]),Labels:{"com.example.role":"omni-money"}},HostConfig:{RestartPolicy:{Name:"unless-stopped",MaximumRetryCount:0},NetworkMode:"omni-money-pangolin",ReadonlyRootfs:true,Privileged:false,Init:false,CapDrop:["ALL"],CapAdd:$cap_add,GroupAdd:$group_add,DeviceRequests:$device_requests,DeviceCgroupRules:$device_rules,Runtime:$runtime,Devices:[],PidMode:"",IpcMode:"",NanoCpus:2000000000,Memory:1073741824,PidsLimit:256,LogConfig:{Type:"json-file",Config:{"max-size":"10m","max-file":"3"}},SecurityOpt:["no-new-privileges:true"]},Mounts:$mounts,NetworkSettings:{Networks:$networks}}';;
       *State.Status*) container_state "$id";;
-      *State.Health*) if [ "$id" = candidate ] && { [ "$scenario" = candidate_failure ] || [ "$scenario" = candidate_data_mutation ] || [ "$scenario" = rollback_failure ] || [ "$scenario" = rollback_tag_mutation ] || [ "$scenario" = unknown_removal ] || { [ "$scenario" = candidate_ingress_health_failure ] && [ "$(get net_candidate)" = connected ]; }; }; then echo missing; else echo healthy; fi;;
+      *State.Health*)
+        if [ "$id" = candidate ] && [ "$scenario" = rollback_journal_failure ] && [ "$(get net_candidate)" = connected ]; then
+          : > "$state_dir/rollback_trigger"; echo missing
+        elif [ "$id" = candidate ] && { [ "$scenario" = candidate_failure ] || [ "$scenario" = candidate_data_mutation ] || [ "$scenario" = rollback_failure ] || [ "$scenario" = rollback_tag_mutation ] || [ "$scenario" = unknown_removal ] || { [ "$scenario" = candidate_ingress_health_failure ] && [ "$(get net_candidate)" = connected ]; }; }; then
+          echo missing
+        else
+          echo healthy
+        fi
+        ;;
       *'.Image}'*) case "$id" in current) echo sha256:old;; rollback) [ "$scenario" = rollback_tag_mutation ] && echo sha256:tampered || echo sha256:old;; candidate) echo sha256:target;; esac;;
       *'.Config.Image}'*) case "$id" in current) echo omni-money:old;; *) echo omni-money:target;; esac;;
       *'.Config.User}'*) [ "$id" = candidate ] && [ "$scenario" = named_uid0_user ] && echo omni || echo 10001:10001;;
@@ -328,7 +348,10 @@ case "$1" in
         nano_cpus=2000000000
         [ "$id" = current ] && [ "$scenario" = runtime_resource_drift ] && nano_cpus=1000000000
         group_add='[]'; [ "$id" = candidate ] && [ "$scenario" = supplementary_group ] && group_add='["0"]'
-        jq -cn --argjson nano_cpus "$nano_cpus" --argjson group_add "$group_add" '{RestartPolicy:{Name:"unless-stopped",MaximumRetryCount:0},NetworkMode:"omni-money-pangolin",ReadonlyRootfs:true,Privileged:false,Init:false,CapDrop:["ALL"],CapAdd:[],GroupAdd:$group_add,Devices:[],PidMode:"",IpcMode:"",NanoCpus:$nano_cpus,Memory:1073741824,PidsLimit:256,LogConfig:{Type:"json-file",Config:{"max-size":"10m","max-file":"3"}},SecurityOpt:["no-new-privileges:true"]}';;
+        device_requests='[]'; [ "$id" = candidate ] && [ "$scenario" = runtime_gpu_request ] && device_requests='[{"Driver":"nvidia","Count":1,"Capabilities":[["gpu"]]}]'
+        device_rules='[]'; [ "$id" = candidate ] && [ "$scenario" = runtime_device_cgroup_rule ] && device_rules='["c 1:3 rwm"]'
+        runtime=runc; [ "$id" = candidate ] && [ "$scenario" = runtime_unapproved_runtime ] && runtime=kata
+        jq -cn --arg runtime "$runtime" --argjson nano_cpus "$nano_cpus" --argjson group_add "$group_add" --argjson device_requests "$device_requests" --argjson device_rules "$device_rules" '{RestartPolicy:{Name:"unless-stopped",MaximumRetryCount:0},NetworkMode:"omni-money-pangolin",ReadonlyRootfs:true,Privileged:false,Init:false,CapDrop:["ALL"],CapAdd:[],GroupAdd:$group_add,DeviceRequests:$device_requests,DeviceCgroupRules:$device_rules,Runtime:$runtime,Devices:[],PidMode:"",IpcMode:"",NanoCpus:$nano_cpus,Memory:1073741824,PidsLimit:256,LogConfig:{Type:"json-file",Config:{"max-size":"10m","max-file":"3"}},SecurityOpt:["no-new-privileges:true"]}';;
       *PortBindings*) [ "$id" = candidate ] && [ "$scenario" = extra_port ] && echo '{"4000/tcp":[{"HostPort":"4000"}]}' || echo '{}';;
       *'.Mounts}'*) container_mounts "$id";;
       *'.NetworkSettings.Networks}'*) container_networks "$id";;
@@ -401,6 +424,7 @@ chmod 0700 "$mock_bin/sleep"
 cat > "$mock_bin/sync" <<'MOCK_SYNC'
 #!/usr/bin/env bash
 printf 'sync %s\n' "$*" >> "$MOCK_LOG"
+[ "${MOCK_SCENARIO:-}" = rollback_journal_failure ] && [ -e "$MOCK_STATE_DIR/rollback_trigger" ] && [[ "$*" == *safe-update-journal* ]] && exit 29
 exit 0
 MOCK_SYNC
 chmod 0700 "$mock_bin/sync"
@@ -491,7 +515,7 @@ run_case() {
     echo "FAIL: $scenario exposed secret content in output or mock log" >&2
     exit 1
   fi
-  if [ "$scenario" = checkpoint_env ] || [ "$scenario" = remote_context ] || [ "$scenario" = remote_host ] || [ "$scenario" = docker_config_override ] || [ "$scenario" = plugin_path_override ] || [ "$scenario" = tar_options ] || [ "$scenario" = env_colon_syntax ] || [ "$scenario" = env_whitespace_syntax ] || [ "$scenario" = env_multiline_quote ] || [ "$scenario" = runtime_env_drift ] || [ "$scenario" = runtime_resource_drift ] || [ "$scenario" = secret_permissions_bad ] || [ "$scenario" = pull_failure ] || [ "$scenario" = compose_config_failure ] || [ "$scenario" = low_space ] || [ "$scenario" = reserve_failure ]; then
+  if [ "$scenario" = checkpoint_env ] || [ "$scenario" = remote_context ] || [ "$scenario" = remote_host ] || [ "$scenario" = docker_config_override ] || [ "$scenario" = plugin_path_override ] || [ "$scenario" = tar_options ] || [ "$scenario" = env_colon_syntax ] || [ "$scenario" = env_whitespace_syntax ] || [ "$scenario" = env_multiline_quote ] || [ "$scenario" = compose_gpu_request ] || [ "$scenario" = compose_device_cgroup_rule ] || [ "$scenario" = compose_unapproved_runtime ] || [ "$scenario" = runtime_env_drift ] || [ "$scenario" = runtime_resource_drift ] || [ "$scenario" = secret_permissions_bad ] || [ "$scenario" = pull_failure ] || [ "$scenario" = compose_config_failure ] || [ "$scenario" = low_space ] || [ "$scenario" = reserve_failure ]; then
     [ "$(cat "$mock_state/current_state")" = running ] && [ "$(cat "$mock_state/phase")" = current ] || { echo "FAIL: $scenario stopped current before a pre-stop failure" >&2; exit 1; }
     [ "$(sha256_file "$fixture_root/.env")" = "$original_env_hash" ] || { echo "FAIL: $scenario changed the env before stop" >&2; exit 1; }
     return 0
@@ -506,6 +530,25 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MO
     rmdir -- "$fixture_root/.omni-money-safe-update.lock"
     for pin_path in "$fixture_root"/.omni-money-safe-update-pin.*; do [ -d "$pin_path" ] && [ ! -L "$pin_path" ] && rm -rf -- "$pin_path"; done
     rm -rf -- "$fixture_root/omni-money-update-checkpoints"
+    return 0
+  fi
+  if [ "$scenario" = rollback_journal_failure ]; then
+    journal_path="$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
+    [ -d "$fixture_root/.omni-money-safe-update.lock" ] && [ -f "$journal_path" ] || { echo "FAIL: rollback journal failure did not preserve lock/journal" >&2; exit 1; }
+    shopt -s nullglob
+    recovery_paths=("$fixture_root/omni-money-update-checkpoints"/*/recovery)
+    pin_paths=("$fixture_root"/.omni-money-safe-update-pin.*)
+    shopt -u nullglob
+    [ "${#recovery_paths[@]}" -eq 1 ] && [ -d "${recovery_paths[0]}" ] && [ "${#pin_paths[@]}" -eq 1 ] || { echo "FAIL: rollback journal failure removed recovery/pin artifacts" >&2; exit 1; }
+    [ "$(cat "$mock_state/candidate_state")" = exited ] && [ "$(cat "$mock_state/current_state")" = absent ] && [ "$(cat "$mock_state/net_candidate")" = none ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: rollback journal failure did not leave containers stopped and ingress-disconnected" >&2; exit 1; }
+    candidate_stop_line="$(grep -n -F 'stop --time 30 candidate' "$mock_state/log" | tail -1 | cut -d: -f1)"
+    current_stop_line="$(grep -n -F 'stop --time 30 current' "$mock_state/log" | tail -1 | cut -d: -f1)"
+    disconnect_line="$(grep -n -F 'network disconnect network-123 candidate' "$mock_state/log" | tail -1 | cut -d: -f1)"
+    journal_sync_line="$(grep -n -F '.safe-update-journal.tmp.' "$mock_state/log" | tail -1 | cut -d: -f1)"
+    [ -n "$candidate_stop_line" ] && [ -n "$current_stop_line" ] && [ -n "$disconnect_line" ] && [ -n "$journal_sync_line" ] && [ "$candidate_stop_line" -lt "$disconnect_line" ] && [ "$current_stop_line" -lt "$disconnect_line" ] && [ "$disconnect_line" -lt "$journal_sync_line" ] || { echo "FAIL: rollback journal preceded stop/disconnect ordering" >&2; exit 1; }
+    [ "$(sha256sum -- "$fixture_root/data/ledger.txt" | sed -E 's/[[:space:]].*$//')" = "$original_data_hash" ] || { echo "FAIL: rollback journal failure touched live data" >&2; exit 1; }
+    rmdir -- "$fixture_root/.omni-money-safe-update.lock"
+    rm -rf -- "${pin_paths[0]}" "$fixture_root/omni-money-update-checkpoints"
     return 0
   fi
   if [ "$scenario" = legacy_archive_failure ]; then
@@ -548,6 +591,10 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MO
     if [ "$scenario" = legacy_project ]; then
       grep -Fq 'rm current' "$mock_state/log" || { echo "FAIL: legacy project was not explicitly migrated" >&2; exit 1; }
     fi
+  elif [ "$scenario" = legacy_archive_failure ]; then
+    [ "$(cat "$mock_state/current_state")" = running ] && [ "$(cat "$mock_state/net_current")" = connected ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: legacy rollback final outcome is not the retained current container" >&2; exit 1; }
+    grep -Fq 'inspect --format {{json .}} current' "$mock_state/log" || { echo "FAIL: legacy rollback did not compare the retained runtime contract" >&2; exit 1; }
+    jq -e '.phase == "rolled-back" and .capacity_reservation_state == "1"' "$fixture_root/omni-money-update-checkpoints/.safe-update-journal" >/dev/null || { echo "FAIL: legacy rollback did not retain the final durable identity outcome" >&2; exit 1; }
   elif [ "$scenario" = rollback_failure ] || [ "$scenario" = network_disconnect_failure ] || [ "$scenario" = rollback_tag_mutation ] || [ "$scenario" = network_contract_drift ]; then
     [ "$(cat "$mock_state/phase")" = rollback ] && [ "$(cat "$mock_state/rollback_state")" != running ] || { echo "FAIL: $scenario left rollback running (phase=$(cat "$mock_state/phase") state=$(cat "$mock_state/rollback_state"))" >&2; sed -n '1,120p' "$mock_state/log" >&2; exit 1; }
     [ "$scenario" = rollback_tag_mutation ] || grep -Fq 'inspect --format {{json .}} rollback' "$mock_state/log" || { echo "FAIL: $scenario did not compare the rollback runtime contract" >&2; exit 1; }
@@ -587,6 +634,9 @@ cat > "$mock_state/config.json" <<EOF
 {"name":"omni-money","x-omni-update-attestation-file":"./attestation.json","services":{"omni-money":{"image":"registry.example/omni-money:1.2.3","container_name":"omni-money","user":"10001:10001","group_add":[],"restart":"unless-stopped","read_only":true,"cap_drop":["ALL"],"cap_add":[],"devices":[],"security_opt":["no-new-privileges:true"],"cpus":2.0,"mem_limit":"1g","pids_limit":256,"logging":{"driver":"json-file","options":{"max-size":"10m","max-file":"3"}},"ports":[],"environment":{"CONTROL_DB_PATH":"/app/data/control/omni_control.db","CONTROL_DB_ENCRYPTION_KEY_FILE":"/run/secrets/omni_control_database_key","VAULT_ROOT":"/app/data/vaults","AUTH_KDF_CONCURRENCY":"2","TMPDIR":"/tmp","SQLITE_TMPDIR":"/tmp","DATA_AT_REST_MODE":"external-encrypted-volume","DATA_AT_REST_ATTESTATION_FILE":"/run/secrets/omni_data_at_rest_attestation.json","HOST_IP":"0.0.0.0","PORT":"4000","SESSION_MAX_AGE_HOURS":"8","SESSION_IDLE_TIMEOUT_MINUTES":"15","SESSION_REAUTH_MAX_AGE_MINUTES":"5","SESSION_MAX_CONCURRENT":"3","TRUSTED_PROXIES":"172.30.240.3/32","FORCE_HTTPS":"true","ALLOW_INSECURE_HTTP":"false","HTTPS_REDIRECT_HOST":"","PASSKEY_RP_ID":"","PASSKEY_ORIGINS":"","ALLOWED_HOSTS":"money.example.com","CORS_ALLOWED_ORIGINS":""},"volumes":[{"type":"bind","source":"$fixture_root/data","target":"/app/data","read_only":false},{"type":"tmpfs","target":"/tmp"}],"secrets":[{"source":"omni_data_at_rest_attestation","target":"omni_data_at_rest_attestation.json"},{"source":"omni_control_database_key","target":"omni_control_database_key"}],"networks":{"pangolin_target":{"ipv4_address":"172.30.240.2"}}}},"secrets":{"omni_data_at_rest_attestation":{"file":"$fixture_root/at-rest.json"},"omni_control_database_key":{"file":"$fixture_root/control.key"}},"networks":{"pangolin_target":{"name":"omni-money-pangolin","internal":true,"ipam":{"config":[{"subnet":"172.30.240.0/28"}]}}}}
 EOF
 
+jq '.services["omni-money"].runtime = "runc"' "$mock_state/config.json" > "$mock_state/config.with-runtime.json"
+mv -- "$mock_state/config.with-runtime.json" "$mock_state/config.json"
+
 if [ -n "${SAFE_UPDATE_ONLY:-}" ]; then
   case "$SAFE_UPDATE_ONLY" in
     success) run_case success 0 ;;
@@ -608,6 +658,9 @@ run_case tar_options 1
 run_case env_colon_syntax 1
 run_case env_whitespace_syntax 1
 run_case env_multiline_quote 1
+run_case compose_gpu_request 1
+run_case compose_device_cgroup_rule 1
+run_case compose_unapproved_runtime 1
 run_case ambient_override 0
 run_case runtime_env_drift 1
 run_case runtime_resource_drift 1
@@ -632,6 +685,7 @@ run_case candidate_ingress_health_failure 1
 run_case network_disconnect_failure 1
 run_case rollback_failure 1
 run_case rollback_tag_mutation 1
+run_case rollback_journal_failure 1
 run_case env_swap 1
 run_case secret_inode_replacement 1
 run_case secret_inode_only_swap 1
@@ -644,6 +698,9 @@ run_case unsafe_cap 1
 run_case named_uid0_user 1
 run_case supplementary_group 1
 run_case network_contract_drift 1
+run_case runtime_gpu_request 1
+run_case runtime_device_cgroup_rule 1
+run_case runtime_unapproved_runtime 1
 run_case sigkill 137
 find "$mock_state" -mindepth 1 ! -name config.json -exec rm -f -- {} +
 printf current > "$mock_state/phase"; printf running > "$mock_state/current_state"; printf connected > "$mock_state/net_current"; : > "$mock_state/log"

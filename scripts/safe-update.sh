@@ -1288,6 +1288,9 @@ write_runtime_contract() {
         ipc_mode: (.HostConfig.IpcMode // ""),
         security_opt: (.HostConfig.SecurityOpt // []),
         group_add: (.HostConfig.GroupAdd // []),
+        device_requests: (.HostConfig.DeviceRequests // []),
+        device_cgroup_rules: (.HostConfig.DeviceCgroupRules // []),
+        runtime: (.HostConfig.Runtime // ""),
         resources: {
           nano_cpus: (.HostConfig.NanoCpus // 0),
           memory: (.HostConfig.Memory // 0),
@@ -1343,6 +1346,9 @@ validate_runtime_safety() {
     ((.HostConfig.LogConfig.Type // "") == "json-file") and
     ((.HostConfig.SecurityOpt // []) | sort == ["no-new-privileges:true"]) and
     (((.HostConfig.GroupAdd // []) | length) == 0) and
+    (((.HostConfig.DeviceRequests // []) | length) == 0) and
+    (((.HostConfig.DeviceCgroupRules // []) | length) == 0) and
+    ((.HostConfig.Runtime // "") == "runc") and
     ((.HostConfig.LogConfig.Config["max-size"] // "") != "") and
     ((.HostConfig.LogConfig.Config["max-file"] // "") != "")
   ' "$raw" >/dev/null; then
@@ -1416,8 +1422,11 @@ validate_desired_host_config() {
     (($a.LogConfig.Type // "") == $s.logging.driver) and
     (($a.LogConfig.Config["max-size"] // "" | tostring) == ($s.logging.options["max-size"] | tostring)) and
     (($a.LogConfig.Config["max-file"] // "" | tostring) == ($s.logging.options["max-file"] | tostring)) and
-    (($a.SecurityOpt // [] | sort) == ($s.security_opt // [] | sort))
-    and (($a.GroupAdd // []) | length == 0)
+    (($a.SecurityOpt // [] | sort) == ($s.security_opt // [] | sort)) and
+    (($a.GroupAdd // []) | length == 0) and
+    (($a.DeviceRequests // []) | length == 0) and
+    (($a.DeviceCgroupRules // []) | length == 0) and
+    (($a.Runtime // "") == $s.runtime) and ($s.runtime == "runc")
   ' >/dev/null; then
     rm -f -- "$actual"
     fail "$label host runtime differs from the resolved Compose contract"
@@ -1496,6 +1505,26 @@ disconnect_all_networks() {
   done < <(jq -r 'keys[]' <<< "$networks")
   networks="$(container_networks "$id")"
   jq -e 'length == 0' <<< "$networks" >/dev/null || { fail "container retained a network after isolation"; return 1; }
+}
+
+disconnect_candidate_ingress() {
+  local id="$1" networks
+  networks="$(container_networks "$id")" || return 1
+  if jq -e 'length == 0' <<< "$networks" >/dev/null; then
+    return 0
+  fi
+  jq -e --arg network "$network_name" --arg network_id "$network_id" '
+    ((keys | length) == 1) and has($network) and (.[$network].NetworkID == $network_id)
+  ' <<< "$networks" >/dev/null || {
+    fail "candidate ingress attachment is not the pinned Docker network"
+    return 1
+  }
+  docker_cli network disconnect "$network_id" "$id" >/dev/null || return 1
+  networks="$(container_networks "$id")" || return 1
+  jq -e 'length == 0' <<< "$networks" >/dev/null || {
+    fail "candidate retained a network after pinned ingress disconnect"
+    return 1
+  }
 }
 
 create_disconnected_container() {
@@ -1938,32 +1967,38 @@ cleanup_private_state() {
 
 rollback_journal_or_stop() {
   if ! write_journal "$1"; then
-    printf 'safe-update: durable rollback journal failed at phase %s; service remains stopped\n' "$1" >&2
-    cleanup_private_state
+    printf 'safe-update: durable rollback journal failed at phase %s; phase cannot advance and lock/journal/recovery artifacts are preserved\n' "$1" >&2
     exit "${rollback_original_status:-1}"
   fi
 }
 
 rollback_update() {
-  local original_status="$1" old_id="" old_image_id="${current_image_id:-}" legacy_state="" reuse_legacy=0
+  local original_status="$1" old_id="" old_image_id="${current_image_id:-}" legacy_state="" reuse_legacy=0 isolation_failed=0
   rollback_original_status="$original_status"
   trap - EXIT INT TERM
   rollback_running=1
   state="rolling-back"
   set +e
   printf 'safe-update: candidate failed; restoring the pre-update checkpoint and previous image\n' >&2
-  rollback_journal_or_stop rollback-start
   if ! validate_pinned_toolchain || ! validate_pinned_docker_socket; then
-    printf 'safe-update: trusted toolchain or Docker socket changed; service remains stopped\n' >&2
-    cleanup_private_state; exit "$original_status"
+    printf 'safe-update: trusted toolchain or Docker socket changed; service remains stopped and recovery artifacts are preserved\n' >&2
+    exit "$original_status"
   fi
   if [ -n "$candidate_id" ] && ! stop_container_safely "$candidate_id" candidate; then
-    printf 'safe-update: candidate could not be safely stopped; service remains stopped\n' >&2
-    cleanup_private_state; exit "$original_status"
+    printf 'safe-update: candidate could not be safely stopped\n' >&2
+    isolation_failed=1
   fi
   if [ -n "$current_id" ] && ! stop_container_safely "$current_id" current; then
-    printf 'safe-update: current container could not be safely stopped; service remains stopped\n' >&2
-    cleanup_private_state; exit "$original_status"
+    printf 'safe-update: current container could not be safely stopped\n' >&2
+    isolation_failed=1
+  fi
+  if [ "$candidate_ingress_state" != never ] && { [ -z "$candidate_id" ] || ! disconnect_candidate_ingress "$candidate_id"; }; then
+    printf 'safe-update: candidate could not be disconnected from the pinned ingress network\n' >&2
+    isolation_failed=1
+  fi
+  if [ "$isolation_failed" -ne 0 ]; then
+    printf 'safe-update: rollback isolation could not be proven; data is untouched and lock/journal/recovery artifacts are preserved for manual recovery\n' >&2
+    exit "$original_status"
   fi
   state="rollback-stopped"
   rollback_journal_or_stop rollback-stopped
@@ -1982,10 +2017,6 @@ rollback_update() {
     printf 'safe-update: Compose source changed; rollback will use the pinned resolved snapshot\n' >&2
   fi
   if [ "$candidate_ingress_state" != never ]; then
-    if [ -z "$candidate_id" ] || ! disconnect_all_networks "$candidate_id"; then
-      printf 'safe-update: candidate ingress isolation could not be proven; live data remains stopped for manual reconciliation\n' >&2
-      cleanup_private_state; exit "$original_status"
-    fi
     if ! quarantine_candidate_data; then
       printf 'safe-update: candidate may have received ingress traffic and its data could not be quarantined safely; automatic restore is prohibited\n' >&2
       cleanup_private_state; exit "$original_status"
@@ -2162,6 +2193,8 @@ safe_update_main() {
     .services["omni-money"] as $s |
     ($s.image == $image) and ($s.container_name == "omni-money") and
     (($s.user | tostring) == "10001:10001") and (($s.group_add // []) | length == 0) and
+    ($s.runtime == "runc") and (($s.gpus // []) | length == 0) and
+    (($s.device_cgroup_rules // []) | length == 0) and
     ($s.read_only == true) and (($s.cap_drop // []) | index("ALL") != null) and
     (($s.cap_drop // []) | sort == ["ALL"]) and (($s.privileged // false) == false) and
     (($s.cap_add // []) | length == 0) and (($s.devices // []) | length == 0) and

@@ -10,6 +10,9 @@ services:
     # candidate image's /etc/passwd and therefore is not a host-side security
     # boundary during safe-update.
     user: "10001:10001"
+    # Do not allow a daemon-level alternative runtime to reinterpret the
+    # container isolation contract.
+    runtime: runc
     restart: unless-stopped
     # The Pangolin deployment is intentionally HTTPS-at-the-edge only. The
     # trusted Newt address below is fixed on the private network so an

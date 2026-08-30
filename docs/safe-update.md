@@ -35,6 +35,9 @@ Linux + Bash 3.2以降 + GNU tar の host contract を要求し、条件を満�
   inspectして、named USERによるUID 0偽装やsupplementary group付与を拒否します。既存の
   containerが`User=omni`等のnamed userなら、safe-updateを使う前にこのCompose定義で一度
   計画停止・再作成し、数値userへ移行してください。
+- container runtimeは`runc`へ固定し、ComposeのGPU request・device cgroup ruleを許可しません。
+  Docker inspectでも`HostConfig.Runtime=runc`、空の`DeviceRequests`/`DeviceCgroupRules`を
+  current、candidate、rollbackのruntime contractとして比較します。
 - up --no-start の直後は必ず compose ps --all -q を読み、IDがちょうど1つで state が
   created（停止）であることを確認します。candidate と rollback のどちらも、network
   を全て disconnect してから start します。
@@ -99,7 +102,11 @@ device/inode/link countと正確な長さでjournalへ固定し、要求blockが
 healthcheck、env 更新、network connect のどれかが失敗した場合、EXIT/INT/TERM trap
 は次の順で処理します。
 
-1. pinned container ID を直接 stop し、partial stop でも安全停止を再試行する。
+1. rollback用journalを書き換える前にcandidate/currentのpinned container IDを直接stopし、
+   partial stopでも安全停止を再試行する。candidateのingress接続が試行済みなら、停止後に
+   pinned network IDからdisconnectしてnetwork 0を確認する。このisolation完了後だけ
+   `rollback-stopped`をdurable journalへ記録する。journal更新が失敗した場合はdataへ触れず、
+   lock/journal/recovery bundleを残してmanual recoveryへ移行する。
 2. checkpoint の archive/checksum と data root の device/inode/link count、owner/mode
    を再検証する。tar の絶対 path、..、control-character/escape 名、symlink、hardlink、
    device、FIFO は作成時・復元前に拒否する。

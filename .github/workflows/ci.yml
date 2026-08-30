@@ -149,6 +149,7 @@ jobs:
             .services["omni-money"].ports == null and
             .services["omni-money"].expose == ["4000"] and
             .services["omni-money"].user == "10001:10001" and
+            .services["omni-money"].runtime == "runc" and
             .services["omni-money"].environment.CONTROL_DB_PATH == "/app/data/control/omni_control.db" and
             .services["omni-money"].environment.CONTROL_DB_ENCRYPTION_KEY_FILE == "/run/secrets/omni_control_database_key" and
             .services["omni-money"].environment.VAULT_ROOT == "/app/data/vaults" and
