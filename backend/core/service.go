@@ -67,21 +67,6 @@ func needsCSVFormulaEscape(value string) bool {
 	return unicode.IsSpace(r) || unicode.IsControl(r) || unicode.In(r, unicode.Cf)
 }
 
-// rejectLegacyCSVFormulaCell protects the unversioned v1 compatibility path.
-// v1 historically treated a leading apostrophe as literal text, so it cannot
-// use the v2 escape decoder; reject only spreadsheet formula prefixes while
-// retaining that legacy apostrophe behavior.
-func rejectLegacyCSVFormulaCell(label, value string) error {
-	if value == "" {
-		return nil
-	}
-	r, _ := utf8.DecodeRuneInString(value)
-	if strings.ContainsRune("=+-@", r) {
-		return fmt.Errorf("%sに未エスケープの数式セルがあります", label)
-	}
-	return nil
-}
-
 // GetAccounts はデータベースから口座名のリストを返す
 func (s *Service) GetAccounts() ([]string, error) {
 	db, err := s.database()
@@ -1301,15 +1286,8 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 		// Both v1 (unversioned) and v2 are historical archive inputs. They may
 		// contain values beyond current new-write limits (for example a 300-byte
 		// account), so validate against the bounded archive ceiling. v1 retains
-		// its historical trim/apostrophe behavior, but formula prefixes and unsafe
-		// controls remain rejected before persistence.
-		if !versionedCSV {
-			for label, value := range map[string]string{"口座名": account, "項目": item, "メモ": memo} {
-				if err := rejectLegacyCSVFormulaCell(label, value); err != nil {
-					return 0, fmt.Errorf("%s (行%d): %w", label, rowNumber, err)
-				}
-			}
-		}
+		// its historical trim/apostrophe behavior and treats formula-like prefixes
+		// as literal text; unsafe controls remain rejected before persistence.
 		textValidator := validation.ValidateArchivedLedgerText
 		for _, field := range []struct {
 			label    string

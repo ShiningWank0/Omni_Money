@@ -894,16 +894,50 @@ func writeCSVRecordsForTest(t *testing.T, records [][]string) string {
 
 func TestCSVV3RejectsDuplicateAndUnknownRowsBeforeWriting(t *testing.T) {
 	setupCoreTestDB(t)
-	base := strings.Join(csvV3Headers, ",") + "\n"
-	row := "3,transaction,1,,0,0,0,cash,2026-01-01,item,income,100,0,,,,,,,,,,"
-	duplicate := base + row + "\n" + row + "\n"
+	row := csvV3Record(map[string]string{
+		csvVersionHeader: "3", "record_type": "transaction", "id": "1",
+		"account": "cash", "date": "2026-01-01", "item": "item", "type": "income", "amount": "100", "balance": "0",
+	})
+	duplicate := writeCSVRecordsForTest(t, [][]string{csvV3Headers, row, row})
 	if _, err := ImportCSV(duplicate, "replace"); err == nil || !strings.Contains(err.Error(), "重複") {
 		t.Fatalf("duplicate v3 transaction result = %v", err)
 	}
 	unknownFields := append([]string{"3", "unknown"}, make([]string, len(csvV3Headers)-2)...)
-	unknown := base + strings.Join(unknownFields, ",") + "\n"
+	unknown := writeCSVRecordsForTest(t, [][]string{csvV3Headers, unknownFields})
 	if _, err := ImportCSV(unknown, "replace"); err == nil || !strings.Contains(err.Error(), "record_type") {
 		t.Fatalf("unknown v3 record result = %v", err)
+	}
+}
+
+func TestCSVV3RejectsNonEmptyDisallowedColumnsForEveryRecordType(t *testing.T) {
+	cases := map[string]string{
+		"transaction":        "filename",
+		"transaction_legacy": "data_base64",
+		"image":              "tag_name",
+		"tag":                "setting_value",
+		"tag_legacy":         "setting_value",
+		"transaction_tag":    "memo",
+		"transaction_link":   "account",
+		"setting":            "filename",
+		"setting_legacy":     "filename",
+	}
+	for recordType, disallowed := range cases {
+		t.Run(recordType, func(t *testing.T) {
+			setupCoreTestDB(t)
+			content := csvV3TestContent(t, map[string]string{
+				csvVersionHeader: "3", "record_type": recordType, disallowed: "smuggled",
+			})
+			if _, err := ImportCSV(content, "replace"); err == nil || !strings.Contains(err.Error(), disallowed) {
+				t.Fatalf("non-empty %s in %s row was accepted: %v", disallowed, recordType, err)
+			}
+			var count int
+			if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transactions").Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("%s shape failure mutated %d transactions", recordType, count)
+			}
+		})
 	}
 }
 

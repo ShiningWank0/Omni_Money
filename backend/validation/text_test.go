@@ -19,6 +19,18 @@ func TestValidateLedgerTextRejectsUnsafeTextWithoutCanonicalizing(t *testing.T) 
 	}
 }
 
+func TestValidateArchivedLedgerTextPreservesSafeFormatCharacters(t *testing.T) {
+	family := "家族👨‍👩‍👧‍👦"
+	if err := ValidateArchivedLedgerText("memo", family, MaxMemoBytes, false); err != nil {
+		t.Fatalf("safe ZWJ text was rejected: %v", err)
+	}
+	for _, value := range []string{"bidi\u202etext", "isolate\u2066text", "line\u2028separator"} {
+		if err := ValidateArchivedLedgerText("memo", value, MaxMemoBytes, false); err == nil {
+			t.Errorf("dangerous archive text was accepted: %q", value)
+		}
+	}
+}
+
 func TestLedgerSettingItemsHaveStableNilAndDuplicateSemantics(t *testing.T) {
 	encoded, err := MarshalLedgerSettingItems(nil)
 	if err != nil || encoded != "[]" {

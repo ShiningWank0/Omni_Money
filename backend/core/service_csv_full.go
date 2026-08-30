@@ -556,6 +556,65 @@ func validateCSVV3ManifestRecordShape(record []string, headers map[string]int) e
 	return nil
 }
 
+// csvV3RecordAllowedColumns is the schema boundary for each typed row. The
+// header is intentionally the complete v3 schema so one parser can be used for
+// every record, but fields belonging to another record type must remain empty.
+// Without this check an otherwise valid transaction row could smuggle an image
+// payload, tag, setting, or relationship through a column that its decoder
+// ignores. Such data would be silently lost on restore.
+var csvV3RecordAllowedColumns = map[string]map[string]struct{}{
+	"transaction": {
+		"id": {}, "account": {}, "date": {}, "item": {}, "type": {}, "amount": {}, "balance": {}, "memo": {},
+	},
+	"transaction_legacy": {
+		"id": {}, "account": {}, "date": {}, "item": {}, "type": {}, "amount": {}, "balance": {}, "memo": {},
+	},
+	"image": {
+		"id": {}, "transaction_id": {}, "filename": {}, "mime_type": {}, "data_base64": {}, "created_at": {},
+	},
+	"tag": {
+		"id": {}, "tag_name": {}, "tag_parent_id": {}, "tag_level": {},
+	},
+	"tag_legacy": {
+		"id": {}, "tag_name": {}, "tag_parent_id": {}, "tag_level": {},
+	},
+	"transaction_tag": {
+		"transaction_id": {}, "tag_id": {},
+	},
+	"transaction_link": {
+		"parent_id": {}, "child_id": {},
+	},
+	"setting": {
+		"setting_key": {}, "setting_value": {},
+	},
+	"setting_legacy": {
+		"setting_key": {}, "setting_value": {},
+	},
+}
+
+func validateCSVV3RecordShape(record []string, headers map[string]int, recordType string) error {
+	allowed, ok := csvV3RecordAllowedColumns[recordType]
+	if !ok {
+		return fmt.Errorf("未対応のrecord_typeです: %s", recordType)
+	}
+	for _, header := range csvV3Headers {
+		if header == csvVersionHeader || header == "record_type" {
+			continue
+		}
+		if _, ok := allowed[header]; ok {
+			continue
+		}
+		value, err := csvV3Get(record, headers, header)
+		if err != nil {
+			return err
+		}
+		if value != "" {
+			return fmt.Errorf("CSV v3 %s行に許可されていない値があります: %s", recordType, header)
+		}
+	}
+	return nil
+}
+
 // csvV3RawTextPrefix is intentionally an otherwise-invalid control-prefixed
 // value. ValidateLedgerText and ValidateArchivedLedgerText reject that control
 // byte, so it cannot collide with an existing persisted ledger value. Encoding
@@ -1431,6 +1490,9 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 		}
 		if !containsCSVV3ManifestRecordType(recordType) {
 			return csvV3Import{}, fmt.Errorf("未対応のrecord_typeです (行%d): %q", rowNumber, recordType)
+		}
+		if err := validateCSVV3RecordShape(record, headerMap, recordType); err != nil {
+			return csvV3Import{}, fmt.Errorf("行%d: %w", rowNumber, err)
 		}
 		recordCounts[recordType]++
 		updateCSVV3Digest(digest, record)
@@ -2336,16 +2398,6 @@ func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Rea
 		dateString = strings.TrimSpace(dateString)
 		txType = strings.ToLower(strings.TrimSpace(txType))
 		amountString = strings.TrimSpace(amountString)
-		// v1 and v2 are historical archive records. Preserve their larger
-		// historical fields while retaining the same unsafe-control policy and
-		// bounded archive ceiling used by v3 legacy rows.
-		if !versionedCSV {
-			for label, value := range map[string]string{"口座名": account, "項目": item, "メモ": memo} {
-				if err := rejectLegacyCSVFormulaCell(label, value); err != nil {
-					return 0, fmt.Errorf("%s (行%d): %w", label, rowNumber, err)
-				}
-			}
-		}
 		textValidator := validation.ValidateArchivedLedgerText
 		for _, field := range []struct {
 			label    string

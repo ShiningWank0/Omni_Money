@@ -66,9 +66,10 @@ func ValidateLedgerText(label, value string, maxBytes int, required bool) error 
 // already persisted before the strict ledger text policy was introduced. It
 // preserves bytes exactly and keeps historical length/required semantics, but
 // never permits bytes unsafe to put in a CSV archive: NUL, C0/C1 controls
-// (apart from memo-compatible whitespace), format/bidi controls, and Unicode
-// line separators remain rejected. New writes and ordinary v3 rows must use
-// ValidateLedgerText instead.
+// (apart from memo-compatible whitespace), dangerous bidi controls, and
+// Unicode line separators remain rejected. Safe format characters such as
+// U+200D ZERO WIDTH JOINER are retained byte-for-byte for migration. New
+// writes and ordinary v3 rows must use ValidateLedgerText instead.
 func ValidateArchivedLedgerText(label, value string, maxBytes int, required bool) error {
 	if required && value == "" {
 		return fmt.Errorf("%sは必須です", label)
@@ -80,7 +81,7 @@ func ValidateArchivedLedgerText(label, value string, maxBytes int, required bool
 		return fmt.Errorf("%sは%dバイト以内にしてください", label, maxBytes)
 	}
 	for _, r := range value {
-		if r == '\x00' || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
+		if r == '\x00' || unicode.Is(unicode.Bidi_Control, r) || r == '\u2028' || r == '\u2029' {
 			return fmt.Errorf("%sに使用できない文字が含まれています", label)
 		}
 		if unicode.IsControl(r) && r != '\t' && r != '\n' && r != '\r' {
