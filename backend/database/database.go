@@ -41,6 +41,11 @@ const ledgerSchemaIdentity = 0x4f4d4e59
 const writableSQLiteQuery = "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 const snapshotSQLiteQuery = "mode=rw&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 
+// SQLite creates these internal statistic/sequence tables itself. Keep the
+// allowlist explicit: a name such as sqlite_evil must be treated as a user
+// table and rejected, rather than disappearing behind a LIKE filter.
+const sqliteUserTablePredicate = "name NOT IN ('sqlite_sequence', 'sqlite_stat1', 'sqlite_stat4')"
+
 // Validation copies are bounded before they are opened.  The retention
 // budget is the upper bound for an individual snapshot in normal operation;
 // keeping the same bound here prevents a hostile off-host file from turning a
@@ -358,7 +363,10 @@ func createTablesOn(target *sql.DB) error {
 		return fmt.Errorf("スキーマidentity取得エラー: %w", err)
 	}
 	var userTables int
-	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&userTables); err != nil {
+	if err := validateInternalSQLiteTables(target); err != nil {
+		return fmt.Errorf("SQLite internal table validation failed: %w", err)
+	}
+	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND " + sqliteUserTablePredicate).Scan(&userTables); err != nil {
 		return fmt.Errorf("schema table count取得エラー: %w", err)
 	}
 	legacyMigration := version == 0 && identity == 0 && userTables > 0
@@ -974,7 +982,10 @@ func validateLedgerSchemaInternal(target schemaQueryer, requireCurrent, strictCu
 		return fmt.Errorf("database identity %08x is not an Omni Money ledger", identity)
 	}
 	var userTables int
-	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&userTables); err != nil {
+	if err := validateInternalSQLiteTables(target); err != nil {
+		return fmt.Errorf("SQLite internal table validation failed: %w", err)
+	}
+	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND " + sqliteUserTablePredicate).Scan(&userTables); err != nil {
 		return err
 	}
 	if userTables == 0 {
@@ -1276,7 +1287,7 @@ func isSupportedLegacyPreMigrationLayout(target schemaQueryer) (bool, error) {
 		return false, err
 	}
 	var extraTables, extraObjects int
-	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('transactions', 'transaction_images')").Scan(&extraTables); err != nil {
+	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND " + sqliteUserTablePredicate + " AND name NOT IN ('transactions', 'transaction_images')").Scan(&extraTables); err != nil {
 		return false, err
 	}
 	if err := target.QueryRow(`
@@ -1302,6 +1313,31 @@ func isLegacyTransactionImagesLayout(target schemaQueryer) (bool, error) {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
 	return canonicalDDL(definition.String) == expected, nil
+}
+
+func validateInternalSQLiteTables(target schemaQueryer) error {
+	expected := map[string]string{
+		"sqlite_sequence": canonicalDDL("CREATE TABLE sqlite_sequence(name,seq)"),
+		"sqlite_stat1":    canonicalDDL("CREATE TABLE sqlite_stat1(tbl,idx,stat)"),
+		"sqlite_stat4":    canonicalDDL("CREATE TABLE sqlite_stat4(tbl,idx,neq,nlt,ndlt,sample)"),
+	}
+	rows, err := target.Query("SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE 'sqlite_%'")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var definition sql.NullString
+		if err := rows.Scan(&name, &definition); err != nil {
+			return err
+		}
+		want, ok := expected[name]
+		if !ok || !definition.Valid || canonicalDDL(definition.String) != want {
+			return fmt.Errorf("unexpected SQLite internal table %s", name)
+		}
+	}
+	return rows.Err()
 }
 
 func requireColumns(target schemaQueryer, table string, required []string) error {
@@ -1337,7 +1373,7 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 		"tags": true, "transaction_tags": true, "ai_transaction_idempotency": true,
 		"ai_daily_transaction_usage": true, "settings": true,
 	}
-	rows, err := target.Query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+	rows, err := target.Query("SELECT name FROM sqlite_master WHERE type='table' AND " + sqliteUserTablePredicate)
 	if err != nil {
 		return err
 	}
@@ -1919,22 +1955,45 @@ func CreateSnapshot(snapshotDir string) (string, error) {
 
 // CreateSnapshot creates a consistent snapshot of this instance.
 func (i *Instance) CreateSnapshot(snapshotDir string) (string, error) {
+	return i.CreateSnapshotContext(context.Background(), snapshotDir)
+}
+
+// CreateSnapshotContext is the request-bound snapshot capability. Cancellation
+// is observed while waiting for process-wide validation admission and during
+// backup/validation; once the public name is atomically published, the caller
+// is allowed to finish the durable completion boundary.
+func (i *Instance) CreateSnapshotContext(ctx context.Context, snapshotDir string) (string, error) {
 	if i == nil {
 		return "", fmt.Errorf("データベースinstanceが初期化されていません")
 	}
-	if err := acquireSnapshotValidation(context.Background()); err != nil {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	i.snapshotLifecycle.RLock()
+	defer i.snapshotLifecycle.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := acquireSnapshotValidation(ctx); err != nil {
 		return "", err
 	}
 	defer snapshotValidationAdmissionRelease()
-	i.snapshotLifecycle.RLock()
-	defer i.snapshotLifecycle.RUnlock()
-	return i.createSnapshot(snapshotDir)
+	return i.createSnapshot(ctx, snapshotDir)
 }
 
 // createSnapshot performs the copy while holding the database lock.  It is
 // called by CreateSnapshot and the auto-snapshot worker, both of which hold a
 // read lock on snapshotLifecycle for the duration of the operation.
-func (i *Instance) createSnapshot(snapshotDir string) (string, error) {
+func (i *Instance) createSnapshot(ctx context.Context, snapshotDir string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
@@ -1989,56 +2048,85 @@ func (i *Instance) createSnapshot(snapshotDir string) (string, error) {
 	// Reserve both one generation slot and the estimated destination bytes
 	// before creating a new file. Only existing snapshot files are candidates;
 	// the live DB and any in-progress output are outside this deletion set.
-	if err := pruneSnapshots(snapshotDir, 29, budget-requiredBytes, ""); err != nil {
+	if err := pruneSnapshotsContext(ctx, snapshotDir, 29, budget-requiredBytes, ""); err != nil {
 		return "", fmt.Errorf("スナップショット容量確保エラー: %w", err)
 	}
 
-	// Nanosecond precision avoids same-process collisions.  copyFile also uses
-	// O_EXCL, so a collision or pre-existing symlink fails closed instead of
-	// overwriting an existing snapshot.
-	timestamp := time.Now().UTC().Format("20060102_150405.000000000")
-	// ドットをアンダースコアに置換してファイル名に安全な形式にする
-	timestamp = strings.ReplaceAll(timestamp, ".", "_")
-	snapshotPath := filepath.Join(snapshotDir, fmt.Sprintf("omni_money_%s.db", timestamp))
+	// The backup is built under a hidden, random staging name. A process crash
+	// can therefore leave only an ignored staging artifact; the public .db name
+	// is published with one atomic rename after validation and fsync.
+	stagingPath, err := randomDatabasePath(snapshotDir, ".omni-money-snapshot-staging-")
+	if err != nil {
+		return "", fmt.Errorf("スナップショットstaging先を作成できません: %w", err)
+	}
+	stagingLive := true
+	defer func() {
+		if stagingLive {
+			_ = removeSQLiteFiles(stagingPath)
+			_ = syncDirectory(snapshotDir)
+		}
+	}()
 
-	// sqlite3_backup APIはWALを含む一貫した状態をオンラインで複製する。
-	// TRUNCATE checkpointを実行しないため、直後の取引更新と競合しない。
-	if err := backupSQLiteDatabase(currentOpener, currentDB, snapshotPath); err != nil {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := backupSQLiteDatabase(ctx, currentOpener, currentDB, stagingPath); err != nil {
 		return "", fmt.Errorf("スナップショット作成エラー: %w", err)
 	}
-	cleanupSnapshot := func() {
-		_ = removePrivateSQLiteFile(snapshotPath)
-		_ = syncDirectory(snapshotDir)
-	}
-	// Backup is not a successful snapshot until the resulting bytes have been
-	// hardened and opened with the same SQLCipher opener. This catches a
-	// plaintext/wrong-key/corrupt output before it is exposed to ListSnapshots.
-	if err := os.Chmod(snapshotPath, 0600); err != nil {
-		cleanupSnapshot()
+	if err := os.Chmod(stagingPath, 0600); err != nil {
 		return "", fmt.Errorf("スナップショット権限設定エラー: %w", err)
 	}
-	if err := hardenPrivateFile(snapshotPath); err != nil {
-		cleanupSnapshot()
+	if err := hardenPrivateFile(stagingPath); err != nil {
 		return "", fmt.Errorf("スナップショットACL設定エラー: %w", err)
 	}
-	created, err := currentOpener.Open(context.Background(), snapshotPath, securedb.ReadOnly)
+	if err := syncFileAndDirectory(stagingPath, snapshotDir); err != nil {
+		return "", fmt.Errorf("スナップショットstaging fsyncエラー: %w", err)
+	}
+	created, err := currentOpener.Open(ctx, stagingPath, securedb.ReadOnly)
 	if err != nil {
-		cleanupSnapshot()
 		return "", fmt.Errorf("作成済みスナップショットを開けません: %w", err)
 	}
-	validationErr := i.validateSnapshotDatabase(created, snapshotPath)
+	validationErr := i.validateSnapshotDatabaseContext(ctx, created, stagingPath)
 	closeErr := created.Close()
 	if validationErr != nil || closeErr != nil {
-		cleanupSnapshot()
 		return "", errors.Join(errors.New("作成済みスナップショットの検証に失敗しました"), validationErr, closeErr)
 	}
-	if err := pruneSnapshots(snapshotDir, 30, budget, snapshotPath); err != nil {
-		cleanupSnapshot()
-		return "", fmt.Errorf("スナップショット容量検査エラー: %w", err)
+	if err := syncFileAndDirectory(stagingPath, snapshotDir); err != nil {
+		return "", fmt.Errorf("検証済みスナップショットstaging fsyncエラー: %w", err)
 	}
+
+	// Keep the timestamp-oriented public naming used by the desktop UI, while
+	// adding cryptographic randomness so a collision cannot replace an older
+	// snapshot. The random path helper checks existence before the atomic rename.
+	timestamp := time.Now().UTC().Format("20060102_150405.000000000")
+	timestamp = strings.ReplaceAll(timestamp, ".", "_")
+	randomSuffix := make([]byte, 8)
+	if _, err := cryptorand.Read(randomSuffix); err != nil {
+		return "", fmt.Errorf("スナップショット名生成エラー: %w", err)
+	}
+	snapshotPath := filepath.Join(snapshotDir, fmt.Sprintf("omni_money_%s_%s.db", timestamp, hex.EncodeToString(randomSuffix)))
+	clear(randomSuffix)
+	if _, err := os.Lstat(snapshotPath); err == nil {
+		return "", errors.New("スナップショット名が衝突しました")
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("スナップショット名検査エラー: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(stagingPath, snapshotPath); err != nil {
+		return "", fmt.Errorf("スナップショット公開エラー: %w", err)
+	}
+	stagingLive = false
+	// From this point onward the public name is complete and must not be
+	// retracted merely because the HTTP client canceled. Finish the durable
+	// completion boundary with cancellation detached from the request.
+	durableCtx := context.WithoutCancel(ctx)
 	if err := syncDirectory(snapshotDir); err != nil {
-		cleanupSnapshot()
 		return "", fmt.Errorf("スナップショットdirectory fsyncエラー: %w", err)
+	}
+	if err := pruneSnapshotsContext(durableCtx, snapshotDir, 30, budget, snapshotPath); err != nil {
+		return "", fmt.Errorf("スナップショット容量検査エラー: %w", err)
 	}
 
 	// Audit records deliberately contain only the operation and result.  The
@@ -2068,15 +2156,15 @@ func (i *Instance) ListSnapshotsContext(ctx context.Context, snapshotDir string)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := acquireSnapshotValidation(ctx); err != nil {
-		return nil, err
-	}
-	defer snapshotValidationAdmissionRelease()
 	i.snapshotLifecycle.RLock()
 	defer i.snapshotLifecycle.RUnlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := acquireSnapshotValidation(ctx); err != nil {
+		return nil, err
+	}
+	defer snapshotValidationAdmissionRelease()
 	if snapshotDir == "" {
 		snapshotDir = i.getSnapshotDir()
 	}
@@ -2085,6 +2173,9 @@ func (i *Instance) ListSnapshotsContext(ctx context.Context, snapshotDir string)
 			return []string{}, nil
 		}
 		return nil, fmt.Errorf("スナップショットディレクトリが安全ではありません: %w", err)
+	}
+	if err := cleanupSnapshotStagingDir(ctx, snapshotDir); err != nil {
+		return nil, fmt.Errorf("スナップショットstaging cleanupエラー: %w", err)
 	}
 
 	i.mu.RLock()
@@ -2112,7 +2203,7 @@ func (i *Instance) ListSnapshotsContext(ctx context.Context, snapshotDir string)
 		if checked >= maxSnapshotValidationEntries {
 			break
 		}
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".db") {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".db") {
 			continue
 		}
 		if err := validateSnapshotName(entry.Name()); err != nil {
@@ -2279,7 +2370,10 @@ func (i *Instance) validateSnapshotDatabaseContext(ctx context.Context, target *
 		return err
 	}
 	var userTables int
-	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&userTables); err != nil {
+	if err := validateInternalSQLiteTables(target); err != nil {
+		return fmt.Errorf("SQLite internal table validation failed: %w", err)
+	}
+	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND " + sqliteUserTablePredicate).Scan(&userTables); err != nil {
 		return err
 	}
 	if userTables == 0 {
@@ -2314,8 +2408,18 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 // touched.  Only after that validation does the lifecycle lock permit an
 // atomic rename swap.  A failed reopen rolls the old file back into place.
 func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
+	return i.RestoreSnapshotContext(context.Background(), snapshotDir, snapshotName)
+}
+
+// RestoreSnapshotContext keeps request cancellation active until the live
+// pathname replacement begins. After that point it completes the durable
+// publication/validation boundary so cancellation cannot strand a half-swap.
+func (i *Instance) RestoreSnapshotContext(ctx context.Context, snapshotDir, snapshotName string) error {
 	if i == nil {
 		return fmt.Errorf("データベースinstanceが初期化されていません")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	// スナップショット名の検証（パストラバーサル防止）。
 	// APIから任意の名前が渡り得るため、ディレクトリ区切りや ".." を含む名前、
@@ -2323,13 +2427,22 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if err := validateSnapshotName(snapshotName); err != nil {
 		return err
 	}
-	if err := acquireSnapshotValidation(context.Background()); err != nil {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Drain/lifecycle comes before process-wide admission. An auto-snapshot
+	// worker may already be marked running while waiting for that admission;
+	// taking the gate first would make this restore wait for the worker while
+	// the worker waits for the gate.
+	i.beginDBLifecycle()
+	defer i.endDBLifecycle()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := acquireSnapshotValidation(ctx); err != nil {
 		return err
 	}
 	defer snapshotValidationAdmissionRelease()
-
-	i.beginDBLifecycle()
-	defer i.endDBLifecycle()
 
 	// 復元中に他のリクエストが nil の DB 接続へアクセスして panic しないよう、
 	// ファイル差し替えと再接続が終わるまでロックを保持し続ける。
@@ -2380,17 +2493,17 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 		}
 		return fmt.Errorf("スナップショットfd検証エラー: %w", err)
 	}
-	sourceDigest, err := digestOpenFile(snapshotFile)
+	sourceDigest, err := digestOpenFileContext(ctx, snapshotFile)
 	if err != nil {
 		return fmt.Errorf("スナップショットdigest検証エラー: %w", err)
 	}
-	if err := copyFileToOpen(snapshotFile, candidateFile); err != nil {
+	if err := copyFileToOpenBoundedContext(ctx, snapshotFile, candidateFile, maxSnapshotValidationBytes); err != nil {
 		return fmt.Errorf("スナップショット候補コピーエラー: %w", err)
 	}
 	if err := candidateFile.Sync(); err != nil {
 		return fmt.Errorf("復元候補のsyncエラー: %w", err)
 	}
-	postSourceDigest, err := digestOpenFile(snapshotFile)
+	postSourceDigest, err := digestOpenFileContext(ctx, snapshotFile)
 	if err != nil || !strings.EqualFold(sourceDigest, postSourceDigest) {
 		if err == nil {
 			err = errors.New("スナップショットがコピー中に変更されました")
@@ -2400,7 +2513,7 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	// Keep the original candidate descriptor as the identity anchor. Digesting
 	// by pathname here would let a same-account writer substitute another
 	// valid database between validation and the eventual replace.
-	candidateDigest, err := digestOpenFile(candidateFile)
+	candidateDigest, err := digestOpenFileContext(ctx, candidateFile)
 	if err != nil || !strings.EqualFold(sourceDigest, candidateDigest) {
 		if err == nil {
 			err = errors.New("復元候補digestがスナップショットと一致しません")
@@ -2410,11 +2523,11 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if err := assertOpenFileAtPath(candidateFile, candidatePath); err != nil {
 		return fmt.Errorf("復元候補identity検証エラー: %w", err)
 	}
-	candidateDB, err := i.opener.Open(context.Background(), candidatePath, securedb.Writable)
+	candidateDB, err := i.opener.Open(ctx, candidatePath, securedb.Writable)
 	if err != nil {
 		return fmt.Errorf("復元候補のDB接続エラー: %w", err)
 	}
-	if err := i.validateRestoreDatabase(candidateDB, candidatePath); err != nil {
+	if err := i.validateRestoreDatabaseContext(ctx, candidateDB, candidatePath); err != nil {
 		_ = candidateDB.Close()
 		return err
 	}
@@ -2424,10 +2537,13 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if err := syncFileAndDirectory(candidatePath, dir); err != nil {
 		return fmt.Errorf("復元候補のfsyncエラー: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// Migration/checkpoint may rewrite the candidate in place. Re-digest the
 	// same open descriptor and bind the final pathname to that descriptor again
 	// before closing it for the platform-specific atomic replace.
-	candidateDigest, err = digestOpenFile(candidateFile)
+	candidateDigest, err = digestOpenFileContext(ctx, candidateFile)
 	if err != nil {
 		return fmt.Errorf("復元候補descriptor digestエラー: %w", err)
 	}
@@ -2448,6 +2564,9 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	// pathname is deliberately kept in place until the replacement is ready:
 	// a rename of live -> backup followed by a second rename would expose a
 	// missing database if the process were killed at the boundary.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, err := i.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		return fmt.Errorf("現行DBのcheckpointエラー: %w", err)
 	}
@@ -2456,6 +2575,10 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if closeErr != nil {
 		return fmt.Errorf("現行DBのクローズエラー: %w", closeErr)
 	}
+	// The live handle is now closed and i.db is nil. Ignore request
+	// cancellation from this point onward so cleanup, journal, replacement and
+	// reopen complete as one durable restore transaction.
+	durableCtx := context.WithoutCancel(ctx)
 	if err := removeSQLiteSidecars(currentPath); err != nil {
 		// The live handle is intentionally not republished after a post-close
 		// filesystem failure. The vault manager still owns the drained entry and
@@ -2536,9 +2659,9 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 		return errors.Join(fmt.Errorf("restore intent journal更新エラー: %w", err), rollbackRestoreFilesExpected(currentPath, backupPath, candidatePath, i, oldDigest))
 	}
 
-	newDB, err := i.opener.Open(context.Background(), currentPath, securedb.Writable)
+	newDB, err := i.opener.Open(durableCtx, currentPath, securedb.Writable)
 	if err == nil {
-		err = i.validateRestoreDatabase(newDB, currentPath)
+		err = i.validateRestoreDatabaseContext(durableCtx, newDB, currentPath)
 	}
 	if err != nil {
 		if newDB != nil {
@@ -2552,9 +2675,9 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	}
 	// Reopen once more after checkpointing so i.db never references a handle
 	// whose pager state predates the final durable candidate.
-	newDB, err = i.opener.Open(context.Background(), currentPath, securedb.Writable)
+	newDB, err = i.opener.Open(durableCtx, currentPath, securedb.Writable)
 	if err == nil {
-		err = i.validateRestoreDatabase(newDB, currentPath)
+		err = i.validateRestoreDatabaseContext(durableCtx, newDB, currentPath)
 	}
 	if err != nil {
 		if newDB != nil {
@@ -2581,8 +2704,18 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 }
 
 func (i *Instance) validateRestoreDatabase(target *sql.DB, path string) error {
+	return i.validateRestoreDatabaseContext(context.Background(), target, path)
+}
+
+func (i *Instance) validateRestoreDatabaseContext(ctx context.Context, target *sql.DB, path string) error {
 	if target == nil {
 		return fmt.Errorf("復元候補DBが初期化されていません")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	// Restore validation is not fresh-database initialization. A blank
 	// user_version=0 SQLite file must never be accepted and then populated by
@@ -2590,7 +2723,10 @@ func (i *Instance) validateRestoreDatabase(target *sql.DB, path string) error {
 	// ledger. Supported legacy snapshots must at least contain the historical
 	// transaction shape before migration.
 	var userTables int
-	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&userTables); err != nil {
+	if err := validateInternalSQLiteTables(target); err != nil {
+		return fmt.Errorf("SQLite internal table validation failed: %w", err)
+	}
+	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND " + sqliteUserTablePredicate).Scan(&userTables); err != nil {
 		return fmt.Errorf("復元DB table count検査エラー: %w", err)
 	}
 	if userTables == 0 {
@@ -2602,13 +2738,16 @@ func (i *Instance) validateRestoreDatabase(target *sql.DB, path string) error {
 	if err := requireFullSynchronous(target); err != nil {
 		return fmt.Errorf("復元DB耐久性設定エラー: %w", err)
 	}
-	if err := i.checkIntegrity(target); err != nil {
+	if err := i.checkIntegrityContext(ctx, target); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := createTablesOn(target); err != nil {
 		return fmt.Errorf("復元DBスキーマ更新エラー: %w", err)
 	}
-	if err := i.checkIntegrity(target); err != nil {
+	if err := i.checkIntegrityContext(ctx, target); err != nil {
 		return err
 	}
 	if i.opener != nil && i.opener.Encrypted() {
@@ -2712,6 +2851,7 @@ func validateSnapshotName(name string) error {
 	if name != filepath.Base(name) ||
 		strings.ContainsAny(name, `/\`) ||
 		strings.Contains(name, "..") ||
+		strings.HasPrefix(name, ".") ||
 		!strings.HasSuffix(name, ".db") {
 		return fmt.Errorf("スナップショット名が不正です")
 	}
@@ -2839,6 +2979,61 @@ func readDirectoryEntriesContext(ctx context.Context, path string, maxEntries in
 	}
 }
 
+// cleanupSnapshotStagingDir removes only hidden, generated staging families.
+// Public snapshot names are never part of this cleanup set, and unsafe
+// symlink/hardlink artifacts fail closed instead of being followed or
+// unlinked. This is called before listing and during startup so a crash cannot
+// turn a partial final-name/scratch file into a restore or retention target.
+func cleanupSnapshotStagingDir(ctx context.Context, path string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := validateSnapshotDirectory(path); err != nil {
+		return err
+	}
+	entries, err := readDirectoryEntriesContext(ctx, path, maxSnapshotDirectoryEntries)
+	if err != nil {
+		return err
+	}
+	var cleanupErrs []error
+	removed := false
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := entry.Name()
+		isGenerated := strings.HasPrefix(name, ".omni-money-snapshot-staging-") || strings.HasPrefix(name, ".omni-money-list-validation-")
+		isDatabase := isGenerated && strings.HasSuffix(name, ".db")
+		isSidecar := isGenerated && (strings.HasSuffix(name, ".db-wal") || strings.HasSuffix(name, ".db-shm") || strings.HasSuffix(name, ".db-journal"))
+		if !isDatabase && !isSidecar {
+			continue
+		}
+		artifactPath := filepath.Join(path, name)
+		var removeErr error
+		if isDatabase {
+			removeErr = removeRecoveryArtifact(artifactPath, path)
+		} else {
+			removeErr = removePrivateSQLiteFile(artifactPath)
+		}
+		if removeErr != nil {
+			cleanupErrs = append(cleanupErrs, removeErr)
+		} else {
+			removed = true
+		}
+	}
+	if removed {
+		if err := syncDirectory(path); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+		}
+	}
+	return errors.Join(cleanupErrs...)
+}
+
 func acquireSnapshotValidation(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -2883,7 +3078,7 @@ func pruneSnapshotsContext(ctx context.Context, snapshotDir string, maxKeep int,
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".db") {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".db") {
 			continue
 		}
 		path := filepath.Join(snapshotDir, entry.Name())
@@ -2994,19 +3189,22 @@ func (i *Instance) StartAutoSnapshot() {
 
 func (i *Instance) runAutoSnapshots() {
 	for {
-		if err := acquireSnapshotValidation(context.Background()); err != nil {
+		i.snapshotLifecycle.RLock()
+		if !i.acquireAutoSnapshotValidation() {
+			// Closing instances must not leave a worker permanently blocked on the
+			// process-wide admission gate. snapshotRunning is cleared below so a
+			// lifecycle drain can complete deterministically.
 			log.Printf("security_event=snapshot_create result=error")
 		} else {
-			i.snapshotLifecycle.RLock()
-			_, err := i.createSnapshot("")
+			_, err := i.createSnapshot(context.Background(), "")
 			if err != nil {
 				log.Printf("security_event=snapshot_create result=error")
 			} else if err := i.cleanOldSnapshots("", 30); err != nil {
 				log.Printf("security_event=snapshot_prune result=error")
 			}
-			i.snapshotLifecycle.RUnlock()
 			snapshotValidationAdmissionRelease()
 		}
+		i.snapshotLifecycle.RUnlock()
 
 		i.snapshotMu.Lock()
 		if i.snapshotPending && !i.snapshotClosing {
@@ -3019,6 +3217,42 @@ func (i *Instance) runAutoSnapshots() {
 		i.snapshotCond.Broadcast()
 		i.snapshotMu.Unlock()
 		return
+	}
+}
+
+// acquireAutoSnapshotValidation bounds the wait for an asynchronous worker.
+// It uses short context-aware admission attempts so beginDBLifecycle can mark
+// the instance closing and release the worker even when another tenant owns
+// the global validation budget.
+func (i *Instance) acquireAutoSnapshotValidation() bool {
+	firstAttempt := true
+	for {
+		i.snapshotMu.Lock()
+		closing := i.snapshotClosing
+		i.snapshotMu.Unlock()
+		if closing && !firstAttempt {
+			return false
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		err := acquireSnapshotValidation(ctx)
+		cancel()
+		if err == nil {
+			i.snapshotMu.Lock()
+			closing = i.snapshotClosing
+			i.snapshotMu.Unlock()
+			if closing && !firstAttempt {
+				snapshotValidationAdmissionRelease()
+				return false
+			}
+			return true
+		}
+		firstAttempt = false
+		i.snapshotMu.Lock()
+		closing = i.snapshotClosing
+		i.snapshotMu.Unlock()
+		if closing {
+			return false
+		}
 	}
 }
 
@@ -3113,11 +3347,14 @@ func hardenSQLiteFiles(path string) error {
 }
 
 // backupSQLiteDatabase はSQLiteのオンラインBackup APIで一貫した複製を作る。
-func backupSQLiteDatabase(opener *securedb.Opener, source *sql.DB, snapshotPath string) error {
+func backupSQLiteDatabase(ctx context.Context, opener *securedb.Opener, source *sql.DB, snapshotPath string) error {
 	if opener == nil {
 		return fmt.Errorf("データベースopenerが初期化されていません")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	return opener.Backup(ctx, source, snapshotPath)
 }
@@ -3460,8 +3697,18 @@ func assertPathDigest(path string, expectedInfo os.FileInfo, expectedDigest stri
 }
 
 func digestOpenFile(file *os.File) (string, error) {
+	return digestOpenFileContext(context.Background(), file)
+}
+
+func digestOpenFileContext(ctx context.Context, file *os.File) (string, error) {
 	if file == nil {
 		return "", errors.New("nil file for digest")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	info, err := file.Stat()
 	if err != nil {
@@ -3474,7 +3721,10 @@ func digestOpenFile(file *os.File) (string, error) {
 		return "", err
 	}
 	hash := sha256.New()
-	if _, err := io.CopyN(hash, file, info.Size()); err != nil {
+	if _, err := io.CopyN(hash, contextReader{ctx: ctx, r: io.LimitReader(file, info.Size())}, info.Size()); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	post, err := file.Stat()
@@ -3568,6 +3818,9 @@ func removeRecoveryArtifact(path, dir string) error {
 // closed and are left for an operator rather than being guessed away.
 func (i *Instance) recoverRestoreState(databasePath string) error {
 	dir := filepath.Dir(databasePath)
+	if err := cleanupSnapshotStagingDir(context.Background(), filepath.Join(dir, "snapshots")); err != nil {
+		return fmt.Errorf("snapshot staging recovery failed: %w", err)
+	}
 	manifest, hasManifest, err := readRestoreManifest(databasePath)
 	if err != nil {
 		return err

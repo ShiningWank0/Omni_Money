@@ -94,6 +94,17 @@ func TestSnapshotValidationAdmissionIsProcessWideAndCancelable(t *testing.T) {
 	_ = firstSnapshots
 }
 
+func TestCreateSnapshotContextHonorsCancellationBeforeAdmission(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	snapshotValidationAdmission <- struct{}{}
+	defer snapshotValidationAdmissionRelease()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := instance.CreateSnapshotContext(ctx, snapshotDir); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("canceled snapshot creation error = %v, want context deadline", err)
+	}
+}
+
 func TestDirectoryScanBoundsEntriesBeforeMaterializing(t *testing.T) {
 	dir := t.TempDir()
 	for index := 0; index <= maxSnapshotDirectoryEntries; index++ {

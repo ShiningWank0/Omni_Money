@@ -34,7 +34,7 @@ func handleServerSnapshots(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonResponse(w, entries, http.StatusOK)
 	case http.MethodPost:
-		path, err := snapshots.CreateSnapshot()
+		path, err := snapshots.CreateSnapshotContext(r.Context())
 		if err != nil {
 			log.Printf("security_event=snapshot_create result=error")
 			jsonError(w, "スナップショットを作成できません", http.StatusServiceUnavailable)

@@ -514,6 +514,41 @@ func TestCurrentSchemaRejectsWritableSchemaInjectedSQLiteObject(t *testing.T) {
 	}
 }
 
+func TestCurrentSchemaRejectsWritableSchemaInjectedSQLiteTable(t *testing.T) {
+	instance, err := OpenPlainInstance(filepath.Join(t.TempDir(), "writable-table.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	if _, err := instance.DB().Exec("PRAGMA writable_schema = ON"); err != nil {
+		t.Fatal(err)
+	}
+	_, insertErr := instance.DB().Exec(`INSERT INTO sqlite_master(type, name, tbl_name, rootpage, sql)
+		VALUES ('table', 'sqlite_evil_injected', 'sqlite_evil_injected', 0,
+		'CREATE TABLE sqlite_evil_injected(secret TEXT)')`)
+	_, disableErr := instance.DB().Exec("PRAGMA writable_schema = OFF")
+	if insertErr != nil || disableErr != nil {
+		t.Fatalf("writable_schema table fixture setup failed: insert=%v disable=%v", insertErr, disableErr)
+	}
+	if err := validateLedgerSchema(instance.DB(), true); err == nil {
+		t.Fatal("SQL-bearing sqlite-prefixed table was accepted")
+	}
+}
+
+func TestCurrentSchemaAllowsExactSQLiteStatisticTable(t *testing.T) {
+	instance, err := OpenPlainInstance(filepath.Join(t.TempDir(), "sqlite-stat.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	if _, err := instance.DB().Exec("ANALYZE"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLedgerSchema(instance.DB(), true); err != nil {
+		t.Fatalf("exact SQLite statistic table was rejected: %v", err)
+	}
+}
+
 func TestCurrentSchemaRejectsPartialVariantOfNonPartialIndex(t *testing.T) {
 	instance, err := OpenPlainInstance(filepath.Join(t.TempDir(), "partial-index.db"))
 	if err != nil {

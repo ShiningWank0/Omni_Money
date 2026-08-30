@@ -158,7 +158,7 @@ type sessionVaultRoot struct {
 
 type requestVaultLease struct {
 	service        *core.Service
-	createSnapshot func() (string, error)
+	createSnapshot func(context.Context) (string, error)
 	listSnapshots  func(context.Context) ([]string, error)
 	release        func()
 	once           sync.Once
@@ -214,7 +214,7 @@ func newSessionVaultRoot(lease *vault.Lease) (*sessionVaultRoot, error) {
 		}
 		return &requestVaultLease{
 			service:        service,
-			createSnapshot: child.CreateSnapshot,
+			createSnapshot: child.CreateSnapshotContext,
 			listSnapshots:  child.ListSnapshotsContext,
 			release:        child.Release,
 		}, nil
@@ -278,6 +278,10 @@ func (lease *requestVaultLease) Service() *core.Service {
 }
 
 func (lease *requestVaultLease) CreateSnapshot() (string, error) {
+	return lease.CreateSnapshotContext(context.Background())
+}
+
+func (lease *requestVaultLease) CreateSnapshotContext(ctx context.Context) (string, error) {
 	if lease == nil {
 		return "", vault.ErrLeaseReleased
 	}
@@ -286,7 +290,7 @@ func (lease *requestVaultLease) CreateSnapshot() (string, error) {
 	if lease.release == nil || lease.createSnapshot == nil {
 		return "", vault.ErrLeaseReleased
 	}
-	return lease.createSnapshot()
+	return lease.createSnapshot(ctx)
 }
 
 func (lease *requestVaultLease) ListSnapshots() ([]string, error) {
@@ -1148,6 +1152,7 @@ func CoreServiceFromContext(ctx context.Context) (*core.Service, bool) {
 // authenticated user's borrowed lease.
 type SnapshotService interface {
 	CreateSnapshot() (string, error)
+	CreateSnapshotContext(context.Context) (string, error)
 	ListSnapshots() ([]string, error)
 	ListSnapshotsContext(context.Context) ([]string, error)
 }

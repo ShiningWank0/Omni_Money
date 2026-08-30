@@ -306,6 +306,12 @@ func (l *Lease) Service() (*core.Service, error) {
 // instance.  It is deliberately a method on Lease, so callers cannot select
 // another user's database or supply an arbitrary snapshot directory.
 func (l *Lease) CreateSnapshot() (string, error) {
+	return l.CreateSnapshotContext(context.Background())
+}
+
+// CreateSnapshotContext preserves the caller's request lifetime through the
+// database backup and validation admission boundary.
+func (l *Lease) CreateSnapshotContext(ctx context.Context) (string, error) {
 	if l == nil || l.state == nil {
 		return "", ErrLeaseReleased
 	}
@@ -314,7 +320,7 @@ func (l *Lease) CreateSnapshot() (string, error) {
 	if l.state.released || l.manager == nil || l.entry == nil || l.entry.instance == nil {
 		return "", ErrLeaseReleased
 	}
-	return l.entry.instance.CreateSnapshot("")
+	return l.entry.instance.CreateSnapshotContext(ctx, "")
 }
 
 // ListSnapshots lists only this lease's default per-vault snapshot directory.
@@ -463,7 +469,7 @@ func (o *RestoreOperation) RestoreSnapshot(ctx context.Context, name string) err
 	}
 	instance := o.entry.instance
 	o.manager.mu.Unlock()
-	return instance.RestoreSnapshot("", name)
+	return instance.RestoreSnapshotContext(ctx, "", name)
 }
 
 // Release abandons a restore operation.  Repeated calls are safe.  Once all

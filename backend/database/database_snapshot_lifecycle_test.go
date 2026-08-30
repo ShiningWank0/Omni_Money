@@ -1,10 +1,14 @@
 package database
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestAutoSnapshotCloseWaitsAndResetsState exercises the lifecycle boundary
@@ -45,6 +49,90 @@ func TestAutoSnapshotCloseWaitsAndResetsState(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(secondDir, "snapshots")); err != nil {
 		t.Fatalf("second database snapshot directory missing: %v", err)
+	}
+}
+
+func TestRestoreLifecycleAdmissionDoesNotDeadlockWithAutoSnapshot(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previousProcs) })
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	snapshotPath, err := instance.CreateSnapshot(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold the only process-wide validation slot so the already-running auto
+	// worker is forced to wait. Restore must drain first, allowing the worker to
+	// observe closing and exit instead of waiting on a gate held by restore.
+	snapshotValidationAdmission <- struct{}{}
+	instance.StartAutoSnapshot()
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- instance.RestoreSnapshotContext(ctx, snapshotDir, filepath.Base(snapshotPath))
+	}()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("restore error = %v, want admission deadline", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("restore remained blocked behind auto-snapshot admission")
+	}
+	snapshotValidationAdmissionRelease()
+	if err := instance.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSnapshotStagingArtifactsAreNotPublicSnapshots(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	snapshotPath, err := instance.CreateSnapshot(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		".omni-money-snapshot-staging-crashed.db",
+		".omni-money-list-validation-crashed.db",
+	} {
+		if err := os.WriteFile(filepath.Join(snapshotDir, name), []byte("partial"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := instance.ListSnapshots(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0] != filepath.Base(snapshotPath) {
+		t.Fatalf("listed snapshots = %v, want only %s", entries, filepath.Base(snapshotPath))
+	}
+	for _, name := range []string{
+		".omni-money-snapshot-staging-crashed.db",
+		".omni-money-list-validation-crashed.db",
+	} {
+		if _, err := os.Stat(filepath.Join(snapshotDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("stale staging artifact %s remains: %v", name, err)
+		}
+	}
+}
+
+func TestStartupRemovesStaleSnapshotStagingArtifacts(t *testing.T) {
+	instance, databasePath, snapshotDir := newPlainSnapshotTestInstance(t)
+	if err := instance.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(snapshotDir, ".omni-money-list-validation-crashed.db")
+	if err := os.WriteFile(stale, []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenPlainInstance(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("startup left stale validation artifact: %v", err)
 	}
 }
 
