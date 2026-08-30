@@ -431,11 +431,15 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 	if err != nil {
 		return nil, fmt.Errorf("更新後データ取得エラー: %w", err)
 	}
+	settings, err := loadLedgerSettingsIn(tx)
+	if err != nil {
+		return nil, fmt.Errorf("設定取得エラー: %w", err)
+	}
+	if err := pruneInvalidTransactionLinksIn(tx, settings); err != nil {
+		return nil, fmt.Errorf("紐付け整合性チェックエラー: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("トランザクションコミットエラー: %w", err)
-	}
-	if err := s.pruneInvalidTransactionLinks(); err != nil {
-		return nil, fmt.Errorf("紐付け整合性チェックエラー: %w", err)
 	}
 	t.Date = parseDate(dateStr)
 	resp := t.ToResponse()
@@ -599,9 +603,6 @@ func (s *Service) SaveCreditCardSettings(items []string) error {
 	if err := s.saveStringSliceSetting("credit_card_items", items); err != nil {
 		return fmt.Errorf("クレジットカード設定保存エラー: %w", err)
 	}
-	if err := s.pruneInvalidTransactionLinks(); err != nil {
-		return fmt.Errorf("紐付け整合性チェックエラー: %w", err)
-	}
 	s.autoSnapshot()
 	return nil
 }
@@ -615,9 +616,6 @@ func (s *Service) GetBankAccountSettings() ([]string, error) {
 func (s *Service) SaveBankAccountSettings(items []string) error {
 	if err := s.saveStringSliceSetting("bank_account_items", items); err != nil {
 		return fmt.Errorf("銀行口座設定保存エラー: %w", err)
-	}
-	if err := s.pruneInvalidTransactionLinks(); err != nil {
-		return fmt.Errorf("紐付け整合性チェックエラー: %w", err)
 	}
 	s.autoSnapshot()
 	return nil
@@ -637,27 +635,47 @@ func (s *Service) getStringSliceSetting(key string) ([]string, error) {
 		return nil, err
 	}
 	var items []string
-	if err := json.Unmarshal([]byte(value), &items); err != nil {
-		return []string{}, nil
+	items, err = validation.ParseLedgerSettingItems(value)
+	if err != nil {
+		return nil, err
 	}
 	return items, nil
 }
 
 func (s *Service) saveStringSliceSetting(key string, items []string) error {
+	if key != "credit_card_items" && key != "bank_account_items" {
+		return fmt.Errorf("未対応のledger設定キーです")
+	}
+	if err := validation.ValidateLedgerSettingItems(items); err != nil {
+		return err
+	}
 	db, err := s.database()
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(items)
+	data, err := validation.MarshalLedgerSettingItems(items)
 	if err != nil {
-		return fmt.Errorf("JSONシリアライズエラー: %w", err)
+		return err
 	}
-	_, err = db.Exec(
-		"INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-		key,
-		string(data),
-	)
-	return err
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("設定transaction開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", key, data); err != nil {
+		return err
+	}
+	settings, err := loadLedgerSettingsIn(tx)
+	if err != nil {
+		return fmt.Errorf("設定取得エラー: %w", err)
+	}
+	if err := pruneInvalidTransactionLinksIn(tx, settings); err != nil {
+		return fmt.Errorf("紐付け整合性チェックエラー: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("設定transactionコミットエラー: %w", err)
+	}
+	return nil
 }
 
 // BackupToCSV exports the ledger in the newest format needed to represent the
@@ -665,74 +683,179 @@ func (s *Service) saveStringSliceSetting(key string, items []string) error {
 // shape so old clients can continue to consume it.  Once extended data (images,
 // tags, links, or settings) exists, v3 is selected automatically.
 func (s *Service) BackupToCSV() (string, error) {
-	extended, err := s.hasCSVExtendedData()
-	if err != nil {
+	return s.BackupToCSVContext(context.Background())
+}
+
+// BackupToCSVContext takes one read transaction for format selection and every
+// export query. This gives callers a coherent snapshot even while another
+// request adds or removes transactions, images, tags, or links.
+func (s *Service) BackupToCSVContext(ctx context.Context) (string, error) {
+	var output strings.Builder
+	boundedOutput := &csvLimitedStringWriter{dst: &output, limit: MaxCSVStringImportBytes}
+	if err := s.backupToCSVContextWriter(ctx, boundedOutput); err != nil {
 		return "", err
 	}
-	if extended {
-		return s.backupToCSVV3()
+	return output.String(), nil
+}
+
+// BackupToCSVStreamContext is the bounded-memory export path used by HTTP and
+// file exports. The writer receives CSV bytes directly; no archive-sized Go
+// string is constructed.
+func (s *Service) BackupToCSVStreamContext(ctx context.Context, output io.Writer) error {
+	if output == nil {
+		return fmt.Errorf("CSV出力先がありません")
 	}
-	return s.backupToCSVV2()
+	return s.backupToCSVContextWriter(ctx, output)
+}
+
+func (s *Service) backupToCSVContextWriter(ctx context.Context, output io.Writer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var release func()
+	if !HasCSVOperationReservation(ctx) {
+		var ok bool
+		release, ok = TryAcquireCSVOperationSlot()
+		if !ok {
+			return fmt.Errorf("CSV入出力が混雑しています。しばらくしてから再試行してください")
+		}
+		defer release()
+	}
+	db, err := s.database()
+	if err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("CSV read transaction開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+	extended, err := hasCSVExtendedDataIn(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if extended {
+		_, err = backupToCSVV3In(ctx, tx, output)
+	} else {
+		err = backupToCSVV2In(ctx, tx, output)
+	}
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("CSV read transactionコミットエラー: %w", err)
+	}
+	return nil
 }
 
 // BackupToCSVFull always emits the normalized v3 format, including empty
 // extension sections.  It is useful to callers that want a stable schema even
 // before the first image/tag/link/setting is created.
 func (s *Service) BackupToCSVFull() (string, error) {
-	return s.backupToCSVV3()
+	return s.BackupToCSVFullContext(context.Background())
+}
+
+func (s *Service) BackupToCSVFullContext(ctx context.Context) (string, error) {
+	var output strings.Builder
+	boundedOutput := &csvLimitedStringWriter{dst: &output, limit: MaxCSVStringImportBytes}
+	if err := s.backupToCSVFullStreamContext(ctx, boundedOutput); err != nil {
+		return "", err
+	}
+	return output.String(), nil
+}
+
+func (s *Service) BackupToCSVFullStreamContext(ctx context.Context, output io.Writer) error {
+	return s.backupToCSVFullStreamContext(ctx, output)
+}
+
+func (s *Service) backupToCSVFullStreamContext(ctx context.Context, output io.Writer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var release func()
+	if !HasCSVOperationReservation(ctx) {
+		var ok bool
+		release, ok = TryAcquireCSVOperationSlot()
+		if !ok {
+			return fmt.Errorf("CSV入出力が混雑しています。しばらくしてから再試行してください")
+		}
+		defer release()
+	}
+	db, err := s.database()
+	if err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("CSV read transaction開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := backupToCSVV3In(ctx, tx, output); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("CSV read transactionコミットエラー: %w", err)
+	}
+	return nil
 }
 
 // backupToCSVV2 preserves the historical transactions-only export contract.
 // Keep this separate from the v3 writer so the legacy import/export tests and
 // existing Desktop clients remain source compatible.
 func (s *Service) backupToCSVV2() (string, error) {
-	db, err := s.database()
-	if err != nil {
+	var builder strings.Builder
+	boundedOutput := &csvLimitedStringWriter{dst: &builder, limit: MaxCSVStringImportBytes}
+	if err := s.backupToCSVContextWriter(context.Background(), boundedOutput); err != nil {
 		return "", err
 	}
-	rows, err := db.Query(
-		"SELECT id, account, date, item, type, amount, balance, memo FROM transactions ORDER BY date",
+	return builder.String(), nil
+}
+
+type csvContextQueryer interface {
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+}
+
+func backupToCSVV2In(ctx context.Context, q csvContextQueryer, dst io.Writer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	output := &csvLimitedStringWriter{dst: dst, limit: maxCSVExportBytes}
+	writer := csv.NewWriter(output)
+	if err := writer.Write([]string{"id", "account", "date", "item", "type", "amount", "balance", "memo", csvVersionHeader}); err != nil {
+		return fmt.Errorf("CSVヘッダー書き出しエラー: %w", err)
+	}
+	rows, err := q.QueryContext(ctx,
+		"SELECT id, account, date, item, type, amount, balance, memo FROM transactions ORDER BY date, id",
 	)
 	if err != nil {
-		return "", fmt.Errorf("バックアップ用データ取得エラー: %w", err)
+		return fmt.Errorf("バックアップ用データ取得エラー: %w", err)
 	}
 	defer rows.Close()
-
-	var builder strings.Builder
-	writer := csv.NewWriter(&builder)
-
-	if err := writer.Write([]string{"id", "account", "date", "item", "type", "amount", "balance", "memo", csvVersionHeader}); err != nil {
-		return "", fmt.Errorf("CSVヘッダー書き出しエラー: %w", err)
-	}
-
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var id, amount, balance int64
 		var account, dateStr, item, txType, memo string
 		if err := rows.Scan(&id, &account, &dateStr, &item, &txType, &amount, &balance, &memo); err != nil {
-			return "", fmt.Errorf("バックアップスキャンエラー: %w", err)
+			return fmt.Errorf("バックアップスキャンエラー: %w", err)
 		}
 		if err := writer.Write([]string{
-			fmt.Sprintf("%d", id),
-			encodeCSVTextCell(account),
-			encodeCSVTextCell(dateStr),
-			encodeCSVTextCell(item),
-			encodeCSVTextCell(txType),
-			fmt.Sprintf("%d", amount),
-			fmt.Sprintf("%d", balance),
-			encodeCSVTextCell(memo),
-			csvVersion2,
+			fmt.Sprintf("%d", id), encodeCSVTextCell(account), encodeCSVTextCell(dateStr),
+			encodeCSVTextCell(item), encodeCSVTextCell(txType), fmt.Sprintf("%d", amount),
+			fmt.Sprintf("%d", balance), encodeCSVTextCell(memo), csvVersion2,
 		}); err != nil {
-			return "", fmt.Errorf("CSV行書き出しエラー: %w", err)
+			return fmt.Errorf("CSV行書き出しエラー: %w", err)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("バックアップ行取得エラー: %w", err)
+		return fmt.Errorf("バックアップ行取得エラー: %w", err)
 	}
 	writer.Flush()
 	if err := writer.Error(); err != nil {
-		return "", fmt.Errorf("CSV書き出しエラー: %w", err)
+		return fmt.Errorf("CSV書き出しエラー: %w", err)
 	}
-	return builder.String(), nil
+	return nil
 }
 
 // BackupToCSVFile はCSVバックアップファイルをユーザーのダウンロードフォルダに保存する
@@ -769,16 +892,16 @@ func (s *Service) BackupToCSVDirectory(destination string) (string, error) {
 	}
 	defer root.Close()
 
-	csvContent, err := s.BackupToCSV()
-	if err != nil {
-		return "", err
-	}
-
 	filename := fmt.Sprintf("transactions_backup_%s.csv", time.Now().Format("2006-01-02"))
 
-	// BOMを付与してExcel互換にする。既存ファイルやsymlinkは上書きしない。
-	bom := "\xEF\xBB\xBF"
-	filePath, err := writeUniquePrivateFileAt(root, resolved, filename, []byte(bom+csvContent))
+	// BOMを付与してExcel互換にする。CSV本体はread transactionから
+	// ファイルへ直接streamし、アーカイブ全体をGo stringへ複製しない。
+	filePath, err := writeUniquePrivateStreamAt(root, resolved, filename, func(file io.Writer) error {
+		if _, err := io.WriteString(file, "\xEF\xBB\xBF"); err != nil {
+			return err
+		}
+		return s.BackupToCSVStreamContext(context.Background(), file)
+	})
 	if err != nil {
 		return "", fmt.Errorf("CSVファイル書き出しエラー: %w", err)
 	}
@@ -798,6 +921,13 @@ func writeUniquePrivateFile(dir, filename string, data []byte) (string, error) {
 }
 
 func writeUniquePrivateFileAt(root *os.Root, dir, filename string, data []byte) (string, error) {
+	return writeUniquePrivateStreamAt(root, dir, filename, func(file io.Writer) error {
+		_, err := io.Copy(file, bytes.NewReader(data))
+		return err
+	})
+}
+
+func writeUniquePrivateStreamAt(root *os.Root, dir, filename string, write func(io.Writer) error) (string, error) {
 	ext := filepath.Ext(filename)
 	base := strings.TrimSuffix(filename, ext)
 	for attempt := 0; attempt < 100; attempt++ {
@@ -829,7 +959,7 @@ func writeUniquePrivateFileAt(root *os.Root, dir, filename string, data []byte) 
 			removePartial()
 			return "", err
 		}
-		if _, err := file.Write(data); err != nil {
+		if err := write(file); err != nil {
 			removePartial()
 			return "", err
 		}
@@ -909,6 +1039,13 @@ func getDownloadsDir() (string, error) {
 // replaceモードでは既存データのDELETEとINSERTをトランザクションで包み、
 // 途中失敗時にデータが消失しないようにする。
 func (s *Service) ImportCSV(content string, mode string) (int, error) {
+	return s.ImportCSVContext(context.Background(), content, mode)
+}
+
+func (s *Service) ImportCSVContext(ctx context.Context, content string, mode string) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Parsing a full v3 export can temporarily hold the raw CSV, decoded JSON
 	// strings, and decoded image blobs at once. Keep direct callers subject to
 	// the same bounded process-wide concurrency policy as the HTTP endpoint.
@@ -917,12 +1054,19 @@ func (s *Service) ImportCSV(content string, mode string) (int, error) {
 		return 0, fmt.Errorf("CSVインポートが混雑しています。しばらくしてから再試行してください")
 	}
 	defer release()
-	return s.importCSV(content, mode)
+	return s.importCSVContext(ctx, content, mode)
 }
 
 func (s *Service) importCSV(content string, mode string) (int, error) {
-	if int64(len(content)) > MaxCSVImportBytes {
-		return 0, fmt.Errorf("CSV入力が上限%d bytesを超えました", MaxCSVImportBytes)
+	return s.importCSVContext(context.Background(), content, mode)
+}
+
+func (s *Service) importCSVContext(ctx context.Context, content string, mode string) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if int64(len(content)) > MaxCSVStringImportBytes {
+		return 0, fmt.Errorf("文字列CSV入力が上限%d bytesを超えました", MaxCSVStringImportBytes)
 	}
 	// v3 is a normalized, typed row format. Detect it from the header while
 	// retaining the historical parser for legacy/v2 transaction-only files.
@@ -940,7 +1084,11 @@ func (s *Service) importCSV(content string, mode string) (int, error) {
 			}
 		}
 		if hasRecordType {
-			return s.importCSVV3(content, mode)
+			parsed, parseErr := s.parseCSVV3Reader(ctx, strings.NewReader(content), false)
+			if parseErr != nil {
+				return 0, parseErr
+			}
+			return s.importCSVV3Parsed(ctx, parsed, mode)
 		}
 	}
 	db, err := s.database()
@@ -954,6 +1102,11 @@ func (s *Service) importCSV(content string, mode string) (int, error) {
 	}
 	if len(headers) > 0 {
 		headers[0] = strings.TrimPrefix(headers[0], "\ufeff")
+	}
+	for _, header := range headers {
+		if !utf8.ValidString(header) {
+			return 0, fmt.Errorf("CSVヘッダーがUTF-8ではありません")
+		}
 	}
 
 	headerMap := make(map[string]int)
@@ -982,12 +1135,20 @@ func (s *Service) importCSV(content string, mode string) (int, error) {
 	}
 	var parsedRows []importRow
 	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		record, err := reader.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return 0, fmt.Errorf("CSV行読み取りエラー (行%d): %w", len(parsedRows)+2, err)
+		}
+		for _, value := range record {
+			if !utf8.ValidString(value) {
+				return 0, fmt.Errorf("CSVに不正なUTF-8があります (行%d)", len(parsedRows)+2)
+			}
 		}
 
 		rowNumber := len(parsedRows) + 2
@@ -1064,11 +1225,38 @@ func (s *Service) importCSV(content string, mode string) (int, error) {
 		txType = strings.ToLower(strings.TrimSpace(txType))
 		amountStr = strings.TrimSpace(amountStr)
 
-		if strings.TrimSpace(account) == "" {
-			return 0, fmt.Errorf("口座名は必須です (行%d)", rowNumber)
+		// Versioned v2 is an archive format emitted by older releases.  Keep
+		// its text byte-for-byte compatible with historical rows, while still
+		// rejecting invalid UTF-8/NUL.  New unversioned input uses the current
+		// shared validator.  v3 carries an explicit transaction_legacy marker
+		// and follows the same compatibility policy in its own parser.
+		textValidator := validation.ValidateLedgerText
+		if versionedCSV {
+			textValidator = validation.ValidateArchivedLedgerText
 		}
-		if strings.TrimSpace(item) == "" {
-			return 0, fmt.Errorf("項目は必須です (行%d)", rowNumber)
+		if err := textValidator("口座名", account, validation.MaxAccountBytes, true); err != nil {
+			if versionedCSV {
+				err = textValidator("口座名", account, maxCSVFieldBytes, true)
+			}
+			if err != nil {
+				return 0, fmt.Errorf("口座名が不正です (行%d): %w", rowNumber, err)
+			}
+		}
+		if err := textValidator("項目", item, validation.MaxItemBytes, true); err != nil {
+			if versionedCSV {
+				err = textValidator("項目", item, maxCSVFieldBytes, true)
+			}
+			if err != nil {
+				return 0, fmt.Errorf("項目が不正です (行%d): %w", rowNumber, err)
+			}
+		}
+		if err := textValidator("メモ", memo, validation.MaxMemoBytes, false); err != nil {
+			if versionedCSV {
+				err = textValidator("メモ", memo, maxCSVFieldBytes, false)
+			}
+			if err != nil {
+				return 0, fmt.Errorf("メモが不正です (行%d): %w", rowNumber, err)
+			}
 		}
 		if txType != "income" && txType != "expense" {
 			return 0, fmt.Errorf("種別はincomeまたはexpenseである必要があります (行%d)", rowNumber)
@@ -1088,26 +1276,30 @@ func (s *Service) importCSV(content string, mode string) (int, error) {
 		parsedRows = append(parsedRows, importRow{account: account, date: date, item: item, txType: txType, amount: amount, memo: memo})
 	}
 
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
 	defer tx.Rollback()
 
 	if mode == "replace" {
-		if _, err := tx.Exec("DELETE FROM transactions"); err != nil {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM transactions"); err != nil {
 			return 0, fmt.Errorf("既存データ削除エラー: %w", err)
 		}
 	}
 
-	stmt, err := tx.Prepare(
+	stmt, err := tx.PrepareContext(ctx,
 		"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, ?)")
 	if err != nil {
 		return 0, fmt.Errorf("プリペアドステートメントエラー: %w", err)
 	}
 	affectedAccounts := make(map[string]struct{})
 	for index, row := range parsedRows {
-		if _, err := stmt.Exec(row.account, row.date, row.item, row.txType, row.amount, row.memo); err != nil {
+		if err := ctx.Err(); err != nil {
+			_ = stmt.Close()
+			return 0, err
+		}
+		if _, err := stmt.ExecContext(ctx, row.account, row.date, row.item, row.txType, row.amount, row.memo); err != nil {
 			_ = stmt.Close()
 			return 0, fmt.Errorf("CSVインポートエラー (行%d): %w", index+2, err)
 		}
@@ -1118,7 +1310,7 @@ func (s *Service) importCSV(content string, mode string) (int, error) {
 	}
 
 	for account := range affectedAccounts {
-		if err := recalculateBalanceIn(tx, account); err != nil {
+		if err := recalculateBalanceInContext(ctx, tx, account); err != nil {
 			return 0, fmt.Errorf("残高再計算エラー (%s): %w", account, err)
 		}
 	}
@@ -1137,6 +1329,71 @@ type sqlExecutor interface {
 	Query(query string, args ...interface{}) (*sql.Rows, error)
 	QueryRow(query string, args ...interface{}) *sql.Row
 	Prepare(query string) (*sql.Stmt, error)
+}
+
+type sqlContextExecutor interface {
+	sqlExecutor
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...interface{}) *sql.Row
+	PrepareContext(context.Context, string) (*sql.Stmt, error)
+}
+
+func recalculateBalanceInContext(ctx context.Context, q sqlContextExecutor, account string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rows, err := q.QueryContext(ctx,
+		"SELECT id, type, amount FROM transactions WHERE account = ? ORDER BY date, id", account)
+	if err != nil {
+		return fmt.Errorf("残高再計算クエリエラー: %w", err)
+	}
+	defer rows.Close()
+	type balanceUpdate struct {
+		id      int64
+		balance int64
+	}
+	updates := make([]balanceUpdate, 0)
+	var runningBalance int64
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var id, amount int64
+		var txType string
+		if err := rows.Scan(&id, &txType, &amount); err != nil {
+			return fmt.Errorf("残高再計算スキャンエラー: %w", err)
+		}
+		if txType == "income" {
+			runningBalance, err = validation.CheckedAddInt64(runningBalance, amount)
+		} else {
+			runningBalance, err = validation.CheckedSubInt64(runningBalance, amount)
+		}
+		if err != nil {
+			return fmt.Errorf("残高計算オーバーフロー (id=%d): %w", id, err)
+		}
+		updates = append(updates, balanceUpdate{id: id, balance: runningBalance})
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("残高再計算行取得エラー: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	stmt, err := q.PrepareContext(ctx, "UPDATE transactions SET balance = ? WHERE id = ?")
+	if err != nil {
+		return fmt.Errorf("プリペアドステートメントエラー: %w", err)
+	}
+	defer stmt.Close()
+	for _, update := range updates {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := stmt.ExecContext(ctx, update.balance, update.id); err != nil {
+			return fmt.Errorf("残高更新エラー (id=%d): %w", update.id, err)
+		}
+	}
+	return nil
 }
 
 // recalculateBalanceIn は指定されたDBまたはトランザクション内で口座残高を再計算する。
@@ -1265,11 +1522,17 @@ func parseTransactionDate(dateStr, timeStr string) (time.Time, error) {
 }
 
 func validateTransactionData(req models.TransactionRequest) error {
-	if req.Account == "" {
-		return fmt.Errorf("口座名は必須です")
+	if err := validation.ValidateLedgerText("口座名", req.Account, validation.MaxAccountBytes, true); err != nil {
+		return err
 	}
-	if req.Item == "" {
-		return fmt.Errorf("項目は必須です")
+	if err := validation.ValidateLedgerText("項目", req.Item, validation.MaxItemBytes, true); err != nil {
+		return err
+	}
+	if err := validation.ValidateLedgerText("メモ", req.Memo, validation.MaxMemoBytes, false); err != nil {
+		return err
+	}
+	if err := validation.ValidateLedgerText("種別", req.Type, 32, true); err != nil {
+		return err
 	}
 	if req.Type != "income" && req.Type != "expense" {
 		return fmt.Errorf("種別はincomeまたはexpenseである必要があります")
@@ -2722,12 +2985,56 @@ func (s *Service) validateCardWithdrawalLink(transactionID, linkedID int64) erro
 	return fmt.Errorf("紐付けはクレジットカード項目と銀行口座項目の取引間でのみ追加できます")
 }
 
-func (s *Service) pruneInvalidTransactionLinks() error {
-	db, err := s.database()
+// loadLedgerSettingsIn reads only settings which participate in the
+// card-withdrawal link policy. Other settings are deliberately opaque to this
+// feature and are never exported, deleted, or interpreted here.
+func loadLedgerSettingsIn(q sqlExecutor) (map[string]string, error) {
+	settings := make(map[string]string, 2)
+	rows, err := q.Query("SELECT key, value FROM settings WHERE key IN ('credit_card_items', 'bank_account_items')")
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("ledger設定取得エラー: %w", err)
 	}
-	rows, err := db.Query(`
+	defer rows.Close()
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, err
+		}
+		settings[key] = value
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
+func loadLedgerSettingsContext(ctx context.Context, q sqlContextExecutor) (map[string]string, error) {
+	settings := make(map[string]string, 2)
+	rows, err := q.QueryContext(ctx, "SELECT key, value FROM settings WHERE key IN ('credit_card_items', 'bank_account_items')")
+	if err != nil {
+		return nil, fmt.Errorf("ledger設定取得エラー: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, err
+		}
+		settings[key] = value
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
+func pruneInvalidTransactionLinksIn(q sqlExecutor, settings map[string]string) error {
+	creditCards := stringSetFromSetting(settings["credit_card_items"])
+	bankAccounts := stringSetFromSetting(settings["bank_account_items"])
+	rows, err := q.Query(`
 		SELECT l.parent_id, p.account, l.child_id, c.account
 		FROM transaction_links l
 		JOIN transactions p ON p.id = l.parent_id
@@ -2745,7 +3052,7 @@ func (s *Service) pruneInvalidTransactionLinks() error {
 		if err := rows.Scan(&parentID, &parentAccount, &childID, &childAccount); err != nil {
 			return fmt.Errorf("紐付けスキャンエラー: %w", err)
 		}
-		if !s.isCardWithdrawalLinkAccounts(parentAccount, childAccount) {
+		if !isCardWithdrawalLinkAccountsWithSettings(parentAccount, childAccount, creditCards, bankAccounts) {
 			invalidPairs = append(invalidPairs, [2]int64{parentID, childID})
 		}
 	}
@@ -2754,7 +3061,47 @@ func (s *Service) pruneInvalidTransactionLinks() error {
 	}
 
 	for _, pair := range invalidPairs {
-		if _, err := db.Exec("DELETE FROM transaction_links WHERE parent_id = ? AND child_id = ?", pair[0], pair[1]); err != nil {
+		if _, err := q.Exec("DELETE FROM transaction_links WHERE parent_id = ? AND child_id = ?", pair[0], pair[1]); err != nil {
+			return fmt.Errorf("不正な紐付け削除エラー: %w", err)
+		}
+	}
+	return nil
+}
+
+func pruneInvalidTransactionLinksContext(ctx context.Context, q sqlContextExecutor, settings map[string]string) error {
+	creditCards := stringSetFromSetting(settings["credit_card_items"])
+	bankAccounts := stringSetFromSetting(settings["bank_account_items"])
+	rows, err := q.QueryContext(ctx, `
+		SELECT l.parent_id, p.account, l.child_id, c.account
+		FROM transaction_links l
+		JOIN transactions p ON p.id = l.parent_id
+		JOIN transactions c ON c.id = l.child_id`)
+	if err != nil {
+		return fmt.Errorf("紐付け取得エラー: %w", err)
+	}
+	defer rows.Close()
+	var invalidPairs [][2]int64
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var parentID, childID int64
+		var parentAccount, childAccount string
+		if err := rows.Scan(&parentID, &parentAccount, &childID, &childAccount); err != nil {
+			return fmt.Errorf("紐付けスキャンエラー: %w", err)
+		}
+		if !isCardWithdrawalLinkAccountsWithSettings(parentAccount, childAccount, creditCards, bankAccounts) {
+			invalidPairs = append(invalidPairs, [2]int64{parentID, childID})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, pair := range invalidPairs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, "DELETE FROM transaction_links WHERE parent_id = ? AND child_id = ?", pair[0], pair[1]); err != nil {
 			return fmt.Errorf("不正な紐付け削除エラー: %w", err)
 		}
 	}
@@ -2762,20 +3109,34 @@ func (s *Service) pruneInvalidTransactionLinks() error {
 }
 
 func (s *Service) isCardWithdrawalLinkAccounts(accountA, accountB string) bool {
-	creditCardItems, _ := s.GetCreditCardSettings()
-	bankAccountItems, _ := s.GetBankAccountSettings()
-	creditCards := stringSet(creditCardItems)
-	bankAccounts := stringSet(bankAccountItems)
+	db, err := s.database()
+	if err != nil {
+		return false
+	}
+	settings, err := loadLedgerSettingsIn(db)
+	if err != nil {
+		return false
+	}
+	return isCardWithdrawalLinkAccountsWithSettings(accountA, accountB,
+		stringSetFromSetting(settings["credit_card_items"]),
+		stringSetFromSetting(settings["bank_account_items"]))
+}
 
-	accountA = strings.TrimSpace(accountA)
-	accountB = strings.TrimSpace(accountB)
+func isCardWithdrawalLinkAccountsWithSettings(accountA, accountB string, creditCards, bankAccounts map[string]bool) bool {
 	return (creditCards[accountA] && bankAccounts[accountB]) || (bankAccounts[accountA] && creditCards[accountB])
+}
+
+func stringSetFromSetting(value string) map[string]bool {
+	items, err := validation.ParseLedgerSettingItems(value)
+	if err != nil {
+		return map[string]bool{}
+	}
+	return stringSet(items)
 }
 
 func stringSet(items []string) map[string]bool {
 	set := make(map[string]bool, len(items))
 	for _, item := range items {
-		item = strings.TrimSpace(item)
 		if item != "" {
 			set[item] = true
 		}

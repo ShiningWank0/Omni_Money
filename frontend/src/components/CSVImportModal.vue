@@ -7,8 +7,11 @@
       <div class="form-row">
         <label>CSVファイル：</label>
         <div>
-          <input type="file" accept=".csv" ref="csvFileInput" :disabled="csvImporting" @change="onCSVFileSelected">
-          <div v-if="csvFile" class="file-info">
+          <input v-if="!isWailsMode" type="file" accept=".csv" ref="csvFileInput" :disabled="csvImporting" @change="onCSVFileSelected">
+          <div v-if="isWailsMode" class="file-info">
+            Desktopでは実行時にOSのファイル選択ダイアログを開きます。
+          </div>
+          <div v-else-if="csvFile" class="file-info">
             選択ファイル: {{ csvFile.name }}
           </div>
         </div>
@@ -31,7 +34,10 @@
 
       <div v-if="csvImportMode === 'replace'" class="replace-warning" role="alert">
         <strong>破壊的操作です。</strong>
-        置換を実行すると、現在の取引データを削除してからCSVの内容に置き換えます。
+        置換を実行すると、現在の取引・画像・タグ・取引タグ・取引リンクと、allowlist対象のledger設定
+        （credit_card_items / bank_account_items）を必ず削除します。CSVに設定行があればその値で置き換え、
+        なければ未設定のままになります。AI連携の重複排除・日次利用量記録もリセットされます。
+        その他の設定は保持され、CSVにない取引関連データは復元されません。
         <label class="replace-confirmation">
           <input v-model="replaceConfirmed" type="checkbox" :disabled="csvImporting">
           <span>現在の取引データが削除されることを理解し、置換を実行します</span>
@@ -84,7 +90,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { importCSV } from '../utils/api'
+import { importCSV, isWailsMode } from '../utils/api'
 import { canStartCSVImport } from '../utils/csvSafety'
 
 const emit = defineEmits(['imported', 'close'])
@@ -96,7 +102,7 @@ const csvImportError = ref('')
 const csvImportSuccess = ref('')
 const replaceConfirmed = ref(false)
 const importDisabled = computed(() => !canStartCSVImport({
-  hasFile: Boolean(csvFile.value),
+  hasFile: isWailsMode || Boolean(csvFile.value),
   importing: csvImporting.value,
   mode: csvImportMode.value,
   replaceConfirmed: replaceConfirmed.value
@@ -116,7 +122,7 @@ function onImportModeChanged() {
 }
 
 async function importCSVFile() {
-  if (!csvFile.value) return
+  if (!isWailsMode && !csvFile.value) return
   if (csvImportMode.value === 'replace' && !replaceConfirmed.value) {
     csvImportError.value = '置換によって現在の取引データが削除されることを確認してください'
     return
@@ -126,10 +132,8 @@ async function importCSVFile() {
   csvImportError.value = ''
   csvImportSuccess.value = ''
 
-  let content = ''
   try {
-    content = await csvFile.value.text()
-    const count = await importCSV(content, csvImportMode.value)
+    const count = await importCSV(isWailsMode ? null : csvFile.value, csvImportMode.value)
     csvImportSuccess.value = `CSVインポート完了: ${count}件のトランザクションを${csvImportMode.value === 'replace' ? '置換' : '追加'}しました`
     setTimeout(() => {
       emit('imported')
@@ -137,8 +141,6 @@ async function importCSVFile() {
   } catch (e) {
     csvImportError.value = e.message || 'CSVインポートに失敗しました'
   } finally {
-    // JavaScript文字列自体の消去は保証できないが、不要な参照は保持しない。
-    content = ''
     csvImporting.value = false
   }
 }

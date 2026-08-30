@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -50,6 +51,7 @@ type App struct {
 	coordinator        desktopVaultCoordinator
 	generation         uint64
 	chooseCSVDirectory func(context.Context) (string, error)
+	chooseCSVFile      func(context.Context) (string, error)
 }
 
 // NewApp prepares the Desktop account coordinator without opening a vault.
@@ -69,6 +71,12 @@ func newAppWithCoordinator(coordinator desktopVaultCoordinator) *App {
 				Title:                "CSVの保存先（暗号化されたボリューム）を選択",
 				CanCreateDirectories: true,
 				ResolvesAliases:      true,
+			})
+		},
+		chooseCSVFile: func(ctx context.Context) (string, error) {
+			return wailsRuntime.OpenFileDialog(ctx, wailsRuntime.OpenDialogOptions{
+				Title:   "CSVバックアップを選択",
+				Filters: []wailsRuntime.FileFilter{{DisplayName: "CSV", Pattern: "*.csv"}},
 			})
 		},
 	}
@@ -425,6 +433,37 @@ func (a *App) ImportCSV(content string, mode string) (int, error) {
 	}
 	defer release()
 	return service.ImportCSV(content, mode)
+}
+
+// ImportCSVFile imports through a native file descriptor and is the preferred
+// Desktop binding for v3 archives; the string method above remains for older
+// Wails clients.
+func (a *App) ImportCSVFile(mode string) (int, error) {
+	a.mu.Lock()
+	ctx := a.ctx
+	chooser := a.chooseCSVFile
+	a.mu.Unlock()
+	if chooser == nil {
+		return 0, errors.New("CSV file chooser is unavailable")
+	}
+	path, err := chooser(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("CSVファイルを選択できませんでした: %w", err)
+	}
+	if path == "" {
+		return 0, nil
+	}
+	service, release, err := a.borrowService()
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	return service.ImportCSVReaderContext(ctx, file, mode)
 }
 
 // --- Snapshots ---

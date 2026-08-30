@@ -160,6 +160,27 @@ type requestVaultLease struct {
 	mu      sync.RWMutex
 }
 
+// requestVaultLeaseRelease is shared by the middleware defer and handlers
+// that materialize a response before streaming it. It makes early release
+// explicit while retaining exactly-once semantics if the defer runs too.
+type requestVaultLeaseRelease struct {
+	once    sync.Once
+	release func()
+}
+
+func (release *requestVaultLeaseRelease) Release() {
+	if release == nil {
+		return
+	}
+	release.once.Do(func() {
+		if release.release != nil {
+			release.release()
+		}
+	})
+}
+
+type requestVaultLeaseReleaseContextKey struct{}
+
 func newSessionVaultRoot(lease *vault.Lease) (*sessionVaultRoot, error) {
 	if lease == nil || lease.UserID() == "" || lease.VaultID() == "" {
 		return nil, ErrInvalidVaultSession
@@ -841,7 +862,8 @@ func VaultSessionAuthMiddleware(sessionManager *SessionManager, users CurrentUse
 			writeAuthRequired(w)
 			return
 		}
-		defer child.Release()
+		leaseRelease := &requestVaultLeaseRelease{release: child.Release}
+		defer leaseRelease.Release()
 
 		if users == nil {
 			writeVaultRoutingUnavailable(w)
@@ -876,9 +898,27 @@ func VaultSessionAuthMiddleware(sessionManager *SessionManager, users CurrentUse
 
 		ctx := context.WithValue(r.Context(), sessionKey, session)
 		ctx = context.WithValue(ctx, authenticatedUserContextKey{}, currentUser)
-		ctx = context.WithValue(ctx, coreServiceContextKey{}, service)
+		// Keep the lease, rather than a detached *Service, in the context so an
+		// early release also makes CoreServiceFromContext fail closed during a
+		// long response stream.
+		ctx = context.WithValue(ctx, coreServiceContextKey{}, child)
+		ctx = context.WithValue(ctx, requestVaultLeaseReleaseContextKey{}, leaseRelease)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// ReleaseRequestVaultLease releases the request-scoped vault child when a
+// handler has finished all database work and is only streaming a materialized
+// response. It is safe to call more than once and is a no-op for legacy
+// single-user requests.
+func ReleaseRequestVaultLease(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	release, _ := ctx.Value(requestVaultLeaseReleaseContextKey{}).(*requestVaultLeaseRelease)
+	if release != nil {
+		release.Release()
+	}
 }
 
 func writeVaultRoutingUnavailable(w http.ResponseWriter) {
@@ -964,8 +1004,15 @@ func CoreServiceFromContext(ctx context.Context) (*core.Service, bool) {
 	if ctx == nil {
 		return nil, false
 	}
-	service, ok := ctx.Value(coreServiceContextKey{}).(*core.Service)
-	return service, ok && service != nil
+	switch bound := ctx.Value(coreServiceContextKey{}).(type) {
+	case *core.Service: // legacy Desktop/global service binding
+		return bound, bound != nil
+	case *requestVaultLease: // request-scoped multi-user binding
+		service := bound.Service()
+		return service, service != nil
+	default:
+		return nil, false
+	}
 }
 
 // SessionMaxAgeFromEnv remains for source compatibility. New code should use

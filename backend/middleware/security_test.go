@@ -1,13 +1,27 @@
 package middleware
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"omni_money/backend/core"
 )
+
+type countingRequestBody struct {
+	reader io.Reader
+	reads  int
+}
+
+func (body *countingRequestBody) Read(p []byte) (int, error) {
+	body.reads++
+	return body.reader.Read(p)
+}
+
+func (body *countingRequestBody) Close() error { return nil }
 
 func TestSecurityHeadersMiddlewareHSTSOnlyForHTTPS(t *testing.T) {
 	handler := SecurityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -51,6 +65,7 @@ func TestMaxBodySizeMiddlewareLimitsConcurrentCSVImports(t *testing.T) {
 	}))
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/import_csv", strings.NewReader(`{"content":""}`))
+	req.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
@@ -76,5 +91,49 @@ func TestMaxBodySizeMiddlewareReleasesCSVSlotAfterHandlerError(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("handler calls = %d, want 2", calls)
+	}
+}
+
+func TestCSVBodyIsNotReadBeforeAuthenticationAndCSRFChecks(t *testing.T) {
+	manager := NewSessionManager(time.Hour)
+	t.Cleanup(manager.Close)
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("protected handler was called")
+	})
+	protected := []struct {
+		name string
+		h    http.Handler
+		want int
+	}{
+		{
+			name: "session authentication",
+			h:    SessionAuthMiddleware(manager, MaxBodySizeMiddleware(next)),
+			want: http.StatusUnauthorized,
+		},
+		{
+			name: "csrf",
+			h:    CSRFMiddleware(manager, MaxBodySizeMiddleware(next)),
+			want: http.StatusForbidden,
+		},
+		{
+			name: "recent authentication",
+			h:    RecentAuthMiddleware(manager, MaxBodySizeMiddleware(next)),
+			want: http.StatusPreconditionRequired,
+		},
+	}
+	for _, test := range protected {
+		t.Run(test.name, func(t *testing.T) {
+			body := &countingRequestBody{reader: strings.NewReader(`{"content":"must not be read"}`)}
+			req := httptest.NewRequest(http.MethodPost, "/api/import_csv", body)
+			req.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			test.h.ServeHTTP(recorder, req)
+			if recorder.Code != test.want {
+				t.Fatalf("status = %d, want %d", recorder.Code, test.want)
+			}
+			if body.reads != 0 {
+				t.Fatalf("request body was read %d times before %s", body.reads, test.name)
+			}
+		})
 	}
 }

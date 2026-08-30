@@ -91,6 +91,33 @@ func TestBackupAndImportCSVV2PreservesEscapedTextExactly(t *testing.T) {
 	}
 }
 
+func TestBackupAndImportCSVV2PreservesHistoricalTextOutsideNewWriteLimits(t *testing.T) {
+	setupCoreTestDB(t)
+	wantAccount := strings.Repeat("a", 300)
+	wantItem := strings.Repeat("項", 300)
+	wantMemo := "legacy\u200b memo"
+	if _, err := database.GetDB().Exec(
+		`INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, '2026-01-01', ?, 'expense', 123, -123, ?)`,
+		wantAccount, wantItem, wantMemo,
+	); err != nil {
+		t.Fatal(err)
+	}
+	content, err := BackupToCSV()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportCSV(content, "replace"); err != nil {
+		t.Fatalf("historical v2 restore: %v", err)
+	}
+	var gotAccount, gotItem, gotMemo string
+	if err := database.GetDB().QueryRow("SELECT account, item, memo FROM transactions").Scan(&gotAccount, &gotItem, &gotMemo); err != nil {
+		t.Fatal(err)
+	}
+	if gotAccount != wantAccount || gotItem != wantItem || gotMemo != wantMemo {
+		t.Fatalf("historical text changed: account=%d/%d item=%d/%d memo=%q/%q", len([]byte(gotAccount)), len([]byte(wantAccount)), len([]byte(gotItem)), len([]byte(wantItem)), gotMemo, wantMemo)
+	}
+}
+
 func TestImportCSVV2RejectsUnknownVersionAndUnescapedFormula(t *testing.T) {
 	for _, content := range []string{
 		"account,date,item,type,amount,memo,omni_money_csv_version\ncash,2026-01-01,item,income,1,,3\n",

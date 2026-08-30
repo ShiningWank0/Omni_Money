@@ -57,6 +57,7 @@ export function GetTransactionTags(arg1:number):Promise<Array<models.Tag>>;
 export function GetTransactions(arg1:string,arg2:string):Promise<Array<models.TransactionResponse>>;
 
 export function ImportCSV(arg1:string,arg2:string):Promise<number>;
+export function ImportCSVFile(arg1:string):Promise<number>;
 
 export function ListSnapshots():Promise<Array<string>>;
 

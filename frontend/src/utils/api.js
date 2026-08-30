@@ -684,6 +684,10 @@ export async function backupToCSV() {
   }
   const res = await apiFetch('/api/backup_csv')
   await validateCSVResponse(res)
+  const contentLength = Number(res.headers.get('Content-Length') || 0)
+  if (contentLength > 64 * 1024 * 1024) {
+    throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+  }
   return await res.text()
 }
 
@@ -709,10 +713,27 @@ export async function backupToCSVFile() {
   await validateCSVResponse(res)
 
   const downloadName = `transactions_backup_${new Date().toISOString().slice(0, 10)}.csv`
+	if (typeof window.showSaveFilePicker === 'function' && res.body) {
+		let writable = null
+		try {
+			const handle = await window.showSaveFilePicker({
+				suggestedName: downloadName,
+				types: [{ description: 'CSV', accept: { 'text/csv': ['.csv'] } }]
+			})
+			writable = await handle.createWritable()
+			await res.body.pipeTo(writable)
+			return downloadName
+		} catch (error) {
+			try { await writable?.abort() } catch (_) { /* best effort */ }
+			throw error
+		}
+	}
   let objectURL = null
   let anchor = null
   try {
-    const csvContent = await res.text()
+    // Older browsers have no writable file stream; keep this as a bounded
+    // compatibility fallback and avoid an additional UTF-8 string copy.
+    const csvContent = await res.blob()
     const blob = new Blob(['\uFEFF', csvContent], { type: 'text/csv;charset=utf-8;' })
     objectURL = URL.createObjectURL(blob)
     anchor = document.createElement('a')
@@ -729,13 +750,46 @@ export async function backupToCSVFile() {
 
 /**
  * CSVインポート（旧v1/v2 transactions-only形式と、完全なv3形式に対応）
- * @param {string} content
+ * @param {string|Blob} content - string is the bounded Wails/JSON compatibility path; Blob streams as raw CSV.
  * @param {string} mode
  * @returns {Promise<number>}
  */
 export async function importCSV(content, mode = 'append') {
   if (isWails) {
-    return await window.go.main.App.ImportCSV(content, mode)
+    // The native binding owns the file descriptor and OS picker.  Keep the
+    // string call below solely for older Wails clients that have no file API.
+    if (content == null && typeof window.go.main.App.ImportCSVFile === 'function') {
+      return await window.go.main.App.ImportCSVFile(mode)
+    }
+    let text
+    if (typeof content === 'string') {
+      text = content
+    } else {
+      if (content.size > 64 * 1024 * 1024) throw new Error('CSVファイルが大きすぎます')
+      try {
+        text = new TextDecoder('utf-8', { fatal: true }).decode(await content.arrayBuffer())
+      } catch (_) {
+        throw new Error('CSVファイルは有効なUTF-8で指定してください')
+      }
+    }
+    return await window.go.main.App.ImportCSV(text, mode)
+  }
+  if (content instanceof Blob) {
+    const maxCSVBytes = 512 * 1024 * 1024
+    if (content.size > maxCSVBytes) {
+      throw new Error('CSVファイルが大きすぎます')
+    }
+    const res = await apiFetch(`/api/import_csv?mode=${encodeURIComponent(mode)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/csv' },
+      body: content
+    })
+    await throwIfNotOk(res, 'CSVインポートに失敗しました')
+    const data = await res.json()
+    if (!Number.isInteger(data?.imported_count) || data.imported_count < 0) {
+      throw new Error('CSVインポートの応答が不正です')
+    }
+    return data.imported_count
   }
   const res = await apiFetch('/api/import_csv', {
     method: 'POST',

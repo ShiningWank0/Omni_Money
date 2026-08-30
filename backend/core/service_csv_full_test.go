@@ -1,6 +1,8 @@
 package core
 
 import (
+	"bufio"
+	"context"
 	"encoding/base64"
 	"encoding/csv"
 	"strings"
@@ -10,6 +12,31 @@ import (
 	"omni_money/backend/models"
 	"omni_money/backend/validation"
 )
+
+func TestCSVTempBudgetIsSharedAcrossUploadAndExportReservations(t *testing.T) {
+	first, ok := TryAcquireCSVTempBudget(MaxCSVImportWireBytes)
+	if !ok {
+		t.Fatal("first CSV temp reservation failed")
+	}
+	second, ok := TryAcquireCSVTempBudget(MaxCSVImportWireBytes)
+	if !ok {
+		first()
+		t.Fatal("second CSV temp reservation failed")
+	}
+	if _, ok := TryAcquireCSVTempBudget(MaxCSVImportBytes); ok {
+		first()
+		second()
+		t.Fatal("third full-size CSV temp reservation unexpectedly succeeded")
+	}
+	first()
+	third, ok := TryAcquireCSVTempBudget(MaxCSVImportBytes)
+	if !ok {
+		second()
+		t.Fatal("released CSV temp reservation was not reusable")
+	}
+	third()
+	second()
+}
 
 func TestCSVV3RoundTripPreservesExtendedLedgerDataAndRemapsIDs(t *testing.T) {
 	instance, service := openCoreTestService(t, "csv-v3-source")
@@ -65,7 +92,7 @@ func TestCSVV3RoundTripPreservesExtendedLedgerDataAndRemapsIDs(t *testing.T) {
 	// Import into an independent instance; IDs are allocated independently and
 	// all associations must be rebuilt through the source-ID maps.
 	target, targetService := openCoreTestService(t, "csv-v3-target")
-	if _, err := targetService.ImportCSV(content, "replace"); err != nil {
+	if _, err := targetService.ImportCSVReaderContext(context.Background(), strings.NewReader(content), "replace"); err != nil {
 		t.Fatalf("ImportCSV v3: %v", err)
 	}
 	var transactionCount, imageCount, tagCount, tagLinkCount, linkCount int
@@ -141,6 +168,74 @@ func TestCSVV3RejectsDuplicateAndUnknownRowsBeforeWriting(t *testing.T) {
 	}
 }
 
+func TestCSVV3ReplacePreservesOtherSettingsAndRenormalizesRemappedLinks(t *testing.T) {
+	setupCoreTestDB(t)
+	insertTestTransaction(t, "keep", "2026-01-01", "before-replace", "income", 1, 1)
+	if _, err := database.GetDB().Exec("INSERT INTO settings (key, value) VALUES ('future_setting', 'preserve-me')"); err != nil {
+		t.Fatal(err)
+	}
+	content := csvV3TestContent(t,
+		// Deliberately reverse source row order. The source link is normalized
+		// by source IDs, while insertion allocates target IDs in row order.
+		map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "2", "account": "bank", "date": "2026-01-02", "item": "bank-side", "type": "expense", "amount": "100"},
+		map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "card", "date": "2026-01-01", "item": "card-side", "type": "expense", "amount": "100"},
+		map[string]string{csvVersionHeader: "3", "record_type": "setting", "setting_key": "credit_card_items", "setting_value": `["card"]`},
+		map[string]string{csvVersionHeader: "3", "record_type": "setting", "setting_key": "bank_account_items", "setting_value": `["bank"]`},
+		map[string]string{csvVersionHeader: "3", "record_type": "transaction_link", "parent_id": "1", "child_id": "2"},
+	)
+	if count, err := ImportCSV(content, "replace"); err != nil || count != 2 {
+		t.Fatalf("replace count = %d, err = %v", count, err)
+	}
+	var parentID, childID int64
+	if err := database.GetDB().QueryRow("SELECT parent_id, child_id FROM transaction_links").Scan(&parentID, &childID); err != nil {
+		t.Fatal(err)
+	}
+	if parentID >= childID {
+		t.Fatalf("link endpoints = %d,%d, want canonical ascending order", parentID, childID)
+	}
+	var parentAccount, childAccount string
+	if err := database.GetDB().QueryRow("SELECT account FROM transactions WHERE id = ?", parentID).Scan(&parentAccount); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.GetDB().QueryRow("SELECT account FROM transactions WHERE id = ?", childID).Scan(&childAccount); err != nil {
+		t.Fatal(err)
+	}
+	if parentAccount != "bank" || childAccount != "card" {
+		t.Fatalf("remapped link accounts = %q,%q, want bank,card", parentAccount, childAccount)
+	}
+	var preserved string
+	if err := database.GetDB().QueryRow("SELECT value FROM settings WHERE key = 'future_setting'").Scan(&preserved); err != nil {
+		t.Fatal(err)
+	}
+	if preserved != "preserve-me" {
+		t.Fatalf("future setting = %q, want preserve-me", preserved)
+	}
+}
+
+func TestCSVV3LegacyTagRowPreservesPreValidatorName(t *testing.T) {
+	setupCoreTestDB(t)
+	if _, err := database.GetDB().Exec("INSERT INTO tags (name, parent_id, level) VALUES (' old/tag ', NULL, 1)"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := BackupToCSV()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "tag_legacy") {
+		t.Fatalf("legacy tag was not marked explicitly: %q", content)
+	}
+	if _, err := ImportCSV(content, "replace"); err != nil {
+		t.Fatalf("legacy tag restore: %v", err)
+	}
+	var name string
+	if err := database.GetDB().QueryRow("SELECT name FROM tags").Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	if name != " old/tag " {
+		t.Fatalf("legacy tag name = %q", name)
+	}
+}
+
 func csvV3TestContent(t *testing.T, rows ...map[string]string) string {
 	t.Helper()
 	var output strings.Builder
@@ -174,6 +269,11 @@ func TestCSVV3RejectsUnsafeTagSettingsAndCreatedAt(t *testing.T) {
 			name: "tag slash",
 			row:  map[string]string{csvVersionHeader: "3", "record_type": "tag", "id": "1", "tag_name": "bad/name", "tag_level": "1"},
 			want: "タグ名",
+		},
+		{
+			name: "tag non canonical whitespace",
+			row:  map[string]string{csvVersionHeader: "3", "record_type": "tag", "id": "1", "tag_name": encodeCSVTextCell(" root "), "tag_level": "1"},
+			want: "正規化済み",
 		},
 		{
 			name: "tag parent level",
@@ -244,9 +344,9 @@ func TestCSVV3AppliesTransactionTextLimits(t *testing.T) {
 		name, field, want string
 		limit             int
 	}{
-		{name: "account", field: "account", want: "口座名", limit: maxCSVAccountBytes},
-		{name: "item", field: "item", want: "項目", limit: maxCSVItemBytes},
-		{name: "memo", field: "memo", want: "メモ", limit: maxCSVMemoBytes},
+		{name: "account", field: "account", want: "口座名", limit: validation.MaxAccountBytes},
+		{name: "item", field: "item", want: "項目", limit: validation.MaxItemBytes},
+		{name: "memo", field: "memo", want: "メモ", limit: validation.MaxMemoBytes},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			row := make(map[string]string, len(base)+1)
@@ -269,6 +369,34 @@ func TestCSVV3ParsedTextQuotaIsStrict(t *testing.T) {
 	parsed = csvV3Import{parsedTextBytes: maxCSVParsedTextBytes - 1}
 	if err := parsed.addParsedText("x"); err != nil {
 		t.Fatalf("last byte of parsed text quota rejected: %v", err)
+	}
+}
+
+func TestCSVV3ReaderHonorsCancellationBeforeMutatingDatabase(t *testing.T) {
+	setupCoreTestDB(t)
+	originalID := insertTestTransaction(t, "keep", "2026-01-01", "original", "income", 100, 100)
+	content := csvV3TestContent(t, map[string]string{
+		csvVersionHeader: "3", "record_type": "transaction", "id": "1",
+		"account": "cash", "date": "2026-01-01", "item": "new", "type": "income", "amount": "100",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (&Service{}).ImportCSVReaderContext(ctx, strings.NewReader(content), "replace"); err == nil {
+		t.Fatal("canceled CSV reader unexpectedly succeeded")
+	}
+	var count int
+	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transactions WHERE id = ?", originalID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("original transaction count after cancellation = %d, want 1", count)
+	}
+}
+
+func TestCSVReaderBoundsHeaderProbe(t *testing.T) {
+	input := bufio.NewReader(strings.NewReader(strings.Repeat("x", maxCSVHeaderBytes+1)))
+	if _, err := readCSVHeaderLine(input); err == nil {
+		t.Fatal("oversized CSV header was accepted")
 	}
 }
 

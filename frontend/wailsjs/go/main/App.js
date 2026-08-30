@@ -110,6 +110,10 @@ export function ImportCSV(arg1, arg2) {
   return window['go']['main']['App']['ImportCSV'](arg1, arg2);
 }
 
+export function ImportCSVFile(arg1) {
+  return window['go']['main']['App']['ImportCSVFile'](arg1);
+}
+
 export function ListSnapshots() {
   return window['go']['main']['App']['ListSnapshots']();
 }

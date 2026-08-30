@@ -2,16 +2,21 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"mime"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"omni_money/backend/aicredentials"
 	"omni_money/backend/audithmac"
@@ -26,6 +31,17 @@ import (
 // more expensive than this allowance, so the decoded CSV limit is enforced
 // independently below rather than treating this as a worst-case overhead.
 const maxCSVImportWireBytes int64 = core.MaxCSVImportWireBytes
+
+func cleanupCSVExportFile(file *os.File, path string) {
+	if file != nil {
+		if err := file.Close(); err != nil {
+			log.Printf("security_event=csv_export_close_failed path=%q error=%v", path, err)
+		}
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Printf("security_event=csv_export_remove_failed path=%q error=%v", path, err)
+	}
+}
 
 // NewRouter は公開Web用ルーターを作成する。
 //
@@ -104,10 +120,10 @@ func NewRouterWithError() (http.Handler, error) {
 
 	// サーバーモード用ミドルウェアの適用
 	var handler http.Handler = middleware.LegacyCoreServiceMiddleware(mux)
+	handler = middleware.MaxBodySizeMiddleware(handler)
 	handler = middleware.RecentAuthMiddleware(sessionManager, handler)
 	handler = middleware.CSRFMiddleware(sessionManager, handler)
 	handler = middleware.SessionAuthMiddleware(sessionManager, handler)
-	handler = middleware.MaxBodySizeMiddleware(handler)
 	handler = middleware.RateLimitMiddleware(handler)
 	handler = middleware.CORSMiddleware(handler)
 	handler = middleware.NoStoreAPIMiddleware(handler)
@@ -439,19 +455,87 @@ func handleBackupCSV(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	csvContent, err := service.BackupToCSV()
+	tempRelease, available := core.TryAcquireCSVTempBudget(core.MaxCSVImportBytes)
+	if !available {
+		writeFinancialError(w, fmt.Errorf("CSV一時領域が混雑しています"), http.StatusTooManyRequests)
+		return
+	}
+	defer tempRelease()
+	release, available := core.TryAcquireCSVOperationSlot()
+	if !available {
+		tempRelease()
+		writeFinancialError(w, fmt.Errorf("CSV入出力が混雑しています"), http.StatusTooManyRequests)
+		return
+	}
+	responseController := http.NewResponseController(w)
+	// Clear the server's ordinary WriteTimeout while generating. A separate
+	// generation context and a fresh write deadline below ensure that slow
+	// clients cannot consume the streaming allowance during DB work.
+	_ = responseController.SetWriteDeadline(time.Time{})
+	var releaseOnce sync.Once
+	releaseHeavy := func() { releaseOnce.Do(release) }
+	defer releaseHeavy()
+	// Materialize the coherent read transaction into a private file before
+	// sending any response headers. The same open descriptor is checked,
+	// rewound, and streamed after generation; no path-based reopen/TOCTOU is
+	// used. The vault lease is released before the client stream starts.
+	tmp, err := os.CreateTemp("", "omni-money-csv-export-")
+	if err != nil {
+		writeFinancialError(w, err, http.StatusInsufficientStorage)
+		return
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		cleanupCSVExportFile(tmp, tmpPath)
+	}
+	defer cleanup()
+	if err := tmp.Chmod(0600); err != nil {
+		writeFinancialError(w, err, http.StatusInsufficientStorage)
+		return
+	}
+	fileInfo, err := tmp.Stat()
+	if err != nil || !fileInfo.Mode().IsRegular() || fileInfo.Mode().Perm() != 0600 {
+		writeFinancialError(w, fmt.Errorf("CSV出力一時ファイルが不正です"), http.StatusInsufficientStorage)
+		return
+	}
+	generationContext, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	streamContext := core.WithCSVOperationReservation(generationContext)
+	err = service.BackupToCSVStreamContext(streamContext, tmp)
+	cancel()
+	if err == nil {
+		err = tmp.Sync()
+	}
+	// No further database/service access is needed after the archive has been
+	// fsynced. The middleware defer is still present and exactly-once guarded.
+	middleware.ReleaseRequestVaultLease(r.Context())
+	releaseHeavy()
 	if err != nil {
 		writeFinancialError(w, err, http.StatusInternalServerError)
 		return
 	}
+	fileInfo, err = tmp.Stat()
+	if err != nil {
+		writeFinancialError(w, err, http.StatusInternalServerError)
+		return
+	}
+	if !fileInfo.Mode().IsRegular() || fileInfo.Size() <= 0 || fileInfo.Size() > core.MaxCSVImportBytes {
+		writeFinancialError(w, fmt.Errorf("CSV出力ファイルのサイズが不正です"), http.StatusInternalServerError)
+		return
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		writeFinancialError(w, err, http.StatusInternalServerError)
+		return
+	}
+	// Start the route-local write deadline at the first byte sent to the
+	// client, not at the beginning of DB/archive generation.
+	_ = responseController.SetWriteDeadline(time.Now().Add(10 * time.Minute))
+	defer responseController.SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf("attachment; filename=transactions_backup_%s.csv",
 			time.Now().Format("20060102_150405")))
-	w.WriteHeader(http.StatusOK)
-	if _, err := io.WriteString(w, csvContent); err != nil {
-		// The headers/status are already sent, so only stop writing on a client
-		// disconnect rather than attempting an invalid second status response.
+	w.Header().Set("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
+	if _, err := io.Copy(w, tmp); err != nil {
 		return
 	}
 }
@@ -461,22 +545,43 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// MaxBodySizeMiddleware also enforces this bound for chunked requests; the
-	// Content-Length check fails early before allocating a JSON body when the
-	// client provides it.
-	if r.ContentLength > maxCSVImportWireBytes {
+	mediaType, _, mediaErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if mediaErr != nil || mediaType == "" {
+		jsonError(w, "CSVリクエストのContent-Typeが無効です", http.StatusUnsupportedMediaType)
+		return
+	}
+	if mediaType == "text/csv" || mediaType == "application/csv" || mediaType == "application/octet-stream" {
+		// MaxBodySizeMiddleware also enforces this bound for chunked requests.
+		if r.ContentLength > maxCSVImportWireBytes {
+			jsonError(w, "CSVリクエストが大きすぎます", http.StatusRequestEntityTooLarge)
+			return
+		}
+		mode := r.URL.Query().Get("mode")
+		if mode == "" {
+			mode = "append"
+		}
+		count, err := service.ImportCSVReaderContext(r.Context(), r.Body, mode)
+		if err != nil {
+			writeFinancialError(w, err, http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, map[string]int{"imported_count": count}, http.StatusOK)
+		return
+	}
+	if mediaType != "application/json" {
+		jsonError(w, "CSVリクエストのContent-Typeが無効です", http.StatusUnsupportedMediaType)
+		return
+	}
+	if r.ContentLength > core.MaxCSVJSONWireBytes {
 		jsonError(w, "CSVリクエストが大きすぎます", http.StatusRequestEntityTooLarge)
 		return
 	}
-	var body struct {
-		Content string `json:"content"`
-		Mode    string `json:"mode"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	body, decodeErr := decodeStrictCSVImportJSON(r.Body)
+	if decodeErr != nil {
 		jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 		return
 	}
-	if int64(len(body.Content)) > core.MaxCSVImportBytes {
+	if int64(len(body.Content)) > core.MaxCSVStringImportBytes {
 		jsonError(w, "CSV入力が大きすぎます", http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -487,11 +592,11 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 	var count int
 	var err error
 	if core.HasCSVImportReservation(r.Context()) {
-		count, err = service.ImportCSVWithReservation(body.Content, body.Mode)
+		count, err = service.ImportCSVWithReservationContext(r.Context(), body.Content, body.Mode)
 	} else {
 		// Unit/embedded callers may invoke the handler without the outer
 		// middleware; the normal service entrypoint acquires the shared slot.
-		count, err = service.ImportCSV(body.Content, body.Mode)
+		count, err = service.ImportCSVContext(r.Context(), body.Content, body.Mode)
 	}
 	if err != nil {
 		if errors.Is(err, core.ErrAIIdempotencyConflict) {
@@ -513,6 +618,101 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 		"imported_count": count,
 		"mode":           body.Mode,
 	}, http.StatusOK)
+}
+
+// decodeStrictCSVImportJSON retains the compatibility JSON shape while
+// rejecting duplicate keys as well as unknown fields and trailing values.
+// encoding/json's struct decoder rejects unknown fields but otherwise accepts
+// duplicate keys, which is unsafe for a destructive replace request.
+func decodeStrictCSVImportJSON(input io.Reader) (struct {
+	Content string `json:"content"`
+	Mode    string `json:"mode"`
+}, error) {
+	var body struct {
+		Content string `json:"content"`
+		Mode    string `json:"mode"`
+	}
+	// encoding/json replaces malformed UTF-8 in strings with U+FFFD. Read the
+	// deliberately small compatibility envelope under its wire cap first so
+	// invalid bytes are rejected rather than silently changed.
+	raw, err := io.ReadAll(io.LimitReader(input, core.MaxCSVJSONWireBytes+1))
+	if err != nil {
+		return body, err
+	}
+	if int64(len(raw)) > core.MaxCSVJSONWireBytes || !utf8.Valid(raw) {
+		return body, fmt.Errorf("CSVリクエストJSONが不正なUTF-8です")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	first, err := decoder.Token()
+	if err != nil {
+		return body, err
+	}
+	delim, ok := first.(json.Delim)
+	if !ok || delim != '{' {
+		return body, fmt.Errorf("CSVリクエストJSONはオブジェクトで指定してください")
+	}
+	seen := make(map[string]struct{}, 2)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return body, err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return body, fmt.Errorf("CSVリクエストJSONのキーが不正です")
+		}
+		if _, exists := seen[key]; exists {
+			return body, fmt.Errorf("CSVリクエストJSONのキーが重複しています: %s", key)
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return body, err
+		}
+		switch key {
+		case "content":
+			decoded, err := decodeCSVImportJSONString(value)
+			if err != nil {
+				return body, err
+			}
+			body.Content = decoded
+		case "mode":
+			decoded, err := decodeCSVImportJSONString(value)
+			if err != nil {
+				return body, err
+			}
+			body.Mode = decoded
+		default:
+			return body, fmt.Errorf("未対応のCSVリクエスト項目です: %s", key)
+		}
+	}
+	last, err := decoder.Token()
+	if err != nil {
+		return body, err
+	}
+	if delim, ok := last.(json.Delim); !ok || delim != '}' {
+		return body, fmt.Errorf("CSVリクエストJSONオブジェクトが閉じていません")
+	}
+	var extra interface{}
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return body, fmt.Errorf("CSVリクエストJSONに余分な入力があります")
+		}
+		return body, err
+	}
+	return body, nil
+}
+
+func decodeCSVImportJSONString(raw json.RawMessage) (string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '"' {
+		return "", fmt.Errorf("CSVリクエストの値は文字列で指定してください")
+	}
+	var value string
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 func handleAITransactions(w http.ResponseWriter, r *http.Request) {
