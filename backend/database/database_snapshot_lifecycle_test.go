@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -133,6 +134,55 @@ func TestStartupRemovesStaleSnapshotStagingArtifacts(t *testing.T) {
 	defer reopened.Close()
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatalf("startup left stale validation artifact: %v", err)
+	}
+}
+
+func TestSnapshotQuarantineRollbackAndStartupRecovery(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "omni_money_20260101_000000_000000001.db")
+	for _, path := range []string{oldPath, filepath.Join(dir, "omni_money_20260102_000000_000000001.db")} {
+		if err := os.WriteFile(path, make([]byte, 40), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := hardenPrivateFile(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quarantined, err := quarantineSnapshotsContext(context.Background(), dir, 2, 100, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quarantined) != 1 {
+		t.Fatalf("quarantine entries=%d, want 1", len(quarantined))
+	}
+	if _, err := os.Stat(quarantined[0].quarantined); err != nil {
+		t.Fatalf("quarantined file missing: %v", err)
+	}
+	if err := rollbackSnapshotQuarantine(quarantined, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(quarantined[0].original); err != nil {
+		t.Fatalf("rollback did not restore original: %v", err)
+	}
+
+	quarantined, err = quarantineSnapshotsContext(context.Background(), dir, 2, 100, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupSnapshotPruneArtifacts(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(quarantined[0].original); err != nil {
+		t.Fatalf("startup cleanup did not restore quarantined snapshot: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), snapshotPruneArtifactPrefix) {
+			t.Fatalf("quarantine artifact remains after recovery: %s", entry.Name())
+		}
 	}
 }
 

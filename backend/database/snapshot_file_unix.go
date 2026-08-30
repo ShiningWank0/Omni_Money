@@ -78,3 +78,8 @@ func installRecoveryFile(replacement, target, _ string) error {
 func replaceManifestFile(replacement, target string) error {
 	return os.Rename(replacement, target)
 }
+
+// publishSnapshotFile atomically exposes a fully validated staging image.
+func publishSnapshotFile(replacement, target string) error {
+	return os.Rename(replacement, target)
+}

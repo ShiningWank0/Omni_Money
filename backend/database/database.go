@@ -95,6 +95,7 @@ var snapshotValidationAdmission = make(chan struct{}, maxConcurrentSnapshotValid
 // CreateSnapshot can retain to be listed and restored.
 const maxSnapshotValidationWorkBytes int64 = maxSnapshotValidationBytes
 const restoreManifestVersion = 1
+const snapshotPruneArtifactPrefix = ".omni-money-snapshot-prune-"
 
 type restoreManifest struct {
 	Version   int    `json:"version"`
@@ -345,36 +346,50 @@ func (i *Instance) Close() error {
 // createTablesOn は指定した接続へ現行スキーマ、index、triggerを適用する。
 // 復元候補をグローバル接続へ公開する前に移行できるよう、接続を引数で受け取る。
 func createTablesOn(target *sql.DB) error {
+	return createTablesOnContext(context.Background(), target)
+}
+
+// createTablesOnContext performs schema inspection and migration with the
+// caller's cancellation boundary. Restore validation uses this variant so a
+// canceled request cannot continue holding the process-wide admission slot
+// through an unbounded migration query.
+func createTablesOnContext(ctx context.Context, target *sql.DB) error {
 	if target == nil {
 		return fmt.Errorf("データベース接続が初期化されていません")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var version int
-	if err := target.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+	if err := target.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("スキーマversion取得エラー: %w", err)
 	}
 	if version > ledgerSchemaVersion {
 		return fmt.Errorf("データベースschema version %dは対応version %dより新しいため開けません", version, ledgerSchemaVersion)
 	}
-	if err := validateLedgerSchema(target, false); err != nil {
+	if err := validateLedgerSchemaContext(ctx, target, false); err != nil {
 		return fmt.Errorf("schema identity/minimum validation failed: %w", err)
 	}
 	var identity int64
-	if err := target.QueryRow("PRAGMA application_id").Scan(&identity); err != nil {
+	if err := target.QueryRowContext(ctx, "PRAGMA application_id").Scan(&identity); err != nil {
 		return fmt.Errorf("スキーマidentity取得エラー: %w", err)
 	}
 	var userTables int
-	if err := validateInternalSQLiteTables(target); err != nil {
+	if err := validateInternalSQLiteTablesContext(ctx, target); err != nil {
 		return fmt.Errorf("SQLite internal table validation failed: %w", err)
 	}
-	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND " + sqliteUserTablePredicate).Scan(&userTables); err != nil {
+	if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "+sqliteUserTablePredicate).Scan(&userTables); err != nil {
 		return fmt.Errorf("schema table count取得エラー: %w", err)
 	}
 	legacyMigration := version == 0 && identity == 0 && userTables > 0
-	legacyLayout, err := isSupportedLegacyCurrentLayout(target)
+	legacyLayout, err := isSupportedLegacyCurrentLayoutContext(ctx, target)
 	if err != nil {
 		return fmt.Errorf("legacy schema fingerprint検査エラー: %w", err)
 	}
-	legacyImageLayout, err := isLegacyTransactionImagesLayout(target)
+	legacyImageLayout, err := isLegacyTransactionImagesLayoutContext(ctx, target)
 	if err != nil {
 		return fmt.Errorf("legacy transaction_images fingerprint検査エラー: %w", err)
 	}
@@ -384,7 +399,7 @@ func createTablesOn(target *sql.DB) error {
 		// NOT EXISTS upgrade a same-name impostor. The only supported pre-marker
 		// family is checked against its complete immutable DDL before anything
 		// is changed.
-		legacy, err := isSupportedLegacyPreMigrationLayout(target)
+		legacy, err := isSupportedLegacyPreMigrationLayoutContext(ctx, target)
 		if err != nil {
 			return fmt.Errorf("legacy schema fingerprint検査エラー: %w", err)
 		}
@@ -393,7 +408,7 @@ func createTablesOn(target *sql.DB) error {
 		}
 	}
 
-	tx, err := target.Begin()
+	tx, err := target.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("スキーマtransaction開始エラー: %w", err)
 	}
@@ -441,10 +456,10 @@ func createTablesOn(target *sql.DB) error {
 		// rebuild it under the current DDL before any identity/version marker is
 		// written. The transaction makes malformed, orphaned, or over-quota data
 		// fail closed without leaving a half-migrated table behind.
-		if err := migrateLegacyTransactionImages(tx); err != nil {
+		if err := migrateLegacyTransactionImagesContext(ctx, tx); err != nil {
 			return fmt.Errorf("legacy transaction_images migration failed: %w", err)
 		}
-		if err := validateCurrentTransactionImages(tx); err != nil {
+		if err := validateCurrentTransactionImagesContext(ctx, tx); err != nil {
 			return fmt.Errorf("migrated transaction_images validation failed: %w", err)
 		}
 	}
@@ -637,7 +652,7 @@ func createTablesOn(target *sql.DB) error {
 	// idempotent declarations upgrades either case atomically.
 	if version < ledgerSchemaVersion {
 		for _, stmt := range statements {
-			if _, err := tx.Exec(stmt); err != nil {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("SQL実行エラー (%s): %w", stmt[:50], err)
 			}
 		}
@@ -679,7 +694,7 @@ func createTablesOn(target *sql.DB) error {
 		if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_root_name_unique ON tags(name) WHERE parent_id IS NULL AND legacy_duplicate = 0`); err != nil {
 			return fmt.Errorf("rootタグ一意index作成エラー: %w", err)
 		}
-		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", ledgerSchemaVersion)); err != nil {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", ledgerSchemaVersion)); err != nil {
 			return fmt.Errorf("スキーマversion更新エラー: %w", err)
 		}
 	}
@@ -688,17 +703,17 @@ func createTablesOn(target *sql.DB) error {
 	// reopened after migration without pretending that old table definitions
 	// had constraints that SQLite cannot add with CREATE IF NOT EXISTS.
 	if identity == ledgerSchemaIdentity || userTables == 0 {
-		if _, err := tx.Exec(fmt.Sprintf("PRAGMA application_id = %d", ledgerSchemaIdentity)); err != nil {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA application_id = %d", ledgerSchemaIdentity)); err != nil {
 			return fmt.Errorf("スキーマidentity更新エラー: %w", err)
 		}
 	}
-	if err := validateCriticalSchema(tx); err != nil {
+	if err := validateCriticalSchemaContext(ctx, tx); err != nil {
 		return err
 	}
 	// Validate the complete post-migration schema while the transaction is
 	// still open. A crafted extra table/index/constraint must not leave a
 	// partially upgraded database committed after validation reports failure.
-	if err := validateLedgerSchemaAfterMigration(tx, !legacyLayout); err != nil {
+	if err := validateLedgerSchemaAfterMigrationContext(ctx, tx, !legacyLayout); err != nil {
 		return fmt.Errorf("完全なschema validation failed: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -708,11 +723,18 @@ func createTablesOn(target *sql.DB) error {
 }
 
 func migrateLegacyTransactionImages(tx *sql.Tx) error {
+	return migrateLegacyTransactionImagesContext(context.Background(), tx)
+}
+
+func migrateLegacyTransactionImagesContext(ctx context.Context, tx *sql.Tx) error {
 	if tx == nil {
 		return errors.New("legacy image migration transaction is nil")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var invalidRows int
-	if err := tx.QueryRow(`
+	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM transaction_images ti
 		LEFT JOIN transactions t ON t.id = ti.transaction_id
@@ -730,7 +752,7 @@ func migrateLegacyTransactionImages(tx *sql.Tx) error {
 		return fmt.Errorf("legacy image table contains %d invalid/orphan rows", invalidRows)
 	}
 	var imageCount int64
-	if err := tx.QueryRow(`
+	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(image_count), 0)
 		FROM (SELECT transaction_id, COUNT(*) AS image_count
 		      FROM transaction_images GROUP BY transaction_id)`).Scan(&imageCount); err != nil {
@@ -740,7 +762,7 @@ func migrateLegacyTransactionImages(tx *sql.Tx) error {
 		return fmt.Errorf("legacy transaction image count exceeds %d", models.MaxImagesPerTransaction)
 	}
 	var transactionBytes int64
-	if err := tx.QueryRow(`
+	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(total_bytes), 0)
 		FROM (SELECT transaction_id, COALESCE(SUM(length(data)), 0) AS total_bytes
 		      FROM transaction_images GROUP BY transaction_id)`).Scan(&transactionBytes); err != nil {
@@ -750,7 +772,7 @@ func migrateLegacyTransactionImages(tx *sql.Tx) error {
 		return fmt.Errorf("legacy per-transaction image bytes exceed %d", models.MaxImageBytesPerTransaction)
 	}
 	var accountBytes int64
-	if err := tx.QueryRow(`
+	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(total_bytes), 0)
 		FROM (SELECT t.account, COALESCE(SUM(length(ti.data)), 0) AS total_bytes
 		      FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id
@@ -761,7 +783,7 @@ func migrateLegacyTransactionImages(tx *sql.Tx) error {
 		return fmt.Errorf("legacy per-account image bytes exceed %d", models.MaxImageBytesPerAccount)
 	}
 	var databaseBytes int64
-	if err := tx.QueryRow("SELECT COALESCE(SUM(length(data)), 0) FROM transaction_images").Scan(&databaseBytes); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(SUM(length(data)), 0) FROM transaction_images").Scan(&databaseBytes); err != nil {
 		return fmt.Errorf("legacy database image quota validation failed: %w", err)
 	}
 	if databaseBytes > models.MaxImageBytesDatabase {
@@ -769,10 +791,10 @@ func migrateLegacyTransactionImages(tx *sql.Tx) error {
 	}
 
 	const legacyTable = "transaction_images_omni_legacy_migration"
-	if _, err := tx.Exec("ALTER TABLE transaction_images RENAME TO " + legacyTable); err != nil {
+	if _, err := tx.ExecContext(ctx, "ALTER TABLE transaction_images RENAME TO "+legacyTable); err != nil {
 		return fmt.Errorf("legacy image table rename failed: %w", err)
 	}
-	if _, err := tx.Exec(`CREATE TABLE transaction_images (
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE transaction_images (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		transaction_id INTEGER NOT NULL,
 		filename TEXT NOT NULL,
@@ -783,21 +805,28 @@ func migrateLegacyTransactionImages(tx *sql.Tx) error {
 	)`); err != nil {
 		return fmt.Errorf("current image table creation failed: %w", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO transaction_images
+	if _, err := tx.ExecContext(ctx, `INSERT INTO transaction_images
 		(id, transaction_id, filename, data, mime_type, created_at)
 		SELECT id, transaction_id, filename, data, mime_type, created_at
-		FROM ` + legacyTable); err != nil {
+		FROM `+legacyTable); err != nil {
 		return fmt.Errorf("legacy image row copy failed: %w", err)
 	}
-	if _, err := tx.Exec("DROP TABLE " + legacyTable); err != nil {
+	if _, err := tx.ExecContext(ctx, "DROP TABLE "+legacyTable); err != nil {
 		return fmt.Errorf("legacy image table removal failed: %w", err)
 	}
 	return nil
 }
 
 func validateCurrentTransactionImages(target schemaQueryer) error {
+	return validateCurrentTransactionImagesContext(context.Background(), target)
+}
+
+func validateCurrentTransactionImagesContext(ctx context.Context, target schemaQueryer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var definition sql.NullString
-	if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&definition); err != nil || !definition.Valid {
+	if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&definition); err != nil || !definition.Valid {
 		return errors.New("current transaction_images definition is unavailable")
 	}
 	if canonicalDDL(definition.String) != expectedLedgerTableDefinitions()["transaction_images"] {
@@ -811,7 +840,7 @@ func validateCurrentTransactionImages(target schemaQueryer) error {
 		{name: "mime_type", columnType: "TEXT", notNull: 1, defaultValue: "'image/jpeg'"},
 		{name: "created_at", columnType: "DATETIME", defaultValue: "current_timestamp"},
 	}
-	rows, err := target.Query("PRAGMA table_info(transaction_images)")
+	rows, err := target.QueryContext(ctx, "PRAGMA table_info(transaction_images)")
 	if err != nil {
 		return err
 	}
@@ -842,7 +871,7 @@ func validateCurrentTransactionImages(target schemaQueryer) error {
 		return errors.New("transaction_images is missing current columns")
 	}
 
-	rows, err = target.Query("PRAGMA foreign_key_list(transaction_images)")
+	rows, err = target.QueryContext(ctx, "PRAGMA foreign_key_list(transaction_images)")
 	if err != nil {
 		return err
 	}
@@ -866,7 +895,7 @@ func validateCurrentTransactionImages(target schemaQueryer) error {
 	if foreignKeyCount != 1 {
 		return errors.New("transaction_images current foreign key is missing")
 	}
-	rows, err = target.Query("PRAGMA foreign_key_check")
+	rows, err = target.QueryContext(ctx, "PRAGMA foreign_key_check")
 	if err != nil {
 		return err
 	}
@@ -878,13 +907,20 @@ func validateCurrentTransactionImages(target schemaQueryer) error {
 }
 
 type schemaQueryer interface {
-	Query(query string, args ...any) (*sql.Rows, error)
-	QueryRow(query string, args ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 func validateCriticalSchema(target schemaQueryer) error {
+	return validateCriticalSchemaContext(context.Background(), target)
+}
+
+func validateCriticalSchemaContext(ctx context.Context, target schemaQueryer) error {
 	if target == nil {
 		return fmt.Errorf("データベース接続が初期化されていません")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	requiredColumns := map[string][]string{
 		"transactions":                {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
@@ -896,7 +932,7 @@ func validateCriticalSchema(target schemaQueryer) error {
 		"ai_daily_transaction_usage":  {"credential_id", "utc_date", "successful_creates"},
 	}
 	for table, required := range requiredColumns {
-		rows, err := target.Query("PRAGMA table_info(" + table + ")")
+		rows, err := target.QueryContext(ctx, "PRAGMA table_info("+table+")")
 		if err != nil {
 			return fmt.Errorf("必須列検査エラー (%s): %w", table, err)
 		}
@@ -938,7 +974,7 @@ func validateCriticalSchema(target schemaQueryer) error {
 	}
 	for _, object := range requiredObjects {
 		var count int
-		if err := target.QueryRow(
+		if err := target.QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM sqlite_master WHERE type = ? AND name = ?",
 			object.objectType,
 			object.name,
@@ -949,7 +985,7 @@ func validateCriticalSchema(target schemaQueryer) error {
 			return fmt.Errorf("必須DBオブジェクトが不足しています: %s", object.name)
 		}
 	}
-	if err := validateRootTagIndex(target); err != nil {
+	if err := validateRootTagIndexContext(ctx, target); err != nil {
 		return err
 	}
 	return nil
@@ -960,32 +996,43 @@ func validateCriticalSchema(target schemaQueryer) error {
 // an explicitly supported legacy version may be shown, but it still needs a
 // recognizable ledger identity/minimum shape and is never migrated there.
 func validateLedgerSchema(target schemaQueryer, requireCurrent bool) error {
-	return validateLedgerSchemaInternal(target, requireCurrent, true)
+	return validateLedgerSchemaContext(context.Background(), target, requireCurrent)
 }
 
 func validateLedgerSchemaInternal(target schemaQueryer, requireCurrent, strictCurrent bool) error {
+	return validateLedgerSchemaContextInternal(context.Background(), target, requireCurrent, strictCurrent)
+}
+
+func validateLedgerSchemaContext(ctx context.Context, target schemaQueryer, requireCurrent bool) error {
+	return validateLedgerSchemaContextInternal(ctx, target, requireCurrent, true)
+}
+
+func validateLedgerSchemaContextInternal(ctx context.Context, target schemaQueryer, requireCurrent, strictCurrent bool) error {
 	if target == nil {
 		return errors.New("database schema target is nil")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var version int
-	if err := target.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+	if err := target.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
 	if version < 0 || version > ledgerSchemaVersion {
 		return fmt.Errorf("unsupported ledger schema version %d", version)
 	}
 	var identity int64
-	if err := target.QueryRow("PRAGMA application_id").Scan(&identity); err != nil {
+	if err := target.QueryRowContext(ctx, "PRAGMA application_id").Scan(&identity); err != nil {
 		return fmt.Errorf("read ledger identity: %w", err)
 	}
 	if identity != 0 && identity != ledgerSchemaIdentity {
 		return fmt.Errorf("database identity %08x is not an Omni Money ledger", identity)
 	}
 	var userTables int
-	if err := validateInternalSQLiteTables(target); err != nil {
+	if err := validateInternalSQLiteTablesContext(ctx, target); err != nil {
 		return fmt.Errorf("SQLite internal table validation failed: %w", err)
 	}
-	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND " + sqliteUserTablePredicate).Scan(&userTables); err != nil {
+	if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "+sqliteUserTablePredicate).Scan(&userTables); err != nil {
 		return err
 	}
 	if userTables == 0 {
@@ -996,7 +1043,7 @@ func validateLedgerSchemaInternal(target schemaQueryer, requireCurrent, strictCu
 	}
 	// Before migration, require the historical transaction shape. This keeps a
 	// random SQLite file from being upgraded by CREATE TABLE IF NOT EXISTS.
-	if err := requireColumns(target, "transactions", []string{"id", "account", "date", "item", "type", "amount", "balance", "memo"}); err != nil {
+	if err := requireColumnsContext(ctx, target, "transactions", []string{"id", "account", "date", "item", "type", "amount", "balance", "memo"}); err != nil {
 		return fmt.Errorf("ledger minimum schema: %w", err)
 	}
 	if version == ledgerSchemaVersion {
@@ -1006,13 +1053,13 @@ func validateLedgerSchemaInternal(target schemaQueryer, requireCurrent, strictCu
 			// image is accepted only when every legacy table definition matches
 			// the exact allowlisted pre-identity DDL and all current objects have
 			// their expected shape. Same-name forged tables/markers do not pass.
-			legacy, err := isSupportedLegacyCurrentLayout(target)
+			legacy, err := isSupportedLegacyCurrentLayoutContext(ctx, target)
 			if err != nil {
 				return err
 			}
 			strict = !legacy
 		}
-		return validateFullLedgerSchema(target, strict)
+		return validateFullLedgerSchemaContext(ctx, target, strict)
 	}
 	if !requireCurrent {
 		return nil
@@ -1020,11 +1067,15 @@ func validateLedgerSchemaInternal(target schemaQueryer, requireCurrent, strictCu
 	if version != ledgerSchemaVersion {
 		return fmt.Errorf("schema version %d was not migrated", version)
 	}
-	return validateFullLedgerSchema(target, strictCurrent)
+	return validateFullLedgerSchemaContext(ctx, target, strictCurrent)
 }
 
 func validateLedgerSchemaAfterMigration(target schemaQueryer, strict bool) error {
-	return validateLedgerSchemaInternal(target, true, strict)
+	return validateLedgerSchemaAfterMigrationContext(context.Background(), target, strict)
+}
+
+func validateLedgerSchemaAfterMigrationContext(ctx context.Context, target schemaQueryer, strict bool) error {
+	return validateLedgerSchemaContextInternal(ctx, target, true, strict)
 }
 
 func canonicalSQL(value string) string {
@@ -1213,8 +1264,15 @@ func expectedLedgerTableDefinitions() map[string]string {
 // mutable marker row/table inside the database. The migrated current objects
 // are validated separately by validateFullLedgerSchema.
 func isSupportedLegacyCurrentLayout(target schemaQueryer) (bool, error) {
+	return isSupportedLegacyCurrentLayoutContext(context.Background(), target)
+}
+
+func isSupportedLegacyCurrentLayoutContext(ctx context.Context, target schemaQueryer) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var markerCount int
-	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE name='omni_legacy_schema_compat'").Scan(&markerCount); err != nil {
+	if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE name='omni_legacy_schema_compat'").Scan(&markerCount); err != nil {
 		return false, err
 	}
 	if markerCount != 0 {
@@ -1241,13 +1299,13 @@ func isSupportedLegacyCurrentLayout(target schemaQueryer) (bool, error) {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
 	var transactionDefinition, imageDefinition sql.NullString
-	if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").Scan(&transactionDefinition); err != nil || !transactionDefinition.Valid {
+	if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").Scan(&transactionDefinition); err != nil || !transactionDefinition.Valid {
 		return false, nil
 	}
 	if canonicalDDL(transactionDefinition.String) != legacyTransactionDefinition {
 		return false, nil
 	}
-	if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&imageDefinition); err != nil || !imageDefinition.Valid {
+	if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&imageDefinition); err != nil || !imageDefinition.Valid {
 		return false, nil
 	}
 	currentImageDefinition := expectedLedgerTableDefinitions()["transaction_images"]
@@ -1260,7 +1318,7 @@ func isSupportedLegacyCurrentLayout(target schemaQueryer) (bool, error) {
 		// compatibility path sees an already-rebuilt image table, verify its
 		// columns, foreign key and orphan rows before allowing the legacy
 		// transaction tables to remain relaxed.
-		if err := validateCurrentTransactionImages(target); err != nil {
+		if err := validateCurrentTransactionImagesContext(ctx, target); err != nil {
 			return false, err
 		}
 	}
@@ -1270,7 +1328,7 @@ func isSupportedLegacyCurrentLayout(target schemaQueryer) (bool, error) {
 	// version-2 image whose old transaction tables remain unchanged.
 	for _, table := range []string{"transactions", "transaction_images"} {
 		var count int
-		if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 1 {
+		if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 1 {
 			return false, err
 		}
 	}
@@ -1278,19 +1336,23 @@ func isSupportedLegacyCurrentLayout(target schemaQueryer) (bool, error) {
 }
 
 func isSupportedLegacyPreMigrationLayout(target schemaQueryer) (bool, error) {
-	legacy, err := isSupportedLegacyCurrentLayout(target)
+	return isSupportedLegacyPreMigrationLayoutContext(context.Background(), target)
+}
+
+func isSupportedLegacyPreMigrationLayoutContext(ctx context.Context, target schemaQueryer) (bool, error) {
+	legacy, err := isSupportedLegacyCurrentLayoutContext(ctx, target)
 	if err != nil || !legacy {
 		return legacy, err
 	}
-	legacyImages, err := isLegacyTransactionImagesLayout(target)
+	legacyImages, err := isLegacyTransactionImagesLayoutContext(ctx, target)
 	if err != nil || !legacyImages {
 		return false, err
 	}
 	var extraTables, extraObjects int
-	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND " + sqliteUserTablePredicate + " AND name NOT IN ('transactions', 'transaction_images')").Scan(&extraTables); err != nil {
+	if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "+sqliteUserTablePredicate+" AND name NOT IN ('transactions', 'transaction_images')").Scan(&extraTables); err != nil {
 		return false, err
 	}
-	if err := target.QueryRow(`
+	if err := target.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM sqlite_master
 		WHERE type IN ('index', 'trigger', 'view')
 		  AND (type != 'index' OR sql IS NOT NULL)`).Scan(&extraObjects); err != nil {
@@ -1300,8 +1362,12 @@ func isSupportedLegacyPreMigrationLayout(target schemaQueryer) (bool, error) {
 }
 
 func isLegacyTransactionImagesLayout(target schemaQueryer) (bool, error) {
+	return isLegacyTransactionImagesLayoutContext(context.Background(), target)
+}
+
+func isLegacyTransactionImagesLayoutContext(ctx context.Context, target schemaQueryer) (bool, error) {
 	var definition sql.NullString
-	if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&definition); err != nil || !definition.Valid {
+	if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&definition); err != nil || !definition.Valid {
 		return false, nil
 	}
 	expected := canonicalDDL(`CREATE TABLE transaction_images (
@@ -1316,12 +1382,16 @@ func isLegacyTransactionImagesLayout(target schemaQueryer) (bool, error) {
 }
 
 func validateInternalSQLiteTables(target schemaQueryer) error {
+	return validateInternalSQLiteTablesContext(context.Background(), target)
+}
+
+func validateInternalSQLiteTablesContext(ctx context.Context, target schemaQueryer) error {
 	expected := map[string]string{
 		"sqlite_sequence": canonicalDDL("CREATE TABLE sqlite_sequence(name,seq)"),
 		"sqlite_stat1":    canonicalDDL("CREATE TABLE sqlite_stat1(tbl,idx,stat)"),
 		"sqlite_stat4":    canonicalDDL("CREATE TABLE sqlite_stat4(tbl,idx,neq,nlt,ndlt,sample)"),
 	}
-	rows, err := target.Query("SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE 'sqlite_%'")
+	rows, err := target.QueryContext(ctx, "SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE 'sqlite_%'")
 	if err != nil {
 		return err
 	}
@@ -1341,7 +1411,11 @@ func validateInternalSQLiteTables(target schemaQueryer) error {
 }
 
 func requireColumns(target schemaQueryer, table string, required []string) error {
-	rows, err := target.Query("PRAGMA table_info(" + table + ")")
+	return requireColumnsContext(context.Background(), target, table, required)
+}
+
+func requireColumnsContext(ctx context.Context, target schemaQueryer, table string, required []string) error {
+	rows, err := target.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {
 		return err
 	}
@@ -1368,12 +1442,16 @@ func requireColumns(target schemaQueryer, table string, required []string) error
 }
 
 func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) error {
+	return validateFullLedgerSchemaContext(context.Background(), target, strictConstraints)
+}
+
+func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, strictConstraints bool) error {
 	allowedTables := map[string]bool{
 		"transactions": true, "transaction_links": true, "transaction_images": true,
 		"tags": true, "transaction_tags": true, "ai_transaction_idempotency": true,
 		"ai_daily_transaction_usage": true, "settings": true,
 	}
-	rows, err := target.Query("SELECT name FROM sqlite_master WHERE type='table' AND " + sqliteUserTablePredicate)
+	rows, err := target.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND "+sqliteUserTablePredicate)
 	if err != nil {
 		return err
 	}
@@ -1406,7 +1484,7 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 		"settings":                   {"key", "value"},
 	}
 	for table, columns := range requiredColumns {
-		if err := requireColumns(target, table, columns); err != nil {
+		if err := requireColumnsContext(ctx, target, table, columns); err != nil {
 			return fmt.Errorf("full schema: %w", err)
 		}
 	}
@@ -1429,7 +1507,7 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 	// a persistent trigger, index, or view that changes ledger behavior while
 	// retaining every required object. The complete current schema has an exact
 	// object family, excluding only SQLite's internal autoindexes.
-	persistentRows, err := target.Query(`
+	persistentRows, err := target.QueryContext(ctx, `
 		SELECT type, name FROM sqlite_master
 		WHERE type IN ('index', 'trigger', 'view')
 		  AND (type != 'index' OR sql IS NOT NULL)`)
@@ -1452,7 +1530,7 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 	}
 	for _, object := range objects {
 		var count int
-		if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?", object.typ, object.name).Scan(&count); err != nil {
+		if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?", object.typ, object.name).Scan(&count); err != nil {
 			return err
 		}
 		if count != 1 {
@@ -1470,21 +1548,21 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 	} {
 		for _, index := range indexes {
 			var tableName string
-			if err := target.QueryRow("SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?", index).Scan(&tableName); err != nil || tableName != table {
+			if err := target.QueryRowContext(ctx, "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?", index).Scan(&tableName); err != nil || tableName != table {
 				return fmt.Errorf("index %s is not attached to %s", index, table)
 			}
 		}
 	}
-	if err := validateRootTagIndex(target); err != nil {
+	if err := validateRootTagIndexContext(ctx, target); err != nil {
 		return err
 	}
-	if err := validateIndexShapes(target); err != nil {
+	if err := validateIndexShapesContext(ctx, target); err != nil {
 		return err
 	}
-	if err := validateTriggerDefinitions(target); err != nil {
+	if err := validateTriggerDefinitionsContext(ctx, target); err != nil {
 		return err
 	}
-	if err := validateCurrentColumnDefinitions(target, !strictConstraints); err != nil {
+	if err := validateCurrentColumnDefinitionsContext(ctx, target, !strictConstraints); err != nil {
 		return err
 	}
 	// Check the complete canonical table DDL. Substring checks are not a
@@ -1497,7 +1575,7 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 			continue
 		}
 		var definition sql.NullString
-		if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&definition); err != nil || !definition.Valid {
+		if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&definition); err != nil || !definition.Valid {
 			return fmt.Errorf("missing definition for %s: %w", table, err)
 		}
 		if got := canonicalDDL(definition.String); got != expected {
@@ -1527,7 +1605,7 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 		if !strictConstraints && table == "transaction_images" {
 			continue
 		}
-		rows, err := target.Query("PRAGMA foreign_key_list(" + table + ")")
+		rows, err := target.QueryContext(ctx, "PRAGMA foreign_key_list("+table+")")
 		if err != nil {
 			return err
 		}
@@ -1560,7 +1638,7 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 			}
 		}
 	}
-	rows, err = target.Query("PRAGMA foreign_key_check")
+	rows, err = target.QueryContext(ctx, "PRAGMA foreign_key_check")
 	if err != nil {
 		return err
 	}
@@ -1577,6 +1655,10 @@ type expectedColumnDefinition struct {
 }
 
 func validateCurrentColumnDefinitions(target schemaQueryer, allowLegacyTables bool) error {
+	return validateCurrentColumnDefinitionsContext(context.Background(), target, allowLegacyTables)
+}
+
+func validateCurrentColumnDefinitionsContext(ctx context.Context, target schemaQueryer, allowLegacyTables bool) error {
 	expected := map[string][]expectedColumnDefinition{
 		"transactions": {
 			{name: "id", columnType: "INTEGER", primaryKey: 1},
@@ -1633,7 +1715,7 @@ func validateCurrentColumnDefinitions(target schemaQueryer, allowLegacyTables bo
 		if allowLegacyTables && (table == "transactions" || table == "transaction_images") {
 			continue
 		}
-		rows, err := target.Query("PRAGMA table_info(" + table + ")")
+		rows, err := target.QueryContext(ctx, "PRAGMA table_info("+table+")")
 		if err != nil {
 			return err
 		}
@@ -1668,6 +1750,10 @@ func validateCurrentColumnDefinitions(target schemaQueryer, allowLegacyTables bo
 }
 
 func validateTriggerDefinitions(target schemaQueryer) error {
+	return validateTriggerDefinitionsContext(context.Background(), target)
+}
+
+func validateTriggerDefinitionsContext(ctx context.Context, target schemaQueryer) error {
 	expected := map[string]string{
 		"trg_transaction_images_quota_insert": canonicalDDL(fmt.Sprintf(`CREATE TRIGGER trg_transaction_images_quota_insert
 			BEFORE INSERT ON transaction_images
@@ -1700,7 +1786,7 @@ func validateTriggerDefinitions(target schemaQueryer) error {
 	}
 	for name, expectedDDL := range expected {
 		var definition sql.NullString
-		if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", name).Scan(&definition); err != nil || !definition.Valid {
+		if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", name).Scan(&definition); err != nil || !definition.Valid {
 			return fmt.Errorf("trigger %s definition is unavailable: %w", name, err)
 		}
 		if got := canonicalDDL(definition.String); got != expectedDDL {
@@ -1718,6 +1804,10 @@ func normalizeColumnDefault(value any) string {
 }
 
 func validateIndexShapes(target schemaQueryer) error {
+	return validateIndexShapesContext(context.Background(), target)
+}
+
+func validateIndexShapesContext(ctx context.Context, target schemaQueryer) error {
 	expected := map[string]struct {
 		table   string
 		unique  bool
@@ -1785,7 +1875,7 @@ func validateIndexShapes(target schemaQueryer) error {
 	for name, want := range expected {
 		var tableName string
 		var definition sql.NullString
-		if err := target.QueryRow("SELECT tbl_name, sql FROM sqlite_master WHERE type='index' AND name=?", name).Scan(&tableName, &definition); err != nil {
+		if err := target.QueryRowContext(ctx, "SELECT tbl_name, sql FROM sqlite_master WHERE type='index' AND name=?", name).Scan(&tableName, &definition); err != nil {
 			return fmt.Errorf("index %s definition is unavailable: %w", name, err)
 		}
 		if tableName != want.table {
@@ -1794,7 +1884,7 @@ func validateIndexShapes(target schemaQueryer) error {
 		if !definition.Valid || canonicalDDL(definition.String) != canonicalDDL(want.ddl) {
 			return fmt.Errorf("index %s DDL is not the current allowlisted definition", name)
 		}
-		rows, err := target.Query("PRAGMA index_list(" + want.table + ")")
+		rows, err := target.QueryContext(ctx, "PRAGMA index_list("+want.table+")")
 		if err != nil {
 			return err
 		}
@@ -1816,7 +1906,7 @@ func validateIndexShapes(target schemaQueryer) error {
 		if !found {
 			return fmt.Errorf("index %s has unexpected uniqueness", name)
 		}
-		rows, err = target.Query("PRAGMA index_xinfo(" + strconv.Quote(name) + ")")
+		rows, err = target.QueryContext(ctx, "PRAGMA index_xinfo("+strconv.Quote(name)+")")
 		if err != nil {
 			return err
 		}
@@ -1864,9 +1954,13 @@ func boolToInt(value bool) int {
 // SQLite silently leaves an existing non-unique index untouched when the
 // names collide.
 func validateRootTagIndex(target schemaQueryer) error {
+	return validateRootTagIndexContext(context.Background(), target)
+}
+
+func validateRootTagIndexContext(ctx context.Context, target schemaQueryer) error {
 	var objectType, tableName string
 	var definition sql.NullString
-	if err := target.QueryRow(`
+	if err := target.QueryRowContext(ctx, `
 		SELECT type, tbl_name, sql FROM sqlite_master
 		WHERE type = 'index' AND name = 'idx_tags_root_name_unique'`).Scan(&objectType, &tableName, &definition); err != nil {
 		return fmt.Errorf("rootタグ一意index定義の検査に失敗しました: %w", err)
@@ -1879,7 +1973,7 @@ func validateRootTagIndex(target schemaQueryer) error {
 		return fmt.Errorf("rootタグ一意indexの定義が不正です: %q", definition.String)
 	}
 
-	rows, err := target.Query("PRAGMA index_list(tags)")
+	rows, err := target.QueryContext(ctx, "PRAGMA index_list(tags)")
 	if err != nil {
 		return fmt.Errorf("rootタグ一意index属性の検査に失敗しました: %w", err)
 	}
@@ -1906,7 +2000,7 @@ func validateRootTagIndex(target schemaQueryer) error {
 		return fmt.Errorf("rootタグ一意indexがindex_listにありません")
 	}
 
-	rows, err = target.Query(`PRAGMA index_info("idx_tags_root_name_unique")`)
+	rows, err = target.QueryContext(ctx, `PRAGMA index_info("idx_tags_root_name_unique")`)
 	if err != nil {
 		return fmt.Errorf("rootタグ一意index列の検査に失敗しました: %w", err)
 	}
@@ -2038,19 +2132,17 @@ func (i *Instance) createSnapshot(ctx context.Context, snapshotDir string) (stri
 	if err != nil {
 		return "", err
 	}
-	requiredBytes, err := sqliteDatabaseSize(currentDB)
+	requiredBytes, err := sqliteDatabaseSizeContext(ctx, currentDB)
 	if err != nil {
 		return "", fmt.Errorf("スナップショット必要容量取得エラー: %w", err)
 	}
 	if requiredBytes > budget {
 		return "", fmt.Errorf("スナップショット必要容量 %d bytes が総容量上限 %d bytes を超えます", requiredBytes, budget)
 	}
-	// Reserve both one generation slot and the estimated destination bytes
-	// before creating a new file. Only existing snapshot files are candidates;
-	// the live DB and any in-progress output are outside this deletion set.
-	if err := pruneSnapshotsContext(ctx, snapshotDir, 29, budget-requiredBytes, ""); err != nil {
-		return "", fmt.Errorf("スナップショット容量確保エラー: %w", err)
-	}
+	// Do not prune existing generations before the new image is complete. A
+	// canceled backup, failed validation, or failed fsync must leave the
+	// existing public snapshot set untouched. Retention is finalized only
+	// after the validated staging file has been atomically published below.
 
 	// The backup is built under a hidden, random staging name. A process crash
 	// can therefore leave only an ignored staging artifact; the public .db name
@@ -2111,11 +2203,26 @@ func (i *Instance) createSnapshot(ctx context.Context, snapshotDir string) (stri
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("スナップショット名検査エラー: %w", err)
 	}
+	stagedInfo, err := os.Stat(stagingPath)
+	if err != nil {
+		return "", fmt.Errorf("スナップショットstaging検査エラー: %w", err)
+	}
+	if stagedInfo.Size() < 0 || stagedInfo.Size() > budget {
+		return "", fmt.Errorf("スナップショットstaging容量が総容量上限を超えます")
+	}
+	quarantined, err := quarantineSnapshotsContext(ctx, snapshotDir, 30, budget, stagedInfo.Size())
+	if err != nil {
+		return "", fmt.Errorf("スナップショット世代退避エラー: %w", err)
+	}
 	if err := ctx.Err(); err != nil {
+		if rollbackErr := rollbackSnapshotQuarantine(quarantined, snapshotDir); rollbackErr != nil {
+			return "", errors.Join(err, rollbackErr)
+		}
 		return "", err
 	}
-	if err := os.Rename(stagingPath, snapshotPath); err != nil {
-		return "", fmt.Errorf("スナップショット公開エラー: %w", err)
+	if err := publishSnapshotFile(stagingPath, snapshotPath); err != nil {
+		rollbackErr := rollbackSnapshotQuarantine(quarantined, snapshotDir)
+		return "", errors.Join(fmt.Errorf("スナップショット公開エラー: %w", err), rollbackErr)
 	}
 	stagingLive = false
 	// From this point onward the public name is complete and must not be
@@ -2125,8 +2232,8 @@ func (i *Instance) createSnapshot(ctx context.Context, snapshotDir string) (stri
 	if err := syncDirectory(snapshotDir); err != nil {
 		return "", fmt.Errorf("スナップショットdirectory fsyncエラー: %w", err)
 	}
-	if err := pruneSnapshotsContext(durableCtx, snapshotDir, 30, budget, snapshotPath); err != nil {
-		return "", fmt.Errorf("スナップショット容量検査エラー: %w", err)
+	if err := finalizeSnapshotQuarantine(durableCtx, quarantined, snapshotDir); err != nil {
+		return "", fmt.Errorf("スナップショット世代削除エラー: %w", err)
 	}
 
 	// Audit records deliberately contain only the operation and result.  The
@@ -2370,10 +2477,10 @@ func (i *Instance) validateSnapshotDatabaseContext(ctx context.Context, target *
 		return err
 	}
 	var userTables int
-	if err := validateInternalSQLiteTables(target); err != nil {
+	if err := validateInternalSQLiteTablesContext(ctx, target); err != nil {
 		return fmt.Errorf("SQLite internal table validation failed: %w", err)
 	}
-	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND " + sqliteUserTablePredicate).Scan(&userTables); err != nil {
+	if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "+sqliteUserTablePredicate).Scan(&userTables); err != nil {
 		return err
 	}
 	if userTables == 0 {
@@ -2382,7 +2489,7 @@ func (i *Instance) validateSnapshotDatabaseContext(ctx context.Context, target *
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return validateLedgerSchema(target, false)
+	return validateLedgerSchemaContext(ctx, target, false)
 }
 
 // RestoreSnapshot はスナップショットからDBを復元する。
@@ -2531,7 +2638,7 @@ func (i *Instance) RestoreSnapshotContext(ctx context.Context, snapshotDir, snap
 		_ = candidateDB.Close()
 		return err
 	}
-	if err := checkpointAndClose(candidateDB, candidatePath); err != nil {
+	if err := checkpointAndCloseContext(ctx, candidateDB, candidatePath); err != nil {
 		return fmt.Errorf("復元候補の耐久化エラー: %w", err)
 	}
 	if err := syncFileAndDirectory(candidatePath, dir); err != nil {
@@ -2669,7 +2776,7 @@ func (i *Instance) RestoreSnapshotContext(ctx context.Context, snapshotDir, snap
 		}
 		return errors.Join(fmt.Errorf("復元後DB検証エラー: %w", err), rollbackRestoreFilesExpected(currentPath, backupPath, candidatePath, i, oldDigest))
 	}
-	if err := checkpointAndClose(newDB, currentPath); err != nil {
+	if err := checkpointAndCloseContext(durableCtx, newDB, currentPath); err != nil {
 		_ = newDB.Close()
 		return errors.Join(fmt.Errorf("復元後DB耐久化エラー: %w", err), rollbackRestoreFilesExpected(currentPath, backupPath, candidatePath, i, oldDigest))
 	}
@@ -2723,19 +2830,19 @@ func (i *Instance) validateRestoreDatabaseContext(ctx context.Context, target *s
 	// ledger. Supported legacy snapshots must at least contain the historical
 	// transaction shape before migration.
 	var userTables int
-	if err := validateInternalSQLiteTables(target); err != nil {
+	if err := validateInternalSQLiteTablesContext(ctx, target); err != nil {
 		return fmt.Errorf("SQLite internal table validation failed: %w", err)
 	}
-	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND " + sqliteUserTablePredicate).Scan(&userTables); err != nil {
+	if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "+sqliteUserTablePredicate).Scan(&userTables); err != nil {
 		return fmt.Errorf("復元DB table count検査エラー: %w", err)
 	}
 	if userTables == 0 {
 		return errors.New("空のSQLiteファイルは復元候補ではありません")
 	}
-	if err := validateLedgerSchema(target, false); err != nil {
+	if err := validateLedgerSchemaContext(ctx, target, false); err != nil {
 		return fmt.Errorf("復元DB schema最低要件エラー: %w", err)
 	}
-	if err := requireFullSynchronous(target); err != nil {
+	if err := requireFullSynchronousContext(ctx, target); err != nil {
 		return fmt.Errorf("復元DB耐久性設定エラー: %w", err)
 	}
 	if err := i.checkIntegrityContext(ctx, target); err != nil {
@@ -2744,7 +2851,7 @@ func (i *Instance) validateRestoreDatabaseContext(ctx context.Context, target *s
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := createTablesOn(target); err != nil {
+	if err := createTablesOnContext(ctx, target); err != nil {
 		return fmt.Errorf("復元DBスキーマ更新エラー: %w", err)
 	}
 	if err := i.checkIntegrityContext(ctx, target); err != nil {
@@ -2762,10 +2869,17 @@ func (i *Instance) validateRestoreDatabaseContext(ctx context.Context, target *s
 }
 
 func checkpointAndClose(target *sql.DB, path string) error {
+	return checkpointAndCloseContext(context.Background(), target, path)
+}
+
+func checkpointAndCloseContext(ctx context.Context, target *sql.DB, path string) error {
 	if target == nil {
 		return fmt.Errorf("DBが初期化されていません")
 	}
-	if _, err := target.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, err := target.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		_ = target.Close()
 		return err
 	}
@@ -2810,8 +2924,15 @@ func snapshotSQLiteDSN(path string) string {
 }
 
 func requireFullSynchronous(target *sql.DB) error {
+	return requireFullSynchronousContext(context.Background(), target)
+}
+
+func requireFullSynchronousContext(ctx context.Context, target *sql.DB) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var synchronous int
-	if err := target.QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil {
+	if err := target.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&synchronous); err != nil {
 		return fmt.Errorf("PRAGMA synchronous検査エラー: %w", err)
 	}
 	if synchronous != 2 {
@@ -2911,11 +3032,18 @@ func snapshotMaxTotalBytes() (int64, error) {
 }
 
 func sqliteDatabaseSize(target *sql.DB) (int64, error) {
+	return sqliteDatabaseSizeContext(context.Background(), target)
+}
+
+func sqliteDatabaseSizeContext(ctx context.Context, target *sql.DB) (int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var pageCount, pageSize int64
-	if err := target.QueryRow("PRAGMA page_count").Scan(&pageCount); err != nil {
+	if err := target.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount); err != nil {
 		return 0, err
 	}
-	if err := target.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
+	if err := target.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize); err != nil {
 		return 0, err
 	}
 	if pageCount <= 0 || pageSize <= 0 || pageCount > (1<<63-1)/pageSize {
@@ -2996,6 +3124,9 @@ func cleanupSnapshotStagingDir(ctx context.Context, path string) error {
 	if err := validateSnapshotDirectory(path); err != nil {
 		return err
 	}
+	if err := cleanupSnapshotPruneArtifacts(ctx, path); err != nil {
+		return err
+	}
 	entries, err := readDirectoryEntriesContext(ctx, path, maxSnapshotDirectoryEntries)
 	if err != nil {
 		return err
@@ -3032,6 +3163,340 @@ func cleanupSnapshotStagingDir(ctx context.Context, path string) error {
 		}
 	}
 	return errors.Join(cleanupErrs...)
+}
+
+func parseSnapshotPruneArtifact(name string) (string, bool) {
+	if !strings.HasPrefix(name, snapshotPruneArtifactPrefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(name, snapshotPruneArtifactPrefix)
+	if len(rest) < 33 || rest[32] != '-' {
+		return "", false
+	}
+	if _, err := hex.DecodeString(rest[:32]); err != nil {
+		return "", false
+	}
+	original := rest[33:]
+	if err := validateSnapshotName(original); err != nil {
+		return "", false
+	}
+	return original, true
+}
+
+// cleanupSnapshotPruneArtifacts recovers a pre-publication quarantine after
+// a process crash. A hidden victim is restored to its original public name;
+// if only its sidecar survived finalization, the orphan sidecar is removed.
+// Existing public names are never overwritten, so ambiguity fails closed.
+func cleanupSnapshotPruneArtifacts(ctx context.Context, path string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	entries, err := readDirectoryEntriesContext(ctx, path, maxSnapshotDirectoryEntries)
+	if err != nil {
+		return err
+	}
+	changed := false
+	var errs []error
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), snapshotPruneArtifactPrefix) || !strings.HasSuffix(entry.Name(), ".db") {
+			continue
+		}
+		original, ok := parseSnapshotPruneArtifact(entry.Name())
+		if !ok {
+			errs = append(errs, fmt.Errorf("invalid snapshot quarantine artifact: %s", entry.Name()))
+			continue
+		}
+		hiddenPath := filepath.Join(path, entry.Name())
+		if _, err := validatePrivateArtifact(hiddenPath); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		originalPath := filepath.Join(path, original)
+		if _, err := os.Lstat(originalPath); err == nil {
+			errs = append(errs, fmt.Errorf("snapshot quarantine target already exists: %s", original))
+			continue
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, err)
+			continue
+		}
+		if err := os.Rename(hiddenPath, originalPath); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		changed = true
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, snapshotPruneArtifactPrefix) || !strings.HasSuffix(name, ".db-wal") && !strings.HasSuffix(name, ".db-shm") && !strings.HasSuffix(name, ".db-journal") {
+			continue
+		}
+		hiddenPath := filepath.Join(path, name)
+		base := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(name, "-wal"), "-shm"), "-journal")
+		original, ok := parseSnapshotPruneArtifact(base)
+		if !ok {
+			errs = append(errs, fmt.Errorf("invalid snapshot quarantine sidecar: %s", name))
+			continue
+		}
+		if _, err := os.Lstat(hiddenPath); err != nil {
+			if !os.IsNotExist(err) {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		originalPath := filepath.Join(path, original) + strings.TrimPrefix(name, base)
+		if _, err := os.Lstat(originalPath); err == nil {
+			errs = append(errs, fmt.Errorf("snapshot quarantine sidecar target already exists: %s", filepath.Base(originalPath)))
+			continue
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, err)
+			continue
+		}
+		hiddenDBPath := filepath.Join(path, base)
+		_, hiddenDBErr := os.Lstat(hiddenDBPath)
+		_, originalDBErr := os.Lstat(filepath.Join(path, original))
+		if hiddenDBErr == nil {
+			// The database itself was not recovered (for example because the
+			// original public name already existed). Never discard its sidecar.
+			errs = append(errs, fmt.Errorf("snapshot quarantine database remains: %s", filepath.Base(hiddenDBPath)))
+			continue
+		}
+		if originalDBErr != nil && !os.IsNotExist(originalDBErr) {
+			errs = append(errs, originalDBErr)
+			continue
+		}
+		if os.IsNotExist(originalDBErr) {
+			if removeErr := removePrivateSQLiteFile(hiddenPath); removeErr != nil {
+				errs = append(errs, removeErr)
+			} else {
+				changed = true
+			}
+			continue
+		}
+		if _, err := validatePrivateArtifact(hiddenPath); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := os.Rename(hiddenPath, originalPath); err != nil {
+			errs = append(errs, err)
+		} else {
+			changed = true
+		}
+	}
+	if changed {
+		if err := syncDirectory(path); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+type snapshotQuarantineEntry struct {
+	original    string
+	quarantined string
+	sidecars    [3]snapshotQuarantineSidecar
+}
+
+type snapshotQuarantineSidecar struct {
+	original    string
+	quarantined string
+	present     bool
+}
+
+// quarantineSnapshotsContext moves retention victims out of the public
+// namespace without deleting them. The caller publishes the new snapshot
+// only after this operation succeeds; any pre-publication failure restores
+// every moved generation. This keeps cancellation and backup failures from
+// losing the previous public snapshot set.
+func quarantineSnapshotsContext(ctx context.Context, snapshotDir string, maxKeep int, maxBytes, newBytes int64) ([]snapshotQuarantineEntry, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if maxKeep <= 0 || maxBytes < 0 || newBytes < 0 || newBytes > maxBytes {
+		return nil, errors.New("snapshot quarantine retention boundary is invalid")
+	}
+	entries, err := readDirectoryEntriesContext(ctx, snapshotDir, maxSnapshotDirectoryEntries)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	usage := make([]snapshotUsageEntry, 0, len(entries))
+	var total int64
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".db") {
+			continue
+		}
+		path := filepath.Join(snapshotDir, entry.Name())
+		info, err := validatePrivateArtifact(path)
+		if err != nil {
+			return nil, err
+		}
+		size := info.Size()
+		if size < 0 || total > (1<<63-1)-size {
+			return nil, errors.New("snapshot retention size overflow")
+		}
+		for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+			sidecarInfo, sidecarErr := validatePrivateArtifact(path + suffix)
+			if os.IsNotExist(sidecarErr) {
+				continue
+			}
+			if sidecarErr != nil {
+				return nil, sidecarErr
+			}
+			if sidecarInfo.Size() < 0 || size > (1<<63-1)-sidecarInfo.Size() {
+				return nil, fmt.Errorf("snapshot sidecar is unsafe: %s", filepath.Base(path+suffix))
+			}
+			size += sidecarInfo.Size()
+		}
+		if total > (1<<63-1)-size {
+			return nil, errors.New("snapshot retention size overflow")
+		}
+		total += size
+		usage = append(usage, snapshotUsageEntry{name: entry.Name(), path: path, size: size})
+	}
+	sort.Slice(usage, func(left, right int) bool { return usage[left].name < usage[right].name })
+	var quarantined []snapshotQuarantineEntry
+	rollback := func(cause error) error {
+		return errors.Join(cause, rollbackSnapshotQuarantine(quarantined, snapshotDir))
+	}
+	for len(usage)+1 > maxKeep || total+newBytes > maxBytes {
+		if err := ctx.Err(); err != nil {
+			return nil, rollback(err)
+		}
+		if len(usage) == 0 {
+			return nil, errors.New("snapshot retention cannot fit the new generation")
+		}
+		victim := usage[0]
+		random := make([]byte, 16)
+		if _, err := cryptorand.Read(random); err != nil {
+			return nil, rollback(err)
+		}
+		quarantinePath := filepath.Join(snapshotDir, snapshotPruneArtifactPrefix+hex.EncodeToString(random)+"-"+victim.name)
+		clear(random)
+		if _, err := os.Lstat(quarantinePath); err == nil {
+			return nil, rollback(errors.New("snapshot quarantine name collision"))
+		} else if !os.IsNotExist(err) {
+			return nil, rollback(err)
+		}
+		item := snapshotQuarantineEntry{original: victim.path, quarantined: quarantinePath}
+		if err := os.Rename(victim.path, quarantinePath); err != nil {
+			return nil, rollback(err)
+		}
+		quarantined = append(quarantined, item)
+		itemIndex := len(quarantined) - 1
+		for index, suffix := range []string{"-wal", "-shm", "-journal"} {
+			original := victim.path + suffix
+			quarantinedPath := quarantinePath + suffix
+			_, statErr := validatePrivateArtifact(original)
+			if os.IsNotExist(statErr) {
+				quarantined[itemIndex].sidecars[index] = snapshotQuarantineSidecar{original: original, quarantined: quarantinedPath}
+				continue
+			}
+			if statErr != nil {
+				return nil, rollback(errors.Join(statErr, errors.New("snapshot sidecar is unsafe")))
+			}
+			if err := os.Rename(original, quarantinedPath); err != nil {
+				return nil, rollback(err)
+			}
+			quarantined[itemIndex].sidecars[index] = snapshotQuarantineSidecar{original: original, quarantined: quarantinedPath, present: true}
+		}
+		total -= victim.size
+		usage = usage[1:]
+	}
+	if len(quarantined) > 0 {
+		if err := syncDirectory(snapshotDir); err != nil {
+			return nil, rollback(err)
+		}
+	}
+	return quarantined, nil
+}
+
+func rollbackSnapshotQuarantine(entries []snapshotQuarantineEntry, snapshotDir string) error {
+	var errs []error
+	for index := len(entries) - 1; index >= 0; index-- {
+		item := entries[index]
+		if _, err := os.Lstat(item.original); err == nil {
+			errs = append(errs, fmt.Errorf("snapshot quarantine rollback target exists: %s", filepath.Base(item.original)))
+		} else if os.IsNotExist(err) {
+			if _, quarantineErr := validatePrivateArtifact(item.quarantined); quarantineErr == nil {
+				if renameErr := os.Rename(item.quarantined, item.original); renameErr != nil {
+					errs = append(errs, renameErr)
+				}
+			} else if !os.IsNotExist(quarantineErr) {
+				errs = append(errs, quarantineErr)
+			}
+		} else {
+			errs = append(errs, err)
+		}
+		for _, sidecar := range item.sidecars {
+			if !sidecar.present {
+				continue
+			}
+			if _, err := os.Lstat(sidecar.original); err == nil {
+				errs = append(errs, fmt.Errorf("snapshot sidecar rollback target exists: %s", filepath.Base(sidecar.original)))
+			} else if os.IsNotExist(err) {
+				if _, quarantineErr := validatePrivateArtifact(sidecar.quarantined); quarantineErr == nil {
+					if renameErr := os.Rename(sidecar.quarantined, sidecar.original); renameErr != nil {
+						errs = append(errs, renameErr)
+					}
+				} else if !os.IsNotExist(quarantineErr) {
+					errs = append(errs, quarantineErr)
+				}
+			} else {
+				errs = append(errs, err)
+			}
+		}
+	}
+	if len(entries) > 0 {
+		if err := syncDirectory(snapshotDir); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func finalizeSnapshotQuarantine(ctx context.Context, entries []snapshotQuarantineEntry, snapshotDir string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var errs []error
+	removed := false
+	for _, item := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := removePrivateSQLiteFile(item.quarantined); err != nil {
+			errs = append(errs, err)
+		} else {
+			removed = true
+		}
+		for _, sidecar := range item.sidecars {
+			if !sidecar.present {
+				continue
+			}
+			if err := removePrivateSQLiteFile(sidecar.quarantined); err != nil {
+				errs = append(errs, err)
+			} else {
+				removed = true
+			}
+		}
+	}
+	if removed {
+		if err := syncDirectory(snapshotDir); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func acquireSnapshotValidation(ctx context.Context) error {
@@ -3436,6 +3901,29 @@ func validateSnapshotSource(path, dir, name string, encrypted ...bool) (os.FileI
 	}
 	if !validSnapshotFile(info) || (len(encrypted) > 0 && !validSnapshotMode(info, encrypted[0])) {
 		return nil, fmt.Errorf("スナップショットが安全な通常ファイルではありません")
+	}
+	return info, nil
+}
+
+// validatePrivateArtifact validates both pathname metadata and the no-follow
+// descriptor. The descriptor check is required on Windows, where Unix mode
+// bits do not expose hard-link count or the protected DACL.
+func validatePrivateArtifact(path string) (os.FileInfo, error) {
+	file, err := openSnapshotFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !validSnapshotFile(info) || !snapshotSourceMatches(pathInfo, info) {
+		return nil, errors.New("private artifact is not a stable regular file")
 	}
 	return info, nil
 }

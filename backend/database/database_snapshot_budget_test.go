@@ -96,12 +96,26 @@ func TestSnapshotValidationAdmissionIsProcessWideAndCancelable(t *testing.T) {
 
 func TestCreateSnapshotContextHonorsCancellationBeforeAdmission(t *testing.T) {
 	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	if _, err := instance.CreateSnapshot(snapshotDir); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	snapshotValidationAdmission <- struct{}{}
 	defer snapshotValidationAdmissionRelease()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	if _, err := instance.CreateSnapshotContext(ctx, snapshotDir); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("canceled snapshot creation error = %v, want context deadline", err)
+	}
+	after, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("canceled snapshot creation changed public generations: before=%d after=%d", len(before), len(after))
 	}
 }
 

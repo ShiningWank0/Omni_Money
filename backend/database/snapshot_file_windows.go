@@ -249,3 +249,30 @@ func replaceManifestFile(replacement, target string) error {
 	}
 	return nil
 }
+
+// publishSnapshotFile uses the write-through Windows move primitive rather
+// than os.Rename. The caller checks that target does not exist, and a
+// concurrent collision fails closed rather than replacing another snapshot.
+func publishSnapshotFile(replacement, target string) error {
+	replacementName, err := windows.UTF16PtrFromString(replacement)
+	if err != nil {
+		return err
+	}
+	targetName, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		return err
+	}
+	const moveFileWriteThrough = 0x8
+	result, _, callErr := procMoveFileEx.Call(
+		uintptr(unsafe.Pointer(replacementName)),
+		uintptr(unsafe.Pointer(targetName)),
+		uintptr(moveFileWriteThrough),
+	)
+	if result == 0 {
+		if callErr != windows.ERROR_SUCCESS {
+			return callErr
+		}
+		return windows.GetLastError()
+	}
+	return nil
+}
