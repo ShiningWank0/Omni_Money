@@ -2,13 +2,14 @@
 
 Pangolin/TrueNAS の production Compose project では、同梱の
 scripts/safe-update.sh を version tag または digest と一緒に使います。更新処理は
-Linux + GNU tar + Bash の host contract を要求し、条件を満たさない場合は停止処理を
+Linux + Bash 3.2以降 + GNU tar の host contract を要求し、条件を満たさない場合は停止処理を
 開始せず fail closed します。
 
 ## 固定された入力と Compose contract
 
-- script の場所を基準に repository の compose.yaml と固定 project name omni-money
-  を選び、-f、--project-directory、--project-name をすべての Compose 呼び出しへ
+- compose.yaml の top-level `name: omni-money` を project identity の source of truth とし、
+  script の場所を基準に repository の compose.yaml を選びます。safe-update は
+  `-f`、`--project-directory`、`--project-name omni-money` をすべての Compose 呼び出しへ
   明示します。環境中の COMPOSE_* は除去します。
 - OMNI_UPDATE_ENV_FILE（既定 .env）は shell source せず owner-only の private copy
   へ pin します。device、inode、link count、SHA-256を保持し、途中の差替えを拒否します。
@@ -86,6 +87,38 @@ healthcheck、env 更新、network connect のどれかが失敗した場合、E
 完了してから operator が明示的に retire してください。latest、local overlay（host
 port付き）、down -v は使えません。
 
+## 電源断と手動復旧
+
+safe-update は root operator として実行します。Compose file、選択した env、host
+attestation、2つの Compose secret source は、root または root が管理する親ディレクトリ
+に置き、symlink ではない通常 file、指定された owner/mode、書込み不可の状態にします。
+control keyは固定service GIDが読むため `root:10001`・`0440`、attestationは
+`root:root`・`0444`を標準とします。
+live data は固定 UID/GID `10001:10001`・mode `0700`、checkpoint root は root-owned
+mode `0700` で、いずれも同じ暗号化 filesystem 上に置きます。例えば配置を変更した
+場合は、先に `sudo chown`/`sudo chmod` と attestation の3 pathを更新し、dry-run相当の
+preflight（安全更新テスト）を通してから実行します。実行例は次の通りです。
+
+    sudo ./scripts/safe-update.sh ghcr.io/shiningwank0/omni_money:1.1.0
+
+停止前に checkpoint directory の `recovery/` と `.safe-update-journal` へ、Compose
+snapshot、env/attestationのprivate copy、secret source contract、current runtime
+contract、device/inode/link count/digestを atomic write し、各fileと親directoryを
+fsyncします。journal phaseが `stopping` 以降で更新途中にSIGKILL・電源断が起きた場合も、
+lockやjournalは自動削除しません。次回実行は `lock` または journal を検出して fail
+closed します。これは古いlockを消して二重復旧する事故を防ぐためです。
+
+復旧時は root operator が、journalのphaseと `recovery/` の全fileについて owner/mode、
+device/inode/link count、SHA-256、attestation/data/checkpointの境界、Dockerの pinned
+container ID/image/networkを照合します。`checkpoint/data.tar` と checksumを検証し、
+必要なら既存の candidate/rollback を直接停止して checkpoint を展開し、data treeの
+全entryが `10001:10001` と許可されたmodeであること、旧runtime contractとhealth/network
+が一致することを確認してからserviceを再接続します。どれか1つでも一致しない場合は、
+lock/journal/recovery bundleを削除せず、serviceを停止したまま管理者が調査します。
+手動復旧が完了した後だけ、検証済みの pinned identity 内のlockとjournalを削除します。
+`rm -rf` で project、data、checkpoint root全体を消去したり、journalだけを先に消去して
+再実行したりしないでください。
+
 ## 実行例
 
     chmod 700 scripts/safe-update.sh
@@ -99,7 +132,8 @@ port付き）、down -v は使えません。
 scripts/safe-update_test.sh は Docker daemon を使わず、Linux では mock Docker/Compose
 state machine で main transaction を実行します。success、candidate failure、pull/config
 の停止前失敗、partial stop、INT/TERM、network disconnect/reconnect failure、rollback
-failure、env/Compose swap、candidate の追加 port/network/mount/secret、ps --all omission
-を検証します。archive の newline 名、symlink、hardlink も fail-close を確認します。
+failure、env/Compose swap、candidateのdata改変、secret inode差替え、rollback tag改変、
+追加 port/network/mount/secret、旧container IDのforce-recreate削除、stale lock/journalを
+検証します。archive の newline 名、symlink、hardlink、FIFOも fail-closeを確認します。
 macOS 等では portable preflight だけを実行し、production 更新は Linux CI/host で行って
 ください。

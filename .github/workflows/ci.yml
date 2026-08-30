@@ -112,6 +112,7 @@ jobs:
           OMNI_INITIAL_ADMIN_SETUP_TOKEN_FILE: '/tmp/omni-initial-admin-setup.token'
         run: |
           docker compose config --quiet
+          docker compose config --format json | jq -e '.name == "omni-money"'
           docker compose -f compose.yaml -f compose.bootstrap.yaml config --quiet
           docker compose -f compose.yaml -f compose.bootstrap.yaml -f compose.local.yaml config --quiet
           test -x scripts/safe-update.sh

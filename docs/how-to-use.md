@@ -69,10 +69,12 @@ chmod 600 secrets/control-database.key secrets/initial-admin-setup.token
 data directoryはcontainer UID/GID `10001:10001`だけが書けるようにします。macOS/ColimaではDocker Desktop/Colimaのfile sharingとvolume ownershipの差を確認してください。
 
 ```bash
-sudo chown 10001:10001 data secrets/control-database.key secrets/initial-admin-setup.token
+sudo chown 10001:10001 data secrets/initial-admin-setup.token
+sudo chown root:10001 secrets/control-database.key
 sudo chown root:root secrets/omni_data_at_rest.json
 sudo chmod 700 data
-sudo chmod 400 secrets/control-database.key secrets/initial-admin-setup.token
+sudo chmod 440 secrets/control-database.key
+sudo chmod 400 secrets/initial-admin-setup.token
 sudo chmod 444 secrets/omni_data_at_rest.json
 docker compose -f compose.yaml -f compose.bootstrap.yaml -f compose.local.yaml up -d --build
 ```

@@ -229,15 +229,17 @@ mkdir -p ./data ./secrets
 test -s ./secrets/control-database.key || openssl rand -hex 32 > ./secrets/control-database.key
 test -s ./secrets/initial-admin-setup.token || \
   openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n' > ./secrets/initial-admin-setup.token
-sudo chown 10001:10001 ./data ./secrets/control-database.key ./secrets/initial-admin-setup.token
+sudo chown 10001:10001 ./data ./secrets/initial-admin-setup.token
+sudo chown root:10001 ./secrets/control-database.key
 sudo chown root:root ./secrets/omni_data_at_rest.json
 sudo chmod 700 ./data
-sudo chmod 400 ./secrets/control-database.key ./secrets/initial-admin-setup.token
+sudo chmod 440 ./secrets/control-database.key
+sudo chmod 400 ./secrets/initial-admin-setup.token
 sudo chmod 444 ./secrets/omni_data_at_rest.json
 docker compose -f compose.yaml -f compose.bootstrap.yaml up -d --build
 ```
 
-ネイティブLinuxでbind mountを使う場合、初回起動前に`./data`と秘密ファイルをコンテナの固定UID/GID `10001:10001`へ設定してください。dataは`0700`、control keyとsetup tokenは`0400`にします。非秘密のattestationはroot所有`0444`にします。TrueNASでは同等のACLを設定します。`chmod 777`やPrivileged modeは使いません。
+ネイティブLinuxでbind mountを使う場合、初回起動前に`./data`を固定UID/GID `10001:10001`へ設定し、control keyは`root:10001`・`0440`、setup tokenは`10001:10001`・`0400`、非秘密のattestationは`root:root`・`0444`にします。safe-updateのhost secret contractもこのowner/modeとdevice/inode/hashを固定し、差替えを拒否します。TrueNASでは同等のACLを設定します。`chmod 777`やPrivileged modeは使いません。
 
 ローカル端末だけから試す場合は、閉じたbase構成にloopback公開を重ねます。
 
