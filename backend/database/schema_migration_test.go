@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"omni_money/backend/models"
 	"omni_money/backend/securedb"
 )
 
@@ -217,6 +218,108 @@ func TestLedgerSchemaRejectsForgedVersionZeroLayout(t *testing.T) {
 	}
 }
 
+func TestLegacyImageMigrationRebuildsForeignKeyAndCascade(t *testing.T) {
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "legacy-images.db?_foreign_keys=ON"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE transactions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		account TEXT NOT NULL, date DATETIME NOT NULL, item TEXT NOT NULL,
+		type TEXT NOT NULL, amount INTEGER NOT NULL,
+		balance INTEGER NOT NULL DEFAULT 0, memo TEXT DEFAULT ''
+	);
+	CREATE TABLE transaction_images (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		transaction_id INTEGER NOT NULL, filename TEXT NOT NULL,
+		data BLOB NOT NULL, mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	INSERT INTO transactions(account,date,item,type,amount,balance) VALUES ('cash','2026-01-01','legacy','income',1,1);
+	INSERT INTO transaction_images(transaction_id,filename,data,mime_type) VALUES (1,'legacy.png',X'01','image/png');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := createTablesOn(db); err != nil {
+		t.Fatalf("legacy migration failed: %v", err)
+	}
+	var foreignKeys int
+	if err := db.QueryRow("SELECT COUNT(*) FROM pragma_foreign_key_list('transaction_images')").Scan(&foreignKeys); err != nil {
+		t.Fatal(err)
+	}
+	if foreignKeys != 1 {
+		t.Fatalf("transaction_images foreign key count = %d, want 1", foreignKeys)
+	}
+	if _, err := db.Exec("DELETE FROM transactions WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	var images int
+	if err := db.QueryRow("SELECT COUNT(*) FROM transaction_images").Scan(&images); err != nil {
+		t.Fatal(err)
+	}
+	if images != 0 {
+		t.Fatalf("cascade left %d legacy images after deleting transaction", images)
+	}
+}
+
+func TestLegacyImageMigrationRejectsOrphanAndOversizedRowsAtomically(t *testing.T) {
+	cases := []struct {
+		name  string
+		image string
+	}{
+		{name: "orphan", image: "INSERT INTO transaction_images(transaction_id,filename,data) VALUES (999,'orphan.png',X'01')"},
+		{name: "oversized", image: "INSERT INTO transaction_images(transaction_id,filename,data) VALUES (1,'large.png',?)"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "legacy-invalid.db?_foreign_keys=ON"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if _, err := db.Exec(`CREATE TABLE transactions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				account TEXT NOT NULL, date DATETIME NOT NULL, item TEXT NOT NULL,
+				type TEXT NOT NULL, amount INTEGER NOT NULL,
+				balance INTEGER NOT NULL DEFAULT 0, memo TEXT DEFAULT ''
+			);
+			CREATE TABLE transaction_images (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				transaction_id INTEGER NOT NULL, filename TEXT NOT NULL,
+				data BLOB NOT NULL, mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			);
+			INSERT INTO transactions(account,date,item,type,amount,balance) VALUES ('cash','2026-01-01','legacy','income',1,1);`); err != nil {
+				t.Fatal(err)
+			}
+			if test.name == "oversized" {
+				if _, err := db.Exec(test.image, make([]byte, models.MaxImageBytes+1)); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := db.Exec(test.image); err != nil {
+				t.Fatal(err)
+			}
+			if err := createTablesOn(db); err == nil {
+				t.Fatal("invalid legacy image rows were migrated")
+			}
+			var version int
+			if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+				t.Fatal(err)
+			}
+			if version != 0 {
+				t.Fatalf("failed image migration changed schema version to %d", version)
+			}
+			var tableCount int
+			if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&tableCount); err != nil {
+				t.Fatal(err)
+			}
+			if tableCount != 1 {
+				t.Fatal("failed image migration removed the original table")
+			}
+		})
+	}
+}
+
 func TestLedgerSchemaRejectsFutureVersion(t *testing.T) {
 	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "future.db"))
 	if err != nil {
@@ -387,6 +490,42 @@ func TestCurrentSchemaRejectsExtraPersistentObjects(t *testing.T) {
 				t.Fatalf("extra persistent %s was accepted", test.name)
 			}
 		})
+	}
+}
+
+func TestCurrentSchemaRejectsWritableSchemaInjectedSQLiteObject(t *testing.T) {
+	instance, err := OpenPlainInstance(filepath.Join(t.TempDir(), "writable-schema.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	if _, err := instance.DB().Exec("PRAGMA writable_schema = ON"); err != nil {
+		t.Fatal(err)
+	}
+	_, insertErr := instance.DB().Exec(`INSERT INTO sqlite_master(type, name, tbl_name, rootpage, sql)
+		VALUES ('trigger', 'sqlite_evil_injected', 'transactions', 0,
+		'CREATE TRIGGER sqlite_evil_injected AFTER INSERT ON transactions BEGIN SELECT 1; END')`)
+	_, disableErr := instance.DB().Exec("PRAGMA writable_schema = OFF")
+	if insertErr != nil || disableErr != nil {
+		t.Fatalf("writable_schema fixture setup failed: insert=%v disable=%v", insertErr, disableErr)
+	}
+	if err := validateLedgerSchema(instance.DB(), true); err == nil {
+		t.Fatal("SQL-bearing sqlite-prefixed persistent object was accepted")
+	}
+}
+
+func TestCurrentSchemaRejectsPartialVariantOfNonPartialIndex(t *testing.T) {
+	instance, err := OpenPlainInstance(filepath.Join(t.TempDir(), "partial-index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	if _, err := instance.DB().Exec(`DROP INDEX idx_transactions_account;
+		CREATE INDEX idx_transactions_account ON transactions(account) WHERE 0`); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLedgerSchema(instance.DB(), true); err == nil {
+		t.Fatal("same-name partial index variant was accepted")
 	}
 }
 

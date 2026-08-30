@@ -70,13 +70,19 @@ type Instance struct {
 	snapshotRunning   bool
 	snapshotPending   bool
 	snapshotClosing   bool
-	// snapshotValidationSem bounds expensive snapshot authentication per
-	// instance. A server user cannot turn one GET into unbounded concurrent
-	// SQLCipher opens by issuing parallel requests.
-	snapshotValidationSem chan struct{}
 }
 
 const maxSnapshotValidationEntries = 256
+const maxSnapshotDirectoryEntries = 256
+const snapshotDirectoryReadBatchSize = 32
+
+// A validation may materialize one file up to maxSnapshotValidationBytes in a
+// private temporary copy. Keep this admission process-wide so independent
+// server tenants cannot multiply that disk/I/O budget by opening one semaphore
+// per Instance.
+const maxConcurrentSnapshotValidations = 1
+
+var snapshotValidationAdmission = make(chan struct{}, maxConcurrentSnapshotValidations)
 
 // A single list request is capped at one maximum-size snapshot. This keeps
 // validation work bounded even when a vault contains the maximum number of
@@ -104,7 +110,6 @@ func newInstance() *Instance {
 func (i *Instance) ensureSnapshotCond() {
 	i.snapshotInit.Do(func() {
 		i.snapshotCond = sync.NewCond(&i.snapshotMu)
-		i.snapshotValidationSem = make(chan struct{}, 1)
 	})
 }
 
@@ -357,6 +362,14 @@ func createTablesOn(target *sql.DB) error {
 		return fmt.Errorf("schema table count取得エラー: %w", err)
 	}
 	legacyMigration := version == 0 && identity == 0 && userTables > 0
+	legacyLayout, err := isSupportedLegacyCurrentLayout(target)
+	if err != nil {
+		return fmt.Errorf("legacy schema fingerprint検査エラー: %w", err)
+	}
+	legacyImageLayout, err := isLegacyTransactionImagesLayout(target)
+	if err != nil {
+		return fmt.Errorf("legacy transaction_images fingerprint検査エラー: %w", err)
+	}
 	if legacyMigration {
 		// Version 0 is ambiguous: it is either a fresh SQLite file or a
 		// historical ledger. Once user tables exist, never let CREATE TABLE IF
@@ -412,6 +425,19 @@ func createTablesOn(target *sql.DB) error {
 			if _, err := tx.Exec(`DROP TABLE transaction_image_archive_v4`); err != nil {
 				return fmt.Errorf("v4 legacy画像table削除エラー: %w", err)
 			}
+		}
+	}
+	if legacyImageLayout {
+		// The historical image table has no foreign key and therefore cannot be
+		// repaired by CREATE TABLE IF NOT EXISTS. Validate all existing rows and
+		// rebuild it under the current DDL before any identity/version marker is
+		// written. The transaction makes malformed, orphaned, or over-quota data
+		// fail closed without leaving a half-migrated table behind.
+		if err := migrateLegacyTransactionImages(tx); err != nil {
+			return fmt.Errorf("legacy transaction_images migration failed: %w", err)
+		}
+		if err := validateCurrentTransactionImages(tx); err != nil {
+			return fmt.Errorf("migrated transaction_images validation failed: %w", err)
 		}
 	}
 
@@ -664,13 +690,183 @@ func createTablesOn(target *sql.DB) error {
 	// Validate the complete post-migration schema while the transaction is
 	// still open. A crafted extra table/index/constraint must not leave a
 	// partially upgraded database committed after validation reports failure.
-	if err := validateLedgerSchemaAfterMigration(tx, !legacyMigration); err != nil {
+	if err := validateLedgerSchemaAfterMigration(tx, !legacyLayout); err != nil {
 		return fmt.Errorf("完全なschema validation failed: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("スキーマtransaction確定エラー: %w", err)
 	}
 	return nil
+}
+
+func migrateLegacyTransactionImages(tx *sql.Tx) error {
+	if tx == nil {
+		return errors.New("legacy image migration transaction is nil")
+	}
+	var invalidRows int
+	if err := tx.QueryRow(`
+		SELECT COUNT(*)
+		FROM transaction_images ti
+		LEFT JOIN transactions t ON t.id = ti.transaction_id
+		WHERE ti.id IS NULL
+		   OR ti.transaction_id IS NULL
+		   OR t.id IS NULL
+		   OR ti.filename IS NULL
+		   OR ti.data IS NULL
+		   OR length(ti.data) <= 0
+		   OR length(ti.data) > ?
+		   OR ti.mime_type IS NULL`, models.MaxImageBytes).Scan(&invalidRows); err != nil {
+		return fmt.Errorf("legacy image row validation failed: %w", err)
+	}
+	if invalidRows != 0 {
+		return fmt.Errorf("legacy image table contains %d invalid/orphan rows", invalidRows)
+	}
+	var imageCount int64
+	if err := tx.QueryRow(`
+		SELECT COALESCE(MAX(image_count), 0)
+		FROM (SELECT transaction_id, COUNT(*) AS image_count
+		      FROM transaction_images GROUP BY transaction_id)`).Scan(&imageCount); err != nil {
+		return fmt.Errorf("legacy per-transaction image count validation failed: %w", err)
+	}
+	if imageCount > int64(models.MaxImagesPerTransaction) {
+		return fmt.Errorf("legacy transaction image count exceeds %d", models.MaxImagesPerTransaction)
+	}
+	var transactionBytes int64
+	if err := tx.QueryRow(`
+		SELECT COALESCE(MAX(total_bytes), 0)
+		FROM (SELECT transaction_id, COALESCE(SUM(length(data)), 0) AS total_bytes
+		      FROM transaction_images GROUP BY transaction_id)`).Scan(&transactionBytes); err != nil {
+		return fmt.Errorf("legacy per-transaction image quota validation failed: %w", err)
+	}
+	if transactionBytes > models.MaxImageBytesPerTransaction {
+		return fmt.Errorf("legacy per-transaction image bytes exceed %d", models.MaxImageBytesPerTransaction)
+	}
+	var accountBytes int64
+	if err := tx.QueryRow(`
+		SELECT COALESCE(MAX(total_bytes), 0)
+		FROM (SELECT t.account, COALESCE(SUM(length(ti.data)), 0) AS total_bytes
+		      FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id
+		      GROUP BY t.account)`).Scan(&accountBytes); err != nil {
+		return fmt.Errorf("legacy per-account image quota validation failed: %w", err)
+	}
+	if accountBytes > models.MaxImageBytesPerAccount {
+		return fmt.Errorf("legacy per-account image bytes exceed %d", models.MaxImageBytesPerAccount)
+	}
+	var databaseBytes int64
+	if err := tx.QueryRow("SELECT COALESCE(SUM(length(data)), 0) FROM transaction_images").Scan(&databaseBytes); err != nil {
+		return fmt.Errorf("legacy database image quota validation failed: %w", err)
+	}
+	if databaseBytes > models.MaxImageBytesDatabase {
+		return fmt.Errorf("legacy database image bytes exceed %d", models.MaxImageBytesDatabase)
+	}
+
+	const legacyTable = "transaction_images_omni_legacy_migration"
+	if _, err := tx.Exec("ALTER TABLE transaction_images RENAME TO " + legacyTable); err != nil {
+		return fmt.Errorf("legacy image table rename failed: %w", err)
+	}
+	if _, err := tx.Exec(`CREATE TABLE transaction_images (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		transaction_id INTEGER NOT NULL,
+		filename TEXT NOT NULL,
+		data BLOB NOT NULL,
+		mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+	)`); err != nil {
+		return fmt.Errorf("current image table creation failed: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO transaction_images
+		(id, transaction_id, filename, data, mime_type, created_at)
+		SELECT id, transaction_id, filename, data, mime_type, created_at
+		FROM ` + legacyTable); err != nil {
+		return fmt.Errorf("legacy image row copy failed: %w", err)
+	}
+	if _, err := tx.Exec("DROP TABLE " + legacyTable); err != nil {
+		return fmt.Errorf("legacy image table removal failed: %w", err)
+	}
+	return nil
+}
+
+func validateCurrentTransactionImages(target schemaQueryer) error {
+	var definition sql.NullString
+	if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&definition); err != nil || !definition.Valid {
+		return errors.New("current transaction_images definition is unavailable")
+	}
+	if canonicalDDL(definition.String) != expectedLedgerTableDefinitions()["transaction_images"] {
+		return errors.New("transaction_images definition is not the current allowlisted DDL")
+	}
+	wantColumns := []expectedColumnDefinition{
+		{name: "id", columnType: "INTEGER", primaryKey: 1},
+		{name: "transaction_id", columnType: "INTEGER", notNull: 1},
+		{name: "filename", columnType: "TEXT", notNull: 1},
+		{name: "data", columnType: "BLOB", notNull: 1},
+		{name: "mime_type", columnType: "TEXT", notNull: 1, defaultValue: "'image/jpeg'"},
+		{name: "created_at", columnType: "DATETIME", defaultValue: "current_timestamp"},
+	}
+	rows, err := target.Query("PRAGMA table_info(transaction_images)")
+	if err != nil {
+		return err
+	}
+	index := 0
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if index >= len(wantColumns) {
+			_ = rows.Close()
+			return errors.New("transaction_images has unexpected extra columns")
+		}
+		want := wantColumns[index]
+		if cid != index || name != want.name || strings.ToUpper(columnType) != want.columnType || notNull != want.notNull || primaryKey != want.primaryKey || normalizeColumnDefault(defaultValue) != want.defaultValue {
+			_ = rows.Close()
+			return fmt.Errorf("transaction_images.%s column definition is not current", name)
+		}
+		index++
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if index != len(wantColumns) {
+		return errors.New("transaction_images is missing current columns")
+	}
+
+	rows, err = target.Query("PRAGMA foreign_key_list(transaction_images)")
+	if err != nil {
+		return err
+	}
+	foreignKeyCount := 0
+	for rows.Next() {
+		var id, seq int
+		var referenced, from, to, onUpdate, onDelete, match string
+		if err := rows.Scan(&id, &seq, &referenced, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		foreignKeyCount++
+		if foreignKeyCount != 1 || referenced != "transactions" || from != "transaction_id" || to != "id" || strings.ToUpper(onUpdate) != "NO ACTION" || strings.ToUpper(onDelete) != "CASCADE" {
+			_ = rows.Close()
+			return errors.New("transaction_images foreign key definition is not current")
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if foreignKeyCount != 1 {
+		return errors.New("transaction_images current foreign key is missing")
+	}
+	rows, err = target.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return errors.New("foreign_key_check reported an orphan row")
+	}
+	return rows.Err()
 }
 
 type schemaQueryer interface {
@@ -1015,8 +1211,7 @@ func isSupportedLegacyCurrentLayout(target schemaQueryer) (bool, error) {
 		// object must force strict current validation, never grant a bypass.
 		return false, nil
 	}
-	legacyDefinitions := map[string]string{
-		"transactions": canonicalDDL(`CREATE TABLE transactions (
+	legacyTransactionDefinition := canonicalDDL(`CREATE TABLE transactions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			account TEXT NOT NULL,
 			date DATETIME NOT NULL,
@@ -1025,23 +1220,37 @@ func isSupportedLegacyCurrentLayout(target schemaQueryer) (bool, error) {
 			amount INTEGER NOT NULL,
 			balance INTEGER NOT NULL DEFAULT 0,
 			memo TEXT DEFAULT ''
-		)`),
-		"transaction_images": canonicalDDL(`CREATE TABLE transaction_images (
+		)`)
+	legacyImageDefinition := canonicalDDL(`CREATE TABLE transaction_images (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			transaction_id INTEGER NOT NULL,
 			filename TEXT NOT NULL,
 			data BLOB NOT NULL,
 			mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`),
+	)`)
+	var transactionDefinition, imageDefinition sql.NullString
+	if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").Scan(&transactionDefinition); err != nil || !transactionDefinition.Valid {
+		return false, nil
 	}
-	for table, expected := range legacyDefinitions {
-		var definition sql.NullString
-		if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&definition); err != nil || !definition.Valid {
-			return false, nil
-		}
-		if canonicalDDL(definition.String) != expected {
-			return false, nil
+	if canonicalDDL(transactionDefinition.String) != legacyTransactionDefinition {
+		return false, nil
+	}
+	if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&imageDefinition); err != nil || !imageDefinition.Valid {
+		return false, nil
+	}
+	currentImageDefinition := expectedLedgerTableDefinitions()["transaction_images"]
+	if canonicalDDL(imageDefinition.String) != legacyImageDefinition && canonicalDDL(imageDefinition.String) != currentImageDefinition {
+		return false, nil
+	}
+	if canonicalDDL(imageDefinition.String) == currentImageDefinition {
+		// A sqlite_master DDL string is not a provenance marker: writable_schema
+		// can forge it while leaving a weaker physical table behind. When this
+		// compatibility path sees an already-rebuilt image table, verify its
+		// columns, foreign key and orphan rows before allowing the legacy
+		// transaction tables to remain relaxed.
+		if err := validateCurrentTransactionImages(target); err != nil {
+			return false, err
 		}
 	}
 	// The legacy family contains exactly these two user tables. Indexes/triggers
@@ -1062,14 +1271,37 @@ func isSupportedLegacyPreMigrationLayout(target schemaQueryer) (bool, error) {
 	if err != nil || !legacy {
 		return legacy, err
 	}
+	legacyImages, err := isLegacyTransactionImagesLayout(target)
+	if err != nil || !legacyImages {
+		return false, err
+	}
 	var extraTables, extraObjects int
 	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('transactions', 'transaction_images')").Scan(&extraTables); err != nil {
 		return false, err
 	}
-	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type IN ('index', 'trigger') AND name NOT LIKE 'sqlite_%'").Scan(&extraObjects); err != nil {
+	if err := target.QueryRow(`
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type IN ('index', 'trigger', 'view')
+		  AND (type != 'index' OR sql IS NOT NULL)`).Scan(&extraObjects); err != nil {
 		return false, err
 	}
 	return extraTables == 0 && extraObjects == 0, nil
+}
+
+func isLegacyTransactionImagesLayout(target schemaQueryer) (bool, error) {
+	var definition sql.NullString
+	if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&definition); err != nil || !definition.Valid {
+		return false, nil
+	}
+	expected := canonicalDDL(`CREATE TABLE transaction_images (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		transaction_id INTEGER NOT NULL,
+		filename TEXT NOT NULL,
+		data BLOB NOT NULL,
+		mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
+	return canonicalDDL(definition.String) == expected, nil
 }
 
 func requireColumns(target schemaQueryer, table string, required []string) error {
@@ -1163,7 +1395,8 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 	// object family, excluding only SQLite's internal autoindexes.
 	persistentRows, err := target.Query(`
 		SELECT type, name FROM sqlite_master
-		WHERE name NOT LIKE 'sqlite_%' AND type IN ('index', 'trigger', 'view')`)
+		WHERE type IN ('index', 'trigger', 'view')
+		  AND (type != 'index' OR sql IS NOT NULL)`)
 	if err != nil {
 		return err
 	}
@@ -1450,32 +1683,80 @@ func normalizeColumnDefault(value any) string {
 
 func validateIndexShapes(target schemaQueryer) error {
 	expected := map[string]struct {
-		table  string
-		unique bool
-		cols   []string
+		table   string
+		unique  bool
+		partial bool
+		cols    []string
+		ddl     string
 	}{
-		"idx_transactions_account":           {"transactions", false, []string{"account"}},
-		"idx_transactions_account_date_id":   {"transactions", false, []string{"account", "date", "id"}},
-		"idx_transactions_date":              {"transactions", false, []string{"date"}},
-		"idx_transactions_item":              {"transactions", false, []string{"item"}},
-		"idx_transactions_memo":              {"transactions", false, []string{"memo"}},
-		"idx_transaction_links_child_id":     {"transaction_links", false, []string{"child_id"}},
-		"idx_transaction_images_txid":        {"transaction_images", false, []string{"transaction_id"}},
-		"idx_tags_parent":                    {"tags", false, []string{"parent_id"}},
-		"idx_tags_root_name_unique":          {"tags", true, []string{"name"}},
-		"idx_transaction_tags_txid":          {"transaction_tags", false, []string{"transaction_id"}},
-		"idx_transaction_tags_tagid":         {"transaction_tags", false, []string{"tag_id"}},
-		"idx_ai_idempotency_credential_key":  {"ai_transaction_idempotency", true, []string{"credential_id", "idempotency_key_sha256"}},
-		"idx_ai_idempotency_transaction":     {"ai_transaction_idempotency", true, []string{"transaction_id"}},
-		"idx_ai_daily_usage_credential_date": {"ai_daily_transaction_usage", true, []string{"credential_id", "utc_date"}},
+		"idx_transactions_account": {
+			table: "transactions", cols: []string{"account"},
+			ddl: "CREATE INDEX idx_transactions_account ON transactions(account)",
+		},
+		"idx_transactions_account_date_id": {
+			table: "transactions", cols: []string{"account", "date", "id"},
+			ddl: "CREATE INDEX idx_transactions_account_date_id ON transactions(account,date,id)",
+		},
+		"idx_transactions_date": {
+			table: "transactions", cols: []string{"date"},
+			ddl: "CREATE INDEX idx_transactions_date ON transactions(date)",
+		},
+		"idx_transactions_item": {
+			table: "transactions", cols: []string{"item"},
+			ddl: "CREATE INDEX idx_transactions_item ON transactions(item)",
+		},
+		"idx_transactions_memo": {
+			table: "transactions", cols: []string{"memo"},
+			ddl: "CREATE INDEX idx_transactions_memo ON transactions(memo)",
+		},
+		"idx_transaction_links_child_id": {
+			table: "transaction_links", cols: []string{"child_id"},
+			ddl: "CREATE INDEX idx_transaction_links_child_id ON transaction_links(child_id)",
+		},
+		"idx_transaction_images_txid": {
+			table: "transaction_images", cols: []string{"transaction_id"},
+			ddl: "CREATE INDEX idx_transaction_images_txid ON transaction_images(transaction_id)",
+		},
+		"idx_tags_parent": {
+			table: "tags", cols: []string{"parent_id"},
+			ddl: "CREATE INDEX idx_tags_parent ON tags(parent_id)",
+		},
+		"idx_tags_root_name_unique": {
+			table: "tags", unique: true, partial: true, cols: []string{"name"},
+			ddl: "CREATE UNIQUE INDEX idx_tags_root_name_unique ON tags(name) WHERE parent_id IS NULL",
+		},
+		"idx_transaction_tags_txid": {
+			table: "transaction_tags", cols: []string{"transaction_id"},
+			ddl: "CREATE INDEX idx_transaction_tags_txid ON transaction_tags(transaction_id)",
+		},
+		"idx_transaction_tags_tagid": {
+			table: "transaction_tags", cols: []string{"tag_id"},
+			ddl: "CREATE INDEX idx_transaction_tags_tagid ON transaction_tags(tag_id)",
+		},
+		"idx_ai_idempotency_credential_key": {
+			table: "ai_transaction_idempotency", unique: true, cols: []string{"credential_id", "idempotency_key_sha256"},
+			ddl: "CREATE UNIQUE INDEX idx_ai_idempotency_credential_key ON ai_transaction_idempotency(credential_id,idempotency_key_sha256)",
+		},
+		"idx_ai_idempotency_transaction": {
+			table: "ai_transaction_idempotency", unique: true, cols: []string{"transaction_id"},
+			ddl: "CREATE UNIQUE INDEX idx_ai_idempotency_transaction ON ai_transaction_idempotency(transaction_id)",
+		},
+		"idx_ai_daily_usage_credential_date": {
+			table: "ai_daily_transaction_usage", unique: true, cols: []string{"credential_id", "utc_date"},
+			ddl: "CREATE UNIQUE INDEX idx_ai_daily_usage_credential_date ON ai_daily_transaction_usage(credential_id,utc_date)",
+		},
 	}
 	for name, want := range expected {
 		var tableName string
-		if err := target.QueryRow("SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?", name).Scan(&tableName); err != nil {
+		var definition sql.NullString
+		if err := target.QueryRow("SELECT tbl_name, sql FROM sqlite_master WHERE type='index' AND name=?", name).Scan(&tableName, &definition); err != nil {
 			return fmt.Errorf("index %s definition is unavailable: %w", name, err)
 		}
 		if tableName != want.table {
 			return fmt.Errorf("index %s is attached to %s, want %s", name, tableName, want.table)
+		}
+		if !definition.Valid || canonicalDDL(definition.String) != canonicalDDL(want.ddl) {
+			return fmt.Errorf("index %s DDL is not the current allowlisted definition", name)
 		}
 		rows, err := target.Query("PRAGMA index_list(" + want.table + ")")
 		if err != nil {
@@ -1490,7 +1771,7 @@ func validateIndexShapes(target schemaQueryer) error {
 				return err
 			}
 			if indexName == name {
-				found = unique == boolToInt(want.unique)
+				found = unique == boolToInt(want.unique) && partial == boolToInt(want.partial)
 			}
 		}
 		if err := rows.Close(); err != nil {
@@ -1499,19 +1780,26 @@ func validateIndexShapes(target schemaQueryer) error {
 		if !found {
 			return fmt.Errorf("index %s has unexpected uniqueness", name)
 		}
-		rows, err = target.Query("PRAGMA index_info(" + strconv.Quote(name) + ")")
+		rows, err = target.Query("PRAGMA index_xinfo(" + strconv.Quote(name) + ")")
 		if err != nil {
 			return err
 		}
 		var columns []string
 		for rows.Next() {
-			var seq, cid int
-			var column string
-			if err := rows.Scan(&seq, &cid, &column); err != nil {
+			var seq, cid, descending, key int
+			var column, collation sql.NullString
+			if err := rows.Scan(&seq, &cid, &column, &descending, &collation, &key); err != nil {
 				_ = rows.Close()
 				return err
 			}
-			columns = append(columns, column)
+			if key == 0 {
+				continue
+			}
+			if seq != len(columns) || descending != 0 || !column.Valid || !collation.Valid || !strings.EqualFold(collation.String, "BINARY") {
+				_ = rows.Close()
+				return fmt.Errorf("index %s has unexpected collation or sort order", name)
+			}
+			columns = append(columns, column.String)
 		}
 		if err := rows.Close(); err != nil {
 			return err
@@ -1634,6 +1922,10 @@ func (i *Instance) CreateSnapshot(snapshotDir string) (string, error) {
 	if i == nil {
 		return "", fmt.Errorf("データベースinstanceが初期化されていません")
 	}
+	if err := acquireSnapshotValidation(context.Background()); err != nil {
+		return "", err
+	}
+	defer snapshotValidationAdmissionRelease()
 	i.snapshotLifecycle.RLock()
 	defer i.snapshotLifecycle.RUnlock()
 	return i.createSnapshot(snapshotDir)
@@ -1767,8 +2059,8 @@ func (i *Instance) ListSnapshots(snapshotDir string) ([]string, error) {
 }
 
 // ListSnapshotsContext is the request-bound form of ListSnapshots. Every
-// potentially expensive copy/open/integrity operation observes ctx, and one
-// instance admits only one validation scan at a time.
+// potentially expensive copy/open/integrity operation observes ctx, and the
+// process-wide admission gate bounds temporary disk/I/O across tenants.
 func (i *Instance) ListSnapshotsContext(ctx context.Context, snapshotDir string) ([]string, error) {
 	if i == nil {
 		return nil, fmt.Errorf("データベースinstanceが初期化されていません")
@@ -1776,13 +2068,10 @@ func (i *Instance) ListSnapshotsContext(ctx context.Context, snapshotDir string)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	i.ensureSnapshotCond()
-	select {
-	case i.snapshotValidationSem <- struct{}{}:
-		defer func() { <-i.snapshotValidationSem }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	if err := acquireSnapshotValidation(ctx); err != nil {
+		return nil, err
 	}
+	defer snapshotValidationAdmissionRelease()
 	i.snapshotLifecycle.RLock()
 	defer i.snapshotLifecycle.RUnlock()
 	if err := ctx.Err(); err != nil {
@@ -1805,7 +2094,7 @@ func (i *Instance) ListSnapshotsContext(ctx context.Context, snapshotDir string)
 	if opener == nil {
 		return nil, fmt.Errorf("データベースopenerが初期化されていません")
 	}
-	entries, err := os.ReadDir(snapshotDir)
+	entries, err := readDirectoryEntriesContext(ctx, snapshotDir, maxSnapshotDirectoryEntries)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []string{}, nil
@@ -2034,6 +2323,10 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if err := validateSnapshotName(snapshotName); err != nil {
 		return err
 	}
+	if err := acquireSnapshotValidation(context.Background()); err != nil {
+		return err
+	}
+	defer snapshotValidationAdmissionRelease()
 
 	i.beginDBLifecycle()
 	defer i.endDBLifecycle()
@@ -2497,11 +2790,87 @@ type snapshotUsageEntry struct {
 	size int64
 }
 
+func readDirectoryEntriesContext(ctx context.Context, path string, maxEntries int) ([]os.DirEntry, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if maxEntries <= 0 {
+		return nil, errors.New("directory entry limit is invalid")
+	}
+	directory, err := os.Open(path) // #nosec G304 -- path is a caller-validated private directory.
+	if err != nil {
+		return nil, err
+	}
+	defer directory.Close()
+	entries := make([]os.DirEntry, 0, minInt(maxEntries, snapshotDirectoryReadBatchSize))
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		remaining := maxEntries - len(entries)
+		batchSize := snapshotDirectoryReadBatchSize
+		if remaining < batchSize {
+			batchSize = remaining
+		}
+		batch, readErr := directory.ReadDir(batchSize)
+		entries = append(entries, batch...)
+		if len(entries) > maxEntries {
+			return nil, errors.New("directory entry limit exceeded")
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return entries, nil
+			}
+			return nil, readErr
+		}
+		if len(entries) == maxEntries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			extra, extraErr := directory.ReadDir(1)
+			if len(extra) != 0 {
+				return nil, errors.New("directory entry limit exceeded")
+			}
+			if extraErr != nil && !errors.Is(extraErr, io.EOF) {
+				return nil, extraErr
+			}
+			return entries, nil
+		}
+	}
+}
+
+func acquireSnapshotValidation(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case snapshotValidationAdmission <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func snapshotValidationAdmissionRelease() {
+	<-snapshotValidationAdmission
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
 func pruneSnapshots(snapshotDir string, maxKeep int, maxBytes int64, protectedPath string) error {
+	return pruneSnapshotsContext(context.Background(), snapshotDir, maxKeep, maxBytes, protectedPath)
+}
+
+func pruneSnapshotsContext(ctx context.Context, snapshotDir string, maxKeep int, maxBytes int64, protectedPath string) error {
 	if maxKeep <= 0 || maxBytes < 0 {
 		return fmt.Errorf("スナップショット保持境界が無効です")
 	}
-	entries, err := os.ReadDir(snapshotDir)
+	entries, err := readDirectoryEntriesContext(ctx, snapshotDir, maxSnapshotDirectoryEntries)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -2511,6 +2880,9 @@ func pruneSnapshots(snapshotDir string, maxKeep int, maxBytes int64, protectedPa
 	usage := make([]snapshotUsageEntry, 0, len(entries))
 	var total int64
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".db") {
 			continue
 		}
@@ -2551,6 +2923,9 @@ func pruneSnapshots(snapshotDir string, maxKeep int, maxBytes int64, protectedPa
 	sort.Slice(usage, func(i, j int) bool { return usage[i].name < usage[j].name })
 	removed := false
 	for len(usage) > maxKeep || total > maxBytes {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		candidate := -1
 		for index := range usage {
 			if usage[index].path != protectedPath {
@@ -2619,14 +2994,19 @@ func (i *Instance) StartAutoSnapshot() {
 
 func (i *Instance) runAutoSnapshots() {
 	for {
-		i.snapshotLifecycle.RLock()
-		_, err := i.createSnapshot("")
-		if err != nil {
+		if err := acquireSnapshotValidation(context.Background()); err != nil {
 			log.Printf("security_event=snapshot_create result=error")
-		} else if err := i.cleanOldSnapshots("", 30); err != nil {
-			log.Printf("security_event=snapshot_prune result=error")
+		} else {
+			i.snapshotLifecycle.RLock()
+			_, err := i.createSnapshot("")
+			if err != nil {
+				log.Printf("security_event=snapshot_create result=error")
+			} else if err := i.cleanOldSnapshots("", 30); err != nil {
+				log.Printf("security_event=snapshot_prune result=error")
+			}
+			i.snapshotLifecycle.RUnlock()
+			snapshotValidationAdmissionRelease()
 		}
-		i.snapshotLifecycle.RUnlock()
 
 		i.snapshotMu.Lock()
 		if i.snapshotPending && !i.snapshotClosing {
@@ -3192,7 +3572,7 @@ func (i *Instance) recoverRestoreState(databasePath string) error {
 	if err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := readDirectoryEntriesContext(context.Background(), dir, maxSnapshotDirectoryEntries)
 	if err != nil {
 		return err
 	}
@@ -3326,7 +3706,7 @@ func (i *Instance) recoverRestoreState(databasePath string) error {
 
 func cleanupRestoreArtifacts(databasePath string) error {
 	dir := filepath.Dir(databasePath)
-	entries, err := os.ReadDir(dir)
+	entries, err := readDirectoryEntriesContext(context.Background(), dir, maxSnapshotDirectoryEntries)
 	if err != nil {
 		return err
 	}

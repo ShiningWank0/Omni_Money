@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestPruneSnapshotsEnforcesCountAndByteBudget(t *testing.T) {
@@ -76,6 +77,38 @@ func TestListSnapshotsContextHonorsCancellationBeforeValidation(t *testing.T) {
 	cancel()
 	if _, err := instance.ListSnapshotsContext(ctx, snapshotDir); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled snapshot listing error = %v, want context.Canceled", err)
+	}
+}
+
+func TestSnapshotValidationAdmissionIsProcessWideAndCancelable(t *testing.T) {
+	first, _, firstSnapshots := newPlainSnapshotTestInstance(t)
+	second, _, secondSnapshots := newPlainSnapshotTestInstance(t)
+	_ = first
+	snapshotValidationAdmission <- struct{}{}
+	defer snapshotValidationAdmissionRelease()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := second.ListSnapshotsContext(ctx, secondSnapshots); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second tenant admission error = %v, want context deadline", err)
+	}
+	_ = firstSnapshots
+}
+
+func TestDirectoryScanBoundsEntriesBeforeMaterializing(t *testing.T) {
+	dir := t.TempDir()
+	for index := 0; index <= maxSnapshotDirectoryEntries; index++ {
+		path := filepath.Join(dir, fmt.Sprintf("entry-%03d", index))
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := readDirectoryEntriesContext(context.Background(), dir, maxSnapshotDirectoryEntries); err == nil {
+		t.Fatal("directory scan accepted more than its bounded entry count")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := readDirectoryEntriesContext(ctx, dir, maxSnapshotDirectoryEntries); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled directory scan error = %v, want context.Canceled", err)
 	}
 }
 
