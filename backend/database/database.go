@@ -101,6 +101,8 @@ const snapshotPruneManifestName = ".omni-money-snapshot-prune-intent.json"
 const snapshotTransactionLockName = ".omni-money-snapshot-transaction.lock"
 const maxSnapshotPruneManifestBytes int64 = 64 * 1024
 const maxSnapshotPruneTemporaryEntries = 1024
+const snapshotPruneCreateTempPrefix = ".omni-money-snapshot-prune-create-"
+const snapshotPruneUpdateTempPrefix = ".omni-money-snapshot-prune-manifest-"
 
 // SnapshotTransactionLockFileName is exported only so the strict Desktop
 // migration tree can recognize this exact database-owned coordination file in
@@ -3458,9 +3460,9 @@ func validSHA256Digest(value string) bool {
 }
 
 // createSnapshotPruneManifest establishes ownership of a new retention
-// transaction. Unlike phase updates, the initial prepared record must never
-// replace an existing journal: an O_EXCL collision means another process (or
-// an unresolved previous run) still owns the fixed transaction name.
+// transaction. A complete, synced private temporary is atomically published
+// with no-replace semantics, so process death can leave either a removable
+// orphan temp or a complete fixed journal, never a partial fixed journal.
 func createSnapshotPruneManifest(snapshotDir string, manifest snapshotPruneManifest) error {
 	return createSnapshotPruneManifestWithCheckpoint(snapshotDir, manifest, nil)
 }
@@ -3476,67 +3478,93 @@ func createSnapshotPruneManifestWithCheckpoint(snapshotDir string, manifest snap
 	if err != nil {
 		return err
 	}
-	path := snapshotPruneManifestPath(snapshotDir)
-	root, err := os.OpenRoot(snapshotDir)
+	file, err := os.CreateTemp(snapshotDir, snapshotPruneCreateTempPrefix+"*.tmp")
 	if err != nil {
 		return err
 	}
-	file, err := fileprivacy.CreateExclusive(root, snapshotDir, snapshotPruneManifestName)
-	if err != nil {
-		_ = root.Close()
-		return err
-	}
+	tmpPath := file.Name()
 	closed := false
+	published := false
+	var expectedInfo os.FileInfo
 	defer func() {
 		if !closed {
 			_ = file.Close()
 		}
+		if !published {
+			_ = os.Remove(tmpPath)
+		}
 	}()
-	fail := func(cause error, expected os.FileInfo) error {
-		cleanupErr := removeCreatedSnapshotPruneManifest(file, path, snapshotDir, expected)
+	fail := func(cause error) error {
+		var statErr error
+		if !closed {
+			expectedInfo, statErr = file.Stat()
+			closeErr := file.Close()
+			closed = true
+			statErr = errors.Join(statErr, closeErr)
+		}
+		cleanupErr := removeCreatedSnapshotPruneManifest(nil, tmpPath, snapshotDir, expectedInfo)
+		if statErr != nil {
+			cleanupErr = errors.Join(cleanupErr, statErr)
+		}
 		return errors.Join(cause, cleanupErr)
 	}
-	if err := root.Close(); err != nil {
-		return fail(err, nil)
+	if err := file.Chmod(0600); err != nil {
+		return fail(err)
 	}
 	if err := fileprivacy.Harden(file); err != nil {
-		return fail(err, nil)
+		return fail(err)
 	}
 	if checkpoint != nil {
 		if err := checkpoint("harden"); err != nil {
-			return fail(err, nil)
+			return fail(err)
 		}
 	}
 	if _, err := file.Write(append(encoded, '\n')); err != nil {
-		return fail(err, nil)
+		return fail(err)
+	}
+	expectedInfo, err = file.Stat()
+	if err != nil {
+		return fail(err)
 	}
 	if checkpoint != nil {
 		if err := checkpoint("write"); err != nil {
-			return fail(err, nil)
+			return fail(err)
 		}
 	}
 	if err := file.Sync(); err != nil {
-		return fail(err, nil)
+		return fail(err)
 	}
 	if checkpoint != nil {
 		if err := checkpoint("sync"); err != nil {
-			return fail(err, nil)
+			return fail(err)
 		}
-	}
-	preCloseInfo, err := file.Stat()
-	if err != nil {
-		return fail(err, nil)
 	}
 	if checkpoint != nil {
 		if err := checkpoint("close"); err != nil {
-			return fail(err, preCloseInfo)
+			return fail(err)
 		}
 	}
 	if err := file.Close(); err != nil {
 		closed = true
-		return fail(err, preCloseInfo)
+		return fail(err)
 	}
 	closed = true
+	if checkpoint != nil {
+		if err := checkpoint("publish"); err != nil {
+			return fail(err)
+		}
+	}
+	if err := publishSnapshotPruneManifestNoReplace(tmpPath, snapshotPruneManifestPath(snapshotDir)); err != nil {
+		return fail(err)
+	}
+	published = true
+	if checkpoint != nil {
+		if err := checkpoint("published"); err != nil {
+			// Publication is already complete. Leave the fixed, fully synced
+			// journal for ordinary startup recovery rather than deleting it.
+			return err
+		}
+	}
 	return syncDirectory(snapshotDir)
 }
 
@@ -3574,7 +3602,7 @@ func writeSnapshotPruneManifest(snapshotDir string, manifest snapshotPruneManife
 	if err := validateSnapshotPruneManifest(snapshotDir, manifest); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(snapshotDir, ".omni-money-snapshot-prune-manifest-*.tmp")
+	tmp, err := os.CreateTemp(snapshotDir, snapshotPruneUpdateTempPrefix+"*.tmp")
 	if err != nil {
 		return err
 	}
@@ -3663,7 +3691,7 @@ func cleanupSnapshotPruneManifestTemps(ctx context.Context, snapshotDir string) 
 			return err
 		}
 		name := entry.Name()
-		if !strings.HasPrefix(name, ".omni-money-snapshot-prune-manifest-") || !strings.HasSuffix(name, ".tmp") {
+		if !isSnapshotPruneManifestTempName(name) {
 			continue
 		}
 		path := filepath.Join(snapshotDir, name)
@@ -3683,6 +3711,13 @@ func cleanupSnapshotPruneManifestTemps(ctx context.Context, snapshotDir string) 
 		return syncDirectory(snapshotDir)
 	}
 	return nil
+}
+
+func isSnapshotPruneManifestTempName(name string) bool {
+	if !strings.HasSuffix(name, ".tmp") {
+		return false
+	}
+	return strings.HasPrefix(name, snapshotPruneCreateTempPrefix) || strings.HasPrefix(name, snapshotPruneUpdateTempPrefix)
 }
 
 func snapshotQuarantineEntriesFromManifest(snapshotDir string, manifest snapshotPruneManifest) ([]snapshotQuarantineEntry, error) {
@@ -3990,7 +4025,7 @@ func planSnapshotQuarantineContext(ctx context.Context, snapshotDir string, maxK
 	}
 	sort.Slice(usage, func(left, right int) bool { return usage[left].name < usage[right].name })
 	var planned []snapshotQuarantineEntry
-	for len(usage)+1 > maxKeep || total+newBytes > maxBytes {
+	for len(usage)+1 > maxKeep || snapshotRetentionExceedsBudget(total, newBytes, maxBytes) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -4038,6 +4073,10 @@ func planSnapshotQuarantineContext(ctx context.Context, snapshotDir string, maxK
 		usage = usage[1:]
 	}
 	return planned, nil
+}
+
+func snapshotRetentionExceedsBudget(total, additional, limit int64) bool {
+	return total < 0 || additional < 0 || limit < 0 || additional > limit || total > limit-additional
 }
 
 // applySnapshotQuarantine performs a fully planned transaction. Every source
@@ -4571,16 +4610,44 @@ func preparePrivateDatabaseFile(path string) error {
 		if !os.IsNotExist(err) {
 			return err
 		}
-		file, createErr := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- path is the configured database path and O_EXCL rejects existing symlinks.
+		directory := filepath.Dir(path)
+		root, rootErr := os.OpenRoot(directory)
+		if rootErr != nil {
+			return rootErr
+		}
+		file, createErr := fileprivacy.CreateExclusive(root, directory, filepath.Base(path))
+		rootCloseErr := root.Close()
 		if createErr != nil {
 			return createErr
 		}
-		return file.Close()
+		complete := false
+		defer func() {
+			_ = file.Close()
+			if !complete {
+				_ = os.Remove(path)
+			}
+		}()
+		if rootCloseErr != nil {
+			return rootCloseErr
+		}
+		// The placeholder must carry its final protected DACL before SQLCipher
+		// writes even the first page. chmod alone is not authoritative on Windows.
+		if err := fileprivacy.Harden(file); err != nil {
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+		complete = true
+		return nil
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("データベースパスが通常ファイルではありません")
 	}
-	return os.Chmod(path, 0600)
+	if err := os.Chmod(path, 0600); err != nil {
+		return err
+	}
+	return hardenPrivateFile(path)
 }
 
 func hardenSQLiteFiles(path string) error {

@@ -276,3 +276,30 @@ func publishSnapshotFile(replacement, target string) error {
 	}
 	return nil
 }
+
+// publishSnapshotPruneManifestNoReplace uses the same atomic, write-through
+// move as snapshot publication. Omitting MOVEFILE_REPLACE_EXISTING preserves
+// an unresolved fixed-name journal on collision.
+func publishSnapshotPruneManifestNoReplace(replacement, target string) error {
+	replacementName, err := windows.UTF16PtrFromString(replacement)
+	if err != nil {
+		return err
+	}
+	targetName, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		return err
+	}
+	const moveFileWriteThrough = 0x8
+	result, _, callErr := procMoveFileEx.Call(
+		uintptr(unsafe.Pointer(replacementName)),
+		uintptr(unsafe.Pointer(targetName)),
+		uintptr(moveFileWriteThrough),
+	)
+	if result == 0 {
+		if callErr != windows.ERROR_SUCCESS {
+			return callErr
+		}
+		return windows.GetLastError()
+	}
+	return nil
+}

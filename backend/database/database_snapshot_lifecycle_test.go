@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -422,6 +424,93 @@ func TestSnapshotTransactionLockSerializesConcurrentOwners(t *testing.T) {
 	secondRelease()
 }
 
+func TestSnapshotTransactionLockProcessHelper(t *testing.T) {
+	if os.Getenv("OMNI_TEST_SNAPSHOT_LOCK_HELPER") != "1" {
+		return
+	}
+	dir := os.Getenv("OMNI_TEST_SNAPSHOT_LOCK_DIR")
+	ready := os.Getenv("OMNI_TEST_SNAPSHOT_LOCK_READY")
+	release, err := acquireSnapshotTransactionLock(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err := os.WriteFile(ready, []byte("ready"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Hour)
+}
+
+func TestSnapshotTransactionLockSurvivesMarkerReplacementAcrossProcesses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix directory flock regression")
+	}
+	dir := t.TempDir()
+	ready := filepath.Join(t.TempDir(), "ready")
+	command := exec.Command(os.Args[0], "-test.run=^TestSnapshotTransactionLockProcessHelper$", "-test.count=1")
+	command.Env = append(os.Environ(),
+		"OMNI_TEST_SNAPSHOT_LOCK_HELPER=1",
+		"OMNI_TEST_SNAPSHOT_LOCK_DIR="+dir,
+		"OMNI_TEST_SNAPSHOT_LOCK_READY="+ready,
+	)
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	process := command.Process
+	waited := false
+	defer func() {
+		if !waited {
+			_ = process.Kill()
+			_ = command.Wait()
+		}
+	}()
+	waitForSnapshotTestSignal(t, ready)
+
+	marker := filepath.Join(dir, snapshotTransactionLockName)
+	if err := os.Rename(marker, marker+".renamed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hardenPrivateFile(marker); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if release, err := acquireSnapshotTransactionLock(ctx, dir); !errors.Is(err, context.DeadlineExceeded) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("replacement marker created a second lock domain: %v", err)
+	}
+	if err := process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = command.Wait()
+	waited = true
+
+	release, err := acquireSnapshotTransactionLock(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("directory lock was not released after process death: %v", err)
+	}
+	release()
+}
+
+func waitForSnapshotTestSignal(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("helper did not signal readiness")
+}
+
 func TestPreparedPruneRollbackStateMatrixIsCrashIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	original := filepath.Join(dir, "omni_money_20260101_000000_000000001.db")
@@ -689,7 +778,7 @@ func TestSnapshotPruneManifestEncodedSizeBoundary(t *testing.T) {
 }
 
 func TestSnapshotPruneManifestCreateFailureRemovesExactJournal(t *testing.T) {
-	for _, step := range []string{"harden", "write", "sync", "close"} {
+	for _, step := range []string{"harden", "write", "sync", "close", "publish"} {
 		t.Run(step, func(t *testing.T) {
 			dir := t.TempDir()
 			original := "omni_money_20260101_000000_000000001.db"
@@ -717,6 +806,141 @@ func TestSnapshotPruneManifestCreateFailureRemovesExactJournal(t *testing.T) {
 				t.Fatalf("next manifest creation did not recover: %v", err)
 			}
 		})
+	}
+}
+
+func TestSnapshotPruneManifestCrashHelper(t *testing.T) {
+	checkpoint := os.Getenv("OMNI_TEST_PRUNE_CRASH_CHECKPOINT")
+	if checkpoint == "" {
+		return
+	}
+	dir := os.Getenv("OMNI_TEST_PRUNE_CRASH_DIR")
+	ready := os.Getenv("OMNI_TEST_PRUNE_CRASH_READY")
+	victimDigest := os.Getenv("OMNI_TEST_PRUNE_CRASH_VICTIM_DIGEST")
+	original := "omni_money_20260101_000000_000000001.db"
+	quarantined := snapshotPruneArtifactPrefix + strings.Repeat("1", 32) + "-" + original
+	manifest, err := newSnapshotPruneManifest(dir, "omni_money_20260102_000000_000000001.db", strings.Repeat("a", 64), []snapshotQuarantineEntry{{
+		original: filepath.Join(dir, original), quarantined: filepath.Join(dir, quarantined), digest: victimDigest,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = createSnapshotPruneManifestWithCheckpoint(dir, manifest, func(name string) error {
+		if name == checkpoint {
+			if err := os.WriteFile(ready, []byte("ready"), 0600); err != nil {
+				return err
+			}
+			time.Sleep(time.Hour)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSnapshotPruneManifestForcedKillPublicationBoundary(t *testing.T) {
+	for _, checkpoint := range []string{"publish", "published"} {
+		t.Run(checkpoint, func(t *testing.T) {
+			dir := t.TempDir()
+			ready := filepath.Join(t.TempDir(), "ready")
+			original := filepath.Join(dir, "omni_money_20260101_000000_000000001.db")
+			quarantined := filepath.Join(dir, snapshotPruneArtifactPrefix+strings.Repeat("1", 32)+"-"+filepath.Base(original))
+			if err := os.WriteFile(quarantined, []byte("victim"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := hardenPrivateFile(quarantined); err != nil {
+				t.Fatal(err)
+			}
+			victimDigest, err := digestDatabaseFile(quarantined)
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command(os.Args[0], "-test.run=^TestSnapshotPruneManifestCrashHelper$", "-test.count=1")
+			command.Env = append(os.Environ(),
+				"OMNI_TEST_PRUNE_CRASH_CHECKPOINT="+checkpoint,
+				"OMNI_TEST_PRUNE_CRASH_DIR="+dir,
+				"OMNI_TEST_PRUNE_CRASH_READY="+ready,
+				"OMNI_TEST_PRUNE_CRASH_VICTIM_DIGEST="+victimDigest,
+			)
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			waitForSnapshotTestSignal(t, ready)
+			if err := command.Process.Kill(); err != nil {
+				t.Fatal(err)
+			}
+			_ = command.Wait()
+
+			manifest, found, err := readSnapshotPruneManifest(dir)
+			if checkpoint == "publish" {
+				if err != nil || found {
+					t.Fatalf("pre-publication death exposed fixed journal: found=%t err=%v", found, err)
+				}
+				if err := cleanupSnapshotPruneManifestTemps(context.Background(), dir); err != nil {
+					t.Fatalf("recover pre-publication orphan: %v", err)
+				}
+				entries, err := os.ReadDir(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range entries {
+					if isSnapshotPruneManifestTempName(entry.Name()) {
+						t.Fatalf("orphan journal temporary remains: %s", entry.Name())
+					}
+				}
+				return
+			}
+			if err != nil || !found {
+				t.Fatalf("post-publication death left unreadable journal: found=%t err=%v", found, err)
+			}
+			if manifest.Phase != "prepared" || len(manifest.Victims) != 1 {
+				t.Fatalf("post-publication journal is incomplete: %+v", manifest)
+			}
+			if err := recoverSnapshotPruneTransactionAtStart(context.Background(), dir); err != nil {
+				t.Fatalf("recover complete fixed journal after process death: %v", err)
+			}
+			if content, err := os.ReadFile(original); err != nil || string(content) != "victim" {
+				t.Fatalf("recovery did not roll victim back: content=%q err=%v", content, err)
+			}
+			if _, err := os.Lstat(quarantined); !os.IsNotExist(err) {
+				t.Fatalf("recovery left quarantined victim: %v", err)
+			}
+			if _, err := os.Lstat(snapshotPruneManifestPath(dir)); !os.IsNotExist(err) {
+				t.Fatalf("recovery left fixed journal: %v", err)
+			}
+		})
+	}
+}
+
+func TestSnapshotRetentionOverflowIsFailClosed(t *testing.T) {
+	if !snapshotRetentionExceedsBudget(math.MaxInt64-4096, 8192, math.MaxInt64) {
+		t.Fatal("overflowing retention addition was accepted")
+	}
+	if snapshotRetentionExceedsBudget(math.MaxInt64-8192, 8192, math.MaxInt64) {
+		t.Fatal("exact retention boundary was rejected")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "omni_money_20260101_000000_000000001.db")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(math.MaxInt64 - 4096); err != nil {
+		_ = file.Close()
+		t.Skipf("filesystem does not support huge sparse files: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := hardenPrivateFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planSnapshotQuarantineContext(context.Background(), dir, 30, math.MaxInt64, 8192); err == nil {
+		t.Fatal("huge sparse snapshot bypassed retention and validation limits")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("failed planning mutated public snapshot set: %v", err)
 	}
 }
 

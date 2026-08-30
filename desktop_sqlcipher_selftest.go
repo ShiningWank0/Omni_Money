@@ -43,10 +43,10 @@ func runDesktopSQLCipherSelfTest() (desktopSQLCipherSelfTestReport, error) {
 		return report, err
 	}
 	defer os.RemoveAll(directory)
-	if err := os.Chmod(directory, 0700); err != nil { // #nosec G302 -- self-test data is owner-only.
-		return report, fmt.Errorf("secure self-test directory: %w", err)
-	}
 	databasePath := filepath.Join(directory, "probe.db")
+	if err := prepareDesktopSQLCipherSelfTestStorage(directory, databasePath); err != nil {
+		return report, fmt.Errorf("secure self-test storage: %w", err)
+	}
 
 	keyBytes := make([]byte, securedb.RawKeySize)
 	if _, err := rand.Read(keyBytes); err != nil {
