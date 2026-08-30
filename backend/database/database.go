@@ -96,8 +96,9 @@ var snapshotValidationAdmission = make(chan struct{}, maxConcurrentSnapshotValid
 const maxSnapshotValidationWorkBytes int64 = maxSnapshotValidationBytes
 const restoreManifestVersion = 1
 const snapshotPruneArtifactPrefix = ".omni-money-snapshot-prune-"
-const snapshotPruneManifestVersion = 1
+const snapshotPruneManifestVersion = 2
 const snapshotPruneManifestName = ".omni-money-snapshot-prune-intent.json"
+const snapshotTransactionLockName = ".omni-money-snapshot-transaction.lock"
 
 type restoreManifest struct {
 	Version   int    `json:"version"`
@@ -125,12 +126,14 @@ type snapshotPruneManifest struct {
 type snapshotPruneManifestVictim struct {
 	Original    string                         `json:"original"`
 	Quarantined string                         `json:"quarantined"`
+	Digest      string                         `json:"digest"`
 	Sidecars    []snapshotPruneManifestSidecar `json:"sidecars,omitempty"`
 }
 
 type snapshotPruneManifestSidecar struct {
 	Original    string `json:"original"`
 	Quarantined string `json:"quarantined"`
+	Digest      string `json:"digest"`
 }
 
 func newInstance() *Instance {
@@ -2158,6 +2161,19 @@ func (i *Instance) createSnapshot(ctx context.Context, snapshotDir string) (stri
 	if err := validateSnapshotDirectory(snapshotDir); err != nil {
 		return "", fmt.Errorf("スナップショットディレクトリが安全ではありません: %w", err)
 	}
+	releaseTransactionLock, err := acquireSnapshotTransactionLock(ctx, snapshotDir)
+	if err != nil {
+		return "", fmt.Errorf("スナップショット世代管理lock取得エラー: %w", err)
+	}
+	defer releaseTransactionLock()
+	// A fixed-name prune journal is the durable ownership record for the
+	// retention transaction. Resolve it before creating a new staging image so
+	// a retry can never replace unresolved victim state from an earlier process.
+	// Recovery is a durability operation and therefore completes even when the
+	// request that happened to discover it is canceled.
+	if err := recoverSnapshotPruneTransactionAtStart(context.WithoutCancel(ctx), snapshotDir); err != nil {
+		return "", fmt.Errorf("スナップショット世代管理トランザクション復旧エラー: %w", err)
+	}
 
 	budget, err := snapshotMaxTotalBytes()
 	if err != nil {
@@ -2264,7 +2280,7 @@ func (i *Instance) createSnapshot(ctx context.Context, snapshotDir string) (stri
 	if len(quarantined) > 0 {
 		pruneManifest, manifestErr := newSnapshotPruneManifest(snapshotDir, filepath.Base(snapshotPath), stagedDigest, quarantined)
 		if manifestErr == nil {
-			manifestErr = writeSnapshotPruneManifest(snapshotDir, pruneManifest)
+			manifestErr = createSnapshotPruneManifest(snapshotDir, pruneManifest)
 		}
 		if manifestErr != nil {
 			rollbackErr := rollbackSnapshotQuarantine(quarantined, snapshotDir)
@@ -3108,6 +3124,16 @@ func (i *Instance) cleanOldSnapshots(snapshotDir string, maxKeep int) error {
 	if err != nil {
 		return err
 	}
+	if _, err := os.Lstat(snapshotDir); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	releaseTransactionLock, err := acquireSnapshotTransactionLock(context.Background(), snapshotDir)
+	if err != nil {
+		return err
+	}
+	defer releaseTransactionLock()
 	return pruneSnapshots(snapshotDir, maxKeep, budget, "")
 }
 
@@ -3219,6 +3245,11 @@ func cleanupSnapshotStagingDir(ctx context.Context, path string) error {
 	if err := validateSnapshotDirectory(path); err != nil {
 		return err
 	}
+	releaseTransactionLock, err := acquireSnapshotTransactionLock(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer releaseTransactionLock()
 	if err := cleanupSnapshotPruneArtifacts(ctx, path); err != nil {
 		return err
 	}
@@ -3308,7 +3339,10 @@ func newSnapshotPruneManifest(snapshotDir, snapshotName, newDigest string, entri
 		if !ok || parsed != original {
 			return snapshotPruneManifest{}, errors.New("snapshot prune victim path is invalid")
 		}
-		victim := snapshotPruneManifestVictim{Original: original, Quarantined: quarantined}
+		if !validSHA256Digest(item.digest) {
+			return snapshotPruneManifest{}, errors.New("snapshot prune victim digest is invalid")
+		}
+		victim := snapshotPruneManifestVictim{Original: original, Quarantined: quarantined, Digest: item.digest}
 		for _, sidecar := range item.sidecars {
 			if !sidecar.present {
 				continue
@@ -3318,8 +3352,11 @@ func newSnapshotPruneManifest(snapshotDir, snapshotName, newDigest string, entri
 				filepath.Base(sidecar.original) != original+suffix || filepath.Base(sidecar.quarantined) != quarantined+suffix {
 				return snapshotPruneManifest{}, errors.New("snapshot prune sidecar path is invalid")
 			}
+			if !validSHA256Digest(sidecar.digest) {
+				return snapshotPruneManifest{}, errors.New("snapshot prune sidecar digest is invalid")
+			}
 			victim.Sidecars = append(victim.Sidecars, snapshotPruneManifestSidecar{
-				Original: original + suffix, Quarantined: quarantined + suffix,
+				Original: original + suffix, Quarantined: quarantined + suffix, Digest: sidecar.digest,
 			})
 		}
 		manifest.Victims = append(manifest.Victims, victim)
@@ -3335,10 +3372,7 @@ func validateSnapshotPruneManifest(snapshotDir string, manifest snapshotPruneMan
 	if err := validateSnapshotName(manifest.Snapshot); err != nil {
 		return errors.New("snapshot prune manifest target is invalid")
 	}
-	if len(manifest.NewDigest) != sha256.Size*2 {
-		return errors.New("snapshot prune manifest digest is invalid")
-	}
-	if _, err := hex.DecodeString(manifest.NewDigest); err != nil {
+	if !validSHA256Digest(manifest.NewDigest) {
 		return errors.New("snapshot prune manifest digest is not hexadecimal")
 	}
 	if len(manifest.Victims) == 0 || len(manifest.Victims) > maxSnapshotDirectoryEntries {
@@ -3357,6 +3391,9 @@ func validateSnapshotPruneManifest(snapshotDir string, manifest snapshotPruneMan
 		if _, ok := seen[victim.Original]; ok {
 			return errors.New("snapshot prune manifest contains duplicate victims")
 		}
+		if !validSHA256Digest(victim.Digest) {
+			return errors.New("snapshot prune manifest victim digest is invalid")
+		}
 		seen[victim.Original] = struct{}{}
 		for _, sidecar := range victim.Sidecars {
 			if filepath.Base(sidecar.Original) != sidecar.Original || filepath.Base(sidecar.Quarantined) != sidecar.Quarantined {
@@ -3364,6 +3401,9 @@ func validateSnapshotPruneManifest(snapshotDir string, manifest snapshotPruneMan
 			}
 			for _, suffix := range []string{"-wal", "-shm", "-journal"} {
 				if sidecar.Original == victim.Original+suffix && sidecar.Quarantined == victim.Quarantined+suffix {
+					if !validSHA256Digest(sidecar.Digest) {
+						return errors.New("snapshot prune manifest sidecar digest is invalid")
+					}
 					goto validSidecar
 				}
 			}
@@ -3375,6 +3415,50 @@ func validateSnapshotPruneManifest(snapshotDir string, manifest snapshotPruneMan
 		return errors.New("snapshot prune manifest directory is invalid")
 	}
 	return nil
+}
+
+func validSHA256Digest(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+// createSnapshotPruneManifest establishes ownership of a new retention
+// transaction. Unlike phase updates, the initial prepared record must never
+// replace an existing journal: an O_EXCL collision means another process (or
+// an unresolved previous run) still owns the fixed transaction name.
+func createSnapshotPruneManifest(snapshotDir string, manifest snapshotPruneManifest) error {
+	if manifest.Phase != "prepared" {
+		return errors.New("initial snapshot prune manifest is not prepared")
+	}
+	if err := validateSnapshotPruneManifest(snapshotDir, manifest); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	path := snapshotPruneManifestPath(snapshotDir)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- fixed manifest path in a validated private directory.
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := fileprivacy.Harden(file); err != nil {
+		return err
+	}
+	if _, err := file.Write(append(encoded, '\n')); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return syncDirectory(snapshotDir)
 }
 
 func writeSnapshotPruneManifest(snapshotDir string, manifest snapshotPruneManifest) error {
@@ -3460,13 +3544,13 @@ func snapshotQuarantineEntriesFromManifest(snapshotDir string, manifest snapshot
 	entries := make([]snapshotQuarantineEntry, 0, len(manifest.Victims))
 	for _, victim := range manifest.Victims {
 		item := snapshotQuarantineEntry{
-			original: filepath.Join(snapshotDir, victim.Original), quarantined: filepath.Join(snapshotDir, victim.Quarantined),
+			original: filepath.Join(snapshotDir, victim.Original), quarantined: filepath.Join(snapshotDir, victim.Quarantined), digest: victim.Digest,
 		}
 		for _, sidecar := range victim.Sidecars {
 			for index, suffix := range []string{"-wal", "-shm", "-journal"} {
 				if sidecar.Original == victim.Original+suffix {
 					item.sidecars[index] = snapshotQuarantineSidecar{
-						original: filepath.Join(snapshotDir, sidecar.Original), quarantined: filepath.Join(snapshotDir, sidecar.Quarantined), present: true,
+						original: filepath.Join(snapshotDir, sidecar.Original), quarantined: filepath.Join(snapshotDir, sidecar.Quarantined), digest: sidecar.Digest, present: true,
 					}
 				}
 			}
@@ -3474,6 +3558,29 @@ func snapshotQuarantineEntriesFromManifest(snapshotDir string, manifest snapshot
 		entries = append(entries, item)
 	}
 	return entries, nil
+}
+
+func recoverSnapshotPruneTransactionAtStart(ctx context.Context, snapshotDir string) error {
+	_, found, err := readSnapshotPruneManifest(snapshotDir)
+	if err != nil {
+		return err
+	}
+	if found {
+		if err := recoverSnapshotPruneManifest(ctx, snapshotDir); err != nil {
+			return err
+		}
+	}
+	// Recovery returning nil is not enough: a partially finalized operation
+	// must retain its journal, and a concurrent owner may have established one
+	// while recovery was running. Never proceed while the fixed name is present.
+	_, found, err = readSnapshotPruneManifest(snapshotDir)
+	if err != nil {
+		return err
+	}
+	if found {
+		return errors.New("snapshot prune manifest remains unresolved")
+	}
+	return nil
 }
 
 // recoverSnapshotPruneManifest completes or rolls back the quarantine
@@ -3518,6 +3625,27 @@ func recoverSnapshotPruneManifest(ctx context.Context, snapshotDir string) error
 		if err := writeSnapshotPruneManifest(snapshotDir, manifest); err != nil {
 			return err
 		}
+	}
+	// Published recovery is allowed to destroy victims only while the durable
+	// public generation still names the exact bytes recorded by the journal.
+	// Otherwise target removal or substitution would turn recovery into data
+	// loss.
+	info, statErr := os.Lstat(target)
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
+			return errors.New("published snapshot target is missing")
+		}
+		return statErr
+	}
+	if !validSnapshotFile(info) {
+		return errors.New("published snapshot target is unsafe")
+	}
+	digest, digestErr := digestDatabaseFile(target)
+	if digestErr != nil {
+		return digestErr
+	}
+	if !strings.EqualFold(digest, manifest.NewDigest) {
+		return errors.New("published snapshot target digest mismatch")
 	}
 	if err := finalizeSnapshotQuarantine(ctx, entries, snapshotDir); err != nil {
 		return err
@@ -3646,12 +3774,14 @@ func cleanupSnapshotPruneArtifacts(ctx context.Context, path string) error {
 type snapshotQuarantineEntry struct {
 	original    string
 	quarantined string
+	digest      string
 	sidecars    [3]snapshotQuarantineSidecar
 }
 
 type snapshotQuarantineSidecar struct {
 	original    string
 	quarantined string
+	digest      string
 	present     bool
 }
 
@@ -3735,11 +3865,15 @@ func quarantineSnapshotsContext(ctx context.Context, snapshotDir string, maxKeep
 		} else if !os.IsNotExist(err) {
 			return nil, rollback(err)
 		}
-		item := snapshotQuarantineEntry{original: victim.path, quarantined: quarantinePath}
+		victimDigest, err := digestDatabaseFile(victim.path)
+		if err != nil {
+			return nil, rollback(err)
+		}
+		item := snapshotQuarantineEntry{original: victim.path, quarantined: quarantinePath, digest: victimDigest}
+		quarantined = append(quarantined, item)
 		if err := os.Rename(victim.path, quarantinePath); err != nil {
 			return nil, rollback(err)
 		}
-		quarantined = append(quarantined, item)
 		itemIndex := len(quarantined) - 1
 		for index, suffix := range []string{"-wal", "-shm", "-journal"} {
 			original := victim.path + suffix
@@ -3752,10 +3886,19 @@ func quarantineSnapshotsContext(ctx context.Context, snapshotDir string, maxKeep
 			if statErr != nil {
 				return nil, rollback(errors.Join(statErr, errors.New("snapshot sidecar is unsafe")))
 			}
+			sidecarDigest, digestErr := digestDatabaseFile(original)
+			if digestErr != nil {
+				return nil, rollback(digestErr)
+			}
+			// Record the sidecar before the rename. If rename itself fails, the
+			// rollback state matrix observes an already-restored original and is
+			// still idempotent.
+			quarantined[itemIndex].sidecars[index] = snapshotQuarantineSidecar{
+				original: original, quarantined: quarantinedPath, digest: sidecarDigest, present: true,
+			}
 			if err := os.Rename(original, quarantinedPath); err != nil {
 				return nil, rollback(err)
 			}
-			quarantined[itemIndex].sidecars[index] = snapshotQuarantineSidecar{original: original, quarantined: quarantinedPath, present: true}
 		}
 		total -= victim.size
 		usage = usage[1:]
@@ -3772,34 +3915,14 @@ func rollbackSnapshotQuarantine(entries []snapshotQuarantineEntry, snapshotDir s
 	var errs []error
 	for index := len(entries) - 1; index >= 0; index-- {
 		item := entries[index]
-		if _, err := os.Lstat(item.original); err == nil {
-			errs = append(errs, fmt.Errorf("snapshot quarantine rollback target exists: %s", filepath.Base(item.original)))
-		} else if os.IsNotExist(err) {
-			if _, quarantineErr := validatePrivateArtifact(item.quarantined); quarantineErr == nil {
-				if renameErr := os.Rename(item.quarantined, item.original); renameErr != nil {
-					errs = append(errs, renameErr)
-				}
-			} else if !os.IsNotExist(quarantineErr) {
-				errs = append(errs, quarantineErr)
-			}
-		} else {
+		if err := rollbackSnapshotPruneArtifact(item.original, item.quarantined, item.digest); err != nil {
 			errs = append(errs, err)
 		}
 		for _, sidecar := range item.sidecars {
 			if !sidecar.present {
 				continue
 			}
-			if _, err := os.Lstat(sidecar.original); err == nil {
-				errs = append(errs, fmt.Errorf("snapshot sidecar rollback target exists: %s", filepath.Base(sidecar.original)))
-			} else if os.IsNotExist(err) {
-				if _, quarantineErr := validatePrivateArtifact(sidecar.quarantined); quarantineErr == nil {
-					if renameErr := os.Rename(sidecar.quarantined, sidecar.original); renameErr != nil {
-						errs = append(errs, renameErr)
-					}
-				} else if !os.IsNotExist(quarantineErr) {
-					errs = append(errs, quarantineErr)
-				}
-			} else {
+			if err := rollbackSnapshotPruneArtifact(sidecar.original, sidecar.quarantined, sidecar.digest); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -3812,6 +3935,80 @@ func rollbackSnapshotQuarantine(entries []snapshotQuarantineEntry, snapshotDir s
 	return errors.Join(errs...)
 }
 
+func openSnapshotPruneArtifact(path, expectedDigest string) (*os.File, bool, error) {
+	if !validSHA256Digest(expectedDigest) {
+		return nil, false, errors.New("snapshot prune artifact digest is invalid")
+	}
+	file, err := openSnapshotFile(path)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	fail := func(err error) (*os.File, bool, error) {
+		_ = file.Close()
+		return nil, false, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return fail(err)
+	}
+	if !validSnapshotFile(info) {
+		return fail(errors.New("snapshot prune artifact is not a private regular file"))
+	}
+	digest, err := digestOpenFile(file)
+	if err != nil {
+		return fail(err)
+	}
+	if !strings.EqualFold(digest, expectedDigest) {
+		return fail(fmt.Errorf("snapshot prune artifact digest mismatch: %s", filepath.Base(path)))
+	}
+	if err := assertOpenFileAtPath(file, path); err != nil {
+		return fail(err)
+	}
+	return file, true, nil
+}
+
+func rollbackSnapshotPruneArtifact(original, quarantined, expectedDigest string) error {
+	originalFile, originalExists, err := openSnapshotPruneArtifact(original, expectedDigest)
+	if err != nil {
+		return err
+	}
+	if originalFile != nil {
+		defer originalFile.Close()
+	}
+	quarantinedFile, quarantinedExists, err := openSnapshotPruneArtifact(quarantined, expectedDigest)
+	if err != nil {
+		return err
+	}
+	if quarantinedFile != nil {
+		defer quarantinedFile.Close()
+	}
+	switch {
+	case originalExists && quarantinedExists:
+		return fmt.Errorf("snapshot prune rollback has both original and quarantine: %s", filepath.Base(original))
+	case originalExists:
+		// A prior attempt completed this atomic rename and crashed before
+		// advancing to the next artifact. Matching bytes make it safe to resume.
+		return nil
+	case quarantinedExists:
+		if err := assertOpenFileAtPath(quarantinedFile, quarantined); err != nil {
+			return err
+		}
+		if _, err := os.Lstat(original); err == nil {
+			return fmt.Errorf("snapshot prune rollback target appeared: %s", filepath.Base(original))
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		return os.Rename(quarantined, original)
+	default:
+		// In prepared phase neither path can mean successful deletion. Treat it
+		// as loss/tampering and preserve the journal for operator recovery.
+		return fmt.Errorf("snapshot prune rollback lost both original and quarantine: %s", filepath.Base(original))
+	}
+}
+
 func finalizeSnapshotQuarantine(ctx context.Context, entries []snapshotQuarantineEntry, snapshotDir string) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -3822,18 +4019,20 @@ func finalizeSnapshotQuarantine(ctx context.Context, entries []snapshotQuarantin
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := removePrivateSQLiteFile(item.quarantined); err != nil {
+		itemRemoved, err := finalizeSnapshotPruneArtifact(item.original, item.quarantined, item.digest)
+		if err != nil {
 			errs = append(errs, err)
-		} else {
+		} else if itemRemoved {
 			removed = true
 		}
 		for _, sidecar := range item.sidecars {
 			if !sidecar.present {
 				continue
 			}
-			if err := removePrivateSQLiteFile(sidecar.quarantined); err != nil {
+			sidecarRemoved, err := finalizeSnapshotPruneArtifact(sidecar.original, sidecar.quarantined, sidecar.digest)
+			if err != nil {
 				errs = append(errs, err)
-			} else {
+			} else if sidecarRemoved {
 				removed = true
 			}
 		}
@@ -3844,6 +4043,43 @@ func finalizeSnapshotQuarantine(ctx context.Context, entries []snapshotQuarantin
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func finalizeSnapshotPruneArtifact(original, quarantined, expectedDigest string) (bool, error) {
+	originalFile, originalExists, err := openSnapshotPruneArtifact(original, expectedDigest)
+	if err != nil {
+		return false, err
+	}
+	if originalFile != nil {
+		defer originalFile.Close()
+	}
+	quarantinedFile, quarantinedExists, err := openSnapshotPruneArtifact(quarantined, expectedDigest)
+	if err != nil {
+		return false, err
+	}
+	if quarantinedFile != nil {
+		defer quarantinedFile.Close()
+	}
+	switch {
+	case originalExists && quarantinedExists:
+		return false, fmt.Errorf("published snapshot prune has both original and quarantine: %s", filepath.Base(original))
+	case originalExists:
+		return false, fmt.Errorf("published snapshot prune victim reappeared: %s", filepath.Base(original))
+	case quarantinedExists:
+		if err := assertOpenFileAtPath(quarantinedFile, quarantined); err != nil {
+			return false, err
+		}
+		if _, err := os.Lstat(original); err == nil {
+			return false, fmt.Errorf("published snapshot prune victim appeared: %s", filepath.Base(original))
+		} else if !os.IsNotExist(err) {
+			return false, err
+		}
+		return true, removePrivateSQLiteFile(quarantined)
+	default:
+		// Published finalization deletes the quarantine atomically. Neither path
+		// therefore means a previous attempt already completed this artifact.
+		return false, nil
+	}
 }
 
 func acquireSnapshotValidation(ctx context.Context) error {

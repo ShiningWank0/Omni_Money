@@ -21,7 +21,12 @@ func (o *Opener) Backup(ctx context.Context, source *sql.DB, snapshotPath string
 	if err := o.CheckIntegrity(ctx, source); err != nil {
 		return err
 	}
-	placeholder, err := os.OpenFile(snapshotPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- caller generates this path inside the private snapshot directory.
+	// Keep the identity-bound placeholder readable as well as writable. SQLite
+	// populates the same inode through its own connection, and the encrypted
+	// header check below intentionally reads through this retained descriptor.
+	// A write-only descriptor makes every encrypted backup fail at that final
+	// verification boundary with EBADF (or the Windows equivalent).
+	placeholder, err := openBackupPlaceholder(snapshotPath)
 	if err != nil {
 		return err
 	}
@@ -147,4 +152,8 @@ func (o *Opener) Backup(ctx context.Context, source *sql.DB, snapshotPath string
 	}
 	succeeded = true
 	return nil
+}
+
+func openBackupPlaceholder(snapshotPath string) (*os.File, error) {
+	return os.OpenFile(snapshotPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- caller generates this path inside the private snapshot directory.
 }

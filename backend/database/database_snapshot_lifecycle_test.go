@@ -270,6 +270,300 @@ func TestSnapshotPruneJournalRollsBackPreparedQuarantine(t *testing.T) {
 	}
 }
 
+func TestCreateSnapshotRecoversPreparedPruneJournalBeforeNewTransaction(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	victimPath := filepath.Join(snapshotDir, "omni_money_20260101_000000_000000001.db")
+	otherPath := filepath.Join(snapshotDir, "omni_money_20260102_000000_000000001.db")
+	for _, path := range []string{victimPath, otherPath} {
+		if err := os.WriteFile(path, make([]byte, 40), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := hardenPrivateFile(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quarantined, err := quarantineSnapshotsContext(context.Background(), snapshotDir, 2, 100, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := newSnapshotPruneManifest(snapshotDir, "omni_money_20260103_000000_000000001.db", strings.Repeat("a", 64), quarantined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := createSnapshotPruneManifest(snapshotDir, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := instance.CreateSnapshot(snapshotDir); err != nil {
+		t.Fatalf("new snapshot did not recover prior prepared transaction: %v", err)
+	}
+	if _, err := os.Stat(victimPath); err != nil {
+		t.Fatalf("prior victim was not restored before the new transaction: %v", err)
+	}
+	if _, err := os.Stat(snapshotPruneManifestPath(snapshotDir)); !os.IsNotExist(err) {
+		t.Fatalf("resolved prune journal remains: %v", err)
+	}
+}
+
+func TestCreateSnapshotFailsClosedOnUnresolvedPruneJournal(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	victimPath := filepath.Join(snapshotDir, "omni_money_20260101_000000_000000001.db")
+	otherPath := filepath.Join(snapshotDir, "omni_money_20260102_000000_000000001.db")
+	for _, path := range []string{victimPath, otherPath} {
+		if err := os.WriteFile(path, make([]byte, 40), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := hardenPrivateFile(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quarantined, err := quarantineSnapshotsContext(context.Background(), snapshotDir, 2, 100, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := newSnapshotPruneManifest(snapshotDir, "omni_money_20260103_000000_000000001.db", strings.Repeat("a", 64), quarantined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := createSnapshotPruneManifest(snapshotDir, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(quarantined[0].quarantined, []byte("tampered"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := instance.CreateSnapshot(snapshotDir); err == nil {
+		t.Fatal("new snapshot overwrote unresolved tampered prune state")
+	}
+	if _, err := os.Stat(snapshotPruneManifestPath(snapshotDir)); err != nil {
+		t.Fatalf("unresolved prune journal was removed: %v", err)
+	}
+}
+
+func TestCreateSnapshotPruneManifestIsExclusiveAcrossConcurrentWriters(t *testing.T) {
+	dir := t.TempDir()
+	original := filepath.Join(dir, "omni_money_20260101_000000_000000001.db")
+	quarantined := filepath.Join(dir, snapshotPruneArtifactPrefix+strings.Repeat("1", 32)+"-"+filepath.Base(original))
+	if err := os.WriteFile(quarantined, []byte("victim"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hardenPrivateFile(quarantined); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := digestDatabaseFile(quarantined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := newSnapshotPruneManifest(dir, "omni_money_20260102_000000_000000001.db", strings.Repeat("a", 64), []snapshotQuarantineEntry{{
+		original: original, quarantined: quarantined, digest: digest,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const writers = 8
+	results := make(chan error, writers)
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- createSnapshotPruneManifest(dir, manifest)
+		}()
+	}
+	wg.Wait()
+	close(results)
+	succeeded := 0
+	for err := range results {
+		if err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("exclusive manifest writers succeeded=%d, want 1", succeeded)
+	}
+	readBack, found, err := readSnapshotPruneManifest(dir)
+	if err != nil || !found {
+		t.Fatalf("read exclusive manifest: found=%t err=%v", found, err)
+	}
+	if readBack.NewDigest != manifest.NewDigest || readBack.Victims[0].Digest != digest {
+		t.Fatal("exclusive manifest contents were replaced")
+	}
+}
+
+func TestSnapshotTransactionLockSerializesConcurrentOwners(t *testing.T) {
+	dir := t.TempDir()
+	firstRelease, err := acquireSnapshotTransactionLock(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := acquireSnapshotTransactionLock(ctx, dir); !errors.Is(err, context.DeadlineExceeded) {
+		firstRelease()
+		t.Fatalf("second transaction lock error=%v, want deadline", err)
+	}
+	firstRelease()
+	secondRelease, err := acquireSnapshotTransactionLock(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("transaction lock was not released: %v", err)
+	}
+	secondRelease()
+}
+
+func TestPreparedPruneRollbackStateMatrixIsCrashIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	original := filepath.Join(dir, "omni_money_20260101_000000_000000001.db")
+	quarantined := filepath.Join(dir, snapshotPruneArtifactPrefix+strings.Repeat("2", 32)+"-"+filepath.Base(original))
+	contents := []byte("victim-bytes")
+	if err := os.WriteFile(original, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hardenPrivateFile(original); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := digestDatabaseFile(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := snapshotQuarantineEntry{original: original, quarantined: quarantined, digest: digest}
+
+	// Crash after rename-back: original exists, quarantine is absent.
+	if err := rollbackSnapshotQuarantine([]snapshotQuarantineEntry{entry}, dir); err != nil {
+		t.Fatalf("already-restored rollback was not idempotent: %v", err)
+	}
+	if err := os.Rename(original, quarantined); err != nil {
+		t.Fatal(err)
+	}
+	if err := rollbackSnapshotQuarantine([]snapshotQuarantineEntry{entry}, dir); err != nil {
+		t.Fatalf("quarantined rollback failed: %v", err)
+	}
+
+	// Both names mean ambiguity; neither name means loss. Both fail closed.
+	if err := os.WriteFile(quarantined, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hardenPrivateFile(quarantined); err != nil {
+		t.Fatal(err)
+	}
+	if err := rollbackSnapshotQuarantine([]snapshotQuarantineEntry{entry}, dir); err == nil {
+		t.Fatal("rollback accepted both original and quarantine")
+	}
+	if err := os.Remove(original); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(quarantined); err != nil {
+		t.Fatal(err)
+	}
+	if err := rollbackSnapshotQuarantine([]snapshotQuarantineEntry{entry}, dir); err == nil {
+		t.Fatal("rollback accepted missing original and quarantine")
+	}
+}
+
+func TestPublishedPruneFinalizeStateMatrixIsCrashIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	original := filepath.Join(dir, "omni_money_20260101_000000_000000001.db")
+	quarantined := filepath.Join(dir, snapshotPruneArtifactPrefix+strings.Repeat("3", 32)+"-"+filepath.Base(original))
+	if err := os.WriteFile(quarantined, []byte("victim"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hardenPrivateFile(quarantined); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := digestDatabaseFile(quarantined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := snapshotQuarantineEntry{original: original, quarantined: quarantined, digest: digest}
+	if err := finalizeSnapshotQuarantine(context.Background(), []snapshotQuarantineEntry{entry}, dir); err != nil {
+		t.Fatalf("first finalize failed: %v", err)
+	}
+	if err := finalizeSnapshotQuarantine(context.Background(), []snapshotQuarantineEntry{entry}, dir); err != nil {
+		t.Fatalf("finalize retry after deletion was not idempotent: %v", err)
+	}
+	if err := os.WriteFile(original, []byte("victim"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hardenPrivateFile(original); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalizeSnapshotQuarantine(context.Background(), []snapshotQuarantineEntry{entry}, dir); err == nil {
+		t.Fatal("published finalize accepted a reappeared original")
+	}
+}
+
+func TestPreparedPruneRollbackAppliesSameStateMatrixToSidecars(t *testing.T) {
+	dir := t.TempDir()
+	original := filepath.Join(dir, "omni_money_20260101_000000_000000001.db")
+	quarantined := filepath.Join(dir, snapshotPruneArtifactPrefix+strings.Repeat("4", 32)+"-"+filepath.Base(original))
+	sidecarOriginal := original + "-wal"
+	sidecarQuarantined := quarantined + "-wal"
+	for _, path := range []string{original, sidecarOriginal} {
+		if err := os.WriteFile(path, []byte(filepath.Base(path)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := hardenPrivateFile(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	digest, err := digestDatabaseFile(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecarDigest, err := digestDatabaseFile(sidecarOriginal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := snapshotQuarantineEntry{original: original, quarantined: quarantined, digest: digest}
+	entry.sidecars[0] = snapshotQuarantineSidecar{
+		original: sidecarOriginal, quarantined: sidecarQuarantined, digest: sidecarDigest, present: true,
+	}
+	if err := rollbackSnapshotQuarantine([]snapshotQuarantineEntry{entry}, dir); err != nil {
+		t.Fatalf("already-restored database and sidecar were not idempotent: %v", err)
+	}
+	if err := os.Remove(sidecarOriginal); err != nil {
+		t.Fatal(err)
+	}
+	if err := rollbackSnapshotQuarantine([]snapshotQuarantineEntry{entry}, dir); err == nil {
+		t.Fatal("rollback accepted a sidecar missing from both names")
+	}
+}
+
+func TestPublishedPruneRecoveryRequiresRecordedTarget(t *testing.T) {
+	dir := t.TempDir()
+	victimPath := filepath.Join(dir, "omni_money_20260101_000000_000000001.db")
+	otherPath := filepath.Join(dir, "omni_money_20260102_000000_000000001.db")
+	for _, path := range []string{victimPath, otherPath} {
+		if err := os.WriteFile(path, make([]byte, 40), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := hardenPrivateFile(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quarantined, err := quarantineSnapshotsContext(context.Background(), dir, 2, 100, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := newSnapshotPruneManifest(dir, "omni_money_20260103_000000_000000001.db", strings.Repeat("a", 64), quarantined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Phase = "published"
+	if err := writeSnapshotPruneManifest(dir, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverSnapshotPruneManifest(context.Background(), dir); err == nil {
+		t.Fatal("published recovery deleted victims without its recorded target")
+	}
+	if _, err := os.Stat(quarantined[0].quarantined); err != nil {
+		t.Fatalf("victim was removed after missing-target recovery: %v", err)
+	}
+	if _, err := os.Stat(snapshotPruneManifestPath(dir)); err != nil {
+		t.Fatalf("journal was removed after missing-target recovery: %v", err)
+	}
+}
+
 func TestConcurrentDatabaseLifecycleTransitionsAreSerialized(t *testing.T) {
 	firstDB := filepath.Join(t.TempDir(), "first", "omni_money.db")
 	secondDB := filepath.Join(t.TempDir(), "second", "omni_money.db")
