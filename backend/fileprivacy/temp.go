@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
 )
 
@@ -11,10 +12,13 @@ import (
 // by the caller. The file is created with CreateExclusive, so Windows applies
 // its protected DACL in the CreateFile call rather than after content exists.
 type PrivateTempFile struct {
-	File *os.File
-	Root *os.Root
-	Dir  string
-	Path string
+	File    *os.File
+	Root    *os.Root
+	Dir     string
+	Path    string
+	Name    string
+	info    os.FileInfo
+	dirInfo os.FileInfo
 }
 
 // CreatePrivateTempFile creates a random, exclusive file in a private temp
@@ -26,7 +30,7 @@ func CreatePrivateTempFile(prefix string) (*PrivateTempFile, error) {
 	}
 	cleanup := func() {
 		_ = root.Close()
-		_ = os.RemoveAll(dir)
+		_ = os.Remove(dir)
 	}
 	for attempt := 0; attempt < 16; attempt++ {
 		var random [16]byte
@@ -48,7 +52,23 @@ func CreatePrivateTempFile(prefix string) (*PrivateTempFile, error) {
 			cleanup()
 			return nil, err
 		}
-		return &PrivateTempFile{File: file, Root: root, Dir: dir, Path: dir + string(os.PathSeparator) + name}, nil
+		info, statErr := file.Stat()
+		if statErr != nil {
+			_ = file.Close()
+			_ = root.Remove(name)
+			_ = root.Close()
+			_ = os.Remove(dir)
+			return nil, statErr
+		}
+		dirInfo, statErr := os.Stat(dir)
+		if statErr != nil {
+			_ = file.Close()
+			_ = root.Remove(name)
+			_ = root.Close()
+			_ = os.Remove(dir)
+			return nil, statErr
+		}
+		return &PrivateTempFile{File: file, Root: root, Dir: dir, Path: dir + string(os.PathSeparator) + name, Name: name, info: info, dirInfo: dirInfo}, nil
 	}
 	cleanup()
 	return nil, fmt.Errorf("一時ファイル名の生成に失敗しました")
@@ -69,16 +89,53 @@ func (f *PrivateTempFile) Cleanup() error {
 		f.File = nil
 	}
 	if f.Root != nil {
+		// Remove only the file created by this object through the retained root.
+		// Never recursively remove the directory: a rename/replacement or an
+		// unexpected extra entry must fail closed and remain for inspection.
+		if f.Name != "" {
+			current, err := f.Root.Lstat(f.Name)
+			if err == nil {
+				if f.info != nil && !os.SameFile(f.info, current) {
+					if first == nil {
+						first = fmt.Errorf("private temp file identity changed")
+					}
+				} else if err := f.Root.Remove(f.Name); err != nil && !os.IsNotExist(err) && first == nil {
+					first = err
+				}
+			} else if !os.IsNotExist(err) && first == nil {
+				first = err
+			}
+		}
+		if entries, err := fs.ReadDir(f.Root.FS(), "."); err != nil {
+			if first == nil {
+				first = err
+			}
+		} else if len(entries) != 0 && first == nil {
+			first = fmt.Errorf("private temp directory is not empty")
+		}
 		if err := f.Root.Close(); err != nil && first == nil {
 			first = err
 		}
 		f.Root = nil
 	}
 	if f.Dir != "" {
-		if err := os.RemoveAll(f.Dir); err != nil && !os.IsNotExist(err) && first == nil {
+		currentDir, statErr := os.Stat(f.Dir)
+		if statErr != nil {
+			if !os.IsNotExist(statErr) && first == nil {
+				first = statErr
+			}
+		} else if f.dirInfo != nil && !os.SameFile(f.dirInfo, currentDir) {
+			if first == nil {
+				first = fmt.Errorf("private temp directory identity changed")
+			}
+		} else if err := os.Remove(f.Dir); err != nil && !os.IsNotExist(err) && first == nil {
 			first = err
+		} else if first == nil {
+			f.Dir = ""
 		}
-		f.Dir = ""
 	}
+	f.Name = ""
+	f.info = nil
+	f.dirInfo = nil
 	return first
 }

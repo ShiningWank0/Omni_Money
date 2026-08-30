@@ -1075,7 +1075,7 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 	}
 	// v3 is a normalized, typed row format. Detect it from the header while
 	// retaining the historical parser for legacy/v2 transaction-only files.
-	probeInput := &csvFieldLimitReader{ctx: ctx, input: strings.NewReader(content), maxFieldBytes: maxCSVFieldBytes, fieldStart: true}
+	probeInput := &csvFieldLimitReader{ctx: ctx, input: strings.NewReader(content), maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
 	probe := csv.NewReader(probeInput)
 	probe.FieldsPerRecord = -1
 	if headers, probeErr := probe.Read(); probeErr == nil {
@@ -1102,7 +1102,7 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 	if err != nil {
 		return 0, err
 	}
-	readerInput := &csvFieldLimitReader{ctx: ctx, input: strings.NewReader(content), maxFieldBytes: maxCSVFieldBytes, fieldStart: true}
+	readerInput := &csvFieldLimitReader{ctx: ctx, input: strings.NewReader(content), maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
 	reader := csv.NewReader(readerInput)
 	headers, err := reader.Read()
 	if err != nil {
@@ -1889,10 +1889,15 @@ func (s *Service) CreateTag(name string, parentID *int64) (*models.Tag, error) {
 		return nil, err
 	}
 
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("タグtransaction開始エラー: %w", err)
+	}
+	defer tx.Rollback()
 	level := 1
 	if parentID != nil {
 		var parentLevel int
-		err := db.QueryRow("SELECT level FROM tags WHERE id = ?", *parentID).Scan(&parentLevel)
+		err := tx.QueryRow("SELECT level FROM tags WHERE id = ?", *parentID).Scan(&parentLevel)
 		if err != nil {
 			return nil, fmt.Errorf("親タグが見つかりません: %w", err)
 		}
@@ -1905,7 +1910,7 @@ func (s *Service) CreateTag(name string, parentID *int64) (*models.Tag, error) {
 	}
 	if parentID == nil {
 		var roots int
-		if err := db.QueryRow("SELECT COUNT(*) FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&roots); err != nil {
+		if err := tx.QueryRow("SELECT COUNT(*) FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&roots); err != nil {
 			return nil, fmt.Errorf("rootタグ重複確認エラー: %w", err)
 		}
 		if roots != 0 {
@@ -1913,7 +1918,7 @@ func (s *Service) CreateTag(name string, parentID *int64) (*models.Tag, error) {
 		}
 	}
 
-	result, err := db.Exec(
+	result, err := tx.Exec(
 		"INSERT INTO tags (name, parent_id, level) VALUES (?, ?, ?)",
 		name, parentID, level,
 	)
@@ -1924,6 +1929,9 @@ func (s *Service) CreateTag(name string, parentID *int64) (*models.Tag, error) {
 	id, err := result.LastInsertId()
 	if err != nil {
 		return nil, fmt.Errorf("タグID取得エラー: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("タグtransaction確定エラー: %w", err)
 	}
 	tag := &models.Tag{
 		ID:       id,
@@ -2041,8 +2049,14 @@ func (s *Service) UpdateTag(id int64, name string) error {
 	if err != nil {
 		return err
 	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("タグtransaction開始エラー: %w", err)
+	}
+	defer tx.Rollback()
 	var parentID sql.NullInt64
-	if err := db.QueryRow("SELECT parent_id FROM tags WHERE id = ?", id).Scan(&parentID); err != nil {
+	var oldName string
+	if err := tx.QueryRow("SELECT parent_id, name FROM tags WHERE id = ?", id).Scan(&parentID, &oldName); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("タグが見つかりません: %w", err)
 		}
@@ -2050,14 +2064,14 @@ func (s *Service) UpdateTag(id int64, name string) error {
 	}
 	if !parentID.Valid {
 		var roots int
-		if err := db.QueryRow("SELECT COUNT(*) FROM tags WHERE name = ? AND parent_id IS NULL AND id <> ?", name, id).Scan(&roots); err != nil {
+		if err := tx.QueryRow("SELECT COUNT(*) FROM tags WHERE name = ? AND parent_id IS NULL AND id <> ?", name, id).Scan(&roots); err != nil {
 			return fmt.Errorf("rootタグ重複確認エラー: %w", err)
 		}
 		if roots != 0 {
 			return fmt.Errorf("同名のrootタグは作成できません")
 		}
 	}
-	result, err := db.Exec("UPDATE tags SET name = ? WHERE id = ?", name, id)
+	result, err := tx.Exec("UPDATE tags SET name = ? WHERE id = ?", name, id)
 	if err != nil {
 		return fmt.Errorf("タグ更新エラー: %w", err)
 	}
@@ -2067,6 +2081,17 @@ func (s *Service) UpdateTag(id int64, name string) error {
 	}
 	if affected == 0 {
 		return fmt.Errorf("タグが見つかりません: %w", sql.ErrNoRows)
+	}
+	if !parentID.Valid {
+		if err := normalizeLegacyRootTagMarkers(tx, oldName); err != nil {
+			return fmt.Errorf("旧rootタグ整合性更新エラー: %w", err)
+		}
+		if err := normalizeLegacyRootTagMarkers(tx, name); err != nil {
+			return fmt.Errorf("新rootタグ整合性更新エラー: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("タグtransactionコミットエラー: %w", err)
 	}
 	s.autoSnapshot()
 	return nil
@@ -2138,7 +2163,15 @@ func createTagPathIn(db *sql.DB, segments []string) (*models.Tag, error) {
 			if rootCount > 1 {
 				return nil, fmt.Errorf("同名のrootタグが複数存在するため通常のタグ操作を中止しました")
 			}
-			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id IS NULL AND legacy_duplicate = 0", name).Scan(&existingID)
+			var legacyDuplicate int
+			err = tx.QueryRow("SELECT id, legacy_duplicate FROM tags WHERE name = ? AND parent_id IS NULL ORDER BY id LIMIT 1", name).Scan(&existingID, &legacyDuplicate)
+			if err == nil && legacyDuplicate != 0 {
+				// A lone archived duplicate is the same logical root. Promote it
+				// before reuse instead of creating a second root row.
+				if _, updateErr := tx.Exec("UPDATE tags SET legacy_duplicate = 0 WHERE id = ?", existingID); updateErr != nil {
+					return nil, fmt.Errorf("legacy rootタグ正規化エラー: %w", updateErr)
+				}
+			}
 		} else {
 			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id = ?", name, *parentID).Scan(&existingID)
 		}
@@ -2174,6 +2207,28 @@ func createTagPathIn(db *sql.DB, segments []string) (*models.Tag, error) {
 	return tag, nil
 }
 
+// normalizeLegacyRootTagMarkers restores the schema invariant after a tag
+// rename or deletion. At most one root of a name is the ordinary marker=0 row;
+// additional historical rows remain marker=1 and are never merged.
+func normalizeLegacyRootTagMarkers(tx *sql.Tx, name string) error {
+	if name == "" {
+		return nil
+	}
+	if _, err := tx.Exec("UPDATE tags SET legacy_duplicate = 1 WHERE parent_id IS NULL AND name = ?", name); err != nil {
+		return err
+	}
+	var firstID int64
+	err := tx.QueryRow("SELECT id FROM tags WHERE parent_id IS NULL AND name = ? ORDER BY id LIMIT 1", name).Scan(&firstID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec("UPDATE tags SET legacy_duplicate = 0 WHERE id = ?", firstID)
+	return err
+}
+
 func isSQLiteBusyError(err error) bool {
 	if err == nil {
 		return false
@@ -2188,7 +2243,20 @@ func (s *Service) DeleteTag(id int64) error {
 	if err != nil {
 		return err
 	}
-	result, err := db.Exec("DELETE FROM tags WHERE id = ?", id)
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("タグtransaction開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+	var parentID sql.NullInt64
+	var name string
+	if err := tx.QueryRow("SELECT parent_id, name FROM tags WHERE id = ?", id).Scan(&parentID, &name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("タグが見つかりません: %w", err)
+		}
+		return fmt.Errorf("タグ取得エラー: %w", err)
+	}
+	result, err := tx.Exec("DELETE FROM tags WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("タグ削除エラー: %w", err)
 	}
@@ -2198,6 +2266,14 @@ func (s *Service) DeleteTag(id int64) error {
 	}
 	if affected == 0 {
 		return fmt.Errorf("タグが見つかりません: %w", sql.ErrNoRows)
+	}
+	if !parentID.Valid {
+		if err := normalizeLegacyRootTagMarkers(tx, name); err != nil {
+			return fmt.Errorf("rootタグ整合性更新エラー: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("タグtransactionコミットエラー: %w", err)
 	}
 	s.autoSnapshot()
 	return nil
@@ -3163,6 +3239,11 @@ func (s *Service) isCardWithdrawalLinkAccounts(accountA, accountB string) bool {
 }
 
 func isCardWithdrawalLinkAccountsWithSettings(accountA, accountB string, creditCards, bankAccounts map[string]bool) bool {
+	// Settings written by older clients may contain surrounding whitespace.
+	// Keep the stored archive value byte-for-byte, but use the historical
+	// canonical account form consistently for link policy decisions.
+	accountA = strings.TrimSpace(accountA)
+	accountB = strings.TrimSpace(accountB)
 	return (creditCards[accountA] && bankAccounts[accountB]) || (bankAccounts[accountA] && creditCards[accountB])
 }
 
@@ -3177,8 +3258,8 @@ func stringSetFromSetting(value string) map[string]bool {
 func stringSet(items []string) map[string]bool {
 	set := make(map[string]bool, len(items))
 	for _, item := range items {
-		if item != "" {
-			set[item] = true
+		if canonical := strings.TrimSpace(item); canonical != "" {
+			set[canonical] = true
 		}
 	}
 	return set

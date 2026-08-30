@@ -119,6 +119,22 @@ test('CSV export refuses oversized legacy-browser fallback before reading the bo
   assert.equal(domState.blobs.length, 0)
 })
 
+test('CSV export cancels the response when the save picker or writable fails', async () => {
+  let canceled = 0
+  const previousPicker = window.showSaveFilePicker
+  window.showSaveFilePicker = async () => { throw new Error('picker canceled') }
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: new Headers({ 'Content-Type': 'text/csv; charset=utf-8' }),
+    body: { cancel: async () => { canceled++ } }
+  })
+  await assert.rejects(backupToCSVFile(), /picker canceled/)
+  assert.equal(canceled, 1)
+  if (previousPicker === undefined) delete window.showSaveFilePicker
+  else window.showSaveFilePicker = previousPicker
+})
+
 test('CSV export supports a response without a reader using the bounded arrayBuffer fallback', async () => {
   const bytes = new TextEncoder().encode('account,amount\ncash,100\n')
   globalThis.fetch = async () => ({

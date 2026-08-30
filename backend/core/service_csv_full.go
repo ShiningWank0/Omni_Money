@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -50,10 +51,14 @@ const (
 	// endpoint.  The JSON value itself is capped separately at
 	// MaxCSVStringImportBytes; this small fixed allowance covers the envelope
 	// and ordinary escaping without allowing an archive-sized JSON allocation.
-	MaxCSVJSONWireBytes     int64 = MaxCSVStringImportBytes + 1*1024*1024
-	maxCSVExportBytes       int64 = MaxCSVImportBytes
-	maxCSVRows                    = 1_000_000
-	maxCSVFieldBytes              = 8 * 1024 * 1024
+	MaxCSVJSONWireBytes int64 = MaxCSVStringImportBytes + 1*1024*1024
+	maxCSVExportBytes   int64 = MaxCSVImportBytes
+	maxCSVRows                = 1_000_000
+	maxCSVFieldBytes          = 8 * 1024 * 1024
+	// encoding/csv removes CRLF normalization and decodeCSVTextCellV2 removes
+	// one formula-safety apostrophe. Permit that fixed wire overhead here, then
+	// enforce the exact decoded value size in the typed validators below.
+	maxCSVGuardFieldBytes         = maxCSVFieldBytes + 1
 	maxCSVHeaderBytes             = 64 * 1024
 	maxCSVSettingKeyBytes         = 256
 	maxCSVSettingValueBytes       = 2 * 1024 * 1024
@@ -152,6 +157,37 @@ func TryAcquireCSVTempBudget(bytes int64) (func(), bool) {
 	}, true
 }
 
+// ResizeCSVTempBudget changes an existing reservation without releasing it
+// between allocations. This is used for Base64's conservative admission: the
+// decoder's exact output may be up to two bytes smaller than DecodedLen, and
+// those bytes must not make an otherwise valid archive fail or briefly become
+// unaccounted memory.
+func ResizeCSVTempBudget(reserved, actual int64) (func(), bool) {
+	if reserved <= 0 || actual <= 0 || reserved > MaxCSVTempBudgetBytes || actual > MaxCSVTempBudgetBytes {
+		return nil, false
+	}
+	csvTempBudget.Lock()
+	if csvTempBudget.used < reserved {
+		csvTempBudget.Unlock()
+		return nil, false
+	}
+	delta := actual - reserved
+	if delta > 0 && csvTempBudget.used > MaxCSVTempBudgetBytes-delta {
+		csvTempBudget.Unlock()
+		return nil, false
+	}
+	csvTempBudget.used += delta
+	csvTempBudget.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			csvTempBudget.Lock()
+			csvTempBudget.used -= actual
+			csvTempBudget.Unlock()
+		})
+	}, true
+}
+
 // WithCSVTempReservation marks an already-admitted request so the reader
 // entrypoint does not reserve the same private-disk budget a second time.
 func WithCSVTempReservation(ctx context.Context) context.Context {
@@ -193,6 +229,7 @@ type csvFieldLimitReader struct {
 	inQuotes      bool
 	quotePending  bool
 	fieldStart    bool
+	pendingCR     bool
 }
 
 func (r *csvFieldLimitReader) Read(p []byte) (int, error) {
@@ -212,6 +249,13 @@ func (r *csvFieldLimitReader) Read(p []byte) (int, error) {
 			return i, err
 		}
 	}
+	if readErr == io.EOF && r.pendingCR {
+		r.pendingCR = false
+		r.fieldBytes++
+		if r.fieldBytes > r.maxFieldBytes {
+			return n, fmt.Errorf("CSV列が大きすぎます")
+		}
+	}
 	return n, readErr
 }
 
@@ -225,6 +269,25 @@ func (r *csvFieldLimitReader) consume(b byte) error {
 		}
 		return nil
 	}
+	if r.pendingCR {
+		r.pendingCR = false
+		if b == '\n' {
+			if r.inQuotes {
+				// encoding/csv normalizes CRLF inside quoted fields to one LF.
+				if err := add(true); err != nil {
+					return err
+				}
+			} else {
+				// Outside quotes CRLF is a record terminator, not field data.
+				r.fieldBytes = 0
+				r.fieldStart = true
+			}
+			return nil
+		}
+		if err := add(true); err != nil {
+			return err
+		}
+	}
 	if r.quotePending {
 		r.quotePending = false
 		if b == '"' {
@@ -236,6 +299,10 @@ func (r *csvFieldLimitReader) consume(b byte) error {
 		// separator/data byte as an ordinary unquoted byte.
 	}
 	if r.inQuotes {
+		if b == '\r' {
+			r.pendingCR = true
+			return nil
+		}
 		if b == '"' {
 			r.quotePending = true
 			return nil
@@ -250,6 +317,12 @@ func (r *csvFieldLimitReader) consume(b byte) error {
 	if b == ',' || b == '\n' {
 		r.fieldBytes = 0
 		r.fieldStart = true
+		return nil
+	}
+	if b == '\r' {
+		// Defer CR until the next byte so CRLF is treated exactly as
+		// encoding/csv treats it, regardless of reader chunk boundaries.
+		r.pendingCR = true
 		return nil
 	}
 	r.fieldStart = false
@@ -435,7 +508,13 @@ func backupToCSVV3In(ctx context.Context, tx *sql.Tx, dst io.Writer) (string, er
 			_ = rows.Close()
 			return "", fmt.Errorf("CSV v3画像created_atが不正です (id %d): %w", id, err)
 		}
+		scratchRelease, scratchAvailable := TryAcquireCSVTempBudget(maxCSVImageDecodeScratchBytes)
+		if !scratchAvailable {
+			_ = rows.Close()
+			return "", fmt.Errorf("CSV画像デコード用メモリ上限に達しました")
+		}
 		prepared, err := prepareDecodedTransactionImageContext(ctx, filename, mimeType, data)
+		scratchRelease()
 		if err != nil {
 			_ = rows.Close()
 			return "", fmt.Errorf("CSV v3画像が不正です (id %d): %w", id, err)
@@ -648,7 +727,13 @@ type csvV3Import struct {
 	parsedTextBytes   int64
 	imageTempDir      string
 	imageTempRoot     *os.Root
+	imageTempFiles    []csvV3TempFile
 	tempReleases      []func()
+}
+
+type csvV3TempFile struct {
+	name string
+	info os.FileInfo
 }
 
 type csvV3Transaction struct {
@@ -662,6 +747,12 @@ type csvV3Image struct {
 	filename, mimeType, createdAt string
 	data                          []byte
 	dataPath                      string
+	// tempRoot/name/info pin the exact private spool object created during
+	// parsing. Import never reopens dataPath by name, since another process
+	// with access to the directory could otherwise replace it after validation.
+	tempRoot *os.Root
+	tempName string
+	tempInfo os.FileInfo
 }
 
 type csvV3Tag struct {
@@ -712,7 +803,7 @@ func csvV3Get(record []string, headers map[string]int, name string) (string, err
 	if idx >= len(record) {
 		return "", fmt.Errorf("%s列が不足しています", name)
 	}
-	if len(record[idx]) > maxCSVFieldBytes {
+	if len(record[idx]) > maxCSVGuardFieldBytes {
 		return "", fmt.Errorf("%s列が大きすぎます", name)
 	}
 	return record[idx], nil
@@ -732,6 +823,9 @@ func csvV3DecodedText(record []string, headers map[string]int, name string, requ
 	decoded, err := decodeCSVTextCellV2(raw)
 	if err != nil {
 		return "", fmt.Errorf("%s列のCSVエスケープが不正です: %w", name, err)
+	}
+	if len([]byte(decoded)) > maxCSVFieldBytes {
+		return "", fmt.Errorf("%s列が大きすぎます", name)
 	}
 	return decoded, nil
 }
@@ -761,19 +855,61 @@ func (p *csvV3Import) addParsedText(values ...string) error {
 	return nil
 }
 
-func (p *csvV3Import) cleanup() {
+func (p *csvV3Import) cleanup() error {
+	if p == nil {
+		return nil
+	}
+	var first error
 	if p.imageTempRoot != nil {
-		_ = p.imageTempRoot.Close()
+		// Remove exactly the names this parser created, while the retained root
+		// still pins the original directory. Never recursively remove a path.
+		for _, temp := range p.imageTempFiles {
+			if temp.name == "" {
+				continue
+			}
+			current, err := p.imageTempRoot.Lstat(temp.name)
+			if err != nil {
+				if !os.IsNotExist(err) && first == nil {
+					first = err
+				}
+				continue
+			}
+			if temp.info != nil && !os.SameFile(temp.info, current) {
+				if first == nil {
+					first = fmt.Errorf("CSV画像一時ファイルのidentityが変更されています")
+				}
+				continue
+			}
+			if err := p.imageTempRoot.Remove(temp.name); err != nil && !os.IsNotExist(err) && first == nil {
+				first = err
+			}
+		}
+		if entries, err := fs.ReadDir(p.imageTempRoot.FS(), "."); err != nil {
+			if first == nil {
+				first = err
+			}
+		} else if len(entries) != 0 && first == nil {
+			first = fmt.Errorf("CSV画像一時ディレクトリが空ではありません")
+		}
+		if err := p.imageTempRoot.Close(); err != nil && first == nil {
+			first = err
+		}
 		p.imageTempRoot = nil
+		p.imageTempFiles = nil
 	}
 	if p.imageTempDir != "" {
-		_ = os.RemoveAll(p.imageTempDir)
-		p.imageTempDir = ""
+		if err := os.Remove(p.imageTempDir); err != nil && !os.IsNotExist(err) && first == nil {
+			first = err
+		}
+		if first == nil {
+			p.imageTempDir = ""
+		}
 	}
 	for _, release := range p.tempReleases {
 		release()
 	}
 	p.tempReleases = nil
+	return first
 }
 
 func csvV3Int(record []string, headers map[string]int, name string, required bool, positive bool) (int64, error) {
@@ -814,7 +950,7 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	guardedInput := &csvFieldLimitReader{ctx: ctx, input: input, maxFieldBytes: maxCSVFieldBytes, fieldStart: true}
+	guardedInput := &csvFieldLimitReader{ctx: ctx, input: input, maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
 	limitedInput := &io.LimitedReader{R: guardedInput, N: MaxCSVImportBytes + 1}
 	reader := csv.NewReader(limitedInput)
 	reader.FieldsPerRecord = -1
@@ -840,9 +976,11 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 	defer func() {
 		if err != nil {
 			if parsed.imageTempDir != "" {
-				parsed.cleanup()
+				_ = parsed.cleanup()
+				parseTempDir = ""
+				parseTempRoot = nil
 			} else if parseTempDir != "" {
-				_ = os.RemoveAll(parseTempDir)
+				_ = os.Remove(parseTempDir)
 			}
 			if parseTempRoot != nil {
 				_ = parseTempRoot.Close()
@@ -1011,7 +1149,10 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 				return csvV3Import{}, fmt.Errorf("画像Base64が大きすぎます (行%d)", rowNumber)
 			}
 			worstDecoded := int64(base64.StdEncoding.DecodedLen(len(encoded)))
-			if worstDecoded <= 0 || worstDecoded > models.MaxImageBytes || worstDecoded > models.MaxImageBytesDatabase-parsed.decodedImageBytes {
+			// DecodedLen is a conservative upper bound. With valid padding it can
+			// exceed the exact output by up to two bytes, so do not reject a
+			// valid image merely because it lands exactly on the byte quota.
+			if worstDecoded <= 0 || worstDecoded > models.MaxImageBytes+2 {
 				return csvV3Import{}, fmt.Errorf("画像Base64のデコード後サイズが上限を超えます (行%d)", rowNumber)
 			}
 			// Admit the possible decoded bytes before DecodeString allocates them.
@@ -1022,12 +1163,18 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 			if !available {
 				return csvV3Import{}, fmt.Errorf("CSV画像一時領域が上限に達しました (行%d)", rowNumber)
 			}
-			parsed.tempReleases = append(parsed.tempReleases, imageRelease)
-			parseTempReleases = append(parseTempReleases, imageRelease)
 			data, err := base64.StdEncoding.Strict().DecodeString(encoded)
 			if err != nil || len(data) == 0 {
+				imageRelease()
 				return csvV3Import{}, fmt.Errorf("画像Base64が不正です (行%d)", rowNumber)
 			}
+			exactRelease, exactAvailable := ResizeCSVTempBudget(worstDecoded, int64(len(data)))
+			if !exactAvailable {
+				imageRelease()
+				return csvV3Import{}, fmt.Errorf("CSV画像一時領域が上限に達しました (行%d)", rowNumber)
+			}
+			parsed.tempReleases = append(parsed.tempReleases, exactRelease)
+			parseTempReleases = append(parseTempReleases, exactRelease)
 			if int64(len(data)) > models.MaxImageBytesDatabase-parsed.decodedImageBytes {
 				return csvV3Import{}, fmt.Errorf("CSV v3画像の合計サイズが上限を超えました (行%d)", rowNumber)
 			}
@@ -1071,7 +1218,7 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 				// identical private-file copy is live. The persistent admission above
 				// covers the eventual private file; reserve a second worst-case copy
 				// only for this short write window.
-				tempRelease, available := TryAcquireCSVTempBudget(worstDecoded)
+				tempRelease, available := TryAcquireCSVTempBudget(int64(len(data)))
 				if !available {
 					parsed.cleanup()
 					return csvV3Import{}, fmt.Errorf("CSV画像一時領域が上限に達しました")
@@ -1085,6 +1232,14 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 					parsed.cleanup()
 					return csvV3Import{}, fmt.Errorf("画像一時ファイルの作成に失敗しました: %w", err)
 				}
+				createdInfo, statErr := file.Stat()
+				if statErr != nil {
+					_ = file.Close()
+					parsed.cleanup()
+					return csvV3Import{}, fmt.Errorf("画像一時ファイルのidentity取得に失敗しました: %w", statErr)
+				}
+				tempFileIndex := len(parsed.imageTempFiles)
+				parsed.imageTempFiles = append(parsed.imageTempFiles, csvV3TempFile{name: name, info: createdInfo})
 				if err := fileprivacy.Harden(file); err != nil {
 					_ = file.Close()
 					parsed.cleanup()
@@ -1095,6 +1250,13 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 					parsed.cleanup()
 					return csvV3Import{}, fmt.Errorf("画像一時ファイルの書き込みに失敗しました: %w", err)
 				}
+				tempInfo, err := file.Stat()
+				if err != nil || !fileprivacy.IsPrivate(file, tempInfo) || tempInfo.Size() != int64(len(prepared.data)) {
+					_ = file.Close()
+					parsed.cleanup()
+					return csvV3Import{}, fmt.Errorf("画像一時ファイルのidentity取得に失敗しました")
+				}
+				parsed.imageTempFiles[tempFileIndex].info = tempInfo
 				if err := file.Close(); err != nil {
 					parsed.cleanup()
 					return csvV3Import{}, fmt.Errorf("画像一時ファイルのクローズに失敗しました: %w", err)
@@ -1103,6 +1265,9 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 				// only the persistent-file reservation until parsed.cleanup.
 				tempRelease()
 				image.dataPath = path
+				image.tempRoot = parsed.imageTempRoot
+				image.tempName = name
+				image.tempInfo = tempInfo
 				image.data = nil
 			}
 			parsed.images = append(parsed.images, image)
@@ -1350,9 +1515,7 @@ func csvV3AccountSettings(settings map[string]string, key string) map[string]boo
 		if parsed, err := validation.ParseLedgerSettingItemsWithMode(value, validation.LedgerSettingArchive, maxCSVSettingValueBytes, validation.MaxSettingItems); err == nil {
 			raw = parsed.Items
 		}
-		for _, item := range raw {
-			set[item] = true
-		}
+		set = stringSet(raw)
 	}
 	return set
 }
@@ -1366,11 +1529,10 @@ func csvV3ImageBytes(row csvV3Image) (int64, error) {
 	if row.dataPath == "" {
 		return int64(len(row.data)), nil
 	}
-	file, root, err := openCSVTempRead(row.dataPath)
+	file, err := openCSVTempImage(row)
 	if err != nil {
 		return 0, err
 	}
-	defer root.Close()
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
@@ -1382,13 +1544,12 @@ func csvV3ImageBytes(row csvV3Image) (int64, error) {
 	return info.Size(), nil
 }
 
-func readCSVTempImage(path string) ([]byte, error) {
-	file, root, err := openCSVTempRead(path)
+func readCSVTempImage(row csvV3Image) ([]byte, error) {
+	file, err := openCSVTempImage(row)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	defer root.Close()
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err
@@ -1411,6 +1572,32 @@ func readCSVTempImage(path string) ([]byte, error) {
 		return nil, fmt.Errorf("画像一時ファイルのサイズが不正です")
 	}
 	return data, nil
+}
+
+// openCSVTempImage uses the root and name retained by the parser. The
+// creation-time identity is checked again immediately before reading, so a
+// same-account rename/replacement cannot substitute bytes after validation.
+func openCSVTempImage(row csvV3Image) (*os.File, error) {
+	if row.tempRoot == nil || row.tempName == "" || row.tempInfo == nil {
+		return nil, fmt.Errorf("画像一時ファイルのidentity情報がありません")
+	}
+	entry, err := row.tempRoot.Lstat(row.tempName)
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(row.tempInfo, entry) {
+		return nil, fmt.Errorf("画像一時ファイルのidentityが変更されています")
+	}
+	file, err := row.tempRoot.Open(row.tempName)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil || !fileprivacy.IsPrivate(file, opened) || !opened.Mode().IsRegular() || !os.SameFile(row.tempInfo, opened) || !os.SameFile(opened, entry) {
+		_ = file.Close()
+		return nil, fmt.Errorf("画像一時ファイルのidentity検証に失敗しました")
+	}
+	return file, nil
 }
 
 // openCSVTempRead opens an image spool through a directory handle rather than
@@ -1586,7 +1773,7 @@ func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Rea
 	if mode != "append" && mode != "replace" {
 		return 0, fmt.Errorf("インポートモードはappendまたはreplaceで指定してください")
 	}
-	guarded := &csvFieldLimitReader{ctx: ctx, input: input, maxFieldBytes: maxCSVFieldBytes, fieldStart: true}
+	guarded := &csvFieldLimitReader{ctx: ctx, input: input, maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
 	limited := &io.LimitedReader{R: guarded, N: MaxCSVStringImportBytes + 1}
 	reader := csv.NewReader(limited)
 	reader.FieldsPerRecord = -1
@@ -1994,7 +2181,7 @@ func (s *Service) importCSVV3Parsed(ctx context.Context, parsed csvV3Import, mod
 		}
 		data := row.data
 		if row.dataPath != "" {
-			data, err = readCSVTempImage(row.dataPath)
+			data, err = readCSVTempImage(row)
 			if err != nil {
 				return 0, fmt.Errorf("CSV v3画像一時ファイル読み取りエラー: %w", err)
 			}

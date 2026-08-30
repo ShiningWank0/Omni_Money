@@ -34,3 +34,37 @@ func TestCreatePrivateTempFileCreatesBoundedPrivateArtifact(t *testing.T) {
 		t.Fatalf("private temp path still exists: %v", err)
 	}
 }
+
+func TestPrivateTempCleanupDoesNotRemoveReplacedFile(t *testing.T) {
+	temp, err := CreatePrivateTempFile("omni-money-identity-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := temp.Path
+	replacement := path + ".replacement"
+	if err := temp.File.Close(); err != nil {
+		t.Fatal(err)
+	}
+	temp.File = nil
+	if err := os.Rename(path, replacement); err != nil {
+		t.Fatal(err)
+	}
+	replacementFile, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		_ = os.Rename(replacement, path)
+		t.Fatal(err)
+	}
+	_ = replacementFile.Close()
+	if err := temp.Cleanup(); err == nil {
+		t.Fatal("cleanup accepted a replaced private file")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("replacement file was removed: %v", err)
+	}
+	if _, err := os.Stat(replacement); err != nil {
+		t.Fatalf("original file was not retained for inspection: %v", err)
+	}
+	_ = os.Remove(path)
+	_ = os.Remove(replacement)
+	_ = os.Remove(temp.Dir)
+}

@@ -762,6 +762,10 @@ export async function backupToCSVFile() {
 			return downloadName
 		} catch (error) {
 			try { await writable?.abort() } catch (_) { /* best effort */ }
+			// A canceled picker or createWritable failure can leave the response
+			// body unread. Explicitly cancel it so the server can release its
+			// private export spool and weighted admission slot.
+			try { await res.body?.cancel?.() } catch (_) { /* best effort */ }
 			throw error
 		}
 	}
@@ -774,6 +778,7 @@ export async function backupToCSVFile() {
 	const contentLengthHeader = res.headers.get('Content-Length')
 	const contentLength = contentLengthHeader == null ? NaN : Number(contentLengthHeader)
 	if (Number.isFinite(contentLength) && (contentLength < 0 || contentLength + 3 > browserBlobCap)) {
+		try { await res.body?.cancel?.() } catch (_) { /* best effort */ }
 		throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
 	}
   let objectURL = null

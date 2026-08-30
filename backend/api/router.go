@@ -532,6 +532,7 @@ func handleBackupCSV(w http.ResponseWriter, r *http.Request) {
 			time.Now().Format("20060102_150405")))
 	w.Header().Set("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
 	if _, err := io.Copy(w, tmp); err != nil {
+		log.Printf("security_event=csv_export_stream_failed error=%v", err)
 		return
 	}
 }

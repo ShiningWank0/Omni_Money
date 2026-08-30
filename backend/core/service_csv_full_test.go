@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/csv"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -65,6 +67,14 @@ func TestCSVFieldLimitReaderHandlesQuotedRecordsBeforeCSVAllocation(t *testing.T
 	if len(records) != 2 || records[1][1] != "line one\nline two with \"quotes\"" {
 		t.Fatalf("quoted CSV records = %#v", records)
 	}
+	crlf := &csvFieldLimitReader{ctx: context.Background(), input: strings.NewReader("a,\"x\r\ny\"\n"), maxFieldBytes: 3, fieldStart: true}
+	if records, err := csv.NewReader(crlf).ReadAll(); err != nil || len(records) != 1 || records[0][1] != "x\ny" {
+		t.Fatalf("quoted CRLF normalization failed: records=%#v err=%v", records, err)
+	}
+	lineCRLF := &csvFieldLimitReader{ctx: context.Background(), input: strings.NewReader("abcd\r\n"), maxFieldBytes: 4, fieldStart: true}
+	if records, err := csv.NewReader(lineCRLF).ReadAll(); err != nil || len(records) != 1 || records[0][0] != "abcd" {
+		t.Fatalf("record CRLF counted as field data: records=%#v err=%v", records, err)
+	}
 
 	giant := "account,detail\n,\"" + strings.Repeat("x", maxCSVFieldBytes+1) + "\"\n"
 	guarded = &csvFieldLimitReader{ctx: context.Background(), input: strings.NewReader(giant), maxFieldBytes: maxCSVFieldBytes, fieldStart: true}
@@ -99,6 +109,47 @@ func TestCSVV3ImageAdmissionHappensBeforeBase64Decode(t *testing.T) {
 		t.Fatalf("image parse after reservation release failed: %v", err)
 	}
 	parsed.cleanup()
+}
+
+func TestCSVV3ImageSpoolRejectsReplacementAfterValidation(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	content := csvV3TestContent(t,
+		map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash", "date": "2026-08-01", "item": "item", "type": "income", "amount": "1"},
+		map[string]string{csvVersionHeader: "3", "record_type": "image", "id": "1", "transaction_id": "1", "filename": "receipt.png", "mime_type": "image/png", "data_base64": base64.StdEncoding.EncodeToString(encodePNG(t))},
+	)
+	parsed, err := service.parseCSVV3Reader(context.Background(), strings.NewReader(content), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := parsed.images[0].dataPath
+	replacement := path + ".replacement"
+	if err := os.Rename(path, replacement); err != nil {
+		_ = parsed.cleanup()
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		_ = os.Rename(replacement, path)
+		_ = parsed.cleanup()
+		t.Fatal(err)
+	}
+	_, _ = f.Write([]byte("substituted"))
+	_ = f.Close()
+	if _, err := service.importCSVV3Parsed(context.Background(), parsed, "replace"); err == nil {
+		t.Fatal("replacement image was accepted")
+	}
+	if _, err := os.Stat(replacement); err != nil {
+		t.Fatalf("original spool was lost: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("replacement path was unexpectedly removed: %v", err)
+	}
+	dir := filepath.Dir(path)
+	_ = parsed.cleanup()
+	_ = os.Remove(path)
+	_ = os.Remove(replacement)
+	_ = os.Remove(dir)
 }
 
 func TestCSVV3RoundTripPreservesExtendedLedgerDataAndRemapsIDs(t *testing.T) {
@@ -410,6 +461,43 @@ func TestCSVV3AppendPreservesExistingLinksAndRejectsSettingConflictsAtomically(t
 	}
 	if links != 1 {
 		t.Fatalf("malformed setting append removed existing links: count=%d", links)
+	}
+}
+
+func TestCSVLinkPolicyCanonicalizesHistoricalSettingWhitespace(t *testing.T) {
+	instance, service := openCoreTestService(t, "csv-whitespace-settings")
+	card, err := service.AddTransaction(models.TransactionRequest{Account: "card", Date: "2026-08-01", Item: "card", Type: "expense", Amount: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bank, err := service.AddTransaction(models.TransactionRequest{Account: "bank", Date: "2026-08-02", Item: "bank", Type: "expense", Amount: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SaveCreditCardSettings([]string{" card "}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SaveBankAccountSettings([]string{" bank "}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AddTransactionLink(card.ID, bank.ID); err != nil {
+		t.Fatalf("historical whitespace settings rejected link: %v", err)
+	}
+	var links int
+	if err := instance.DB().QueryRow("SELECT COUNT(*) FROM transaction_links").Scan(&links); err != nil {
+		t.Fatal(err)
+	}
+	if links != 1 {
+		t.Fatalf("link count=%d, want 1", links)
+	}
+	if err := service.SaveCreditCardSettings([]string{" card "}); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.DB().QueryRow("SELECT COUNT(*) FROM transaction_links").Scan(&links); err != nil {
+		t.Fatal(err)
+	}
+	if links != 1 {
+		t.Fatalf("link was pruned after equivalent setting save: %d", links)
 	}
 }
 

@@ -7,7 +7,10 @@ import "os"
 
 // CreateExclusive atomically creates an owner-only file beneath a pinned root.
 func CreateExclusive(root *os.Root, _ string, name string) (*os.File, error) {
-	return root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	// The descriptor is retained across the private-file lifecycle.  Callers
+	// may need to rewind/read it after generation (and must not reopen a path),
+	// so it is deliberately read/write rather than write-only.
+	return root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 }
 
 // Harden restricts a newly created file to its owner.
