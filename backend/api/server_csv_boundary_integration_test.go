@@ -322,7 +322,7 @@ func assertServerCSVAccounts(t *testing.T, response *httptest.ResponseRecorder, 
 	if len(manifestRecord) != len(header) || manifestRecord[1] != "manifest" || manifestRecord[20] != "omni_money_csv_v3_manifest" || manifestRecord[21] == "" {
 		t.Fatalf("CSV response does not end with a manifest: %#v", manifestRecord)
 	}
-	for _, record := range records[:manifestIndex] {
+	for _, record := range records[1:manifestIndex] {
 		if len(record) != len(header) {
 			t.Fatal("CSV response row has a different field count")
 		}
@@ -347,7 +347,7 @@ func assertServerCSVAccounts(t *testing.T, response *httptest.ResponseRecorder, 
 	}
 	counts := make(map[string]int64)
 	digest := sha256.New()
-	for _, record := range records[:manifestIndex] {
+	for _, record := range records[1:manifestIndex] {
 		counts[record[1]]++
 		var length [8]byte
 		for _, field := range record {

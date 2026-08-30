@@ -1,12 +1,54 @@
 package core
 
 import (
+	"context"
 	"encoding/csv"
 	"strings"
 	"testing"
 
 	"omni_money/backend/database"
 )
+
+func TestImportCSVV1PreservesHistoricalTextBeyondNewWriteLimits(t *testing.T) {
+	wantAccount := strings.Repeat("a", 300)
+	wantItem := strings.Repeat("項", 300)
+	wantMemo := "legacy memo"
+	content := "account,date,item,type,amount,memo\n" +
+		wantAccount + ",2026-01-01," + wantItem + ",expense,123," + wantMemo + "\n"
+	for _, name := range []string{"string", "raw stream"} {
+		t.Run(name, func(t *testing.T) {
+			setupCoreTestDB(t)
+			var imported int
+			var err error
+			if name == "string" {
+				imported, err = ImportCSV(content, "append")
+			} else {
+				service := &Service{db: database.GetDB(), legacy: true}
+				imported, err = service.ImportCSVReaderContext(context.Background(), strings.NewReader(content), "append")
+			}
+			if err != nil || imported != 1 {
+				t.Fatalf("v1 historical import = %d, %v", imported, err)
+			}
+			var account, item, memo string
+			if err := database.GetDB().QueryRow("SELECT account, item, memo FROM transactions").Scan(&account, &item, &memo); err != nil {
+				t.Fatal(err)
+			}
+			if account != wantAccount || item != wantItem || memo != wantMemo {
+				t.Fatalf("v1 historical text changed: account=%d/%d item=%d/%d memo=%q/%q", len([]byte(account)), len([]byte(wantAccount)), len([]byte(item)), len([]byte(wantItem)), memo, wantMemo)
+			}
+		})
+	}
+}
+
+func TestImportCSVV1RejectsFormulaAndUnsafeControlText(t *testing.T) {
+	for _, value := range []string{"=cmd", "+cmd", "-cmd", "@cmd", "legacy\x01memo", "hidden\u200btext", "bidi\u202etext"} {
+		setupCoreTestDB(t)
+		content := "account,date,item,type,amount,memo\n" + value + ",2026-01-01,item,income,1,memo\n"
+		if _, err := ImportCSV(content, "append"); err == nil {
+			t.Fatalf("unsafe v1 value was accepted: %q", value)
+		}
+	}
+}
 
 func TestCSVTextCellEncodingIsCanonicalAndReversible(t *testing.T) {
 	values := []string{

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,19 @@ type countingRequestBody struct {
 	reader io.Reader
 	reads  int
 }
+
+type expiringRequestBody struct {
+	reader io.Reader
+	onRead func()
+	once   sync.Once
+}
+
+func (body *expiringRequestBody) Read(p []byte) (int, error) {
+	body.once.Do(body.onRead)
+	return body.reader.Read(p)
+}
+
+func (body *expiringRequestBody) Close() error { return nil }
 
 func (body *countingRequestBody) Read(p []byte) (int, error) {
 	body.reads++
@@ -189,5 +203,30 @@ func TestCSVBodyIsNotReadBeforeAuthenticationAndCSRFChecks(t *testing.T) {
 				t.Fatalf("request body was read %d times before %s", body.reads, test.name)
 			}
 		})
+	}
+}
+
+func TestCSVImportRevalidatesRecentAuthAfterSpooling(t *testing.T) {
+	manager, session, clock := newCSRFTestFixture(t)
+	t.Cleanup(manager.Close)
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := RecentAuthMiddleware(manager, MaxBodySizeMiddleware(next))
+	body := &expiringRequestBody{
+		reader: strings.NewReader("account,date,item,type,amount\ncash,2026-01-01,item,income,1\n"),
+		onRead: func() {
+			*clock = session.ReauthenticatedAt.Add(manager.config.RecentAuthAge + time.Second)
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "https://money.example/api/import_csv", body)
+	req = requestWithSession(req, session)
+	req.Header.Set("Content-Type", "text/csv")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusPreconditionRequired || called {
+		t.Fatalf("post-spool stale auth status=%d called=%v, want 428 false", recorder.Code, called)
 	}
 }

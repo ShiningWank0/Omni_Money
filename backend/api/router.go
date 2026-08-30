@@ -227,6 +227,12 @@ func financialService(w http.ResponseWriter, r *http.Request) (*core.Service, bo
 }
 
 func writeFinancialError(w http.ResponseWriter, err error, status int) {
+	if errors.Is(err, core.ErrCSVReplaceRequiresV3) {
+		// This compatibility remediation is safe to expose for both raw CSV and
+		// JSON clients; keep parser/database details out of the response.
+		jsonError(w, "旧形式のCSVはappendで取り込めます。完全置換にはCSV v3を使用してください", status)
+		return
+	}
 	if errors.Is(err, core.ErrServiceUnavailable) {
 		jsonError(w, financialServiceUnavailableMessage, http.StatusServiceUnavailable)
 		return
@@ -557,6 +563,10 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 		if mode == "" {
 			mode = "append"
 		}
+		if checked, recent := middleware.RevalidateRecentAuthentication(r.Context()); checked && !recent {
+			jsonError(w, "この操作には再認証が必要です", http.StatusPreconditionRequired)
+			return
+		}
 		count, err := service.ImportCSVReaderContext(r.Context(), r.Body, mode)
 		if err != nil {
 			writeFinancialError(w, err, http.StatusBadRequest)
@@ -584,6 +594,10 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Mode == "" {
 		body.Mode = "append"
+	}
+	if checked, recent := middleware.RevalidateRecentAuthentication(r.Context()); checked && !recent {
+		jsonError(w, "この操作には再認証が必要です", http.StatusPreconditionRequired)
+		return
 	}
 
 	var count int

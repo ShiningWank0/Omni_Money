@@ -149,6 +149,13 @@ func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 			// Keep the weighted reservation while the private spool remains
 			// on disk and while parsed image files may be created.
 			defer cleanup()
+			// A recent-auth check performed before a slow upload is not sufficient:
+			// revalidate after spooling, before admitting the heavy processing slot
+			// or allowing the import handler to mutate the vault.
+			if checked, recent := RevalidateRecentAuthentication(r.Context()); checked && !recent {
+				writeRecentAuthRequired(w)
+				return
+			}
 			release, ok := core.TryAcquireCSVImportSlot()
 			if !ok {
 				http.Error(w, "CSV import is busy", http.StatusTooManyRequests)

@@ -124,6 +124,10 @@ func containsCSVV3ManifestRecordType(recordType string) bool {
 
 const legacyCSVReplaceError = "legacy/v1/v2 CSVではreplaceを利用できません。完全置換にはCSV v3を使用してください"
 
+// ErrCSVReplaceRequiresV3 is a safe, typed compatibility error. API layers
+// may expose its remediation without forwarding parser/DB details.
+var ErrCSVReplaceRequiresV3 = errors.New(legacyCSVReplaceError)
+
 // Imports and exports share one process-wide heavy operation slot. Both can
 // hold large database/blob buffers and a read transaction at the same time.
 var csvHeavySlots = make(chan struct{}, 1)
@@ -1892,8 +1896,12 @@ func loadCSVV3Settings(ctx context.Context, tx *sql.Tx, incoming map[string]stri
 			}
 			settings[key] = value
 		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("既存のledger設定読み取りエラー: %w", err)
+		}
 		if err := rows.Close(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("既存のledger設定クローズエラー: %w", err)
 		}
 	}
 	for key, value := range incoming {
@@ -2182,11 +2190,12 @@ func (s *Service) ImportCSVReaderContext(ctx context.Context, input io.Reader, m
 		return count, importErr
 	}
 	if mode == "replace" {
-		return 0, fmt.Errorf("%s", legacyCSVReplaceError)
+		return 0, ErrCSVReplaceRequiresV3
 	}
 	// Legacy/v2 remains source-compatible for append imports. Full replace is
 	// intentionally v3-only because v1/v2 cannot describe extension data;
-	// the raw archive is never materialized as a second 64 MiB string.
+	// the raw archive is never materialized as a second string (the separate
+	// JSON/string compatibility path remains bounded at 64 MiB).
 	return s.importCSVLegacyReaderContext(ctx, stream, mode)
 }
 
@@ -2202,16 +2211,19 @@ type csvLegacyImportRow struct {
 // importCSVLegacyReaderContext is the bounded append-only compatibility path
 // for native files and HTTP uploads. It parses rows as they arrive and
 // retains only the validated columns needed for the DB transaction; the raw
-// 64 MiB archive is never copied into a second string.
+// 512 MiB archive is never copied into a second string.
 func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Reader, mode string) (int, error) {
 	if mode != "append" && mode != "replace" {
 		return 0, fmt.Errorf("インポートモードはappendまたはreplaceで指定してください")
 	}
 	if mode == "replace" {
-		return 0, fmt.Errorf("%s", legacyCSVReplaceError)
+		return 0, ErrCSVReplaceRequiresV3
 	}
 	guarded := &csvFieldLimitReader{ctx: ctx, input: input, maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
-	limited := &io.LimitedReader{R: guarded, N: MaxCSVStringImportBytes + 1}
+	// This entrypoint is used by raw HTTP/Desktop readers. Their wire contract
+	// is the 512 MiB bounded stream; only the JSON/string compatibility path is
+	// constrained to MaxCSVStringImportBytes in importCSVContext.
+	limited := &io.LimitedReader{R: guarded, N: MaxCSVImportBytes + 1}
 	reader := csv.NewReader(limited)
 	reader.FieldsPerRecord = -1
 	headers, err := reader.Read()
@@ -2324,32 +2336,26 @@ func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Rea
 		dateString = strings.TrimSpace(dateString)
 		txType = strings.ToLower(strings.TrimSpace(txType))
 		amountString = strings.TrimSpace(amountString)
-		textValidator := validation.ValidateLedgerText
-		if versionedCSV {
-			textValidator = validation.ValidateArchivedLedgerText
-		}
-		if err := textValidator("口座名", account, validation.MaxAccountBytes, true); err != nil {
-			if versionedCSV {
-				err = textValidator("口座名", account, maxCSVFieldBytes, true)
-			}
-			if err != nil {
-				return 0, fmt.Errorf("口座名が不正です (行%d): %w", rowNumber, err)
+		// v1 and v2 are historical archive records. Preserve their larger
+		// historical fields while retaining the same unsafe-control policy and
+		// bounded archive ceiling used by v3 legacy rows.
+		if !versionedCSV {
+			for label, value := range map[string]string{"口座名": account, "項目": item, "メモ": memo} {
+				if err := rejectLegacyCSVFormulaCell(label, value); err != nil {
+					return 0, fmt.Errorf("%s (行%d): %w", label, rowNumber, err)
+				}
 			}
 		}
-		if err := textValidator("項目", item, validation.MaxItemBytes, true); err != nil {
-			if versionedCSV {
-				err = textValidator("項目", item, maxCSVFieldBytes, true)
-			}
-			if err != nil {
-				return 0, fmt.Errorf("項目が不正です (行%d): %w", rowNumber, err)
-			}
-		}
-		if err := textValidator("メモ", memo, validation.MaxMemoBytes, false); err != nil {
-			if versionedCSV {
-				err = textValidator("メモ", memo, maxCSVFieldBytes, false)
-			}
-			if err != nil {
-				return 0, fmt.Errorf("メモが不正です (行%d): %w", rowNumber, err)
+		textValidator := validation.ValidateArchivedLedgerText
+		for _, field := range []struct {
+			label    string
+			value    string
+			required bool
+		}{
+			{"口座名", account, true}, {"項目", item, true}, {"メモ", memo, false},
+		} {
+			if err := textValidator(field.label, field.value, maxCSVFieldBytes, field.required); err != nil {
+				return 0, fmt.Errorf("%sが不正です (行%d): %w", field.label, rowNumber, err)
 			}
 		}
 		if txType != "income" && txType != "expense" {
@@ -2374,14 +2380,14 @@ func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Rea
 		rows = append(rows, csvLegacyImportRow{account: account, date: date, item: item, txType: txType, amount: amount, memo: memo})
 	}
 	if limited.N == 0 {
-		return 0, fmt.Errorf("legacy/v2 CSV入力が文字列互換上限%d bytesを超えました", MaxCSVStringImportBytes)
+		return 0, fmt.Errorf("CSV入力が上限%d bytesを超えました", MaxCSVImportBytes)
 	}
 	return s.importCSVLegacyRowsContext(ctx, rows, mode)
 }
 
 func (s *Service) importCSVLegacyRowsContext(ctx context.Context, rows []csvLegacyImportRow, mode string) (int, error) {
 	if mode == "replace" {
-		return 0, fmt.Errorf("%s", legacyCSVReplaceError)
+		return 0, ErrCSVReplaceRequiresV3
 	}
 	db, err := s.database()
 	if err != nil {

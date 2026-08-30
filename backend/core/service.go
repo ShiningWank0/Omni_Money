@@ -67,6 +67,21 @@ func needsCSVFormulaEscape(value string) bool {
 	return unicode.IsSpace(r) || unicode.IsControl(r) || unicode.In(r, unicode.Cf)
 }
 
+// rejectLegacyCSVFormulaCell protects the unversioned v1 compatibility path.
+// v1 historically treated a leading apostrophe as literal text, so it cannot
+// use the v2 escape decoder; reject only spreadsheet formula prefixes while
+// retaining that legacy apostrophe behavior.
+func rejectLegacyCSVFormulaCell(label, value string) error {
+	if value == "" {
+		return nil
+	}
+	r, _ := utf8.DecodeRuneInString(value)
+	if strings.ContainsRune("=+-@", r) {
+		return fmt.Errorf("%sに未エスケープの数式セルがあります", label)
+	}
+	return nil
+}
+
 // GetAccounts はデータベースから口座名のリストを返す
 func (s *Service) GetAccounts() ([]string, error) {
 	db, err := s.database()
@@ -1139,7 +1154,7 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 	// replacement must remove. Reject before opening the database so a caller
 	// cannot get a partial or transaction-only replacement by format accident.
 	if mode == "replace" {
-		return 0, fmt.Errorf("%s", legacyCSVReplaceError)
+		return 0, ErrCSVReplaceRequiresV3
 	}
 	db, err := s.database()
 	if err != nil {
@@ -1283,37 +1298,28 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 		txType = strings.ToLower(strings.TrimSpace(txType))
 		amountStr = strings.TrimSpace(amountStr)
 
-		// Versioned v2 is an archive format emitted by older releases.  Keep
-		// its text byte-for-byte compatible with historical rows, while still
-		// rejecting invalid UTF-8/NUL.  New unversioned input uses the current
-		// shared validator.  v3 carries an explicit transaction_legacy marker
-		// and follows the same compatibility policy in its own parser.
-		textValidator := validation.ValidateLedgerText
-		if versionedCSV {
-			textValidator = validation.ValidateArchivedLedgerText
-		}
-		if err := textValidator("口座名", account, validation.MaxAccountBytes, true); err != nil {
-			if versionedCSV {
-				err = textValidator("口座名", account, maxCSVFieldBytes, true)
-			}
-			if err != nil {
-				return 0, fmt.Errorf("口座名が不正です (行%d): %w", rowNumber, err)
+		// Both v1 (unversioned) and v2 are historical archive inputs. They may
+		// contain values beyond current new-write limits (for example a 300-byte
+		// account), so validate against the bounded archive ceiling. v1 retains
+		// its historical trim/apostrophe behavior, but formula prefixes and unsafe
+		// controls remain rejected before persistence.
+		if !versionedCSV {
+			for label, value := range map[string]string{"口座名": account, "項目": item, "メモ": memo} {
+				if err := rejectLegacyCSVFormulaCell(label, value); err != nil {
+					return 0, fmt.Errorf("%s (行%d): %w", label, rowNumber, err)
+				}
 			}
 		}
-		if err := textValidator("項目", item, validation.MaxItemBytes, true); err != nil {
-			if versionedCSV {
-				err = textValidator("項目", item, maxCSVFieldBytes, true)
-			}
-			if err != nil {
-				return 0, fmt.Errorf("項目が不正です (行%d): %w", rowNumber, err)
-			}
-		}
-		if err := textValidator("メモ", memo, validation.MaxMemoBytes, false); err != nil {
-			if versionedCSV {
-				err = textValidator("メモ", memo, maxCSVFieldBytes, false)
-			}
-			if err != nil {
-				return 0, fmt.Errorf("メモが不正です (行%d): %w", rowNumber, err)
+		textValidator := validation.ValidateArchivedLedgerText
+		for _, field := range []struct {
+			label    string
+			value    string
+			required bool
+		}{
+			{"口座名", account, true}, {"項目", item, true}, {"メモ", memo, false},
+		} {
+			if err := textValidator(field.label, field.value, maxCSVFieldBytes, field.required); err != nil {
+				return 0, fmt.Errorf("%sが不正です (行%d): %w", field.label, rowNumber, err)
 			}
 		}
 		if txType != "income" && txType != "expense" {

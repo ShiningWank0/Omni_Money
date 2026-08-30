@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,72 @@ import (
 	"omni_money/backend/models"
 	"omni_money/backend/validation"
 )
+
+// generatedCSVReader emits a large raw archive without constructing the whole
+// input in memory. The ignored column makes the wire payload exceed the old
+// 64 MiB compatibility cap while the retained ledger rows remain small.
+type generatedCSVReader struct {
+	header, row, tail   []byte
+	rows, phase, offset int
+}
+
+func (r *generatedCSVReader) Read(p []byte) (int, error) {
+	written := 0
+	for written < len(p) {
+		var current []byte
+		switch r.phase {
+		case 0:
+			current = r.header
+		case 1:
+			if r.rows == 0 {
+				r.phase = 2
+				continue
+			}
+			current = r.row
+		case 2:
+			current = r.tail
+		default:
+			if written == 0 {
+				return 0, io.EOF
+			}
+			return written, nil
+		}
+		if r.offset == len(current) {
+			r.offset = 0
+			switch r.phase {
+			case 0:
+				r.phase = 1
+			case 1:
+				r.rows--
+			case 2:
+				r.phase = 3
+			}
+			continue
+		}
+		n := copy(p[written:], current[r.offset:])
+		r.offset += n
+		written += n
+	}
+	return written, nil
+}
+
+func TestCSVLegacyRawStreamUses512MiBWireLimit(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	row := []byte("cash,2026-01-01,item,income,1," + strings.Repeat("x", 16*1024) + "\n")
+	reader := &generatedCSVReader{
+		header: []byte("account,date,item,type,amount,ignored\n"),
+		row:    row,
+		// ~67 MiB raw input: this used to fail at the legacy reader's 64 MiB
+		// string limit, but stays well below the raw 512 MiB contract.
+		rows: 4100,
+		tail: []byte("cash,2026-01-01,final,income,1,tail\n"),
+	}
+	imported, err := service.ImportCSVReaderContext(context.Background(), reader, "append")
+	if err != nil || imported != 4101 {
+		t.Fatalf("large raw v1 stream import = %d, %v", imported, err)
+	}
+}
 
 func TestCSVTempBudgetIsSharedAcrossUploadAndExportReservations(t *testing.T) {
 	first, ok := TryAcquireCSVTempBudget(MaxCSVImportWireBytes)
