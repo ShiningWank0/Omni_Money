@@ -100,13 +100,16 @@ async function executeRestore(name) {
     finishRestoreAndRequireLogin('snapshot-restored')
   } catch (e) {
     if (isWailsMode) {
-      // A desktop failure leaves the database untouched. Keep the modal open
-      // so the user can inspect the error or choose another snapshot, but
-      // discard any transient restore confirmation state.
+      // Desktop closes and destroys the vault on every restore failure. Drop
+      // all browser-held secrets and let the shell reload into the password
+      // gate; keeping this modal mounted would retain financial state while
+      // the backend is already fail-closed.
+      clearSessionSecrets()
+      snapshots.value = []
       isRestoring.value = false
       confirmingSnapshot.value = null
-      messageType.value = 'error'
-      message.value = e?.message || 'スナップショットの復元に失敗しました'
+      emit('close')
+      emit('restored', { failed: true })
       return
     }
     // The server drains sessions before attempting disk restore, so a failed

@@ -23,7 +23,7 @@ func handleServerSnapshots(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		entries, err := snapshots.ListSnapshots()
+		entries, err := snapshots.ListSnapshotsContext(r.Context())
 		if err != nil {
 			log.Printf("security_event=snapshot_list result=error")
 			jsonError(w, "スナップショットを利用できません", http.StatusServiceUnavailable)

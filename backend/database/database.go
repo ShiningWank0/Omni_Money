@@ -68,9 +68,19 @@ type Instance struct {
 	snapshotRunning   bool
 	snapshotPending   bool
 	snapshotClosing   bool
+	// snapshotValidationSem bounds expensive snapshot authentication per
+	// instance. A server user cannot turn one GET into unbounded concurrent
+	// SQLCipher opens by issuing parallel requests.
+	snapshotValidationSem chan struct{}
 }
 
 const maxSnapshotValidationEntries = 256
+
+// A single list request is capped at one maximum-size snapshot. This keeps
+// validation work bounded even when a vault contains the maximum number of
+// large off-host files, while still allowing the largest snapshot that
+// CreateSnapshot can retain to be listed and restored.
+const maxSnapshotValidationWorkBytes int64 = maxSnapshotValidationBytes
 const restoreManifestVersion = 1
 
 type restoreManifest struct {
@@ -92,6 +102,7 @@ func newInstance() *Instance {
 func (i *Instance) ensureSnapshotCond() {
 	i.snapshotInit.Do(func() {
 		i.snapshotCond = sync.NewCond(&i.snapshotMu)
+		i.snapshotValidationSem = make(chan struct{}, 1)
 	})
 }
 
@@ -796,6 +807,87 @@ func canonicalSQL(value string) string {
 	return strings.Join(strings.Fields(strings.ToLower(value)), " ")
 }
 
+// canonicalDDL removes only formatting which SQLite itself is free to add
+// around punctuation when it stores sqlite_master.sql. Unlike substring
+// checks, equality against these fingerprints cannot be bypassed with a
+// harmless-looking token such as "WHEN 0" or "OR 1".
+func canonicalDDL(value string) string {
+	value = canonicalSQL(value)
+	value = strings.ReplaceAll(value, "( ", "(")
+	value = strings.ReplaceAll(value, " )", ")")
+	value = strings.ReplaceAll(value, " ,", ",")
+	value = strings.ReplaceAll(value, ", ", ",")
+	return value
+}
+
+func expectedLedgerTableDefinitions() map[string]string {
+	return map[string]string{
+		"transactions": canonicalDDL(`CREATE TABLE transactions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account TEXT NOT NULL,
+			date DATETIME NOT NULL,
+			item TEXT NOT NULL,
+			type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
+			amount INTEGER NOT NULL CHECK(amount BETWEEN 1 AND 1000000000),
+			balance INTEGER NOT NULL DEFAULT 0,
+			memo TEXT DEFAULT ''
+		)`),
+		"transaction_links": canonicalDDL(`CREATE TABLE transaction_links (
+			parent_id INTEGER NOT NULL,
+			child_id INTEGER NOT NULL,
+			PRIMARY KEY (parent_id, child_id),
+			FOREIGN KEY (parent_id) REFERENCES transactions(id) ON DELETE CASCADE,
+			FOREIGN KEY (child_id) REFERENCES transactions(id) ON DELETE CASCADE
+		)`),
+		"transaction_images": canonicalDDL(`CREATE TABLE transaction_images (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			transaction_id INTEGER NOT NULL,
+			filename TEXT NOT NULL,
+			data BLOB NOT NULL,
+			mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+		)`),
+		"tags": canonicalDDL(`CREATE TABLE tags (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			parent_id INTEGER DEFAULT NULL,
+			level INTEGER NOT NULL DEFAULT 1 CHECK(level IN (1, 2, 3)),
+			FOREIGN KEY (parent_id) REFERENCES tags(id) ON DELETE CASCADE,
+			UNIQUE(name, parent_id)
+		)`),
+		"transaction_tags": canonicalDDL(`CREATE TABLE transaction_tags (
+			transaction_id INTEGER NOT NULL,
+			tag_id INTEGER NOT NULL,
+			PRIMARY KEY (transaction_id, tag_id),
+			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE,
+			FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+		)`),
+		"ai_transaction_idempotency": canonicalDDL(`CREATE TABLE ai_transaction_idempotency (
+			credential_id TEXT NOT NULL,
+			idempotency_key_sha256 BLOB NOT NULL CHECK(length(idempotency_key_sha256) = 32),
+			request_sha256 BLOB NOT NULL CHECK(length(request_sha256) = 32),
+			transaction_id INTEGER,
+			response_account TEXT,
+			response_date TEXT,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (credential_id, idempotency_key_sha256),
+			UNIQUE (transaction_id),
+			CHECK ((transaction_id IS NULL AND response_account IS NULL AND response_date IS NULL) OR (transaction_id IS NOT NULL AND response_account IS NOT NULL AND response_date IS NOT NULL))
+		)`),
+		"ai_daily_transaction_usage": canonicalDDL(`CREATE TABLE ai_daily_transaction_usage (
+			credential_id TEXT NOT NULL,
+			utc_date TEXT NOT NULL CHECK(length(utc_date) = 10),
+			successful_creates INTEGER NOT NULL CHECK(successful_creates >= 0),
+			PRIMARY KEY (credential_id, utc_date)
+		)`),
+		"settings": canonicalDDL(`CREATE TABLE settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL DEFAULT ''
+		)`),
+	}
+}
+
 // isSupportedLegacyCurrentLayout recognizes the one historical layout that
 // can be migrated without pretending its old tables had today's constraints.
 // Recognition is based on immutable DDL fingerprints, not a mutable marker
@@ -953,20 +1045,12 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 	if err := validateCurrentColumnDefinitions(target, !strictConstraints); err != nil {
 		return err
 	}
-	// Check the declared constraints as well as table/column names. The
-	// foreign_key_check below catches orphan rows in otherwise valid schemas.
-	for table, required := range map[string][]string{
-		"transactions":               {"check(type in", "check(amount between"},
-		"transaction_links":          {"foreign key"},
-		"transaction_images":         {"foreign key"},
-		"tags":                       {"foreign key", "check(level in", "unique(name, parent_id)"},
-		"ai_transaction_idempotency": {"check(length(idempotency_key_sha256)", "check(length(request_sha256)"},
-		"ai_daily_transaction_usage": {"check(length(utc_date)", "check(successful_creates >= 0)"},
-		"transaction_tags":           {"foreign key"},
-	} {
-		if !strictConstraints && (table == "transactions" || table == "transaction_images") {
-			continue
-		}
+	// Check the complete canonical table DDL. Substring checks are not a
+	// security boundary: an attacker can retain a token while replacing a
+	// CHECK/FOREIGN KEY with a weaker expression. Legacy transaction tables
+	// are the only intentionally relaxed objects during the supported
+	// pre-identity migration; every other table remains exact.
+	for table, expected := range expectedLedgerTableDefinitions() {
 		if !strictConstraints && (table == "transactions" || table == "transaction_images") {
 			continue
 		}
@@ -974,11 +1058,8 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 		if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&definition); err != nil || !definition.Valid {
 			return fmt.Errorf("missing definition for %s: %w", table, err)
 		}
-		canonical := strings.ToLower(definition.String)
-		for _, token := range required {
-			if !strings.Contains(canonical, token) {
-				return fmt.Errorf("%s lacks %s constraint", table, token)
-			}
+		if got := canonicalDDL(definition.String); got != expected {
+			return fmt.Errorf("%s definition is not the current allowlisted DDL", table)
 		}
 	}
 	type expectedForeignKey struct {
@@ -1145,30 +1226,43 @@ func validateCurrentColumnDefinitions(target schemaQueryer, allowLegacyTables bo
 }
 
 func validateTriggerDefinitions(target schemaQueryer) error {
-	expected := map[string][]string{
-		"trg_transaction_images_quota_insert": {
-			"before insert on transaction_images", "length(new.data)", "raise(abort",
-		},
-		"trg_transaction_images_immutable_update": {
-			"before update on transaction_images", "raise(abort", "immutable",
-		},
-		"validate_transactions_amount_insert": {
-			"before insert on transactions", "new.amount", "raise(abort",
-		},
-		"validate_transactions_amount_update": {
-			"before update of amount on transactions", "new.amount", "raise(abort",
-		},
+	expected := map[string]string{
+		"trg_transaction_images_quota_insert": canonicalDDL(fmt.Sprintf(`CREATE TRIGGER trg_transaction_images_quota_insert
+			BEFORE INSERT ON transaction_images
+			WHEN length(NEW.data) <= 0
+				OR length(NEW.data) > %d
+				OR (SELECT COUNT(*) FROM transaction_images WHERE transaction_id = NEW.transaction_id) >= %d
+				OR COALESCE((SELECT SUM(length(data)) FROM transaction_images WHERE transaction_id = NEW.transaction_id), 0) + length(NEW.data) > %d
+				OR COALESCE(( SELECT SUM(length(ti.data)) FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id) ), 0) + length(NEW.data) > %d
+				OR COALESCE((SELECT SUM(length(data)) FROM transaction_images), 0) + length(NEW.data) > %d
+			BEGIN
+				SELECT RAISE(ABORT, 'image storage quota exceeded');
+			END`, models.MaxImageBytes, models.MaxImagesPerTransaction, models.MaxImageBytesPerTransaction, models.MaxImageBytesPerAccount, models.MaxImageBytesDatabase)),
+		"trg_transaction_images_immutable_update": canonicalDDL(`CREATE TRIGGER trg_transaction_images_immutable_update
+			BEFORE UPDATE ON transaction_images
+			BEGIN
+				SELECT RAISE(ABORT, 'transaction images are immutable; delete and re-add the image');
+			END`),
+		"validate_transactions_amount_insert": canonicalDDL(fmt.Sprintf(`CREATE TRIGGER validate_transactions_amount_insert
+			BEFORE INSERT ON transactions
+			WHEN NEW.amount < 1 OR NEW.amount > %d
+			BEGIN
+				SELECT RAISE(ABORT, 'transaction amount out of range');
+			END`, validation.MaxTransactionAmount)),
+		"validate_transactions_amount_update": canonicalDDL(fmt.Sprintf(`CREATE TRIGGER validate_transactions_amount_update
+			BEFORE UPDATE OF amount ON transactions
+			WHEN NEW.amount < 1 OR NEW.amount > %d
+			BEGIN
+				SELECT RAISE(ABORT, 'transaction amount out of range');
+			END`, validation.MaxTransactionAmount)),
 	}
-	for name, tokens := range expected {
+	for name, expectedDDL := range expected {
 		var definition sql.NullString
 		if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", name).Scan(&definition); err != nil || !definition.Valid {
 			return fmt.Errorf("trigger %s definition is unavailable: %w", name, err)
 		}
-		canonical := canonicalSQL(definition.String)
-		for _, token := range tokens {
-			if !strings.Contains(canonical, token) {
-				return fmt.Errorf("trigger %s lacks required behavior", name)
-			}
+		if got := canonicalDDL(definition.String); got != expectedDDL {
+			return fmt.Errorf("trigger %s definition is not the current allowlisted DDL", name)
 		}
 	}
 	return nil
@@ -1496,11 +1590,31 @@ func ListSnapshots(snapshotDir string) ([]string, error) {
 // ListSnapshots returns snapshots belonging to this instance's default
 // snapshot directory, or to snapshotDir when explicitly provided.
 func (i *Instance) ListSnapshots(snapshotDir string) ([]string, error) {
+	return i.ListSnapshotsContext(context.Background(), snapshotDir)
+}
+
+// ListSnapshotsContext is the request-bound form of ListSnapshots. Every
+// potentially expensive copy/open/integrity operation observes ctx, and one
+// instance admits only one validation scan at a time.
+func (i *Instance) ListSnapshotsContext(ctx context.Context, snapshotDir string) ([]string, error) {
 	if i == nil {
 		return nil, fmt.Errorf("データベースinstanceが初期化されていません")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	i.ensureSnapshotCond()
+	select {
+	case i.snapshotValidationSem <- struct{}{}:
+		defer func() { <-i.snapshotValidationSem }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	i.snapshotLifecycle.RLock()
 	defer i.snapshotLifecycle.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if snapshotDir == "" {
 		snapshotDir = i.getSnapshotDir()
 	}
@@ -1528,7 +1642,11 @@ func (i *Instance) ListSnapshots(snapshotDir string) ([]string, error) {
 
 	var snapshots []string
 	checked := 0
+	var validationBytes int64
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if checked >= maxSnapshotValidationEntries {
 			break
 		}
@@ -1546,7 +1664,12 @@ func (i *Instance) ListSnapshots(snapshotDir string) ([]string, error) {
 			continue
 		}
 		checked++
-		if i.validateSnapshotEntry(path, snapshotDir, info, encrypted) {
+		valid, used, err := i.validateSnapshotEntry(ctx, path, snapshotDir, info, encrypted, maxSnapshotValidationWorkBytes-validationBytes)
+		validationBytes += used
+		if err != nil {
+			return nil, err
+		}
+		if valid {
 			snapshots = append(snapshots, entry.Name())
 		}
 	}
@@ -1558,62 +1681,84 @@ func (i *Instance) ListSnapshots(snapshotDir string) ([]string, error) {
 // descriptor. Keeping all cleanup in this bounded helper is important: a
 // defer in the ListSnapshots loop would retain up to 256 full candidates
 // until the whole directory scan returned.
-func (i *Instance) validateSnapshotEntry(path, snapshotDir string, inspected os.FileInfo, encrypted bool) bool {
+func (i *Instance) validateSnapshotEntry(ctx context.Context, path, snapshotDir string, inspected os.FileInfo, encrypted bool, remainingWork int64) (bool, int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if remainingWork <= 0 {
+		return false, 0, errors.New("snapshot validation work budget exhausted")
+	}
 	file, err := openSnapshotFile(path)
 	if err != nil {
-		return false
+		return false, 0, nil
 	}
 	defer file.Close()
 	fdInfo, err := file.Stat()
-	if err != nil || fdInfo.Size() < 0 || fdInfo.Size() > maxSnapshotValidationBytes ||
+	if err != nil || fdInfo.Size() < 0 || fdInfo.Size() > maxSnapshotValidationBytes || fdInfo.Size() > remainingWork ||
 		!validSnapshotFile(fdInfo) || !validSnapshotMode(fdInfo, encrypted) ||
 		!snapshotSourceMatches(inspected, fdInfo) {
-		return false
+		return false, 0, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return false, 0, err
+	}
+	used := fdInfo.Size()
 	// The descriptor-level checks above are required even for a positive
 	// cache hit. In particular, Windows does not expose hard-link count in
 	// os.FileInfo, while openSnapshotFile verifies it with the handle.
 	candidatePath, candidateFile, err := temporaryDatabaseFile(snapshotDir, ".omni-money-list-validation-")
 	if err != nil {
-		return false
+		return false, used, nil
 	}
 	defer func() {
 		_ = candidateFile.Close()
 		_ = removeSQLiteFiles(candidatePath)
 	}()
-	if err := copyFileToOpenBounded(file, candidateFile, maxSnapshotValidationBytes); err != nil {
-		return false
+	if err := copyFileToOpenBoundedContext(ctx, file, candidateFile, maxSnapshotValidationBytes); err != nil {
+		return false, used, errIfContextDone(ctx, err)
 	}
 	if err := candidateFile.Sync(); err != nil {
-		return false
+		return false, used, nil
 	}
 	if err := candidateFile.Close(); err != nil {
-		return false
+		return false, used, nil
 	}
 	// Re-check the source descriptor after copying. A same-inode writer or
 	// replacement must not cause a partially copied object to be treated as a
 	// validated snapshot.
 	postFDInfo, err := file.Stat()
 	if err != nil || !snapshotSourceMatches(fdInfo, postFDInfo) {
-		return false
+		return false, used, nil
 	}
-	db, err := i.opener.Open(context.Background(), candidatePath, securedb.ReadOnly)
+	if err := ctx.Err(); err != nil {
+		return false, used, err
+	}
+	db, err := i.opener.Open(ctx, candidatePath, securedb.ReadOnly)
 	if err != nil {
-		return false
+		return false, used, errIfContextDone(ctx, err)
 	}
-	validErr := i.validateSnapshotDatabase(db, candidatePath)
+	validErr := i.validateSnapshotDatabaseContext(ctx, db, candidatePath)
 	closeErr := db.Close()
 	if validErr != nil || closeErr != nil {
-		return false
+		return false, used, errIfContextDone(ctx, errors.Join(validErr, closeErr))
 	}
 	// The path may not have been replaced while its descriptor was being
 	// copied/validated. The candidate remains the validated bytes even if the
 	// path was briefly swapped away, but do not cache or expose that name.
 	postInfo, postErr := os.Lstat(path)
 	if postErr != nil || !sameSnapshotInfo(fdInfo, postInfo) {
-		return false
+		return false, used, nil
 	}
-	return true
+	return true, used, nil
+}
+
+func errIfContextDone(ctx context.Context, err error) error {
+	if ctx != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+	}
+	return nil
 }
 
 func sameSnapshotInfo(a, b os.FileInfo) bool {
@@ -1623,15 +1768,25 @@ func sameSnapshotInfo(a, b os.FileInfo) bool {
 // validateSnapshotDatabase is deliberately read-only. Legacy snapshots may
 // be migrated only during restore; listing must not mutate an off-host file.
 func (i *Instance) validateSnapshotDatabase(target *sql.DB, path string) error {
+	return i.validateSnapshotDatabaseContext(context.Background(), target, path)
+}
+
+func (i *Instance) validateSnapshotDatabaseContext(ctx context.Context, target *sql.DB, path string) error {
 	if target == nil {
 		return errors.New("snapshot database is not open")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if i.opener != nil && i.opener.Encrypted() {
 		if err := securedb.RequireEncryptedHeader(path); err != nil {
 			return err
 		}
 	}
-	if err := i.checkIntegrity(target); err != nil {
+	if err := i.checkIntegrityContext(ctx, target); err != nil {
 		return err
 	}
 	var userTables int
@@ -1640,6 +1795,9 @@ func (i *Instance) validateSnapshotDatabase(target *sql.DB, path string) error {
 	}
 	if userTables == 0 {
 		return errors.New("empty database is not a ledger snapshot")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return validateLedgerSchema(target, false)
 }
@@ -1989,10 +2147,17 @@ func requireFullSynchronous(target *sql.DB) error {
 }
 
 func (i *Instance) checkIntegrity(target *sql.DB) error {
+	return i.checkIntegrityContext(context.Background(), target)
+}
+
+func (i *Instance) checkIntegrityContext(ctx context.Context, target *sql.DB) error {
 	if i.opener == nil {
 		return fmt.Errorf("データベースopenerが初期化されていません")
 	}
-	if err := i.opener.CheckIntegrity(context.Background(), target); err != nil {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := i.opener.CheckIntegrity(ctx, target); err != nil {
 		return fmt.Errorf("整合性チェック失敗: %w", err)
 	}
 	return nil
@@ -2063,6 +2228,9 @@ func snapshotMaxTotalBytes() (int64, error) {
 	value, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || value <= 0 {
 		return 0, fmt.Errorf("SNAPSHOT_MAX_TOTAL_BYTES は正の整数で指定してください")
+	}
+	if value > maxSnapshotValidationBytes {
+		return 0, fmt.Errorf("SNAPSHOT_MAX_TOTAL_BYTES は %d bytes 以下で指定してください", maxSnapshotValidationBytes)
 	}
 	return value, nil
 }
@@ -2929,11 +3097,35 @@ func copyFileToOpen(src, dst *os.File) error {
 }
 
 func copyFileToOpenBounded(src, dst *os.File, maxBytes int64) error {
+	return copyFileToOpenBoundedContext(context.Background(), src, dst, maxBytes)
+}
+
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	default:
+		return r.r.Read(p)
+	}
+}
+
+func copyFileToOpenBoundedContext(ctx context.Context, src, dst *os.File, maxBytes int64) error {
 	if src == nil || dst == nil {
 		return errors.New("コピー元またはコピー先が開かれていません")
 	}
 	if maxBytes <= 0 {
 		return errors.New("コピー上限が無効です")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	info, err := src.Stat()
 	if err != nil {
@@ -2951,7 +3143,7 @@ func copyFileToOpenBounded(src, dst *os.File, maxBytes int64) error {
 	if err := dst.Truncate(0); err != nil {
 		return err
 	}
-	written, err := io.Copy(dst, io.LimitReader(src, maxBytes+1))
+	written, err := io.Copy(dst, io.LimitReader(contextReader{ctx: ctx, r: src}, maxBytes+1))
 	if err != nil {
 		return err
 	}

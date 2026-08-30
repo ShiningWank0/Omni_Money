@@ -319,6 +319,12 @@ func (l *Lease) CreateSnapshot() (string, error) {
 
 // ListSnapshots lists only this lease's default per-vault snapshot directory.
 func (l *Lease) ListSnapshots() ([]string, error) {
+	return l.ListSnapshotsContext(context.Background())
+}
+
+// ListSnapshotsContext keeps snapshot validation tied to the request
+// lifetime. It never accepts a caller-selected directory.
+func (l *Lease) ListSnapshotsContext(ctx context.Context) ([]string, error) {
 	if l == nil || l.state == nil {
 		return nil, ErrLeaseReleased
 	}
@@ -327,7 +333,7 @@ func (l *Lease) ListSnapshots() ([]string, error) {
 	if l.state.released || l.manager == nil || l.entry == nil || l.entry.instance == nil {
 		return nil, ErrLeaseReleased
 	}
-	return l.entry.instance.ListSnapshots("")
+	return l.entry.instance.ListSnapshotsContext(ctx, "")
 }
 
 // BeginRestore starts a root-only restore operation.  It atomically marks the
@@ -363,9 +369,9 @@ func (l *Lease) BeginRestore() (*RestoreOperation, error) {
 
 // ValidateSessionRoot is the registration barrier used by SessionManager.
 // It performs the same manager-entry/liveness check as Borrow while taking no
-// reference. The caller must hold SessionManager's mutex; BeginRestore takes
-// that mutex before this lease state/manager sequence, making publication and
-// draining a single deterministic order.
+// reference. SessionManager holds its own mutex while calling this method;
+// this method separately takes the actual vault Manager mutex so Acquire and
+// entry publication cannot race.
 func (l *Lease) ValidateSessionRoot() error {
 	if l == nil || l.state == nil {
 		return ErrLeaseReleased
@@ -379,10 +385,9 @@ func (l *Lease) ValidateSessionRoot() error {
 	return l.validateSessionRootLocked()
 }
 
-// ValidateSessionRootLocked is the registration barrier used by
-// SessionManager.createSession. The caller must hold the exact Manager mutex;
-// it intentionally does not acquire it again, preventing a lock inversion
-// with BeginRestore and Release.
+// ValidateSessionRootLocked is retained for package compatibility. Callers
+// must hold the exact Manager mutex; SessionManager must use
+// ValidateSessionRoot because it does not hold that mutex.
 func (l *Lease) ValidateSessionRootLocked() error {
 	return l.validateSessionRootLocked()
 }

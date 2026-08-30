@@ -159,7 +159,7 @@ type sessionVaultRoot struct {
 type requestVaultLease struct {
 	service        *core.Service
 	createSnapshot func() (string, error)
-	listSnapshots  func() ([]string, error)
+	listSnapshots  func(context.Context) ([]string, error)
 	release        func()
 	once           sync.Once
 	mu             sync.RWMutex
@@ -194,8 +194,11 @@ func newSessionVaultRoot(lease *vault.Lease) (*sessionVaultRoot, error) {
 		return nil, ErrInvalidVaultSession
 	}
 	root := &sessionVaultRoot{
-		userID:       lease.UserID(),
-		validate:     lease.ValidateSessionRootLocked,
+		userID: lease.UserID(),
+		// createSession holds SessionManager.mu, not the vault Manager mutex.
+		// ValidateSessionRoot acquires the latter so Manager.Acquire cannot
+		// mutate the entry map concurrently with this registration barrier.
+		validate:     lease.ValidateSessionRoot,
 		release:      lease.Release,
 		beginRestore: lease.BeginRestore,
 	}
@@ -212,7 +215,7 @@ func newSessionVaultRoot(lease *vault.Lease) (*sessionVaultRoot, error) {
 		return &requestVaultLease{
 			service:        service,
 			createSnapshot: child.CreateSnapshot,
-			listSnapshots:  child.ListSnapshots,
+			listSnapshots:  child.ListSnapshotsContext,
 			release:        child.Release,
 		}, nil
 	}
@@ -287,6 +290,10 @@ func (lease *requestVaultLease) CreateSnapshot() (string, error) {
 }
 
 func (lease *requestVaultLease) ListSnapshots() ([]string, error) {
+	return lease.ListSnapshotsContext(context.Background())
+}
+
+func (lease *requestVaultLease) ListSnapshotsContext(ctx context.Context) ([]string, error) {
 	if lease == nil {
 		return nil, vault.ErrLeaseReleased
 	}
@@ -295,7 +302,7 @@ func (lease *requestVaultLease) ListSnapshots() ([]string, error) {
 	if lease.release == nil || lease.listSnapshots == nil {
 		return nil, vault.ErrLeaseReleased
 	}
-	return lease.listSnapshots()
+	return lease.listSnapshots(ctx)
 }
 
 // SessionManager uses one mutex for lookup/touch/delete/rotation. This avoids
@@ -1142,6 +1149,7 @@ func CoreServiceFromContext(ctx context.Context) (*core.Service, bool) {
 type SnapshotService interface {
 	CreateSnapshot() (string, error)
 	ListSnapshots() ([]string, error)
+	ListSnapshotsContext(context.Context) ([]string, error)
 }
 
 func SnapshotServiceFromContext(ctx context.Context) (SnapshotService, bool) {

@@ -648,6 +648,14 @@ func (c *Coordinator) RestoreSnapshot(name string) error {
 	c.draining = false
 	c.cond.Broadcast()
 	c.mu.Unlock()
+	if err != nil {
+		// Restore closes the live database before the filesystem swap.  Any
+		// failure after that point leaves the opener/DEK and coordinator
+		// state unsafe to keep published, even when rollback was attempted.
+		// Lock unconditionally on failure so Desktop always destroys the
+		// instance and requires a fresh password before another operation.
+		return errors.Join(err, c.Lock())
+	}
 	return err
 }
 

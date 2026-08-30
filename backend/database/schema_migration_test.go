@@ -292,6 +292,44 @@ func TestCurrentSchemaRejectsIneffectiveSameNamedTrigger(t *testing.T) {
 	}
 }
 
+func TestCurrentSchemaRejectsForgeableTriggerTokens(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup string
+	}{
+		{
+			name: "quota when zero",
+			setup: `DROP TRIGGER trg_transaction_images_quota_insert;
+				CREATE TRIGGER trg_transaction_images_quota_insert
+				BEFORE INSERT ON transaction_images WHEN 0
+				BEGIN SELECT RAISE(ABORT, 'image storage quota exceeded'); END`,
+		},
+		{
+			name: "amount or one",
+			setup: `DROP TRIGGER validate_transactions_amount_insert;
+				CREATE TRIGGER validate_transactions_amount_insert
+				BEFORE INSERT ON transactions
+				WHEN NEW.amount < 1 OR 1
+				BEGIN SELECT RAISE(ABORT, 'transaction amount out of range'); END`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			instance, err := OpenPlainInstance(filepath.Join(t.TempDir(), "trigger.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer instance.Close()
+			if _, err := instance.DB().Exec(test.setup); err != nil {
+				t.Fatal(err)
+			}
+			if err := validateLedgerSchema(instance.DB(), true); err == nil {
+				t.Fatal("token-stuffed trigger was accepted")
+			}
+		})
+	}
+}
+
 func TestBlankSQLiteFileIsNotAListableSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "blank.db")
 	db, err := sql.Open("sqlite3", path)

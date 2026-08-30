@@ -1,6 +1,9 @@
 package database
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -60,5 +63,18 @@ func TestSnapshotMaxTotalBytesValidation(t *testing.T) {
 	t.Setenv("SNAPSHOT_MAX_TOTAL_BYTES", "0")
 	if _, err := snapshotMaxTotalBytes(); err == nil {
 		t.Fatal("zero budget was accepted")
+	}
+	t.Setenv("SNAPSHOT_MAX_TOTAL_BYTES", fmt.Sprintf("%d", maxSnapshotValidationBytes+1))
+	if _, err := snapshotMaxTotalBytes(); err == nil {
+		t.Fatal("budget above the per-file validation ceiling was accepted")
+	}
+}
+
+func TestListSnapshotsContextHonorsCancellationBeforeValidation(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := instance.ListSnapshotsContext(ctx, snapshotDir); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled snapshot listing error = %v, want context.Canceled", err)
 	}
 }
