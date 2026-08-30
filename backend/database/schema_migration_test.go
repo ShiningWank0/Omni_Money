@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -259,6 +260,70 @@ func TestLegacyImageMigrationRebuildsForeignKeyAndCascade(t *testing.T) {
 	}
 	if images != 0 {
 		t.Fatalf("cascade left %d legacy images after deleting transaction", images)
+	}
+}
+
+func TestVersionTwoLegacyImageRebuildRecreatesDependentObjects(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-v2-images.db")
+	createLegacyImageSnapshot(t, path, true)
+	db, err := sql.Open("sqlite3", path+"?_journal_mode=DELETE&_foreign_keys=ON")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	// First perform the historical migration. This leaves the old transaction
+	// DDL and a current v2 marker, matching databases produced by the previous
+	// IF NOT EXISTS migration path.
+	if err := createTablesOn(db); err != nil {
+		t.Fatalf("initial legacy migration failed: %v", err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER trg_transaction_images_quota_insert;
+		DROP TRIGGER trg_transaction_images_immutable_update;
+		DROP INDEX idx_transaction_images_txid;
+		DROP TABLE transaction_images;
+		CREATE TABLE transaction_images (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			transaction_id INTEGER NOT NULL,
+			filename TEXT NOT NULL,
+			data BLOB NOT NULL,
+			mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX idx_transaction_images_txid ON transaction_images(transaction_id);`); err != nil {
+		t.Fatalf("legacy v2 image fixture setup failed: %v", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`CREATE TRIGGER trg_transaction_images_quota_insert
+		BEFORE INSERT ON transaction_images
+		WHEN length(NEW.data) <= 0 OR length(NEW.data) > %d
+			OR (SELECT COUNT(*) FROM transaction_images WHERE transaction_id = NEW.transaction_id) >= %d
+			OR COALESCE((SELECT SUM(length(data)) FROM transaction_images WHERE transaction_id = NEW.transaction_id), 0) + length(NEW.data) > %d
+			OR COALESCE((SELECT SUM(length(ti.data)) FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)), 0) + length(NEW.data) > %d
+			OR COALESCE((SELECT SUM(length(data)) FROM transaction_images), 0) + length(NEW.data) > %d
+		BEGIN SELECT RAISE(ABORT, 'image storage quota exceeded'); END;
+		CREATE TRIGGER trg_transaction_images_immutable_update
+		BEFORE UPDATE ON transaction_images
+		BEGIN SELECT RAISE(ABORT, 'transaction images are immutable; delete and re-add the image'); END`,
+		models.MaxImageBytes, models.MaxImagesPerTransaction, models.MaxImageBytesPerTransaction,
+		models.MaxImageBytesPerAccount, models.MaxImageBytesDatabase)); err != nil {
+		t.Fatalf("legacy v2 image dependent trigger setup failed: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA user_version = 2; PRAGMA application_id = 0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := createTablesOn(db); err != nil {
+		t.Fatalf("version-2 legacy image rebuild failed: %v", err)
+	}
+	if err := validateCurrentTransactionImages(db); err != nil {
+		t.Fatalf("rebuilt transaction_images is not current: %v", err)
+	}
+	for _, object := range []string{"idx_transaction_images_txid", "trg_transaction_images_quota_insert", "trg_transaction_images_immutable_update"} {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE name = ?", object).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("dependent object %s count=%d, want 1", object, count)
+		}
 	}
 }
 

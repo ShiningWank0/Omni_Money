@@ -186,6 +186,90 @@ func TestSnapshotQuarantineRollbackAndStartupRecovery(t *testing.T) {
 	}
 }
 
+func TestSnapshotPruneJournalDoesNotResurrectPublishedVictims(t *testing.T) {
+	dir := t.TempDir()
+	victimPath := filepath.Join(dir, "omni_money_20260101_000000_000000001.db")
+	otherPath := filepath.Join(dir, "omni_money_20260102_000000_000000001.db")
+	for _, path := range []string{victimPath, otherPath} {
+		if err := os.WriteFile(path, make([]byte, 40), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := hardenPrivateFile(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quarantined, err := quarantineSnapshotsContext(context.Background(), dir, 2, 100, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetName := "omni_money_20260103_000000_000000001.db"
+	targetPath := filepath.Join(dir, targetName)
+	if err := os.WriteFile(targetPath, make([]byte, 40), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hardenPrivateFile(targetPath); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := digestDatabaseFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := newSnapshotPruneManifest(dir, targetName, digest, quarantined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Phase = "published"
+	if err := writeSnapshotPruneManifest(dir, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupSnapshotPruneArtifacts(context.Background(), dir); err != nil {
+		t.Fatalf("published prune recovery failed: %v", err)
+	}
+	if _, err := os.Stat(targetPath); err != nil {
+		t.Fatalf("published target disappeared: %v", err)
+	}
+	if _, err := os.Stat(victimPath); !os.IsNotExist(err) {
+		t.Fatalf("published victim was resurrected: %v", err)
+	}
+	if _, err := os.Stat(snapshotPruneManifestPath(dir)); !os.IsNotExist(err) {
+		t.Fatalf("prune manifest remains after finalize: %v", err)
+	}
+}
+
+func TestSnapshotPruneJournalRollsBackPreparedQuarantine(t *testing.T) {
+	dir := t.TempDir()
+	victimPath := filepath.Join(dir, "omni_money_20260101_000000_000000001.db")
+	otherPath := filepath.Join(dir, "omni_money_20260102_000000_000000001.db")
+	for _, path := range []string{victimPath, otherPath} {
+		if err := os.WriteFile(path, make([]byte, 40), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := hardenPrivateFile(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quarantined, err := quarantineSnapshotsContext(context.Background(), dir, 2, 100, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := newSnapshotPruneManifest(dir, "omni_money_20260103_000000_000000001.db", strings.Repeat("a", 64), quarantined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSnapshotPruneManifest(dir, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupSnapshotPruneArtifacts(context.Background(), dir); err != nil {
+		t.Fatalf("prepared prune recovery failed: %v", err)
+	}
+	if _, err := os.Stat(victimPath); err != nil {
+		t.Fatalf("prepared victim was not restored: %v", err)
+	}
+	if _, err := os.Stat(snapshotPruneManifestPath(dir)); !os.IsNotExist(err) {
+		t.Fatalf("prepared prune manifest remains: %v", err)
+	}
+}
+
 func TestConcurrentDatabaseLifecycleTransitionsAreSerialized(t *testing.T) {
 	firstDB := filepath.Join(t.TempDir(), "first", "omni_money.db")
 	secondDB := filepath.Join(t.TempDir(), "second", "omni_money.db")

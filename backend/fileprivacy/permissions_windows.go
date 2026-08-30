@@ -196,6 +196,94 @@ func IsPrivate(file *os.File, info os.FileInfo) bool {
 	return true
 }
 
+// ValidatePrivateFile checks the descriptor itself. Windows mode bits are not
+// authoritative; the protected owner+SYSTEM DACL and file identity are.
+func ValidatePrivateFile(file *os.File) error {
+	if file == nil {
+		return errors.New("private file handle is nil")
+	}
+	if err := validatePrivateFileHandle(file); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validatePrivateFileHandle(file *os.File) error {
+	handle := windows.Handle(file.Fd())
+	var attributes struct {
+		Attributes uint32
+		ReparseTag uint32
+	}
+	if err := windows.GetFileInformationByHandleEx(handle, windows.FileAttributeTagInfo, (*byte)(unsafe.Pointer(&attributes)), uint32(unsafe.Sizeof(attributes))); err != nil {
+		return err
+	}
+	if attributes.Attributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
+		return errors.New("private file is a directory or reparse point")
+	}
+	var byHandle windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &byHandle); err != nil {
+		return err
+	}
+	if byHandle.NumberOfLinks != 1 {
+		return errors.New("private file must have exactly one hard link")
+	}
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return err
+	}
+	if owner == nil || !owner.Equals(user.User.Sid) {
+		return errors.New("private file owner is not the current Windows account")
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return err
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return errors.New("private file DACL is inheritable")
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	if dacl == nil || dacl.AceCount != 2 {
+		return errors.New("private file DACL must contain only owner and LocalSystem")
+	}
+	system, err := windows.StringToSid("S-1-5-18")
+	if err != nil {
+		return err
+	}
+	want := map[string]bool{user.User.Sid.String(): false, system.String(): false}
+	const fileAllAccess = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
+	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, index, &ace); err != nil {
+			return err
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != 0 || ace.Mask != fileAllAccess {
+			return errors.New("private file DACL contains an unexpected ACE")
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if _, ok := want[sid.String()]; !ok {
+			return errors.New("private file DACL grants an unexpected principal")
+		}
+		want[sid.String()] = true
+	}
+	for _, present := range want {
+		if !present {
+			return errors.New("private file DACL is missing a required principal")
+		}
+	}
+	return nil
+}
+
 func openPrivateDirectory(path string, access uint32) (*os.File, error) {
 	pointer, err := windows.UTF16PtrFromString(path)
 	if err != nil {

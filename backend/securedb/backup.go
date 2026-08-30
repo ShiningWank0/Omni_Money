@@ -44,20 +44,19 @@ func (o *Opener) Backup(ctx context.Context, source *sql.DB, snapshotPath string
 		}
 	}()
 
+	// Verify the exclusive placeholder before handing the pathname to SQLite.
+	// Otherwise a symlink-to-placeholder substitution could be followed by the
+	// driver before the first post-open identity check runs.
+	if err := assertBackupDestination(snapshotPath, placeholderInfo); err != nil {
+		return err
+	}
 	destination, err := o.Open(ctx, snapshotPath, Snapshot)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = destination.Close() }()
 	assertDestination := func() error {
-		info, statErr := os.Stat(snapshotPath)
-		if statErr != nil {
-			return statErr
-		}
-		if !os.SameFile(placeholderInfo, info) {
-			return fmt.Errorf("snapshot destination was replaced during backup")
-		}
-		return nil
+		return assertBackupDestination(snapshotPath, placeholderInfo)
 	}
 	if err := assertDestination(); err != nil {
 		return err
@@ -132,11 +131,11 @@ func (o *Opener) Backup(ctx context.Context, source *sql.DB, snapshotPath string
 	if err := o.CheckIntegrity(ctx, verified); err != nil {
 		return err
 	}
-	if err := os.Chmod(snapshotPath, 0600); err != nil {
+	if err := fileprivacy.Harden(placeholder); err != nil {
 		return err
 	}
 	if o.Encrypted() {
-		if err := RequireEncryptedHeader(snapshotPath); err != nil {
+		if err := requireEncryptedHeaderFile(placeholder); err != nil {
 			return err
 		}
 	}

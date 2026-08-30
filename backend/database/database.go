@@ -96,6 +96,8 @@ var snapshotValidationAdmission = make(chan struct{}, maxConcurrentSnapshotValid
 const maxSnapshotValidationWorkBytes int64 = maxSnapshotValidationBytes
 const restoreManifestVersion = 1
 const snapshotPruneArtifactPrefix = ".omni-money-snapshot-prune-"
+const snapshotPruneManifestVersion = 1
+const snapshotPruneManifestName = ".omni-money-snapshot-prune-intent.json"
 
 type restoreManifest struct {
 	Version   int    `json:"version"`
@@ -105,6 +107,30 @@ type restoreManifest struct {
 	Candidate string `json:"candidate"`
 	OldDigest string `json:"old_digest"`
 	NewDigest string `json:"new_digest"`
+}
+
+// snapshotPruneManifest is the durable transaction record for retention
+// quarantine. A process may die after publishing the new generation but
+// before deleting quarantined victims; without this phase marker startup
+// cannot distinguish that state from a pre-publication rollback and could
+// resurrect old generations alongside the new one.
+type snapshotPruneManifest struct {
+	Version   int                           `json:"version"`
+	Phase     string                        `json:"phase"`
+	Snapshot  string                        `json:"snapshot"`
+	NewDigest string                        `json:"new_digest"`
+	Victims   []snapshotPruneManifestVictim `json:"victims"`
+}
+
+type snapshotPruneManifestVictim struct {
+	Original    string                         `json:"original"`
+	Quarantined string                         `json:"quarantined"`
+	Sidecars    []snapshotPruneManifestSidecar `json:"sidecars,omitempty"`
+}
+
+type snapshotPruneManifestSidecar struct {
+	Original    string `json:"original"`
+	Quarantined string `json:"quarantined"`
 }
 
 func newInstance() *Instance {
@@ -650,7 +676,12 @@ func createTablesOnContext(ctx context.Context, target *sql.DB) error {
 	// Version 0 includes both a brand-new database and databases created by
 	// older releases before schema versions were recorded. Reapplying the
 	// idempotent declarations upgrades either case atomically.
-	if version < ledgerSchemaVersion {
+	// A historical v2 image table can coexist with the current version marker:
+	// an older migration used IF NOT EXISTS and consequently left the legacy
+	// table (and its dependent objects) in place. Re-run the idempotent DDL
+	// after rebuilding that table so indexes/triggers dropped by the rebuild
+	// are recreated even though user_version already equals the current value.
+	if version < ledgerSchemaVersion || legacyImageLayout {
 		for _, stmt := range statements {
 			if _, err := tx.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("SQL実行エラー (%s): %w", stmt[:50], err)
@@ -2165,11 +2196,27 @@ func (i *Instance) createSnapshot(ctx context.Context, snapshotDir string) (stri
 	if err := backupSQLiteDatabase(ctx, currentOpener, currentDB, stagingPath); err != nil {
 		return "", fmt.Errorf("スナップショット作成エラー: %w", err)
 	}
-	if err := os.Chmod(stagingPath, 0600); err != nil {
-		return "", fmt.Errorf("スナップショット権限設定エラー: %w", err)
+	// Securedb.Backup creates and hardens the placeholder. Pin that resulting
+	// inode before any further pathname-based opener call; the descriptor is
+	// retained through publication below.
+	stagingFile, err := openSnapshotFile(stagingPath)
+	if err != nil {
+		return "", fmt.Errorf("検証済みスナップショットdescriptorを開けません: %w", err)
 	}
-	if err := hardenPrivateFile(stagingPath); err != nil {
-		return "", fmt.Errorf("スナップショットACL設定エラー: %w", err)
+	defer stagingFile.Close()
+	stagedInfo, err := stagingFile.Stat()
+	if err != nil || !validSnapshotFile(stagedInfo) || !validSnapshotMode(stagedInfo, currentOpener.Encrypted()) {
+		if err == nil {
+			err = errors.New("staging descriptor is not a private regular file")
+		}
+		return "", fmt.Errorf("スナップショットstaging descriptor検査エラー: %w", err)
+	}
+	stagedDigest, err := digestOpenFileContext(ctx, stagingFile)
+	if err != nil {
+		return "", fmt.Errorf("スナップショットstaging digest検査エラー: %w", err)
+	}
+	if err := assertOpenFileAtPath(stagingFile, stagingPath); err != nil {
+		return "", fmt.Errorf("スナップショットstaging identity検査エラー: %w", err)
 	}
 	if err := syncFileAndDirectory(stagingPath, snapshotDir); err != nil {
 		return "", fmt.Errorf("スナップショットstaging fsyncエラー: %w", err)
@@ -2185,6 +2232,9 @@ func (i *Instance) createSnapshot(ctx context.Context, snapshotDir string) (stri
 	}
 	if err := syncFileAndDirectory(stagingPath, snapshotDir); err != nil {
 		return "", fmt.Errorf("検証済みスナップショットstaging fsyncエラー: %w", err)
+	}
+	if err := assertOpenFileAtPath(stagingFile, stagingPath); err != nil {
+		return "", fmt.Errorf("検証済みスナップショットstaging identity再検証エラー: %w", err)
 	}
 
 	// Keep the timestamp-oriented public naming used by the desktop UI, while
@@ -2203,10 +2253,6 @@ func (i *Instance) createSnapshot(ctx context.Context, snapshotDir string) (stri
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("スナップショット名検査エラー: %w", err)
 	}
-	stagedInfo, err := os.Stat(stagingPath)
-	if err != nil {
-		return "", fmt.Errorf("スナップショットstaging検査エラー: %w", err)
-	}
 	if stagedInfo.Size() < 0 || stagedInfo.Size() > budget {
 		return "", fmt.Errorf("スナップショットstaging容量が総容量上限を超えます")
 	}
@@ -2214,26 +2260,75 @@ func (i *Instance) createSnapshot(ctx context.Context, snapshotDir string) (stri
 	if err != nil {
 		return "", fmt.Errorf("スナップショット世代退避エラー: %w", err)
 	}
-	if err := ctx.Err(); err != nil {
-		if rollbackErr := rollbackSnapshotQuarantine(quarantined, snapshotDir); rollbackErr != nil {
-			return "", errors.Join(err, rollbackErr)
+	pruneJournalWritten := false
+	if len(quarantined) > 0 {
+		pruneManifest, manifestErr := newSnapshotPruneManifest(snapshotDir, filepath.Base(snapshotPath), stagedDigest, quarantined)
+		if manifestErr == nil {
+			manifestErr = writeSnapshotPruneManifest(snapshotDir, pruneManifest)
 		}
-		return "", err
+		if manifestErr != nil {
+			rollbackErr := rollbackSnapshotQuarantine(quarantined, snapshotDir)
+			return "", errors.Join(fmt.Errorf("スナップショット世代退避journal作成エラー: %w", manifestErr), rollbackErr)
+		}
+		pruneJournalWritten = true
+	}
+	rollbackQuarantine := func(cause error) error {
+		rollbackErr := rollbackSnapshotQuarantine(quarantined, snapshotDir)
+		if pruneJournalWritten && rollbackErr == nil {
+			rollbackErr = removeSnapshotPruneManifest(snapshotDir)
+		}
+		return errors.Join(cause, rollbackErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", rollbackQuarantine(err)
+	}
+	if err := assertOpenFileAtPath(stagingFile, stagingPath); err != nil {
+		return "", rollbackQuarantine(fmt.Errorf("スナップショットstaging配置前identity検証エラー: %w", err))
 	}
 	if err := publishSnapshotFile(stagingPath, snapshotPath); err != nil {
-		rollbackErr := rollbackSnapshotQuarantine(quarantined, snapshotDir)
-		return "", errors.Join(fmt.Errorf("スナップショット公開エラー: %w", err), rollbackErr)
+		return "", rollbackQuarantine(fmt.Errorf("スナップショット公開エラー: %w", err))
 	}
 	stagingLive = false
 	// From this point onward the public name is complete and must not be
 	// retracted merely because the HTTP client canceled. Finish the durable
 	// completion boundary with cancellation detached from the request.
 	durableCtx := context.WithoutCancel(ctx)
+	if err := assertOpenFileAtPath(stagingFile, snapshotPath); err != nil {
+		cleanupErr := removePrivateSQLiteFile(snapshotPath)
+		return "", errors.Join(fmt.Errorf("公開済みスナップショットidentity検証エラー: %w", err), cleanupErr)
+	}
+	publishedDigest, err := digestOpenFileContext(durableCtx, stagingFile)
+	if err != nil {
+		cleanupErr := removePrivateSQLiteFile(snapshotPath)
+		return "", errors.Join(fmt.Errorf("公開済みスナップショットdigest検証エラー: %w", err), cleanupErr)
+	}
+	if !strings.EqualFold(stagedDigest, publishedDigest) {
+		cleanupErr := removePrivateSQLiteFile(snapshotPath)
+		return "", errors.Join(errors.New("公開済みスナップショットが検証済みstagingと一致しません"), cleanupErr)
+	}
 	if err := syncDirectory(snapshotDir); err != nil {
 		return "", fmt.Errorf("スナップショットdirectory fsyncエラー: %w", err)
 	}
+	if pruneJournalWritten {
+		pruneManifest, found, manifestErr := readSnapshotPruneManifest(snapshotDir)
+		if manifestErr != nil || !found {
+			if manifestErr == nil {
+				manifestErr = errors.New("snapshot prune manifest disappeared")
+			}
+			return "", fmt.Errorf("スナップショット世代退避journal再読込エラー: %w", manifestErr)
+		}
+		pruneManifest.Phase = "published"
+		if manifestErr := writeSnapshotPruneManifest(snapshotDir, pruneManifest); manifestErr != nil {
+			return "", fmt.Errorf("スナップショット世代退避journal確定エラー: %w", manifestErr)
+		}
+	}
 	if err := finalizeSnapshotQuarantine(durableCtx, quarantined, snapshotDir); err != nil {
 		return "", fmt.Errorf("スナップショット世代削除エラー: %w", err)
+	}
+	if pruneJournalWritten {
+		if err := removeSnapshotPruneManifest(snapshotDir); err != nil {
+			return "", fmt.Errorf("スナップショット世代退避journal削除エラー: %w", err)
+		}
 	}
 
 	// Audit records deliberately contain only the operation and result.  The
@@ -3183,6 +3278,253 @@ func parseSnapshotPruneArtifact(name string) (string, bool) {
 	return original, true
 }
 
+func snapshotPruneManifestPath(snapshotDir string) string {
+	return filepath.Join(snapshotDir, snapshotPruneManifestName)
+}
+
+func newSnapshotPruneManifest(snapshotDir, snapshotName, newDigest string, entries []snapshotQuarantineEntry) (snapshotPruneManifest, error) {
+	manifest := snapshotPruneManifest{
+		Version:   snapshotPruneManifestVersion,
+		Phase:     "prepared",
+		Snapshot:  snapshotName,
+		NewDigest: newDigest,
+	}
+	if err := validateSnapshotName(snapshotName); err != nil {
+		return snapshotPruneManifest{}, err
+	}
+	if len(newDigest) != sha256.Size*2 {
+		return snapshotPruneManifest{}, errors.New("snapshot prune digest is invalid")
+	}
+	if _, err := hex.DecodeString(newDigest); err != nil {
+		return snapshotPruneManifest{}, errors.New("snapshot prune digest is not hexadecimal")
+	}
+	if len(entries) > maxSnapshotDirectoryEntries {
+		return snapshotPruneManifest{}, errors.New("snapshot prune victim count exceeds limit")
+	}
+	for _, item := range entries {
+		original := filepath.Base(item.original)
+		quarantined := filepath.Base(item.quarantined)
+		parsed, ok := parseSnapshotPruneArtifact(quarantined)
+		if !ok || parsed != original {
+			return snapshotPruneManifest{}, errors.New("snapshot prune victim path is invalid")
+		}
+		victim := snapshotPruneManifestVictim{Original: original, Quarantined: quarantined}
+		for _, sidecar := range item.sidecars {
+			if !sidecar.present {
+				continue
+			}
+			suffix := strings.TrimPrefix(sidecar.original, item.original)
+			if suffix != "-wal" && suffix != "-shm" && suffix != "-journal" ||
+				filepath.Base(sidecar.original) != original+suffix || filepath.Base(sidecar.quarantined) != quarantined+suffix {
+				return snapshotPruneManifest{}, errors.New("snapshot prune sidecar path is invalid")
+			}
+			victim.Sidecars = append(victim.Sidecars, snapshotPruneManifestSidecar{
+				Original: original + suffix, Quarantined: quarantined + suffix,
+			})
+		}
+		manifest.Victims = append(manifest.Victims, victim)
+	}
+	_ = snapshotDir // retained in the signature to keep construction tied to the validated directory.
+	return manifest, validateSnapshotPruneManifest(snapshotDir, manifest)
+}
+
+func validateSnapshotPruneManifest(snapshotDir string, manifest snapshotPruneManifest) error {
+	if manifest.Version != snapshotPruneManifestVersion || (manifest.Phase != "prepared" && manifest.Phase != "published") {
+		return errors.New("unsupported snapshot prune manifest")
+	}
+	if err := validateSnapshotName(manifest.Snapshot); err != nil {
+		return errors.New("snapshot prune manifest target is invalid")
+	}
+	if len(manifest.NewDigest) != sha256.Size*2 {
+		return errors.New("snapshot prune manifest digest is invalid")
+	}
+	if _, err := hex.DecodeString(manifest.NewDigest); err != nil {
+		return errors.New("snapshot prune manifest digest is not hexadecimal")
+	}
+	if len(manifest.Victims) == 0 || len(manifest.Victims) > maxSnapshotDirectoryEntries {
+		return errors.New("snapshot prune manifest victim count is invalid")
+	}
+	seen := make(map[string]struct{}, len(manifest.Victims))
+	for _, victim := range manifest.Victims {
+		if filepath.Base(victim.Original) != victim.Original || validateSnapshotName(victim.Original) != nil ||
+			filepath.Base(victim.Quarantined) != victim.Quarantined {
+			return errors.New("snapshot prune manifest victim name is invalid")
+		}
+		original, ok := parseSnapshotPruneArtifact(victim.Quarantined)
+		if !ok || original != victim.Original {
+			return errors.New("snapshot prune manifest quarantine name is invalid")
+		}
+		if _, ok := seen[victim.Original]; ok {
+			return errors.New("snapshot prune manifest contains duplicate victims")
+		}
+		seen[victim.Original] = struct{}{}
+		for _, sidecar := range victim.Sidecars {
+			if filepath.Base(sidecar.Original) != sidecar.Original || filepath.Base(sidecar.Quarantined) != sidecar.Quarantined {
+				return errors.New("snapshot prune manifest sidecar name is invalid")
+			}
+			for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+				if sidecar.Original == victim.Original+suffix && sidecar.Quarantined == victim.Quarantined+suffix {
+					goto validSidecar
+				}
+			}
+			return errors.New("snapshot prune manifest sidecar suffix is invalid")
+		validSidecar:
+		}
+	}
+	if filepath.Clean(snapshotDir) == "." {
+		return errors.New("snapshot prune manifest directory is invalid")
+	}
+	return nil
+}
+
+func writeSnapshotPruneManifest(snapshotDir string, manifest snapshotPruneManifest) error {
+	if err := validateSnapshotPruneManifest(snapshotDir, manifest); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(snapshotDir, ".omni-money-snapshot-prune-manifest-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	complete := false
+	defer func() {
+		_ = tmp.Close()
+		if !complete {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0600); err != nil {
+		return err
+	}
+	if err := fileprivacy.Harden(tmp); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(append(encoded, '\n')); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := replaceManifestFile(tmpPath, snapshotPruneManifestPath(snapshotDir)); err != nil {
+		return err
+	}
+	complete = true
+	return syncDirectory(snapshotDir)
+}
+
+func readSnapshotPruneManifest(snapshotDir string) (snapshotPruneManifest, bool, error) {
+	file, err := openSnapshotFile(snapshotPruneManifestPath(snapshotDir))
+	if os.IsNotExist(err) {
+		return snapshotPruneManifest{}, false, nil
+	}
+	if err != nil {
+		return snapshotPruneManifest{}, true, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return snapshotPruneManifest{}, true, err
+	}
+	if !validSnapshotFile(info) || info.Size() > 64*1024 {
+		return snapshotPruneManifest{}, true, errors.New("snapshot prune manifest is not a private regular file")
+	}
+	var manifest snapshotPruneManifest
+	decoder := json.NewDecoder(io.LimitReader(file, 64*1024))
+	if err := decoder.Decode(&manifest); err != nil {
+		return snapshotPruneManifest{}, true, fmt.Errorf("decode snapshot prune manifest: %w", err)
+	}
+	if err := validateSnapshotPruneManifest(snapshotDir, manifest); err != nil {
+		return snapshotPruneManifest{}, true, err
+	}
+	return manifest, true, nil
+}
+
+func removeSnapshotPruneManifest(snapshotDir string) error {
+	if err := os.Remove(snapshotPruneManifestPath(snapshotDir)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return syncDirectory(snapshotDir)
+}
+
+func snapshotQuarantineEntriesFromManifest(snapshotDir string, manifest snapshotPruneManifest) ([]snapshotQuarantineEntry, error) {
+	if err := validateSnapshotPruneManifest(snapshotDir, manifest); err != nil {
+		return nil, err
+	}
+	entries := make([]snapshotQuarantineEntry, 0, len(manifest.Victims))
+	for _, victim := range manifest.Victims {
+		item := snapshotQuarantineEntry{
+			original: filepath.Join(snapshotDir, victim.Original), quarantined: filepath.Join(snapshotDir, victim.Quarantined),
+		}
+		for _, sidecar := range victim.Sidecars {
+			for index, suffix := range []string{"-wal", "-shm", "-journal"} {
+				if sidecar.Original == victim.Original+suffix {
+					item.sidecars[index] = snapshotQuarantineSidecar{
+						original: filepath.Join(snapshotDir, sidecar.Original), quarantined: filepath.Join(snapshotDir, sidecar.Quarantined), present: true,
+					}
+				}
+			}
+		}
+		entries = append(entries, item)
+	}
+	return entries, nil
+}
+
+// recoverSnapshotPruneManifest completes or rolls back the quarantine
+// transaction idempotently. A prepared transaction with no published target
+// restores victims; a target matching the staged digest is treated as an
+// already-published transaction and only then finalizes victim deletion.
+func recoverSnapshotPruneManifest(ctx context.Context, snapshotDir string) error {
+	manifest, found, err := readSnapshotPruneManifest(snapshotDir)
+	if err != nil || !found {
+		return err
+	}
+	entries, err := snapshotQuarantineEntriesFromManifest(snapshotDir, manifest)
+	if err != nil {
+		return err
+	}
+	target := filepath.Join(snapshotDir, manifest.Snapshot)
+	if manifest.Phase == "prepared" {
+		info, statErr := os.Lstat(target)
+		if os.IsNotExist(statErr) {
+			if rollbackErr := rollbackSnapshotQuarantine(entries, snapshotDir); rollbackErr != nil {
+				// Preserve the prepared journal when any victim could not be
+				// restored. Deleting the only durable recovery record would turn
+				// a recoverable partial rollback into silent data loss.
+				return rollbackErr
+			}
+			return removeSnapshotPruneManifest(snapshotDir)
+		}
+		if statErr != nil {
+			return statErr
+		}
+		if !validSnapshotFile(info) {
+			return errors.New("prepared snapshot publish target is unsafe")
+		}
+		digest, digestErr := digestDatabaseFile(target)
+		if digestErr != nil || !strings.EqualFold(digest, manifest.NewDigest) {
+			if digestErr == nil {
+				digestErr = errors.New("prepared snapshot publish target digest mismatch")
+			}
+			return digestErr
+		}
+		manifest.Phase = "published"
+		if err := writeSnapshotPruneManifest(snapshotDir, manifest); err != nil {
+			return err
+		}
+	}
+	if err := finalizeSnapshotQuarantine(ctx, entries, snapshotDir); err != nil {
+		return err
+	}
+	return removeSnapshotPruneManifest(snapshotDir)
+}
+
 // cleanupSnapshotPruneArtifacts recovers a pre-publication quarantine after
 // a process crash. A hidden victim is restored to its original public name;
 // if only its sidecar survived finalization, the orphan sidecar is removed.
@@ -3190,6 +3532,11 @@ func parseSnapshotPruneArtifact(name string) (string, bool) {
 func cleanupSnapshotPruneArtifacts(ctx context.Context, path string) error {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if _, found, err := readSnapshotPruneManifest(path); err != nil {
+		return err
+	} else if found {
+		return recoverSnapshotPruneManifest(ctx, path)
 	}
 	entries, err := readDirectoryEntriesContext(ctx, path, maxSnapshotDirectoryEntries)
 	if err != nil {
@@ -4616,7 +4963,7 @@ func removePrivateSQLiteFile(path string) error {
 }
 
 func syncFileAndDirectory(path, dir string) error {
-	file, err := os.Open(path) // #nosec G304 -- path is a generated candidate in the private DB directory.
+	file, err := openSnapshotFile(path)
 	if err != nil {
 		return err
 	}

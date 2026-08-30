@@ -76,11 +76,21 @@ func expectForeignKeyIntegrity(ctx context.Context, db databaseQueryer) error {
 }
 
 func RequireEncryptedHeader(path string) error {
-	file, err := os.Open(path) // #nosec G304 -- caller supplies the configured database path.
+	file, err := openNoFollowPrivateFile(path)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	return requireEncryptedHeaderFile(file)
+}
+
+func requireEncryptedHeaderFile(file *os.File) error {
+	if file == nil {
+		return errors.New("encrypted database header file is nil")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	header := make([]byte, 16)
 	if _, err := io.ReadFull(file, header); err != nil {
 		return fmt.Errorf("read encrypted database header: %w", err)
