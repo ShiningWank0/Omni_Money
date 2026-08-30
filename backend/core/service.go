@@ -683,17 +683,18 @@ func (s *Service) saveStringSliceSetting(key string, items []string) error {
 	return nil
 }
 
-// BackupToCSV exports the ledger in the newest format needed to represent the
-// current data.  A plain transactions-only ledger keeps the historical v2
-// shape so old clients can continue to consume it.  Once extended data (images,
-// tags, links, or settings) exists, v3 is selected automatically.
+// BackupToCSV exports the complete ledger in the normalized v3 format.
+// The default backup contract must always be able to restore the complete
+// ledger, including extension data, because legacy/v2 replace is intentionally
+// rejected.  Call BackupToCSVV2 only for an explicitly requested, append-only
+// compatibility export for old clients.
 func (s *Service) BackupToCSV() (string, error) {
 	return s.BackupToCSVContext(context.Background())
 }
 
-// BackupToCSVContext takes one read transaction for format selection and every
-// export query. This gives callers a coherent snapshot even while another
-// request adds or removes transactions, images, tags, or links.
+// BackupToCSVContext takes one read transaction for every export query. This
+// gives callers a coherent snapshot even while another request adds or removes
+// transactions, images, tags, or links.
 func (s *Service) BackupToCSVContext(ctx context.Context) (string, error) {
 	var output strings.Builder
 	boundedOutput := &csvLimitedStringWriter{dst: &output, limit: MaxCSVStringImportBytes}
@@ -735,15 +736,7 @@ func (s *Service) backupToCSVContextWriter(ctx context.Context, output io.Writer
 		return fmt.Errorf("CSV read transaction開始エラー: %w", err)
 	}
 	defer tx.Rollback()
-	extended, err := hasCSVExtendedDataIn(ctx, tx)
-	if err != nil {
-		return err
-	}
-	if extended {
-		_, err = backupToCSVV3In(ctx, tx, output)
-	} else {
-		err = backupToCSVV2In(ctx, tx, output)
-	}
+	_, err = backupToCSVV3In(ctx, tx, output)
 	if err != nil {
 		return err
 	}
@@ -804,16 +797,54 @@ func (s *Service) backupToCSVFullStreamContext(ctx context.Context, output io.Wr
 	return nil
 }
 
+// BackupToCSVV2 is an explicit legacy compatibility export. It emits only the
+// historical transactions table and is therefore suitable for append imports
+// into old clients, but must not be used as a full-ledger backup.
+func (s *Service) BackupToCSVV2() (string, error) {
+	return s.backupToCSVV2()
+}
+
 // backupToCSVV2 preserves the historical transactions-only export contract.
-// Keep this separate from the v3 writer so the legacy import/export tests and
-// existing Desktop clients remain source compatible.
+// Keep this separate from the v3 writer so callers cannot accidentally select
+// v2 through the default full-backup path.
 func (s *Service) backupToCSVV2() (string, error) {
 	var builder strings.Builder
 	boundedOutput := &csvLimitedStringWriter{dst: &builder, limit: MaxCSVStringImportBytes}
-	if err := s.backupToCSVContextWriter(context.Background(), boundedOutput); err != nil {
+	if err := s.backupToCSVV2ContextWriter(context.Background(), boundedOutput); err != nil {
 		return "", err
 	}
 	return builder.String(), nil
+}
+
+func (s *Service) backupToCSVV2ContextWriter(ctx context.Context, output io.Writer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var release func()
+	if !HasCSVOperationReservation(ctx) {
+		var ok bool
+		release, ok = TryAcquireCSVOperationSlot()
+		if !ok {
+			return fmt.Errorf("CSV入出力が混雑しています。しばらくしてから再試行してください")
+		}
+		defer release()
+	}
+	db, err := s.database()
+	if err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("CSV v2 read transaction開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+	if err := backupToCSVV2In(ctx, tx, output); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("CSV v2 read transactionコミットエラー: %w", err)
+	}
+	return nil
 }
 
 type csvContextQueryer interface {
@@ -829,6 +860,7 @@ func backupToCSVV2In(ctx context.Context, q csvContextQueryer, dst io.Writer) er
 	if err := writer.Write([]string{"id", "account", "date", "item", "type", "amount", "balance", "memo", csvVersionHeader}); err != nil {
 		return fmt.Errorf("CSVヘッダー書き出しエラー: %w", err)
 	}
+	exportedRows := 0
 	rows, err := q.QueryContext(ctx,
 		"SELECT id, account, date, item, type, amount, balance, memo FROM transactions ORDER BY date, id",
 	)
@@ -839,6 +871,9 @@ func backupToCSVV2In(ctx context.Context, q csvContextQueryer, dst io.Writer) er
 	for rows.Next() {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if exportedRows >= maxCSVRows {
+			return fmt.Errorf("CSV v2行数が上限%dを超えるため、復元不能なバックアップを作成できません", maxCSVRows)
 		}
 		var id, amount, balance int64
 		var account, dateStr, item, txType, memo string
@@ -852,6 +887,7 @@ func backupToCSVV2In(ctx context.Context, q csvContextQueryer, dst io.Writer) er
 		}); err != nil {
 			return fmt.Errorf("CSV行書き出しエラー: %w", err)
 		}
+		exportedRows++
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("バックアップ行取得エラー: %w", err)
@@ -1076,8 +1112,9 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 	if int64(len(content)) > MaxCSVStringImportBytes {
 		return 0, fmt.Errorf("文字列CSV入力が上限%d bytesを超えました", MaxCSVStringImportBytes)
 	}
-	// v3 is a normalized, typed row format. Detect it from the header while
-	// retaining the historical parser for legacy/v2 transaction-only files.
+	// v3 is a normalized, typed row format. Detect it from the official full
+	// header or from an unambiguous first data row while retaining the
+	// historical parser for legacy/v2 transaction-only files.
 	probeInput := &csvFieldLimitReader{ctx: ctx, input: strings.NewReader(content), maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
 	probe := csv.NewReader(probeInput)
 	probe.FieldsPerRecord = -1
@@ -1125,9 +1162,16 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 		}
 	}
 
-	headerMap := make(map[string]int)
+	headerMap := make(map[string]int, len(headers))
 	for i, h := range headers {
-		headerMap[strings.TrimSpace(h)] = i
+		name := strings.TrimSpace(h)
+		if name == "" {
+			return 0, fmt.Errorf("CSVヘッダーが空です")
+		}
+		if _, exists := headerMap[name]; exists {
+			return 0, fmt.Errorf("CSVヘッダーが重複しています: %s", name)
+		}
+		headerMap[name] = i
 	}
 	versionIndex, versionedCSV := headerMap[csvVersionHeader]
 

@@ -67,6 +67,35 @@ func TestCSVReaderLegacyAppendAllowsExtraRecordTypeColumn(t *testing.T) {
 	}
 }
 
+func TestBackupToCSVDefaultAlwaysEmitsV3AndV2IsExplicit(t *testing.T) {
+	setupCoreTestDB(t)
+	insertTestTransaction(t, "cash", "2026-08-01", "salary", "income", 100, 100)
+
+	content, err := BackupToCSV()
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := csv.NewReader(strings.NewReader(content)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || len(records[0]) != len(csvV3Headers) || records[0][0] != csvVersionHeader || records[1][0] != csvVersion3 {
+		t.Fatalf("default backup was not v3: %#v", records)
+	}
+
+	legacyContent, err := BackupToCSVV2()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyRecords, err := csv.NewReader(strings.NewReader(legacyContent)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(legacyRecords) != 2 || len(legacyRecords[0]) != 9 || legacyRecords[1][8] != csvVersion2 {
+		t.Fatalf("explicit v2 backup = %#v", legacyRecords)
+	}
+}
+
 func TestCSVFieldLimitReaderHandlesQuotedRecordsBeforeCSVAllocation(t *testing.T) {
 	input := "account,detail\n" + "cash,\"line one\nline two with \"\"quotes\"\"\"\n"
 	guarded := &csvFieldLimitReader{ctx: context.Background(), input: strings.NewReader(input), maxFieldBytes: 64, fieldStart: true}
@@ -196,6 +225,49 @@ func TestCSVV3ImageSpoolRejectsSameInodeMutationAfterValidation(t *testing.T) {
 		t.Fatalf("same-inode image mutation result = %v", err)
 	}
 	if err := parsed.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCSVV3ImageSpoolCleanupDoesNotRemoveReplacementDirectory(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	content := csvV3TestContent(t,
+		map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash", "date": "2026-08-01", "item": "item", "type": "income", "amount": "1"},
+		map[string]string{csvVersionHeader: "3", "record_type": "image", "id": "1", "transaction_id": "1", "filename": "receipt.png", "mime_type": "image/png", "data_base64": base64.StdEncoding.EncodeToString(encodePNG(t))},
+	)
+	parsed, err := service.parseCSVV3Reader(context.Background(), strings.NewReader(content), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := parsed.imageTempDir
+	replacement := dir + ".renamed"
+	if err := os.Rename(dir, replacement); err != nil {
+		_ = parsed.cleanup()
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
+		_ = os.Rename(replacement, dir)
+		_ = parsed.cleanup()
+		t.Fatal(err)
+	}
+	cleanupErr := parsed.cleanup()
+	if cleanupErr == nil || !strings.Contains(cleanupErr.Error(), "identity") {
+		_ = os.Remove(dir)
+		_ = os.Remove(filepath.Join(replacement, "1.bin"))
+		_ = os.Remove(replacement)
+		t.Fatalf("replacement directory cleanup result = %v", cleanupErr)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("replacement directory was removed: %v", err)
+	}
+	if _, err := os.Stat(replacement); err != nil {
+		t.Fatalf("original directory was unexpectedly removed: %v", err)
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(replacement); err != nil {
 		t.Fatal(err)
 	}
 }

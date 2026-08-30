@@ -177,6 +177,43 @@ func TestImportCSVLegacyAppendAllowsExtraRecordTypeColumn(t *testing.T) {
 	}
 }
 
+func TestImportCSVLegacyAppendAllowsUnknownRecordTypeAndFilenameColumns(t *testing.T) {
+	setupCoreTestDB(t)
+	content := "id,account,date,item,type,amount,balance,memo,omni_money_csv_version,record_type,filename\n" +
+		"101,cash,2026-01-01,給与,income,1000,1000,,2,legacy-note,receipt.csv\n"
+	if imported, err := ImportCSV(content, "append"); err != nil || imported != 1 {
+		t.Fatalf("legacy CSV with unknown columns result = %d, %v; want append success", imported, err)
+	}
+}
+
+func TestImportCSVLegacyStringRejectsEmptyAndDuplicateHeaders(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{name: "empty", header: "account,date,item,type,amount,memo,", want: "空"},
+		{name: "duplicate after trim", header: "account,date,item,type,amount,memo, account ", want: "重複"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupCoreTestDB(t)
+			originalID := insertTestTransaction(t, "bank", "2025-12-31", "keep", "income", 1, 1)
+			content := tt.header + "\n" + "cash,2026-01-01,給与,income,1000,,old\n"
+			if imported, err := ImportCSV(content, "append"); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ImportCSV result = %d, %v; want %q", imported, err, tt.want)
+			}
+			var count int
+			if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transactions WHERE id = ?", originalID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 {
+				t.Fatalf("database changed after invalid header: count=%d", count)
+			}
+		})
+	}
+}
+
 func TestImportCSVMinimalV3UsesTypedRecordDetection(t *testing.T) {
 	setupCoreTestDB(t)
 	originalID := insertTestTransaction(t, "old", "2025-12-31", "before", "income", 1, 1)

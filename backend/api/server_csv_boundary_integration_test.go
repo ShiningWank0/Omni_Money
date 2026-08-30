@@ -310,6 +310,9 @@ func assertServerCSVAccounts(t *testing.T, response *httptest.ResponseRecorder, 
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(header) != 23 || header[0] != "omni_money_csv_version" || header[1] != "record_type" || header[16] != "data_base64" {
+		t.Fatalf("CSV response is not the complete v3 schema: %#v", header)
+	}
 	accountColumn := -1
 	for index, name := range header {
 		if name == "account" {

@@ -357,24 +357,6 @@ func (w *csvLimitedStringWriter) Write(p []byte) (int, error) {
 
 func (w *csvLimitedStringWriter) String() string { return w.b.String() }
 
-type csvContextReader interface {
-	QueryRowContext(context.Context, string, ...interface{}) *sql.Row
-}
-
-func hasCSVExtendedDataIn(ctx context.Context, q csvContextReader) (bool, error) {
-	var count int64
-	err := q.QueryRowContext(ctx, `SELECT
-		(SELECT COUNT(*) FROM transaction_images) +
-		(SELECT COUNT(*) FROM tags) +
-		(SELECT COUNT(*) FROM transaction_tags) +
-		(SELECT COUNT(*) FROM transaction_links) +
-		(SELECT COUNT(*) FROM settings WHERE key IN ('credit_card_items', 'bank_account_items'))`).Scan(&count)
-	if err != nil {
-		return false, fmt.Errorf("CSV拡張データ確認エラー: %w", err)
-	}
-	return count > 0, nil
-}
-
 func csvV3Record(values map[string]string) []string {
 	record := make([]string, len(csvV3Headers))
 	for i, header := range csvV3Headers {
@@ -465,10 +447,15 @@ func backupToCSVV3In(ctx context.Context, tx *sql.Tx, dst io.Writer) (string, er
 	if err := writer.Write(csvV3Headers); err != nil {
 		return "", fmt.Errorf("CSV v3ヘッダー書き出しエラー: %w", err)
 	}
+	exportedRows := 0
 	write := func(values map[string]string) error {
+		if exportedRows >= maxCSVRows {
+			return fmt.Errorf("CSV v3行数が上限%dを超えるため、復元不能なバックアップを作成できません", maxCSVRows)
+		}
 		if err := writer.Write(csvV3Record(values)); err != nil {
 			return fmt.Errorf("CSV v3行書き出しエラー: %w", err)
 		}
+		exportedRows++
 		return nil
 	}
 
@@ -764,6 +751,7 @@ type csvV3Import struct {
 	decodedImageBytes int64
 	parsedTextBytes   int64
 	imageTempDir      string
+	imageTempDirInfo  os.FileInfo
 	imageTempRoot     *os.Root
 	imageTempFiles    []csvV3TempFile
 	tempReleases      []func()
@@ -837,25 +825,21 @@ func csvV3HeaderMap(headers []string) (map[string]int, error) {
 	return m, nil
 }
 
-// isCSVV3Header requires the version marker and at least one field that cannot
-// occur in the historical transactions-only schema. A legacy/v2 export may
-// contain an application-specific column named record_type; treating that
-// column alone as v3 would route an otherwise compatible append through the
-// strict typed parser.
+// isCSVV3Header recognizes only the official full v3 header emitted by this
+// package. A legacy/v2 export may contain application-specific columns such as
+// record_type or filename; those are not enough to route it through the strict
+// typed parser. Ambiguous subsets are classified by isCSVV3Record using the
+// first non-empty data row's version and record type.
 func isCSVV3Header(headers []string) bool {
-	hasVersion, hasRecordType, hasV3Field := false, false, false
-	for _, raw := range headers {
-		header := strings.TrimSpace(raw)
-		switch header {
-		case csvVersionHeader:
-			hasVersion = true
-		case "record_type":
-			hasRecordType = true
-		case "transaction_id", "parent_id", "child_id", "tag_id", "filename", "mime_type", "data_base64", "tag_name", "tag_parent_id", "tag_level", "setting_key", "setting_value", "created_at":
-			hasV3Field = true
+	if len(headers) != len(csvV3Headers) {
+		return false
+	}
+	for index, expected := range csvV3Headers {
+		if strings.TrimSpace(headers[index]) != expected {
+			return false
 		}
 	}
-	return hasVersion && hasRecordType && hasV3Field
+	return true
 }
 
 func hasCSVV3Markers(headers []string) (versionIndex, recordTypeIndex int, ok bool) {
@@ -1003,11 +987,27 @@ func (p *csvV3Import) cleanup() error {
 		p.imageTempFiles = nil
 	}
 	if p.imageTempDir != "" {
-		if err := os.Remove(p.imageTempDir); err != nil && !os.IsNotExist(err) && first == nil {
+		// The retained directory identity is the only authority for removing
+		// the path after the root handle is closed. Never remove a replacement
+		// directory (or a symlink/non-directory) that an attacker placed at the
+		// old pathname while cleanup was in progress.
+		current, err := os.Lstat(p.imageTempDir)
+		sameDirectory := err == nil && p.imageTempDirInfo != nil &&
+			current.Mode().IsDir() && current.Mode()&os.ModeSymlink == 0 &&
+			os.SameFile(p.imageTempDirInfo, current)
+		if err != nil {
+			if !os.IsNotExist(err) && first == nil {
+				first = err
+			}
+		} else if !sameDirectory {
+			if first == nil {
+				first = fmt.Errorf("CSV画像一時ディレクトリのidentityが変更されています")
+			}
+		} else if err := os.Remove(p.imageTempDir); err != nil && !os.IsNotExist(err) && first == nil {
 			first = err
-		}
-		if first == nil {
+		} else if first == nil {
 			p.imageTempDir = ""
+			p.imageTempDirInfo = nil
 		}
 	}
 	for _, release := range p.tempReleases {
@@ -1314,7 +1314,13 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 						parsed.cleanup()
 						return csvV3Import{}, fmt.Errorf("画像一時領域の作成に失敗しました: %w", err)
 					}
+					dirInfo, statErr := os.Lstat(dir)
+					if statErr != nil || !dirInfo.Mode().IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 {
+						_ = imageRoot.Close()
+						return csvV3Import{}, fmt.Errorf("画像一時領域のidentity取得に失敗しました")
+					}
 					parsed.imageTempDir = dir
+					parsed.imageTempDirInfo = dirInfo
 					parseTempDir = dir
 					parsed.imageTempRoot = imageRoot
 					parseTempRoot = imageRoot

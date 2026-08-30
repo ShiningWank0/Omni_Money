@@ -58,7 +58,7 @@ func TestBackupAndImportCSVV2PreservesEscapedTextExactly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content, err := BackupToCSV()
+	content, err := BackupToCSVV2()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestBackupAndImportCSVV2PreservesHistoricalTextOutsideNewWriteLimits(t *tes
 	); err != nil {
 		t.Fatal(err)
 	}
-	content, err := BackupToCSV()
+	content, err := BackupToCSVV2()
 	if err != nil {
 		t.Fatal(err)
 	}
