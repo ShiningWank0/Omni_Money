@@ -4,8 +4,10 @@ package database
 import (
 	"context"
 	cryptorand "crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,12 +35,6 @@ const ledgerSchemaVersion = 5
 // non-zero identity is never treated as a ledger merely because it has a
 // familiar table name.
 const ledgerSchemaIdentity = 0x4f4d4e59
-
-// This marker is written only by the explicit pre-identity migration path.
-// It distinguishes a recognized historical layout from an arbitrary current
-// version file with application_id=0; the latter must pass current constraint
-// validation and is never granted the legacy compatibility exception.
-const legacySchemaCompatibilityTable = "omni_legacy_schema_compat"
 
 const writableSQLiteQuery = "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 const snapshotSQLiteQuery = "mode=rw&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
@@ -72,23 +68,23 @@ type Instance struct {
 	snapshotRunning   bool
 	snapshotPending   bool
 	snapshotClosing   bool
-	// snapshotValidation is a bounded positive cache. Listing never trusts a
-	// filename alone: an entry is shown only after it has been opened with the
-	// same opener and passed integrity/schema validation. File identity and
-	// metadata bind the cache to the object that was validated, so a replaced
-	// off-host file is revalidated.
-	snapshotValidationMu sync.Mutex
-	snapshotValidation   map[string]snapshotValidationEntry
 }
 
 const maxSnapshotValidationEntries = 256
+const restoreManifestVersion = 1
 
-type snapshotValidationEntry struct {
-	info os.FileInfo
+type restoreManifest struct {
+	Version   int    `json:"version"`
+	Phase     string `json:"phase"`
+	Current   string `json:"current"`
+	Backup    string `json:"backup"`
+	Candidate string `json:"candidate"`
+	OldDigest string `json:"old_digest"`
+	NewDigest string `json:"new_digest"`
 }
 
 func newInstance() *Instance {
-	instance := &Instance{snapshotValidation: make(map[string]snapshotValidationEntry)}
+	instance := &Instance{}
 	instance.ensureSnapshotCond()
 	return instance
 }
@@ -220,6 +216,14 @@ func (i *Instance) initDBLocked(path string, opener *securedb.Opener, migratePla
 			return fmt.Errorf("データベースディレクトリ作成エラー: %w", err)
 		}
 	}
+	// Restore swaps are journaled before the live pathname is touched. Recover
+	// that journal before EnsureEncrypted/preparePrivateDatabaseFile: those
+	// open paths are allowed to create a fresh file, which would otherwise hide
+	// a crash that left the live pathname absent and cause the only valid old
+	// copy to be deleted as an "artifact".
+	if err := i.recoverRestoreState(path); err != nil {
+		return fmt.Errorf("restore crash recovery failed: %w", err)
+	}
 	if migratePlaintext {
 		if err := securedb.EnsureEncrypted(context.Background(), path, opener); err != nil {
 			return fmt.Errorf("SQLCipher移行エラー: %w", err)
@@ -266,15 +270,6 @@ func (i *Instance) initDBLocked(path string, opener *securedb.Opener, migratePla
 			return fmt.Errorf("SQLCipher暗号化検証エラー: %w", err)
 		}
 	}
-	// A process crash can leave a durable old-copy or candidate beside the
-	// atomically replaced live file. Once this live file has passed the same
-	// schema/integrity checks, reclaim those artifacts. Cleanup is retried on
-	// the next startup and never blocks publication of an otherwise valid
-	// ledger, so a stale unreadable artifact cannot become a login DoS.
-	if err := cleanupRestoreArtifacts(path); err != nil {
-		log.Printf("security_event=snapshot_restore_cleanup result=deferred")
-	}
-
 	log.Printf("データベース初期化完了: %s", path)
 	return nil
 }
@@ -625,16 +620,6 @@ func createTablesOn(target *sql.DB) error {
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", ledgerSchemaVersion)); err != nil {
 			return fmt.Errorf("スキーマversion更新エラー: %w", err)
 		}
-		if identity == 0 && userTables > 0 {
-			if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS omni_legacy_schema_compat (
-				legacy_version INTEGER PRIMARY KEY CHECK(legacy_version >= 0 AND legacy_version < 2)
-			)`); err != nil {
-				return fmt.Errorf("legacy schema compatibility marker作成エラー: %w", err)
-			}
-			if _, err := tx.Exec("INSERT OR IGNORE INTO omni_legacy_schema_compat(legacy_version) VALUES (?)", version); err != nil {
-				return fmt.Errorf("legacy schema compatibility marker記録エラー: %w", err)
-			}
-		}
 	}
 	// A blank new database receives the identity marker. Legacy databases keep
 	// application_id=0 so their explicitly supported pre-marker layout can be
@@ -648,11 +633,14 @@ func createTablesOn(target *sql.DB) error {
 	if err := validateCriticalSchema(tx); err != nil {
 		return err
 	}
+	// Validate the complete post-migration schema while the transaction is
+	// still open. A crafted extra table/index/constraint must not leave a
+	// partially upgraded database committed after validation reports failure.
+	if err := validateLedgerSchemaAfterMigration(tx, version == ledgerSchemaVersion || identity == ledgerSchemaIdentity); err != nil {
+		return fmt.Errorf("完全なschema validation failed: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("スキーマtransaction確定エラー: %w", err)
-	}
-	if err := validateLedgerSchemaAfterMigration(target, version == ledgerSchemaVersion || identity == ledgerSchemaIdentity); err != nil {
-		return fmt.Errorf("完全なschema validation failed: %w", err)
 	}
 	return nil
 }
@@ -779,10 +767,11 @@ func validateLedgerSchemaInternal(target schemaQueryer, requireCurrent, strictCu
 	if version == ledgerSchemaVersion {
 		strict := strictCurrent
 		if strictCurrent && identity == 0 {
-			// Do not use application_id=0 itself as a broad bypass. Only a
-			// database that this migration code explicitly marked as a supported
-			// historical layout may retain its pre-marker table definitions.
-			legacy, err := hasLegacySchemaCompatibilityMarker(target)
+			// application_id=0 is never a compatibility marker. A historical
+			// image is accepted only when every legacy table definition matches
+			// the exact allowlisted pre-identity DDL and all current objects have
+			// their expected shape. Same-name forged tables/markers do not pass.
+			legacy, err := isSupportedLegacyCurrentLayout(target)
 			if err != nil {
 				return err
 			}
@@ -803,34 +792,45 @@ func validateLedgerSchemaAfterMigration(target schemaQueryer, strict bool) error
 	return validateLedgerSchemaInternal(target, true, strict)
 }
 
-func hasLegacySchemaCompatibilityMarker(target schemaQueryer) (bool, error) {
-	var count int
-	if err := target.QueryRow(
-		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
-		legacySchemaCompatibilityTable,
-	).Scan(&count); err != nil {
-		return false, fmt.Errorf("legacy schema compatibility marker検査エラー: %w", err)
+func canonicalSQL(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(value)), " ")
+}
+
+// isSupportedLegacyCurrentLayout recognizes the one historical layout that
+// can be migrated without pretending its old tables had today's constraints.
+// Recognition is based on immutable DDL fingerprints, not a mutable marker
+// row/table inside the database. The migrated current objects are validated
+// separately by validateFullLedgerSchema.
+func isSupportedLegacyCurrentLayout(target schemaQueryer) (bool, error) {
+	var markerCount int
+	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE name='omni_legacy_schema_compat'").Scan(&markerCount); err != nil {
+		return false, err
 	}
-	if count == 0 {
+	if markerCount != 0 {
+		// The former marker is deliberately not trusted. A forged same-name
+		// object must force strict current validation, never grant a bypass.
 		return false, nil
 	}
-	var definition sql.NullString
-	if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", legacySchemaCompatibilityTable).Scan(&definition); err != nil || !definition.Valid {
-		return false, fmt.Errorf("legacy schema compatibility marker SQL定義を検査できません: %w", err)
+	legacyDefinitions := map[string]string{
+		"transactions":       "create table transactions ( id integer primary key autoincrement, account text not null, date datetime not null, item text not null, type text not null, amount integer not null, balance integer not null default 0, memo text default '' )",
+		"transaction_images": "create table transaction_images ( id integer primary key autoincrement, transaction_id integer not null, filename text not null, data blob not null, mime_type text not null default 'image/jpeg', created_at datetime default current_timestamp )",
 	}
-	canonical := strings.Join(strings.Fields(strings.ToLower(definition.String)), " ")
-	if canonical != "create table omni_legacy_schema_compat ( legacy_version integer primary key check(legacy_version >= 0 and legacy_version < 2) )" {
-		return false, fmt.Errorf("legacy schema compatibility marker SQL定義が不正です")
+	for table, expected := range legacyDefinitions {
+		var definition sql.NullString
+		if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&definition); err != nil || !definition.Valid {
+			return false, nil
+		}
+		if canonicalSQL(definition.String) != expected {
+			return false, nil
+		}
 	}
-	if err := requireColumns(target, legacySchemaCompatibilityTable, []string{"legacy_version"}); err != nil {
-		return false, fmt.Errorf("legacy schema compatibility marker定義エラー: %w", err)
-	}
-	var version, rows int
-	if err := target.QueryRow("SELECT COUNT(*), COALESCE(MIN(legacy_version), -1) FROM omni_legacy_schema_compat").Scan(&rows, &version); err != nil {
-		return false, fmt.Errorf("legacy schema compatibility marker値検査エラー: %w", err)
-	}
-	if rows != 1 || version < 0 || version >= ledgerSchemaVersion {
-		return false, fmt.Errorf("legacy schema compatibility marker値が不正です")
+	// The old image table must not have foreign keys or hidden extra columns;
+	// those would be a different migration family.
+	for _, table := range []string{"transactions", "transaction_images"} {
+		var count int
+		if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 1 {
+			return false, err
+		}
 	}
 	return true, nil
 }
@@ -863,6 +863,33 @@ func requireColumns(target schemaQueryer, table string, required []string) error
 }
 
 func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) error {
+	allowedTables := map[string]bool{
+		"transactions": true, "transaction_links": true, "transaction_images": true,
+		"tags": true, "transaction_tags": true, "ai_transaction_idempotency": true,
+		"ai_daily_transaction_usage": true, "settings": true,
+	}
+	rows, err := target.Query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if !allowedTables[name] {
+			_ = rows.Close()
+			return fmt.Errorf("unexpected ledger table %s", name)
+		}
+		delete(allowedTables, name)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(allowedTables) != 0 {
+		return errors.New("ledger is missing one or more required tables")
+	}
 	requiredColumns := map[string][]string{
 		"transactions":               {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
 		"transaction_links":          {"parent_id", "child_id"},
@@ -917,8 +944,14 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 	if err := validateRootTagIndex(target); err != nil {
 		return err
 	}
-	if !strictConstraints {
-		return nil
+	if err := validateIndexShapes(target); err != nil {
+		return err
+	}
+	if err := validateTriggerDefinitions(target); err != nil {
+		return err
+	}
+	if err := validateCurrentColumnDefinitions(target, !strictConstraints); err != nil {
+		return err
 	}
 	// Check the declared constraints as well as table/column names. The
 	// foreign_key_check below catches orphan rows in otherwise valid schemas.
@@ -931,6 +964,12 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 		"ai_daily_transaction_usage": {"check(length(utc_date)", "check(successful_creates >= 0)"},
 		"transaction_tags":           {"foreign key"},
 	} {
+		if !strictConstraints && (table == "transactions" || table == "transaction_images") {
+			continue
+		}
+		if !strictConstraints && (table == "transactions" || table == "transaction_images") {
+			continue
+		}
 		var definition sql.NullString
 		if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&definition); err != nil || !definition.Valid {
 			return fmt.Errorf("missing definition for %s: %w", table, err)
@@ -942,12 +981,34 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 			}
 		}
 	}
-	for table, expectedCount := range map[string]int{"transaction_links": 2, "transaction_images": 1, "tags": 1, "transaction_tags": 2} {
+	type expectedForeignKey struct {
+		referenced, from, to, onUpdate, onDelete string
+	}
+	expectedForeignKeys := map[string][]expectedForeignKey{
+		"transaction_links": {
+			{referenced: "transactions", from: "parent_id", to: "id", onUpdate: "NO ACTION", onDelete: "CASCADE"},
+			{referenced: "transactions", from: "child_id", to: "id", onUpdate: "NO ACTION", onDelete: "CASCADE"},
+		},
+		"transaction_images": {
+			{referenced: "transactions", from: "transaction_id", to: "id", onUpdate: "NO ACTION", onDelete: "CASCADE"},
+		},
+		"tags": {
+			{referenced: "tags", from: "parent_id", to: "id", onUpdate: "NO ACTION", onDelete: "CASCADE"},
+		},
+		"transaction_tags": {
+			{referenced: "transactions", from: "transaction_id", to: "id", onUpdate: "NO ACTION", onDelete: "CASCADE"},
+			{referenced: "tags", from: "tag_id", to: "id", onUpdate: "NO ACTION", onDelete: "CASCADE"},
+		},
+	}
+	for table, expected := range expectedForeignKeys {
+		if !strictConstraints && table == "transaction_images" {
+			continue
+		}
 		rows, err := target.Query("PRAGMA foreign_key_list(" + table + ")")
 		if err != nil {
 			return err
 		}
-		count := 0
+		actual := make([]expectedForeignKey, 0, len(expected))
 		for rows.Next() {
 			var id, seq int
 			var referenced, from, to, onUpdate, onDelete, match string
@@ -955,18 +1016,28 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 				_ = rows.Close()
 				return err
 			}
-			if referenced == "transactions" || referenced == "tags" {
-				count++
-			}
+			actual = append(actual, expectedForeignKey{referenced: referenced, from: from, to: to, onUpdate: strings.ToUpper(onUpdate), onDelete: strings.ToUpper(onDelete)})
 		}
 		if err := rows.Close(); err != nil {
 			return err
 		}
-		if count != expectedCount {
-			return fmt.Errorf("%s has %d expected foreign keys, found %d", table, expectedCount, count)
+		if len(actual) != len(expected) {
+			return fmt.Errorf("%s has %d expected foreign keys, found %d", table, len(expected), len(actual))
+		}
+		for _, want := range expected {
+			found := false
+			for _, got := range actual {
+				if got == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("%s has an unexpected foreign key", table)
+			}
 		}
 	}
-	rows, err := target.Query("PRAGMA foreign_key_check")
+	rows, err = target.Query("PRAGMA foreign_key_check")
 	if err != nil {
 		return err
 	}
@@ -975,6 +1046,226 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 		return errors.New("foreign_key_check reported an orphan row")
 	}
 	return rows.Err()
+}
+
+type expectedColumnDefinition struct {
+	name, columnType, defaultValue string
+	notNull, primaryKey            int
+}
+
+func validateCurrentColumnDefinitions(target schemaQueryer, allowLegacyTables bool) error {
+	expected := map[string][]expectedColumnDefinition{
+		"transactions": {
+			{name: "id", columnType: "INTEGER", primaryKey: 1},
+			{name: "account", columnType: "TEXT", notNull: 1},
+			{name: "date", columnType: "DATETIME", notNull: 1},
+			{name: "item", columnType: "TEXT", notNull: 1},
+			{name: "type", columnType: "TEXT", notNull: 1},
+			{name: "amount", columnType: "INTEGER", notNull: 1},
+			{name: "balance", columnType: "INTEGER", notNull: 1, defaultValue: "0"},
+			{name: "memo", columnType: "TEXT", defaultValue: "''"},
+		},
+		"transaction_links": {
+			{name: "parent_id", columnType: "INTEGER", notNull: 1, primaryKey: 1},
+			{name: "child_id", columnType: "INTEGER", notNull: 1, primaryKey: 2},
+		},
+		"transaction_images": {
+			{name: "id", columnType: "INTEGER", primaryKey: 1},
+			{name: "transaction_id", columnType: "INTEGER", notNull: 1},
+			{name: "filename", columnType: "TEXT", notNull: 1},
+			{name: "data", columnType: "BLOB", notNull: 1},
+			{name: "mime_type", columnType: "TEXT", notNull: 1, defaultValue: "'image/jpeg'"},
+			{name: "created_at", columnType: "DATETIME", defaultValue: "current_timestamp"},
+		},
+		"tags": {
+			{name: "id", columnType: "INTEGER", primaryKey: 1},
+			{name: "name", columnType: "TEXT", notNull: 1},
+			{name: "parent_id", columnType: "INTEGER", defaultValue: "null"},
+			{name: "level", columnType: "INTEGER", notNull: 1, defaultValue: "1"},
+		},
+		"transaction_tags": {
+			{name: "transaction_id", columnType: "INTEGER", notNull: 1, primaryKey: 1},
+			{name: "tag_id", columnType: "INTEGER", notNull: 1, primaryKey: 2},
+		},
+		"settings": {
+			{name: "key", columnType: "TEXT", primaryKey: 1},
+			{name: "value", columnType: "TEXT", notNull: 1, defaultValue: "''"},
+		},
+		"ai_transaction_idempotency": {
+			{name: "credential_id", columnType: "TEXT", notNull: 1, primaryKey: 1},
+			{name: "idempotency_key_sha256", columnType: "BLOB", notNull: 1, primaryKey: 2},
+			{name: "request_sha256", columnType: "BLOB", notNull: 1},
+			{name: "transaction_id", columnType: "INTEGER"},
+			{name: "response_account", columnType: "TEXT"},
+			{name: "response_date", columnType: "TEXT"},
+			{name: "created_at", columnType: "TEXT", notNull: 1},
+		},
+		"ai_daily_transaction_usage": {
+			{name: "credential_id", columnType: "TEXT", notNull: 1, primaryKey: 1},
+			{name: "utc_date", columnType: "TEXT", notNull: 1, primaryKey: 2},
+			{name: "successful_creates", columnType: "INTEGER", notNull: 1},
+		},
+	}
+	for table, want := range expected {
+		if allowLegacyTables && (table == "transactions" || table == "transaction_images") {
+			continue
+		}
+		rows, err := target.Query("PRAGMA table_info(" + table + ")")
+		if err != nil {
+			return err
+		}
+		var index int
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue any
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if index >= len(want) {
+				_ = rows.Close()
+				return fmt.Errorf("%s has unexpected extra columns", table)
+			}
+			definition := want[index]
+			if cid != index || name != definition.name || strings.ToUpper(columnType) != definition.columnType || notNull != definition.notNull || primaryKey != definition.primaryKey || normalizeColumnDefault(defaultValue) != definition.defaultValue {
+				_ = rows.Close()
+				return fmt.Errorf("%s.%s column definition is not current", table, name)
+			}
+			index++
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if index != len(want) {
+			return fmt.Errorf("%s is missing current columns", table)
+		}
+	}
+	return nil
+}
+
+func validateTriggerDefinitions(target schemaQueryer) error {
+	expected := map[string][]string{
+		"trg_transaction_images_quota_insert": {
+			"before insert on transaction_images", "length(new.data)", "raise(abort",
+		},
+		"trg_transaction_images_immutable_update": {
+			"before update on transaction_images", "raise(abort", "immutable",
+		},
+		"validate_transactions_amount_insert": {
+			"before insert on transactions", "new.amount", "raise(abort",
+		},
+		"validate_transactions_amount_update": {
+			"before update of amount on transactions", "new.amount", "raise(abort",
+		},
+	}
+	for name, tokens := range expected {
+		var definition sql.NullString
+		if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", name).Scan(&definition); err != nil || !definition.Valid {
+			return fmt.Errorf("trigger %s definition is unavailable: %w", name, err)
+		}
+		canonical := canonicalSQL(definition.String)
+		for _, token := range tokens {
+			if !strings.Contains(canonical, token) {
+				return fmt.Errorf("trigger %s lacks required behavior", name)
+			}
+		}
+	}
+	return nil
+}
+
+func normalizeColumnDefault(value any) string {
+	if value == nil {
+		return ""
+	}
+	return canonicalSQL(fmt.Sprint(value))
+}
+
+func validateIndexShapes(target schemaQueryer) error {
+	expected := map[string]struct {
+		table  string
+		unique bool
+		cols   []string
+	}{
+		"idx_transactions_account":           {"transactions", false, []string{"account"}},
+		"idx_transactions_account_date_id":   {"transactions", false, []string{"account", "date", "id"}},
+		"idx_transactions_date":              {"transactions", false, []string{"date"}},
+		"idx_transactions_item":              {"transactions", false, []string{"item"}},
+		"idx_transactions_memo":              {"transactions", false, []string{"memo"}},
+		"idx_transaction_links_child_id":     {"transaction_links", false, []string{"child_id"}},
+		"idx_transaction_images_txid":        {"transaction_images", false, []string{"transaction_id"}},
+		"idx_tags_parent":                    {"tags", false, []string{"parent_id"}},
+		"idx_tags_root_name_unique":          {"tags", true, []string{"name"}},
+		"idx_transaction_tags_txid":          {"transaction_tags", false, []string{"transaction_id"}},
+		"idx_transaction_tags_tagid":         {"transaction_tags", false, []string{"tag_id"}},
+		"idx_ai_idempotency_credential_key":  {"ai_transaction_idempotency", true, []string{"credential_id", "idempotency_key_sha256"}},
+		"idx_ai_idempotency_transaction":     {"ai_transaction_idempotency", true, []string{"transaction_id"}},
+		"idx_ai_daily_usage_credential_date": {"ai_daily_transaction_usage", true, []string{"credential_id", "utc_date"}},
+	}
+	for name, want := range expected {
+		var tableName string
+		if err := target.QueryRow("SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?", name).Scan(&tableName); err != nil {
+			return fmt.Errorf("index %s definition is unavailable: %w", name, err)
+		}
+		if tableName != want.table {
+			return fmt.Errorf("index %s is attached to %s, want %s", name, tableName, want.table)
+		}
+		rows, err := target.Query("PRAGMA index_list(" + want.table + ")")
+		if err != nil {
+			return err
+		}
+		found := false
+		for rows.Next() {
+			var seq, unique, partial int
+			var indexName, origin string
+			if err := rows.Scan(&seq, &indexName, &unique, &origin, &partial); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if indexName == name {
+				found = unique == boolToInt(want.unique)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("index %s has unexpected uniqueness", name)
+		}
+		rows, err = target.Query("PRAGMA index_info(" + strconv.Quote(name) + ")")
+		if err != nil {
+			return err
+		}
+		var columns []string
+		for rows.Next() {
+			var seq, cid int
+			var column string
+			if err := rows.Scan(&seq, &cid, &column); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			columns = append(columns, column)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if len(columns) != len(want.cols) {
+			return fmt.Errorf("index %s has unexpected column count", name)
+		}
+		for index := range want.cols {
+			if columns[index] != want.cols[index] {
+				return fmt.Errorf("index %s column order is invalid", name)
+			}
+		}
+	}
+	return nil
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 // validateRootTagIndex verifies the definition, not just the object name.
@@ -1109,6 +1400,14 @@ func (i *Instance) createSnapshot(snapshotDir string) (string, error) {
 		return "", fmt.Errorf("スナップショットディレクトリ作成エラー: %w", err)
 	}
 	if defaultSnapshotDir {
+		// The implicit per-vault directory is owned by this application and can
+		// safely be hardened in place. Explicit caller-selected directories are
+		// validated below but are never silently chmod'ed/ACL-replaced.
+		if err := fileprivacy.HardenDirectory(snapshotDir); err != nil {
+			return "", fmt.Errorf("スナップショットディレクトリ権限設定エラー: %w", err)
+		}
+	}
+	if defaultSnapshotDir {
 		if err := os.Chmod(snapshotDir, 0700); err != nil { // #nosec G302 -- the default snapshot directory is intentionally private.
 			return "", fmt.Errorf("スナップショットディレクトリ権限設定エラー: %w", err)
 		}
@@ -1148,12 +1447,38 @@ func (i *Instance) createSnapshot(snapshotDir string) (string, error) {
 	if err := backupSQLiteDatabase(currentOpener, currentDB, snapshotPath); err != nil {
 		return "", fmt.Errorf("スナップショット作成エラー: %w", err)
 	}
+	cleanupSnapshot := func() {
+		_ = removePrivateSQLiteFile(snapshotPath)
+		_ = syncDirectory(snapshotDir)
+	}
+	// Backup is not a successful snapshot until the resulting bytes have been
+	// hardened and opened with the same SQLCipher opener. This catches a
+	// plaintext/wrong-key/corrupt output before it is exposed to ListSnapshots.
+	if err := os.Chmod(snapshotPath, 0600); err != nil {
+		cleanupSnapshot()
+		return "", fmt.Errorf("スナップショット権限設定エラー: %w", err)
+	}
+	if err := hardenPrivateFile(snapshotPath); err != nil {
+		cleanupSnapshot()
+		return "", fmt.Errorf("スナップショットACL設定エラー: %w", err)
+	}
+	created, err := currentOpener.Open(context.Background(), snapshotPath, securedb.ReadOnly)
+	if err != nil {
+		cleanupSnapshot()
+		return "", fmt.Errorf("作成済みスナップショットを開けません: %w", err)
+	}
+	validationErr := i.validateSnapshotDatabase(created, snapshotPath)
+	closeErr := created.Close()
+	if validationErr != nil || closeErr != nil {
+		cleanupSnapshot()
+		return "", errors.Join(errors.New("作成済みスナップショットの検証に失敗しました"), validationErr, closeErr)
+	}
 	if err := pruneSnapshots(snapshotDir, 30, budget, snapshotPath); err != nil {
-		_ = os.Remove(snapshotPath)
+		cleanupSnapshot()
 		return "", fmt.Errorf("スナップショット容量検査エラー: %w", err)
 	}
 	if err := syncDirectory(snapshotDir); err != nil {
-		_ = os.Remove(snapshotPath)
+		cleanupSnapshot()
 		return "", fmt.Errorf("スナップショットdirectory fsyncエラー: %w", err)
 	}
 
@@ -1248,10 +1573,6 @@ func (i *Instance) validateSnapshotEntry(path, snapshotDir string, inspected os.
 	// The descriptor-level checks above are required even for a positive
 	// cache hit. In particular, Windows does not expose hard-link count in
 	// os.FileInfo, while openSnapshotFile verifies it with the handle.
-	if i.snapshotIsValidated(path, fdInfo) {
-		postInfo, postErr := os.Lstat(path)
-		return postErr == nil && sameSnapshotInfo(fdInfo, postInfo)
-	}
 	candidatePath, candidateFile, err := temporaryDatabaseFile(snapshotDir, ".omni-money-list-validation-")
 	if err != nil {
 		return false
@@ -1292,32 +1613,7 @@ func (i *Instance) validateSnapshotEntry(path, snapshotDir string, inspected os.
 	if postErr != nil || !sameSnapshotInfo(fdInfo, postInfo) {
 		return false
 	}
-	i.rememberValidatedSnapshot(path, fdInfo)
 	return true
-}
-
-func (i *Instance) snapshotIsValidated(path string, info os.FileInfo) bool {
-	i.snapshotValidationMu.Lock()
-	defer i.snapshotValidationMu.Unlock()
-	entry, ok := i.snapshotValidation[path]
-	return ok && sameSnapshotInfo(entry.info, info)
-}
-
-func (i *Instance) rememberValidatedSnapshot(path string, info os.FileInfo) {
-	i.snapshotValidationMu.Lock()
-	defer i.snapshotValidationMu.Unlock()
-	if i.snapshotValidation == nil {
-		i.snapshotValidation = make(map[string]snapshotValidationEntry)
-	}
-	if len(i.snapshotValidation) >= maxSnapshotValidationEntries {
-		// Positive entries are only a performance hint. Evicting an arbitrary
-		// entry keeps memory bounded and simply causes a later revalidation.
-		for key := range i.snapshotValidation {
-			delete(i.snapshotValidation, key)
-			break
-		}
-	}
-	i.snapshotValidation[path] = snapshotValidationEntry{info: info}
 }
 
 func sameSnapshotInfo(a, b os.FileInfo) bool {
@@ -1433,11 +1729,29 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 		}
 		return fmt.Errorf("スナップショットfd検証エラー: %w", err)
 	}
+	sourceDigest, err := digestOpenFile(snapshotFile)
+	if err != nil {
+		return fmt.Errorf("スナップショットdigest検証エラー: %w", err)
+	}
 	if err := copyFileToOpen(snapshotFile, candidateFile); err != nil {
 		return fmt.Errorf("スナップショット候補コピーエラー: %w", err)
 	}
 	if err := candidateFile.Sync(); err != nil {
 		return fmt.Errorf("復元候補のsyncエラー: %w", err)
+	}
+	postSourceDigest, err := digestOpenFile(snapshotFile)
+	if err != nil || !strings.EqualFold(sourceDigest, postSourceDigest) {
+		if err == nil {
+			err = errors.New("スナップショットがコピー中に変更されました")
+		}
+		return fmt.Errorf("スナップショットdigest再検証エラー: %w", err)
+	}
+	candidateDigest, err := digestDatabaseFile(candidatePath)
+	if err != nil || !strings.EqualFold(sourceDigest, candidateDigest) {
+		if err == nil {
+			err = errors.New("復元候補digestがスナップショットと一致しません")
+		}
+		return fmt.Errorf("復元候補digest検証エラー: %w", err)
 	}
 	if err := candidateFile.Close(); err != nil {
 		return fmt.Errorf("復元候補のクローズエラー: %w", err)
@@ -1489,6 +1803,26 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if err := syncFileAndDirectory(backupPath, dir); err != nil {
 		return fmt.Errorf("現行DB退避のfsyncエラー: %w", err)
 	}
+	oldDigest, err := digestDatabaseFile(backupPath)
+	if err != nil {
+		return fmt.Errorf("現行DB退避digest検証エラー: %w", err)
+	}
+	newDigest, err := digestDatabaseFile(candidatePath)
+	if err != nil {
+		return fmt.Errorf("復元候補digest検証エラー: %w", err)
+	}
+	manifest := restoreManifest{
+		Version:   restoreManifestVersion,
+		Phase:     "prepared",
+		Current:   filepath.Base(currentPath),
+		Backup:    filepath.Base(backupPath),
+		Candidate: filepath.Base(candidatePath),
+		OldDigest: oldDigest,
+		NewDigest: newDigest,
+	}
+	if err := writeRestoreManifest(currentPath, manifest); err != nil {
+		return fmt.Errorf("restore intent journal作成エラー: %w", err)
+	}
 
 	// Replace the live pathname in one filesystem operation. POSIX rename is
 	// atomic and replaces the old file; Windows uses ReplaceFileW and retains
@@ -1503,6 +1837,10 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	removeCandidate = false
 	if err := syncDirectory(dir); err != nil {
 		return errors.Join(fmt.Errorf("復元配置のfsyncエラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+	}
+	manifest.Phase = "swapped"
+	if err := writeRestoreManifest(currentPath, manifest); err != nil {
+		return errors.Join(fmt.Errorf("restore intent journal更新エラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
 	}
 
 	newDB, err := i.opener.Open(context.Background(), currentPath, securedb.Writable)
@@ -1538,6 +1876,12 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 		// retained for startup cleanup/recovery rather than silently losing the
 		// only rollback image.
 		return errors.Join(errors.New("復元後の旧DB退避ファイル削除に失敗しました"), err)
+	}
+	if err := removeRestoreManifest(currentPath); err != nil {
+		// The current database is already valid and published. Keep the durable
+		// intent journal so the next startup can verify that state and retry its
+		// cleanup rather than silently forgetting the restore boundary.
+		return errors.Join(errors.New("復元後のrestore intent journal削除に失敗しました"), err)
 	}
 	log.Printf("snapshot_restore result=success")
 	return nil
@@ -1771,8 +2115,28 @@ func pruneSnapshots(snapshotDir string, maxKeep int, maxBytes int64, protectedPa
 		if info.Size() < 0 || total > (1<<63-1)-info.Size() {
 			return fmt.Errorf("スナップショット容量が整数上限を超えました")
 		}
-		total += info.Size()
-		usage = append(usage, snapshotUsageEntry{name: entry.Name(), path: path, size: info.Size()})
+		snapshotBytes := info.Size()
+		for _, sidecar := range []string{path + "-wal", path + "-shm", path + "-journal"} {
+			sidecarInfo, sidecarErr := os.Lstat(sidecar)
+			if os.IsNotExist(sidecarErr) {
+				continue
+			}
+			if sidecarErr != nil {
+				return sidecarErr
+			}
+			if !validSnapshotFile(sidecarInfo) {
+				return fmt.Errorf("スナップショットsidecarが通常ファイルではありません: %s", filepath.Base(sidecar))
+			}
+			if sidecarInfo.Size() < 0 || snapshotBytes > (1<<63-1)-sidecarInfo.Size() {
+				return fmt.Errorf("スナップショットsidecar容量が整数上限を超えました")
+			}
+			snapshotBytes += sidecarInfo.Size()
+		}
+		if total > (1<<63-1)-snapshotBytes {
+			return fmt.Errorf("スナップショット容量が整数上限を超えました")
+		}
+		total += snapshotBytes
+		usage = append(usage, snapshotUsageEntry{name: entry.Name(), path: path, size: snapshotBytes})
 	}
 	sort.Slice(usage, func(i, j int) bool { return usage[i].name < usage[j].name })
 	removed := false
@@ -1788,8 +2152,13 @@ func pruneSnapshots(snapshotDir string, maxKeep int, maxBytes int64, protectedPa
 			return fmt.Errorf("保護対象を残したまま容量上限を満たせません")
 		}
 		victim := usage[candidate]
-		if err := os.Remove(victim.path); err != nil {
+		if err := removePrivateSQLiteFile(victim.path); err != nil {
 			return fmt.Errorf("古いスナップショット削除エラー (%s): %w", victim.name, err)
+		}
+		for _, sidecar := range []string{victim.path + "-wal", victim.path + "-shm", victim.path + "-journal"} {
+			if err := removePrivateSQLiteFile(sidecar); err != nil {
+				return fmt.Errorf("古いスナップショットsidecar削除エラー (%s): %w", victim.name, err)
+			}
 		}
 		total -= victim.size
 		usage = append(usage[:candidate], usage[candidate+1:]...)
@@ -1894,9 +2263,9 @@ func (i *Instance) endDBLifecycle() {
 }
 
 func ensurePrivateDir(path string) error {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err == nil {
-		if !info.IsDir() {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf("ディレクトリではありません")
 		}
 		return nil
@@ -1907,7 +2276,10 @@ func ensurePrivateDir(path string) error {
 	if err := os.MkdirAll(path, 0700); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0700) // #nosec G302 -- newly created financial-data directories are owner-only.
+	if err := fileprivacy.HardenDirectory(path); err != nil {
+		return err
+	}
+	return fileprivacy.ValidateDirectory(path)
 }
 
 func preparePrivateDatabaseFile(path string) error {
@@ -2011,6 +2383,9 @@ func validateSnapshotDirectory(path string) error {
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("スナップショットディレクトリは通常のdirectoryである必要があります")
+	}
+	if err := fileprivacy.ValidateDirectory(path); err != nil {
+		return err
 	}
 	if !snapshotDirectoryModeAllowed(info) {
 		return fmt.Errorf("スナップショットディレクトリ権限は0700が必要です")
@@ -2136,10 +2511,369 @@ func copyDatabaseFile(source, destination string) error {
 }
 
 func removeRestoreBackup(path, dir string) error {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := removePrivateSQLiteFile(path); err != nil {
 		return err
 	}
 	return syncDirectory(dir)
+}
+
+// restoreManifestPath is kept beside the live database, rather than in the
+// snapshot directory.  It is the durable boundary for a restore swap: startup
+// must inspect it before any opener which is allowed to create a new database.
+func restoreManifestPath(databasePath string) string {
+	return filepath.Join(filepath.Dir(databasePath), "."+filepath.Base(databasePath)+".restore-intent.json")
+}
+
+func writeRestoreManifest(databasePath string, manifest restoreManifest) error {
+	if err := validateRestoreManifest(databasePath, manifest); err != nil {
+		return err
+	}
+	dir := filepath.Dir(databasePath)
+	tmp, err := os.CreateTemp(dir, ".omni-money-restore-manifest-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	complete := false
+	defer func() {
+		_ = tmp.Close()
+		if !complete {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0600); err != nil {
+		return err
+	}
+	if err := fileprivacy.Harden(tmp); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(append(encoded, '\n')); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := replaceManifestFile(tmpPath, restoreManifestPath(databasePath)); err != nil {
+		return err
+	}
+	complete = true
+	return syncDirectory(dir)
+}
+
+func readRestoreManifest(databasePath string) (restoreManifest, bool, error) {
+	file, err := openSnapshotFile(restoreManifestPath(databasePath))
+	if os.IsNotExist(err) {
+		return restoreManifest{}, false, nil
+	}
+	if err != nil {
+		return restoreManifest{}, true, err
+	}
+	defer file.Close()
+	if info, statErr := file.Stat(); statErr != nil || !validSnapshotFile(info) || info.Size() > 16*1024 {
+		if statErr != nil {
+			return restoreManifest{}, true, statErr
+		}
+		return restoreManifest{}, true, errors.New("restore intent is not a private regular file")
+	}
+	var manifest restoreManifest
+	decoder := json.NewDecoder(io.LimitReader(file, 16*1024))
+	if err := decoder.Decode(&manifest); err != nil {
+		return restoreManifest{}, true, fmt.Errorf("decode restore intent: %w", err)
+	}
+	if err := validateRestoreManifest(databasePath, manifest); err != nil {
+		return restoreManifest{}, true, err
+	}
+	return manifest, true, nil
+}
+
+func validateRestoreManifest(databasePath string, manifest restoreManifest) error {
+	if manifest.Version != restoreManifestVersion || (manifest.Phase != "prepared" && manifest.Phase != "swapped") {
+		return errors.New("unsupported restore intent manifest")
+	}
+	if manifest.Current != filepath.Base(databasePath) || !safeRestoreArtifactName(manifest.Backup, ".omni-money-restore-backup-") || !safeRestoreArtifactName(manifest.Candidate, ".omni-money-restore-candidate-") {
+		return errors.New("restore intent manifest path is invalid")
+	}
+	for _, digest := range []string{manifest.OldDigest, manifest.NewDigest} {
+		if len(digest) != sha256.Size*2 {
+			return errors.New("restore intent manifest digest is invalid")
+		}
+		if _, err := hex.DecodeString(digest); err != nil {
+			return errors.New("restore intent manifest digest is not hexadecimal")
+		}
+	}
+	return nil
+}
+
+func safeRestoreArtifactName(name, prefix string) bool {
+	return name != "" && name == filepath.Base(name) && !strings.ContainsAny(name, `/\\`) && strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ".db")
+}
+
+func removeRestoreManifest(databasePath string) error {
+	if err := os.Remove(restoreManifestPath(databasePath)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return syncDirectory(filepath.Dir(databasePath))
+}
+
+func digestDatabaseFile(path string) (string, error) {
+	file, err := openSnapshotFile(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	return digestOpenFile(file)
+}
+
+func digestOpenFile(file *os.File) (string, error) {
+	if file == nil {
+		return "", errors.New("nil file for digest")
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if info.Size() < 0 || info.Size() > maxSnapshotValidationBytes {
+		return "", errors.New("file exceeds validation size limit")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	if _, err := io.CopyN(hash, file, info.Size()); err != nil {
+		return "", err
+	}
+	post, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !snapshotSourceMatches(info, post) {
+		return "", errors.New("file changed while digesting")
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func (i *Instance) validateRecoveryDatabase(path string) error {
+	if i == nil || i.opener == nil {
+		return errors.New("database opener is unavailable for recovery")
+	}
+	db, err := i.opener.Open(context.Background(), path, securedb.Writable)
+	if err != nil {
+		return err
+	}
+	if err := i.validateRestoreDatabase(db, path); err != nil {
+		_ = db.Close()
+		return err
+	}
+	if err := checkpointAndClose(db, path); err != nil {
+		return err
+	}
+	return syncFileAndDirectory(path, filepath.Dir(path))
+}
+
+func (i *Instance) recoveryFile(path, expectedDigest string) (bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !validSnapshotFile(info) || (i.opener != nil && !validSnapshotMode(info, i.opener.Encrypted())) {
+		return false, errors.New("restore artifact is not a private regular file")
+	}
+	digest, err := digestDatabaseFile(path)
+	if err != nil {
+		return false, err
+	}
+	if expectedDigest != "" && !strings.EqualFold(digest, expectedDigest) {
+		return false, fmt.Errorf("restore artifact digest mismatch")
+	}
+	return true, nil
+}
+
+func removeRecoveryArtifact(path, dir string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !validSnapshotFile(info) {
+		return errors.New("refusing to remove unsafe restore artifact")
+	}
+	var errs []error
+	if err := removePrivateSQLiteFile(path); err != nil {
+		errs = append(errs, err)
+	}
+	// SQLite can leave sidecars beside a copied image. Treat each as an
+	// independent artifact and never blindly unlink a symlink/hard link.
+	for _, sidecar := range []string{path + "-wal", path + "-shm", path + "-journal"} {
+		if sidecarInfo, statErr := os.Lstat(sidecar); statErr == nil {
+			if !validSnapshotFile(sidecarInfo) {
+				errs = append(errs, fmt.Errorf("unsafe restore sidecar: %s", filepath.Base(sidecar)))
+				continue
+			}
+			if removeErr := removePrivateSQLiteFile(sidecar); removeErr != nil {
+				errs = append(errs, removeErr)
+			}
+		} else if !os.IsNotExist(statErr) {
+			errs = append(errs, statErr)
+		}
+	}
+	if err := syncDirectory(dir); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// recoverRestoreState runs before any create-capable database open.  It
+// treats a journal with an absent/invalid live pathname as a recovery problem,
+// never as permission to create a fresh ledger.  Ambiguous artifacts fail
+// closed and are left for an operator rather than being guessed away.
+func (i *Instance) recoverRestoreState(databasePath string) error {
+	dir := filepath.Dir(databasePath)
+	manifest, hasManifest, err := readRestoreManifest(databasePath)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var backups, candidates []string
+	var orphanSidecars []string
+	for _, entry := range entries {
+		name := entry.Name()
+		switch {
+		case strings.HasPrefix(name, ".omni-money-restore-backup-") && strings.HasSuffix(name, ".db"):
+			backups = append(backups, filepath.Join(dir, name))
+		case strings.HasPrefix(name, ".omni-money-restore-candidate-") && strings.HasSuffix(name, ".db"):
+			candidates = append(candidates, filepath.Join(dir, name))
+		case (strings.HasPrefix(name, ".omni-money-restore-backup-") || strings.HasPrefix(name, ".omni-money-restore-candidate-") || strings.HasPrefix(name, ".omni-money-list-validation-")) && (strings.HasSuffix(name, ".db-wal") || strings.HasSuffix(name, ".db-shm") || strings.HasSuffix(name, ".db-journal")):
+			orphanSidecars = append(orphanSidecars, filepath.Join(dir, name))
+		}
+	}
+	if !hasManifest && len(backups) == 0 && len(candidates) == 0 && len(orphanSidecars) == 0 {
+		return nil
+	}
+	if hasManifest {
+		backups = []string{filepath.Join(dir, manifest.Backup)}
+		candidates = []string{filepath.Join(dir, manifest.Candidate)}
+	}
+	liveDigest, liveDigestErr := digestDatabaseFile(databasePath)
+	liveExists := liveDigestErr == nil
+	if liveExists && hasManifest && !strings.EqualFold(liveDigest, manifest.OldDigest) && !strings.EqualFold(liveDigest, manifest.NewDigest) {
+		// The pathname exists but is not either journaled image. Treat it as
+		// corrupt and recover only from exactly one validated journal image.
+		liveExists = false
+	}
+	if liveExists {
+		if err := i.validateRecoveryDatabase(databasePath); err != nil {
+			liveExists = false
+		}
+	}
+	if liveExists {
+		// A durable, valid live image wins regardless of which side of the
+		// rename boundary was recorded. Validate every named artifact before
+		// deleting it so an unexpected valid copy is never discarded.
+		for _, path := range append(backups, candidates...) {
+			digest := ""
+			if hasManifest {
+				switch filepath.Base(path) {
+				case manifest.Backup:
+					digest = manifest.OldDigest
+				case manifest.Candidate:
+					digest = manifest.NewDigest
+				default:
+					return errors.New("restore artifact is not named by its journal")
+				}
+			}
+			item := struct {
+				path   string
+				digest string
+			}{path: path, digest: digest}
+			if ok, err := i.recoveryFile(item.path, item.digest); err != nil {
+				return err
+			} else if ok {
+				if err := removeRecoveryArtifact(item.path, dir); err != nil {
+					return err
+				}
+			}
+		}
+		for _, path := range orphanSidecars {
+			if err := removePrivateSQLiteFile(path); err != nil {
+				return err
+			}
+		}
+		if len(orphanSidecars) > 0 {
+			if err := syncDirectory(dir); err != nil {
+				return err
+			}
+		}
+		if hasManifest {
+			return removeRestoreManifest(databasePath)
+		}
+		return nil
+	}
+	if !hasManifest {
+		return errors.New("live database is unavailable while restore artifacts exist")
+	}
+	if len(orphanSidecars) != 0 {
+		return errors.New("orphan restore sidecar prevents deterministic recovery")
+	}
+	// The live pathname is missing or corrupt. Exactly one durable image may
+	// be used; choosing between two valid images would make crash recovery
+	// nondeterministic.
+	type image struct{ path, digest string }
+	var valid []image
+	for _, candidate := range []struct {
+		path   string
+		digest string
+	}{{backups[0], manifest.OldDigest}, {candidates[0], manifest.NewDigest}} {
+		ok, err := i.recoveryFile(candidate.path, candidate.digest)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if ok {
+			valid = append(valid, image{candidate.path, candidate.digest})
+		}
+	}
+	if len(valid) != 1 {
+		return fmt.Errorf("restore recovery is ambiguous: %d valid images", len(valid))
+	}
+	if err := installRecoveryFile(valid[0].path, databasePath, candidates[0]); err != nil {
+		return err
+	}
+	if err := syncDirectory(dir); err != nil {
+		return err
+	}
+	if err := i.validateRecoveryDatabase(databasePath); err != nil {
+		return fmt.Errorf("recovered database validation failed: %w", err)
+	}
+	for _, path := range append(backups, candidates...) {
+		if filepath.Clean(path) == filepath.Clean(databasePath) {
+			continue
+		}
+		if _, err := os.Lstat(path); err == nil {
+			if err := removeRecoveryArtifact(path, dir); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return removeRestoreManifest(databasePath)
 }
 
 func cleanupRestoreArtifacts(databasePath string) error {
@@ -2152,6 +2886,7 @@ func cleanupRestoreArtifacts(databasePath string) error {
 	prefixes := []string{
 		".omni-money-restore-backup-",
 		".omni-money-restore-candidate-",
+		".omni-money-list-validation-",
 	}
 	var cleanupErrs []error
 	removed := false
@@ -2168,19 +2903,14 @@ func cleanupRestoreArtifacts(databasePath string) error {
 			continue
 		}
 		path := filepath.Join(dir, name)
-		info, statErr := os.Lstat(path)
+		_, statErr := os.Lstat(path)
 		if statErr != nil {
 			if !os.IsNotExist(statErr) {
 				cleanupErrs = append(cleanupErrs, statErr)
 			}
 			continue
 		}
-		if !validSnapshotFile(info) {
-			// Never unlink a symlink/reparse or a multi-link object during
-			// recovery cleanup; leave it for an operator to inspect.
-			continue
-		}
-		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+		if removeErr := removeRecoveryArtifact(path, dir); removeErr != nil {
 			cleanupErrs = append(cleanupErrs, removeErr)
 		} else {
 			removed = true
@@ -2241,7 +2971,7 @@ func copyFileToOpenBounded(src, dst *os.File, maxBytes int64) error {
 func removeSQLiteFiles(path string) error {
 	var errs []error
 	for _, candidate := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
-		if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
+		if err := removePrivateSQLiteFile(candidate); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -2251,11 +2981,45 @@ func removeSQLiteFiles(path string) error {
 func removeSQLiteSidecars(path string) error {
 	var errs []error
 	for _, candidate := range []string{path + "-wal", path + "-shm", path + "-journal"} {
-		if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
+		if err := removePrivateSQLiteFile(candidate); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func removePrivateSQLiteFile(path string) error {
+	file, err := openSnapshotFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !validSnapshotFile(info) || !snapshotSourceMatches(pathInfo, info) {
+		return fmt.Errorf("refusing to remove unsafe SQLite artifact: %s", filepath.Base(path))
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if postInfo, postErr := os.Lstat(path); postErr == nil {
+		if !snapshotSourceMatches(info, postInfo) {
+			return fmt.Errorf("SQLite artifact was replaced while removing: %s", filepath.Base(path))
+		}
+		return fmt.Errorf("SQLite artifact remained after removal: %s", filepath.Base(path))
+	} else if !os.IsNotExist(postErr) {
+		return postErr
+	}
+	return nil
 }
 
 func syncFileAndDirectory(path, dir string) error {
@@ -2315,6 +3079,11 @@ func rollbackRestoreFiles(currentPath, backupPath, candidatePath string, instanc
 	}
 	if err := syncDirectory(dir); err != nil {
 		errs = append(errs, fmt.Errorf("restore cleanup directory sync: %w", err))
+	}
+	if len(errs) == 0 {
+		if err := removeRestoreManifest(currentPath); err != nil {
+			errs = append(errs, fmt.Errorf("remove restore intent after rollback: %w", err))
+		}
 	}
 	return errors.Join(errs...)
 }

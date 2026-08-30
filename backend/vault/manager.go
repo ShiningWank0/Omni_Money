@@ -18,6 +18,7 @@ import (
 
 	"omni_money/backend/core"
 	"omni_money/backend/database"
+	"omni_money/backend/fileprivacy"
 	"omni_money/backend/securedb"
 )
 
@@ -774,7 +775,7 @@ func ensurePrivateDirectory(path string, create bool) error {
 		if err := os.MkdirAll(path, 0700); err != nil {
 			return fmt.Errorf("create private directory: %w", err)
 		}
-		if err := os.Chmod(path, 0700); err != nil { // #nosec G302 -- vault directories must be owner-only.
+		if err := fileprivacy.HardenDirectory(path); err != nil {
 			return fmt.Errorf("secure private directory: %w", err)
 		}
 		info, err = os.Lstat(path)
@@ -785,10 +786,7 @@ func ensurePrivateDirectory(path string, create bool) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return errors.New("vault directory must be a real directory")
 	}
-	if info.Mode().Perm() != 0700 {
-		return fmt.Errorf("vault directory permissions must be 0700, got %04o", info.Mode().Perm())
-	}
-	return nil
+	return fileprivacy.ValidateDirectory(path)
 }
 
 func validateContainedPath(root, candidate string) error {

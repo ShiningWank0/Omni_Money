@@ -3,7 +3,11 @@
 // Package fileprivacy applies OS-specific owner-only permissions to files.
 package fileprivacy
 
-import "os"
+import (
+	"errors"
+	"fmt"
+	"os"
+)
 
 // CreateExclusive atomically creates an owner-only file beneath a pinned root.
 func CreateExclusive(root *os.Root, _ string, name string) (*os.File, error) {
@@ -23,4 +27,24 @@ func Harden(file *os.File) error {
 // create/stat/check sequence; Unix permission checks use the supplied info.
 func IsPrivate(_ *os.File, info os.FileInfo) bool {
 	return info != nil && info.Mode().IsRegular() && info.Mode().Perm() == 0600
+}
+
+// HardenDirectory applies the owner-only directory mode used for vault and
+// snapshot roots.
+func HardenDirectory(path string) error {
+	return os.Chmod(path, 0700) // #nosec G302 -- financial data directories are private.
+}
+
+func ValidateDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("private path is not a real directory")
+	}
+	if info.Mode().Perm() != 0700 {
+		return fmt.Errorf("private directory permissions must be 0700, got %04o", info.Mode().Perm())
+	}
+	return nil
 }

@@ -36,6 +36,19 @@ func privateSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
 	return descriptor, nil
 }
 
+func privateDirectorySecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return nil, fmt.Errorf("read current Windows account: %w", err)
+	}
+	sddl := "D:P(A;OICI;FA;;;" + user.User.Sid.String() + ")(A;OICI;FA;;;SY)"
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		return nil, fmt.Errorf("create private Windows directory DACL: %w", err)
+	}
+	return descriptor, nil
+}
+
 // CreateExclusive creates the file with its protected DACL in the same
 // CreateFile call. It then proves that the created handle names the file under
 // the directory root pinned before sensitive content was generated.
@@ -181,4 +194,131 @@ func IsPrivate(file *os.File, info os.FileInfo) bool {
 		}
 	}
 	return true
+}
+
+func openPrivateDirectory(path string, access uint32) (*os.File, error) {
+	pointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(
+		pointer,
+		access,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, errors.New("wrap private Windows directory handle")
+	}
+	var attributes struct {
+		Attributes uint32
+		ReparseTag uint32
+	}
+	if err := windows.GetFileInformationByHandleEx(handle, windows.FileAttributeTagInfo, (*byte)(unsafe.Pointer(&attributes)), uint32(unsafe.Sizeof(attributes))); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if attributes.Attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || attributes.Attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		_ = file.Close()
+		return nil, errors.New("private path is not a real Windows directory")
+	}
+	return file, nil
+}
+
+func HardenDirectory(path string) error {
+	file, err := openPrivateDirectory(path, windows.GENERIC_READ|windows.GENERIC_WRITE|windows.WRITE_DAC|windows.READ_CONTROL)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	descriptor, err := privateDirectorySecurityDescriptor()
+	if err != nil {
+		return err
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	if err := windows.SetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		return fmt.Errorf("apply private Windows directory DACL: %w", err)
+	}
+	return nil
+}
+
+func ValidateDirectory(path string) error {
+	file, err := openPrivateDirectory(path, windows.READ_CONTROL)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return validatePrivateDACL(file)
+}
+
+func validatePrivateDACL(file *os.File) error {
+	if file == nil {
+		return errors.New("nil private handle")
+	}
+	descriptor, err := windows.GetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return err
+	}
+	if owner == nil || !owner.Equals(user.User.Sid) {
+		return errors.New("private directory owner is not the current Windows account")
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return err
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return errors.New("private directory DACL is inheritable")
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	if dacl == nil || dacl.AceCount != 2 {
+		return errors.New("private directory DACL must contain only the owner and LocalSystem")
+	}
+	system, err := windows.StringToSid("S-1-5-18")
+	if err != nil {
+		return err
+	}
+	want := map[string]bool{user.User.Sid.String(): false, system.String(): false}
+	const fileAllAccess = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
+	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, index, &ace); err != nil {
+			return err
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE || ace.Mask != fileAllAccess {
+			return errors.New("private directory DACL contains an unexpected ACE")
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if _, ok := want[sid.String()]; !ok {
+			return errors.New("private directory DACL grants an unexpected principal")
+		}
+		want[sid.String()] = true
+	}
+	for _, present := range want {
+		if !present {
+			return errors.New("private directory DACL is missing a required principal")
+		}
+	}
+	return nil
 }

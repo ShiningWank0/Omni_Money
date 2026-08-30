@@ -243,6 +243,55 @@ func TestCurrentVersionWithoutIdentityStillRequiresFullConstraints(t *testing.T)
 	}
 }
 
+func TestLegacyCompatibilityRequiresExactFingerprintAndDoesNotTrustMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	createLegacyImageSnapshot(t, path, true)
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := createTablesOn(db); err != nil {
+		t.Fatal(err)
+	}
+	// The historical transaction/image definitions are allowlisted, but every
+	// generated table still has to retain current constraints.
+	if _, err := db.Exec(`DROP TABLE tags; CREATE TABLE tags (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+		parent_id INTEGER DEFAULT NULL, level INTEGER NOT NULL DEFAULT 1
+	); CREATE INDEX idx_tags_parent ON tags(parent_id);
+	CREATE UNIQUE INDEX idx_tags_root_name_unique ON tags(name) WHERE parent_id IS NULL`); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLedgerSchema(db, true); err == nil {
+		t.Fatal("legacy fingerprint bypassed constraints on a generated table")
+	}
+	if _, err := db.Exec(`CREATE TABLE omni_legacy_schema_compat (
+		legacy_version INTEGER PRIMARY KEY CHECK(legacy_version >= 0 AND legacy_version < 2)
+	); INSERT INTO omni_legacy_schema_compat(legacy_version) VALUES (0)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLedgerSchema(db, true); err == nil {
+		t.Fatal("forgeable legacy marker was trusted")
+	}
+}
+
+func TestCurrentSchemaRejectsIneffectiveSameNamedTrigger(t *testing.T) {
+	instance, err := OpenPlainInstance(filepath.Join(t.TempDir(), "trigger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	if _, err := instance.DB().Exec(`DROP TRIGGER trg_transaction_images_immutable_update;
+		CREATE TRIGGER trg_transaction_images_immutable_update
+		BEFORE UPDATE ON transaction_images BEGIN SELECT NULL; END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLedgerSchema(instance.DB(), true); err == nil {
+		t.Fatal("ineffective same-name trigger was accepted")
+	}
+}
+
 func TestBlankSQLiteFileIsNotAListableSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "blank.db")
 	db, err := sql.Open("sqlite3", path)
@@ -269,6 +318,12 @@ func TestBlankSameKeySnapshotIsNotRestored(t *testing.T) {
 	blankPath := filepath.Join(snapshotDir, "blank-same-key.db")
 	db, err := sql.Open("sqlite3", blankPath)
 	if err != nil {
+		t.Fatal(err)
+	}
+	// database/sql opens lazily; force SQLite to materialize the empty file so
+	// this test exercises a real blank same-key snapshot instead of a missing
+	// pathname.
+	if err := db.Ping(); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {

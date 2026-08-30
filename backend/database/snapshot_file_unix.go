@@ -4,6 +4,7 @@ package database
 
 import (
 	"os"
+	"strconv"
 	"syscall"
 )
 
@@ -29,10 +30,10 @@ func validSnapshotFile(info os.FileInfo) bool {
 	if !ok || uid < 0 {
 		return false
 	}
-	ownerUID := uint64(stat.Uid)
-	// #nosec G115 -- uid is checked non-negative before this widening
-	// conversion; Unix process UIDs are represented in this range.
-	return ownerUID == uint64(uid) && stat.Nlink == 1
+	// Compare the decimal representations to avoid narrowing the process UID
+	// (and the corresponding gosec G115 warning) on platforms whose stat UID is
+	// narrower than int.
+	return strconv.FormatUint(uint64(stat.Uid), 10) == strconv.Itoa(uid) && stat.Nlink == 1
 }
 
 func snapshotModeAllowed(info os.FileInfo, encrypted bool) bool {
@@ -64,5 +65,16 @@ func syncDirectory(path string) error {
 // rename replaces the destination atomically; backupPath is already a durable
 // copy used if post-swap validation fails.
 func replaceDatabaseFile(replacement, target, _ string) error {
+	return os.Rename(replacement, target)
+}
+
+// installRecoveryFile is used when the live pathname was lost entirely.  The
+// generated recovery image is already validated and private; rename keeps the
+// publication atomic on POSIX.
+func installRecoveryFile(replacement, target, _ string) error {
+	return os.Rename(replacement, target)
+}
+
+func replaceManifestFile(replacement, target string) error {
 	return os.Rename(replacement, target)
 }

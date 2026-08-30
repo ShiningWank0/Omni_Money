@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"omni_money/backend/securedb"
 )
 
 func newPlainSnapshotTestInstance(t *testing.T) (*Instance, string, string) {
@@ -351,6 +353,167 @@ func TestStartupReclaimsDurableRestoreArtifacts(t *testing.T) {
 			t.Fatalf("stale restore artifact was not reclaimed: %s", entry.Name())
 		}
 	}
+}
+
+func prepareRecoveryFixture(t *testing.T) (dir, path, backup, candidate string, oldDigest, newDigest string) {
+	t.Helper()
+	dir = t.TempDir()
+	path = filepath.Join(dir, "ledger.db")
+	instance, err := OpenPlainInstance(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := instance.DB().Exec("INSERT INTO transactions (account,date,item,type,amount,balance) VALUES ('cash','2026-01-01','recovery','income',1,1)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backup = filepath.Join(dir, ".omni-money-restore-backup-recovery.db")
+	if err := copyDatabaseFile(path, backup); err != nil {
+		t.Fatal(err)
+	}
+	oldDigest, err = digestDatabaseFile(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate = filepath.Join(dir, ".omni-money-restore-candidate-recovery.db")
+	if err := copyDatabaseFile(path, candidate); err != nil {
+		t.Fatal(err)
+	}
+	newDigest, err = digestDatabaseFile(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return
+}
+
+func TestStartupRecoveryRestoresSoleBackupBeforeFreshCreate(t *testing.T) {
+	dir, path, backup, candidate, oldDigest, newDigest := prepareRecoveryFixture(t)
+	if err := os.Remove(candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRestoreManifest(path, restoreManifest{
+		Version: restoreManifestVersion, Phase: "prepared", Current: filepath.Base(path),
+		Backup: filepath.Base(backup), Candidate: filepath.Base(candidate),
+		OldDigest: oldDigest, NewDigest: newDigest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	instance, err := OpenPlainInstance(path)
+	if err != nil {
+		t.Fatalf("sole valid restore backup was not recovered: %v", err)
+	}
+	defer instance.Close()
+	var count int
+	if err := instance.DB().QueryRow("SELECT COUNT(*) FROM transactions").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("recovered ledger count = %d, err=%v", count, err)
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("recovery backup was not cleaned: %v", err)
+	}
+	if _, err := os.Stat(restoreManifestPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("restore manifest was not cleaned: %v", err)
+	}
+	_ = dir
+}
+
+func TestStartupRecoveryRejectsAmbiguousMissingLive(t *testing.T) {
+	dir, path, backup, candidate, oldDigest, newDigest := prepareRecoveryFixture(t)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRestoreManifest(path, restoreManifest{
+		Version: restoreManifestVersion, Phase: "prepared", Current: filepath.Base(path),
+		Backup: filepath.Base(backup), Candidate: filepath.Base(candidate),
+		OldDigest: oldDigest, NewDigest: newDigest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenPlainInstance(path); err == nil {
+		t.Fatal("startup accepted two valid restore images with no live database")
+	}
+	_ = dir
+}
+
+func TestStartupRecoveryRejectsUnjournaledThirdLiveImage(t *testing.T) {
+	dir, path, backup, candidate, oldDigest, newDigest := prepareRecoveryFixture(t)
+	thirdDir := filepath.Join(dir, "third-source")
+	if err := os.Mkdir(thirdDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	thirdPath := filepath.Join(thirdDir, "third.db")
+	third, err := OpenPlainInstance(thirdPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := third.DB().Exec("INSERT INTO transactions (account,date,item,type,amount,balance) VALUES ('cash','2026-01-02','third','income',2,2)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := third.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyDatabaseFile(thirdPath, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRestoreManifest(path, restoreManifest{
+		Version: restoreManifestVersion, Phase: "swapped", Current: filepath.Base(path),
+		Backup: filepath.Base(backup), Candidate: filepath.Base(candidate),
+		OldDigest: oldDigest, NewDigest: newDigest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenPlainInstance(path); err == nil {
+		t.Fatal("startup adopted a valid live image that was not named by the journal")
+	}
+}
+
+func TestStartupRecoveryReplacesCorruptLiveWithValidBackup(t *testing.T) {
+	dir, path, backup, candidate, oldDigest, newDigest := prepareRecoveryFixture(t)
+	if err := os.Remove(candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("corrupt live"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRestoreManifest(path, restoreManifest{
+		Version: restoreManifestVersion, Phase: "swapped", Current: filepath.Base(path),
+		Backup: filepath.Base(backup), Candidate: filepath.Base(candidate),
+		OldDigest: oldDigest, NewDigest: newDigest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	instance, err := OpenPlainInstance(path)
+	if err != nil {
+		t.Fatalf("valid backup did not replace corrupt live: %v", err)
+	}
+	defer instance.Close()
+	var count int
+	if err := instance.DB().QueryRow("SELECT COUNT(*) FROM transactions").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("recovered ledger count = %d, err=%v", count, err)
+	}
+	_ = dir
+}
+
+func TestStartupRecoveryRejectsMissingLiveWithoutJournal(t *testing.T) {
+	dir, path, backup, candidate, _, _ := prepareRecoveryFixture(t)
+	if err := os.Remove(candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenPlainInstance(path); err == nil {
+		t.Fatal("startup created a fresh ledger over an unjournaled restore backup")
+	}
+	_ = dir
+	_ = backup
 }
 
 func TestConcurrentSnapshotCreateListAndRestore(t *testing.T) {

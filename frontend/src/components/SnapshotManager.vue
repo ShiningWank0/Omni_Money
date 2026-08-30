@@ -50,7 +50,8 @@ import { ref, onMounted } from 'vue'
 import {
   listSnapshots as apiListSnapshots,
   restoreSnapshot as apiRestoreSnapshot,
-  clearSessionSecrets
+  clearSessionSecrets,
+  isWailsMode
 } from '../utils/api'
 
 const emit = defineEmits(['close', 'restored'])
@@ -85,11 +86,32 @@ async function executeRestore(name) {
   message.value = ''
   try {
     await apiRestoreSnapshot(name)
+    if (isWailsMode) {
+      // Desktop keeps its established Wails flow: notify the shell so it can
+      // purge/reload/lock the vault. Do not route a desktop restore through
+      // the server login-expiry path.
+      snapshots.value = []
+      confirmingSnapshot.value = null
+      isRestoring.value = false
+      emit('close')
+      emit('restored')
+      return
+    }
     finishRestoreAndRequireLogin('snapshot-restored')
   } catch (e) {
-    // The server drains sessions before attempting disk restore, so a
-    // failed restore still requires a fresh login and must not leave a
-    // stale modal/store visible in the browser.
+    if (isWailsMode) {
+      // A desktop failure leaves the database untouched. Keep the modal open
+      // so the user can inspect the error or choose another snapshot, but
+      // discard any transient restore confirmation state.
+      isRestoring.value = false
+      confirmingSnapshot.value = null
+      messageType.value = 'error'
+      message.value = e?.message || 'スナップショットの復元に失敗しました'
+      return
+    }
+    // The server drains sessions before attempting disk restore, so a failed
+    // restore still requires a fresh login and must not leave a stale
+    // modal/store visible in the browser.
     finishRestoreAndRequireLogin('snapshot-restore-failed')
   }
 }

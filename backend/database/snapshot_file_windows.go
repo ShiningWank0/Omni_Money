@@ -11,6 +11,7 @@ import (
 )
 
 var procReplaceFile = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
+var procMoveFileEx = windows.NewLazySystemDLL("kernel32.dll").NewProc("MoveFileExW")
 
 const replaceFileWriteThrough = 0x1
 
@@ -117,7 +118,11 @@ func validateSnapshotHandle(file *os.File) error {
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != 0 {
 			return errors.New("snapshot DACL contains an unexpected ACE")
 		}
-		const fileAllAccess = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | windows.SPECIFIC_RIGHTS_ALL
+		// SDDL's FA alias is FILE_ALL_ACCESS (0x1f01ff), not
+		// STANDARD_RIGHTS_REQUIRED|SYNCHRONIZE|SPECIFIC_RIGHTS_ALL
+		// (0x1fffff).  The latter accidentally grants reserved bits and is not
+		// the same ACL that fileprivacy.Harden installs.
+		const fileAllAccess = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
 		if ace.Mask != fileAllAccess {
 			return errors.New("snapshot DACL does not grant the exact private access mask")
 		}
@@ -190,6 +195,52 @@ func replaceDatabaseFile(replacement, target, backup string) error {
 		uintptr(unsafe.Pointer(backupName)),
 		uintptr(replaceFileWriteThrough), 0, 0,
 	)
+	if result == 0 {
+		if callErr != windows.ERROR_SUCCESS {
+			return callErr
+		}
+		return windows.GetLastError()
+	}
+	return nil
+}
+
+func installRecoveryFile(replacement, target, _ string) error {
+	replacementName, err := windows.UTF16PtrFromString(replacement)
+	if err != nil {
+		return err
+	}
+	targetName, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		return err
+	}
+	const moveFileReplaceExisting = 0x1
+	const moveFileWriteThrough = 0x8
+	result, _, callErr := procMoveFileEx.Call(
+		uintptr(unsafe.Pointer(replacementName)),
+		uintptr(unsafe.Pointer(targetName)),
+		uintptr(moveFileReplaceExisting|moveFileWriteThrough),
+	)
+	if result == 0 {
+		if callErr != windows.ERROR_SUCCESS {
+			return callErr
+		}
+		return windows.GetLastError()
+	}
+	return nil
+}
+
+func replaceManifestFile(replacement, target string) error {
+	replacementName, err := windows.UTF16PtrFromString(replacement)
+	if err != nil {
+		return err
+	}
+	targetName, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		return err
+	}
+	const moveFileReplaceExisting = 0x1
+	const moveFileWriteThrough = 0x8
+	result, _, callErr := procMoveFileEx.Call(uintptr(unsafe.Pointer(replacementName)), uintptr(unsafe.Pointer(targetName)), uintptr(moveFileReplaceExisting|moveFileWriteThrough))
 	if result == 0 {
 		if callErr != windows.ERROR_SUCCESS {
 			return callErr
