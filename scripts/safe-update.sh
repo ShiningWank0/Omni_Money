@@ -1,21 +1,57 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
+#!/bin/bash
+
+# This must be the first executable statement.  An inherited xtrace shell can
+# otherwise print the target image or raw runtime environment before the
+# updater has a chance to establish its logging boundary.
+case "$-" in
+  *x*) builtin set +x; builtin printf 'safe-update: inherited xtrace is not allowed\n' >&2; builtin exit 77 ;;
+esac
+builtin set -Eeuo pipefail
 
 # Deploy one pinned Omni Money image with an offline checkpoint. This entry
 # point treats Compose files and paths as data, never as shell code. It is
 # written for Bash and the GNU userland used by the production Linux host; the
 # stat compatibility layer also keeps preflight tests useful on macOS.
 
+script_source="${BASH_SOURCE[0]:-$0}"
+safe_update_test_mode=0
+case "$script_source" in
+  */.omni-safe-update-test.*/*) safe_update_test_mode=1 ;;
+esac
+trusted_path="/usr/sbin:/usr/bin:/sbin:/bin"
+case "$safe_update_test_mode:${MOCK_BIN:+set}" in
+1:set)
+  # The fixture supplies exported shims and a regular mock tar executable.
+  # This branch is reachable only from the generated test fixture path; the
+  # production entry point always uses the fixed system path below.
+  PATH="$MOCK_BIN:$trusted_path"
+  ;;
+*)
+  PATH="$trusted_path"
+  ;;
+esac
+builtin export PATH
+case "$safe_update_test_mode" in
+0)
+  # Exported Bash functions otherwise take precedence over the fixed PATH.
+  # Remove every external command name before dirname/id are first used; the
+  # later toolchain attestation then pins their canonical root-owned files.
+  builtin unset -f bash docker jq sha256sum tar stat awk sed grep mktemp du df chown find findmnt \
+    uname id dirname pwd printf type cp chmod mkdir rmdir rm mv date sleep sync fallocate readlink tr 2>/dev/null || true
+  builtin hash -r
+  ;;
+esac
+
 service_name="omni-money"
 project_name="omni-money"
 target_image="${1:-}"
-script_source="${BASH_SOURCE[0]:-$0}"
-script_dir="$(cd -- "$(dirname -- "$script_source")" && pwd -P)"
-project_dir="$(cd -- "$script_dir/.." && pwd -P)"
+case "$script_source" in */*) script_parent="${script_source%/*}" ;; *) script_parent=. ;; esac
+script_dir="$(builtin cd -- "$script_parent" && builtin pwd -P)"
+project_dir="$(builtin cd -- "$script_dir/.." && builtin pwd -P)"
 compose_file="$project_dir/compose.yaml"
 compose_definition="$compose_file"
 compose_file_pin=""
-current_uid="$(id -u)"
+current_uid="$EUID"
 env_file_input="${OMNI_UPDATE_ENV_FILE:-.env}"
 env_file=""
 env_file_pin=""
@@ -23,7 +59,6 @@ attestation_file=""
 attestation_pin=""
 compose_snapshot=""
 compose_snapshot_hash=""
-runtime_contract_file=""
 runtime_contract_hash=""
 secret_contract_file=""
 secret_contract_hash=""
@@ -42,6 +77,9 @@ env_updated=0
 checkpoint_ready=0
 candidate_id=""
 current_id=""
+current_project="$project_name"
+legacy_project_name=""
+legacy_current=0
 checkpoint_dir=""
 archive_path=""
 archive_tmp=""
@@ -59,7 +97,8 @@ capacity_reservation_kb=""
 capacity_reservation_device=""
 capacity_reservation_inode=""
 capacity_reservation_nlink=""
-capacity_reservation_hash=""
+capacity_reservation_size=""
+capacity_reservation_released=0
 rollback_image=""
 data_dir=""
 data_uid="10001"
@@ -69,7 +108,6 @@ network_ip=""
 checkpoint_root=""
 checkpoint_root_created=0
 checkpoint_root_journal=""
-checkpoint_journal_phase=""
 recovery_bundle_dir=""
 recovery_env_file=""
 recovery_attestation_file=""
@@ -106,6 +144,10 @@ env_pin_device=""
 env_pin_inode=""
 env_pin_nlink=""
 env_pin_hash=""
+recovery_env_device=""
+recovery_env_inode=""
+recovery_env_nlink=""
+recovery_env_hash=""
 attestation_device=""
 attestation_inode=""
 attestation_nlink=""
@@ -135,7 +177,6 @@ updated_env_hash=""
 updated_env_tmp=""
 restore_env_tmp=""
 state="init"
-compose_ps_sequence=0
 compose_source_changed=0
 current_runtime_contract_file=""
 current_runtime_contract_hash=""
@@ -145,6 +186,34 @@ tar_device=""
 tar_inode=""
 tar_nlink=""
 tar_hash=""
+docker_path=""
+docker_device=""
+docker_inode=""
+docker_nlink=""
+docker_hash=""
+docker_socket_path=""
+docker_socket_device=""
+docker_socket_inode=""
+docker_socket_nlink=""
+docker_socket_owner=""
+docker_socket_group=""
+docker_socket_mode=""
+docker_socket_ready=0
+docker_config_dir=""
+docker_config_device=""
+docker_config_inode=""
+docker_config_nlink=""
+compose_plugin_path=""
+compose_plugin_device=""
+compose_plugin_inode=""
+compose_plugin_nlink=""
+compose_plugin_hash=""
+tool_names=()
+tool_paths=()
+tool_devices=()
+tool_inodes=()
+tool_nlinks=()
+tool_hashes=()
 secret_sources=()
 secret_targets=()
 secret_paths=()
@@ -215,6 +284,11 @@ stat_nlink() {
   if value="$(stat -c '%h' -- "$path" 2>/dev/null)"; then printf '%s' "$value"; else stat -f '%l' "$path"; fi
 }
 
+stat_size() {
+  local path="$1" value
+  if value="$(stat -c '%s' -- "$path" 2>/dev/null)"; then printf '%s' "$value"; else stat -f '%z' "$path"; fi
+}
+
 sha256_file() {
   sha256sum -- "$1" | sed -E 's/[[:space:]].*$//'
 }
@@ -248,7 +322,7 @@ free_space_kb() {
 }
 
 reserve_capacity() {
-  local reserve_kb="$1" available_after
+  local reserve_kb="$1" available_after allocated_kb expected_bytes
   capacity_reservation="$checkpoint_dir/.capacity.reserve"
   capacity_reservation_kb="$reserve_kb"
   create_exclusive_file "$capacity_reservation" || return 1
@@ -256,17 +330,47 @@ reserve_capacity() {
     rm -f -- "$capacity_reservation"
     return 1
   }
-  validate_root_owned_file "$capacity_reservation" "rollback capacity reservation" || return 1
-  [ "$(stat_device "$capacity_reservation")" = "$checkpoint_root_device" ] || return 1
-  [ "$(stat_nlink "$capacity_reservation")" = 1 ] || return 1
-  fsync_path "$capacity_reservation" || return 1
+  validate_root_owned_file "$capacity_reservation" "rollback capacity reservation" || { fail "capacity reservation owner/mode validation failed"; return 1; }
+  [ "$(stat_device "$capacity_reservation")" = "$checkpoint_root_device" ] || { fail "capacity reservation is not on checkpoint filesystem"; return 1; }
+  [ "$(stat_nlink "$capacity_reservation")" = 1 ] || { fail "capacity reservation link count is not one"; return 1; }
+  fsync_path "$capacity_reservation" || { fail "capacity reservation fsync failed"; return 1; }
   capacity_reservation_device="$(stat_device "$capacity_reservation")"
   capacity_reservation_inode="$(stat_inode "$capacity_reservation")"
   capacity_reservation_nlink="$(stat_nlink "$capacity_reservation")"
-  capacity_reservation_hash="$(sha256_file "$capacity_reservation")"
-  available_after="$(free_space_kb "$checkpoint_root")" || return 1
-  [ "$available_after" -ge "$reserve_kb" ] || return 1
-  fsync_directory "$checkpoint_root" || return 1
+  # Do not hash the reserve: it can be hundreds of GiB and its bytes have no
+  # recovery value.  Bind its identity and exact length, and prove that the
+  # filesystem actually allocated the requested blocks instead.
+  expected_bytes=$((reserve_kb * 1024))
+  capacity_reservation_size="$(stat_size "$capacity_reservation")" || return 1
+  [ "$capacity_reservation_size" -eq "$expected_bytes" ] || { fail "capacity reservation size is not exact"; return 1; }
+  allocated_kb="$(directory_size_kb "$capacity_reservation")" || return 1
+  [ "$allocated_kb" -ge "$reserve_kb" ] || { fail "capacity reservation is sparse or incompletely allocated"; return 1; }
+  available_after="$(free_space_kb "$checkpoint_root")" || { fail "free space could not be rechecked after reservation"; return 1; }
+  [ "$available_after" -ge "$reserve_kb" ] || { fail "capacity reservation exceeds remaining free space"; return 1; }
+  fsync_directory "$checkpoint_root" || { fail "checkpoint root fsync failed after capacity reservation"; return 1; }
+}
+
+release_capacity_reservation() {
+  [ "$capacity_reservation_released" -eq 1 ] && return 0
+  validate_capacity_reservation || return 1
+  state="reservation-release-prepared"
+  write_journal reservation-release-prepared || return 1
+  rm -f -- "$capacity_reservation" || return 1
+  # Mark the reservation consumed before extraction. If the following fsync or
+  # journal write fails, the updater remains stopped with a durable phase that
+  # tells recovery the reservation is no longer available.
+  capacity_reservation_released=1
+  fsync_directory "$checkpoint_dir" || return 1
+  state="reservation-released"
+  write_journal reservation-released || return 1
+}
+
+validate_capacity_reservation() {
+  validate_existing_file "$capacity_reservation" "rollback capacity reservation" root || return 1
+  [ "$(stat_device "$capacity_reservation")" = "$capacity_reservation_device" ] || return 1
+  [ "$(stat_inode "$capacity_reservation")" = "$capacity_reservation_inode" ] || return 1
+  [ "$(stat_nlink "$capacity_reservation")" = "$capacity_reservation_nlink" ] || return 1
+  [ "$(stat_size "$capacity_reservation")" = "$capacity_reservation_size" ] || return 1
 }
 
 write_journal() {
@@ -282,28 +386,35 @@ write_journal() {
   create_exclusive_file "$temporary" || { fail "could not create exclusive journal staging file"; return 1; }
   if ! jq -n \
     --arg phase "$phase" --arg state "$state" --arg pid "$$" --arg target "$target_image" \
-    --arg current "$current_id" --arg current_image "$current_image_id" --arg rollback "$rollback_image" \
+    --arg current "$current_id" --arg current_project "$current_project" --arg current_image "$current_image_id" --arg rollback "$rollback_image" \
     --arg candidate "$candidate_id" --arg data "$data_dir" --arg checkpoint "$checkpoint_dir" \
-    --arg archive "$archive_path" --arg env "${recovery_env_file:-$env_file_pin}" --arg env_hash "$env_hash" \
-    --arg compose "${recovery_compose_file:-$compose_file_pin}" --arg compose_hash "$compose_hash" \
+    --arg archive "$archive_path" --arg env "$env_file" --arg env_hash "$env_hash" \
+    --arg recovery_env_file "$recovery_env_file" \
+    --arg compose "$compose_file" --arg compose_hash "$compose_hash" \
     --arg rollback_definition "${recovery_rollback_file:-$rollback_definition}" \
     --arg snapshot "${recovery_snapshot_file:-$compose_snapshot}" --arg snapshot_hash "$compose_snapshot_hash" \
     --arg runtime "${recovery_runtime_file:-$current_runtime_contract_file}" --arg runtime_hash "$current_runtime_contract_hash" \
     --arg secret_contract "${recovery_secret_file:-$secret_contract_file}" --arg secret_hash "$secret_contract_hash" \
     --arg data_device "$data_dir_device" --arg data_inode "$data_dir_inode" --arg data_nlink "$data_dir_nlink" \
     --arg checkpoint_device "$checkpoint_root_device" --arg checkpoint_inode "$checkpoint_root_inode" --arg checkpoint_nlink "$checkpoint_root_nlink" \
+    --arg checkpoint_dir_device "$checkpoint_dir_device" --arg checkpoint_dir_inode "$checkpoint_dir_inode" --arg checkpoint_dir_nlink "$checkpoint_dir_nlink" \
     --arg env_device "$env_device" --arg env_inode "$env_inode" --arg env_nlink "$env_nlink" \
+    --arg env_pin "$env_file_pin" --arg env_pin_device "$env_pin_device" --arg env_pin_inode "$env_pin_inode" --arg env_pin_nlink "$env_pin_nlink" --arg env_pin_hash "$env_pin_hash" \
+    --arg recovery_env_device "$recovery_env_device" --arg recovery_env_inode "$recovery_env_inode" --arg recovery_env_nlink "$recovery_env_nlink" --arg recovery_env_hash "$recovery_env_hash" \
     --arg attestation "$attestation_file" --arg attestation_hash "$attestation_hash" \
     --arg network "$network_name" --arg ip "$network_ip" \
     --arg recovery_bundle "$recovery_bundle_dir" --arg recovery_device "$recovery_bundle_device" \
     --arg recovery_inode "$recovery_bundle_inode" --arg recovery_nlink "$recovery_bundle_nlink" \
     --arg recovery_manifest "$recovery_manifest_file" --arg recovery_manifest_hash "$recovery_manifest_hash" \
     --arg recovery_manifest_device "$recovery_manifest_device" --arg recovery_manifest_inode "$recovery_manifest_inode" --arg recovery_manifest_nlink "$recovery_manifest_nlink" \
+    --arg docker_socket "$docker_socket_path" --arg docker_socket_owner "$docker_socket_owner" --arg docker_socket_group "$docker_socket_group" --arg docker_socket_mode "$docker_socket_mode" \
+    --arg docker_socket_device "$docker_socket_device" --arg docker_socket_inode "$docker_socket_inode" --arg docker_socket_nlink "$docker_socket_nlink" \
     --arg archive_device "$archive_device" --arg archive_inode "$archive_inode" --arg archive_nlink "$archive_nlink" --arg archive_hash "$archive_hash" \
     --arg checksum_device "$checksum_device" --arg checksum_inode "$checksum_inode" --arg checksum_nlink "$checksum_nlink" --arg checksum_hash "$checksum_hash" \
-    --arg capacity_reservation "$capacity_reservation" --arg capacity_reservation_kb "$capacity_reservation_kb" \
-    --arg capacity_device "$capacity_reservation_device" --arg capacity_inode "$capacity_reservation_inode" --arg capacity_nlink "$capacity_reservation_nlink" --arg capacity_hash "$capacity_reservation_hash" \
-    '{version:1,phase:$phase,state:$state,pid:($pid|tonumber),target_image:$target,current_id:$current,current_image_id:$current_image,rollback_image:$rollback,candidate_id:$candidate,data_dir:$data,checkpoint_dir:$checkpoint,archive_path:$archive,archive_identity:{device:$archive_device,inode:$archive_inode,nlink:$archive_nlink,sha256:$archive_hash},checksum_identity:{device:$checksum_device,inode:$checksum_inode,nlink:$checksum_nlink,sha256:$checksum_hash},capacity_reservation:$capacity_reservation,capacity_reservation_kb:($capacity_reservation_kb|tonumber?),capacity_reservation_identity:{device:$capacity_device,inode:$capacity_inode,nlink:$capacity_nlink,sha256:$capacity_hash},env_file:$env,env_hash:$env_hash,compose_file:$compose,compose_hash:$compose_hash,rollback_definition:$rollback_definition,compose_snapshot:$snapshot,compose_snapshot_hash:$snapshot_hash,runtime_contract_file:$runtime,runtime_contract_hash:$runtime_hash,secret_contract_file:$secret_contract,secret_contract_hash:$secret_hash,recovery_bundle:$recovery_bundle,recovery_bundle_identity:{device:$recovery_device,inode:$recovery_inode,nlink:$recovery_nlink},recovery_manifest:$recovery_manifest,recovery_manifest_hash:$recovery_manifest_hash,recovery_manifest_identity:{device:$recovery_manifest_device,inode:$recovery_manifest_inode,nlink:$recovery_manifest_nlink},data_identity:{device:$data_device,inode:$data_inode,nlink:$data_nlink},checkpoint_identity:{device:$checkpoint_device,inode:$checkpoint_inode,nlink:$checkpoint_nlink},env_identity:{device:$env_device,inode:$env_inode,nlink:$env_nlink},attestation_file:$attestation,attestation_hash:$attestation_hash,network:$network,network_ip:$ip}' \
+    --arg checkpoint_root "$checkpoint_root" \
+    --arg capacity_reservation "$capacity_reservation" --arg capacity_reservation_kb "$capacity_reservation_kb" --arg capacity_state "$capacity_reservation_released" \
+    --arg capacity_device "$capacity_reservation_device" --arg capacity_inode "$capacity_reservation_inode" --arg capacity_nlink "$capacity_reservation_nlink" --arg capacity_size "$capacity_reservation_size" \
+    '{version:1,phase:$phase,state:$state,pid:($pid|tonumber),target_image:$target,current_id:$current,current_project:$current_project,current_project_migration:($current_project != "omni-money"),current_image_id:$current_image,rollback_image:$rollback,candidate_id:$candidate,data_dir:$data,checkpoint_root:$checkpoint_root,checkpoint_root_identity:{device:$checkpoint_device,inode:$checkpoint_inode,nlink:$checkpoint_nlink},checkpoint_dir:$checkpoint,checkpoint_dir_identity:{device:$checkpoint_dir_device,inode:$checkpoint_dir_inode,nlink:$checkpoint_dir_nlink},archive_path:$archive,archive_identity:{device:$archive_device,inode:$archive_inode,nlink:$archive_nlink,sha256:$archive_hash},checksum_identity:{device:$checksum_device,inode:$checksum_inode,nlink:$checksum_nlink,sha256:$checksum_hash},capacity_reservation:$capacity_reservation,capacity_reservation_kb:($capacity_reservation_kb|tonumber?),capacity_reservation_state:$capacity_state,capacity_reservation_identity:{device:$capacity_device,inode:$capacity_inode,nlink:$capacity_nlink,size:($capacity_size|tonumber?)},env_file:$env,env_identity:{device:$env_device,inode:$env_inode,nlink:$env_nlink,sha256:$env_hash},env_pin_file:$env_pin,env_pin_identity:{device:$env_pin_device,inode:$env_pin_inode,nlink:$env_pin_nlink,sha256:$env_pin_hash},recovery_env_file:$recovery_env_file,recovery_env_identity:{device:$recovery_env_device,inode:$recovery_env_inode,nlink:$recovery_env_nlink,sha256:$recovery_env_hash},compose_file:$compose,compose_hash:$compose_hash,rollback_definition:$rollback_definition,compose_snapshot:$snapshot,compose_snapshot_hash:$snapshot_hash,runtime_contract_file:$runtime,runtime_contract_hash:$runtime_hash,secret_contract_file:$secret_contract,secret_contract_hash:$secret_hash,recovery_bundle:$recovery_bundle,recovery_bundle_identity:{device:$recovery_device,inode:$recovery_inode,nlink:$recovery_nlink},recovery_manifest:$recovery_manifest,recovery_manifest_hash:$recovery_manifest_hash,recovery_manifest_identity:{device:$recovery_manifest_device,inode:$recovery_manifest_inode,nlink:$recovery_manifest_nlink},data_identity:{device:$data_device,inode:$data_inode,nlink:$data_nlink},docker_socket:$docker_socket,docker_socket_identity:{owner:$docker_socket_owner,group:$docker_socket_group,mode:$docker_socket_mode,device:$docker_socket_device,inode:$docker_socket_inode,nlink:$docker_socket_nlink,type:"socket"},attestation_file:$attestation,attestation_hash:$attestation_hash,network:$network,network_ip:$ip}' \
     > "$temporary"; then
     rm -f -- "$temporary"
     return 1
@@ -316,7 +427,6 @@ write_journal() {
   validate_root_owned_file "$checkpoint_root_journal" "durable update journal" || return 1
   fsync_path "$checkpoint_root_journal" || return 1
   fsync_directory "$checkpoint_root" || return 1
-  checkpoint_journal_phase="$phase"
 }
 
 remove_journal() {
@@ -356,6 +466,12 @@ prepare_recovery_bundle() {
     chown 0:0 "$name" || return 1
     validate_root_owned_file "$name" "recovery bundle file" || return 1
     fsync_path "$name" || return 1
+    if [ "$name" = "$recovery_env_file" ]; then
+      recovery_env_device="$(stat_device "$name")"
+      recovery_env_inode="$(stat_inode "$name")"
+      recovery_env_nlink="$(stat_nlink "$name")"
+      recovery_env_hash="$(sha256_file "$name")"
+    fi
   done
   recovery_manifest_file="$recovery_bundle_dir/manifest"
   create_exclusive_file "$recovery_manifest_file" || return 1
@@ -647,39 +763,185 @@ clear_compose_environment() {
   unset OMNI_CPU_LIMIT OMNI_MEMORY_LIMIT OMNI_PIDS_LIMIT OMNI_LOG_MAX_SIZE OMNI_LOG_MAX_FILES
   unset OMNI_TMPFS_SIZE OMNI_MONEY_IP OMNI_PANGOLIN_NETWORK OMNI_PANGOLIN_SUBNET
   unset OMNI_UPDATE_ENV_FILE OMNI_UPDATE_CHECKPOINT_DIR
+  # These values are all Compose interpolations or application startup
+  # inputs. They must come exclusively from the pinned env file, never from
+  # the updater's ambient shell (including proxy/passkey/session policy).
+  unset AUTH_KDF_CONCURRENCY SESSION_MAX_AGE_HOURS SESSION_IDLE_TIMEOUT_MINUTES
+  unset SESSION_REAUTH_MAX_AGE_MINUTES SESSION_MAX_CONCURRENT TRUSTED_PROXIES
+  unset HTTPS_REDIRECT_HOST PASSKEY_RP_ID PASSKEY_ORIGINS ALLOWED_HOSTS
+  unset CORS_ALLOWED_ORIGINS CONTROL_DB_PATH CONTROL_DB_ENCRYPTION_KEY_FILE
+  unset VAULT_ROOT TMPDIR SQLITE_TMPDIR DATA_AT_REST_MODE
+  unset DATA_AT_REST_ATTESTATION_FILE HOST_IP PORT FORCE_HTTPS ALLOW_INSECURE_HTTP
+  unset DOCKER_CONFIG DOCKER_CLI_PLUGIN_EXTRA_DIRS DOCKER_CLI_EXPERIMENTAL
 }
 
 validate_local_docker() {
-  local context endpoint
+  local context endpoint canonical_socket
   [ -z "${DOCKER_HOST+x}" ] || { fail "DOCKER_HOST must be unset; remote Docker endpoints are not allowed"; return 1; }
   [ -z "${DOCKER_TLS_VERIFY+x}" ] || { fail "DOCKER_TLS_VERIFY must be unset for the local daemon contract"; return 1; }
   [ -z "${DOCKER_CERT_PATH+x}" ] || { fail "DOCKER_CERT_PATH must be unset for the local daemon contract"; return 1; }
+  [ -z "${DOCKER_CONFIG+x}" ] || { fail "DOCKER_CONFIG must be unset; the updater uses the trusted local Docker configuration"; return 1; }
+  [ -z "${DOCKER_CLI_PLUGIN_EXTRA_DIRS+x}" ] || { fail "Docker CLI plugin search paths must be unset"; return 1; }
+  [ -z "${DOCKER_CLI_EXPERIMENTAL+x}" ] || { fail "Docker CLI experimental/plugin configuration must be unset"; return 1; }
   if [ -n "${DOCKER_CONTEXT:-}" ] && [ "${DOCKER_CONTEXT}" != default ]; then
     fail "DOCKER_CONTEXT must select the local default context"
     return 1
   fi
-  context="$(docker context show 2>/dev/null)" || { fail "Docker context could not be inspected"; return 1; }
+  context="$("$docker_path" context show 2>/dev/null)" || { fail "Docker context could not be inspected"; return 1; }
   [ "$context" = default ] || { fail "Docker context is not the local default context"; return 1; }
-  endpoint="$(docker context inspect default --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null)" || {
+  endpoint="$("$docker_path" context inspect default --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null)" || {
     fail "Docker default context endpoint could not be inspected"
     return 1
   }
-  case "$endpoint" in
-    unix://*) ;;
-    *) fail "Docker default context must use a local Unix socket"; return 1 ;;
-  esac
+  [ "$endpoint" = "unix:///var/run/docker.sock" ] || {
+    fail "Docker default context must use the canonical local Unix socket"
+    return 1
+  }
+  # The socket is the authority boundary for Docker and must be on this host.
+  # The mock suite supplies a local context but not a real daemon socket.
+  if [ "$safe_update_test_mode" -eq 0 ] && [ "$(uname -s)" = Linux ]; then
+    canonical_socket="$(readlink -f -- /var/run/docker.sock)" || {
+      fail "canonical Docker socket could not be resolved"
+      return 1
+    }
+    [ "$canonical_socket" = /run/docker.sock ] || { fail "Docker socket canonical path must be /run/docker.sock"; return 1; }
+    [ -S "$canonical_socket" ] && [ ! -L "$canonical_socket" ] || { fail "canonical Docker socket is missing or is a symbolic link"; return 1; }
+    docker_socket_path="$canonical_socket"
+    docker_socket_owner="$(stat_owner "$docker_socket_path")" || return 1
+    docker_socket_group="$(stat_group "$docker_socket_path")" || return 1
+    docker_socket_mode="$(stat_mode "$docker_socket_path")" || return 1
+    [ "$docker_socket_owner" = 0 ] || { fail "Docker socket must be root-owned"; return 1; }
+    case "$docker_socket_mode" in 600|660) ;; *) fail "Docker socket mode must be 0600 or 0660"; return 1 ;; esac
+    docker_socket_device="$(stat_device "$docker_socket_path")" || return 1
+    docker_socket_inode="$(stat_inode "$docker_socket_path")" || return 1
+    docker_socket_nlink="$(stat_nlink "$docker_socket_path")" || return 1
+    [ "$docker_socket_nlink" = 1 ] || { fail "Docker socket must have exactly one link"; return 1; }
+    [ -n "$docker_socket_device" ] && [ -n "$docker_socket_inode" ] || return 1
+  else
+    docker_socket_path=/run/docker.sock
+    docker_socket_owner=0; docker_socket_group=0; docker_socket_mode=660
+    docker_socket_device=mock; docker_socket_inode=mock; docker_socket_nlink=1
+  fi
+  docker_socket_ready=1
   unset DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH
+}
+
+validate_pinned_docker_socket() {
+  [ "$docker_socket_ready" -eq 1 ] || return 0
+  [ "$safe_update_test_mode" -eq 1 ] && return 0
+  [ "$docker_socket_path" = /run/docker.sock ] && [ -S "$docker_socket_path" ] && [ ! -L "$docker_socket_path" ] || return 1
+  [ "$(stat_owner "$docker_socket_path")" = "$docker_socket_owner" ] || return 1
+  [ "$(stat_group "$docker_socket_path")" = "$docker_socket_group" ] || return 1
+  [ "$(stat_mode "$docker_socket_path")" = "$docker_socket_mode" ] || return 1
+  [ "$(stat_device "$docker_socket_path")" = "$docker_socket_device" ] || return 1
+  [ "$(stat_inode "$docker_socket_path")" = "$docker_socket_inode" ] || return 1
+  [ "$(stat_nlink "$docker_socket_path")" = "$docker_socket_nlink" ] || return 1
+}
+
+docker_cli() {
+  if [ "$safe_update_test_mode" -eq 0 ]; then
+    validate_pinned_docker_socket || { fail "pinned Docker socket identity changed"; return 1; }
+    validate_pinned_file "$docker_path" "Docker CLI executable" "$docker_device" "$docker_inode" "$docker_nlink" "$docker_hash" root || return 1
+  fi
+  "$docker_path" "$@"
+}
+
+validate_trusted_toolchain() {
+  local command_name path canonical i
+  tool_names=(); tool_paths=(); tool_devices=(); tool_inodes=(); tool_nlinks=(); tool_hashes=()
+  for command_name in bash docker jq sha256sum tar stat awk sed grep mktemp du df chown find findmnt uname id dirname pwd cp chmod mkdir rmdir rm mv date sleep sync fallocate readlink tr; do
+    if declare -F "$command_name" >/dev/null 2>&1; then
+      if [ "$safe_update_test_mode" -eq 1 ] && [ -x "$MOCK_BIN/$command_name" ]; then
+        path="$MOCK_BIN/$command_name"
+      elif [ "$safe_update_test_mode" -eq 1 ]; then
+        path="$(type -P "$command_name" 2>/dev/null)" || return 1
+      else
+        fail "shell function shadows trusted command: $command_name"
+        return 1
+      fi
+    else
+      path="$(type -P "$command_name" 2>/dev/null)" || {
+        fail "required command is missing: $command_name"
+        return 1
+      }
+    fi
+    canonical="$(readlink -f -- "$path" 2>/dev/null || printf '%s' "$path")"
+    path="$canonical"
+    [ -n "$path" ] || {
+      fail "required command is missing: $command_name"
+      return 1
+    }
+    case "$path" in
+      /bin/*|/sbin/*|/usr/bin/*|/usr/sbin/*) ;;
+      "$MOCK_BIN"/*) [ "$safe_update_test_mode" -eq 1 ] || return 1 ;;
+      *) fail "command is outside the trusted system path: $command_name ($path)"; return 1 ;;
+    esac
+    validate_existing_file "$path" "trusted $command_name executable" root || return 1
+    tool_names+=("$command_name"); tool_paths+=("$path")
+    tool_devices+=("$(stat_device "$path")"); tool_inodes+=("$(stat_inode "$path")")
+    tool_nlinks+=("$(stat_nlink "$path")"); tool_hashes+=("$(sha256_file "$path")")
+    if [ "$command_name" = docker ]; then
+      docker_path="$path"; i=$((${#tool_names[@]} - 1))
+      docker_device="${tool_devices[$i]}"; docker_inode="${tool_inodes[$i]}"
+      docker_nlink="${tool_nlinks[$i]}"; docker_hash="${tool_hashes[$i]}"
+    fi
+  done
+}
+
+validate_pinned_toolchain() {
+  local i
+  for i in "${!tool_names[@]}"; do
+    validate_pinned_file "${tool_paths[$i]}" "trusted ${tool_names[$i]} executable" \
+      "${tool_devices[$i]}" "${tool_inodes[$i]}" "${tool_nlinks[$i]}" "${tool_hashes[$i]}" root || return 1
+  done
+}
+
+configure_compose_plugin_boundary() {
+  local candidate canonical
+  docker_config_dir="$pin_dir/docker-config"
+  mkdir -m 0700 -- "$docker_config_dir" || return 1
+  chown 0:0 "$docker_config_dir" || return 1
+  validate_existing_directory "$docker_config_dir" "private Docker configuration directory" root || return 1
+  docker_config_device="$(stat_device "$docker_config_dir")"
+  docker_config_inode="$(stat_inode "$docker_config_dir")"
+  docker_config_nlink="$(stat_nlink "$docker_config_dir")"
+  if [ "$safe_update_test_mode" -eq 1 ]; then
+    compose_plugin_path="$MOCK_BIN/docker"
+  else
+    for candidate in \
+      /usr/local/lib/docker/cli-plugins/docker-compose \
+      /usr/local/libexec/docker/cli-plugins/docker-compose \
+      /usr/lib/docker/cli-plugins/docker-compose \
+      /usr/libexec/docker/cli-plugins/docker-compose; do
+      [ -x "$candidate" ] || continue
+      canonical="$(readlink -f -- "$candidate")" || return 1
+      case "$canonical" in /usr/lib/*|/usr/libexec/*|/usr/local/lib/*|/usr/local/libexec/*) ;; *) continue ;; esac
+      compose_plugin_path="$canonical"
+      break
+    done
+    [ -n "$compose_plugin_path" ] || { fail "Docker Compose plugin is not installed in a trusted system directory"; return 1; }
+  fi
+  validate_existing_file "$compose_plugin_path" "Docker Compose plugin" root || return 1
+  compose_plugin_device="$(stat_device "$compose_plugin_path")"; compose_plugin_inode="$(stat_inode "$compose_plugin_path")"
+  compose_plugin_nlink="$(stat_nlink "$compose_plugin_path")"; compose_plugin_hash="$(sha256_file "$compose_plugin_path")"
+  DOCKER_CONFIG="$docker_config_dir"
+  DOCKER_CLI_PLUGIN_EXTRA_DIRS="$(dirname -- "$compose_plugin_path")"
+  export DOCKER_CONFIG DOCKER_CLI_PLUGIN_EXTRA_DIRS
+}
+
+validate_compose_plugin_boundary() {
+  [ "$safe_update_test_mode" -eq 1 ] && return 0
+  validate_pinned_directory "$docker_config_dir" "private Docker configuration directory" \
+    "$docker_config_device" "$docker_config_inode" "$docker_config_nlink" root || return 1
+  validate_pinned_file "$compose_plugin_path" "Docker Compose plugin" "$compose_plugin_device" \
+    "$compose_plugin_inode" "$compose_plugin_nlink" "$compose_plugin_hash" root
 }
 
 compose() {
   # The selected env file is always the immutable private pin. Explicit
   # project/file arguments make COMPOSE_* ambient configuration irrelevant.
-  env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
-    -u COMPOSE_PARALLEL_LIMIT -u COMPOSE_ENV_FILES -u COMPOSE_PATH_SEPARATOR \
-    -u COMPOSE_IGNORE_ORPHANS -u COMPOSE_REMOVE_ORPHANS -u COMPOSE_SSH_AUTH_SOCK \
-    -u COMPOSE_MENU -u COMPOSE_EXPERIMENTAL -u COMPOSE_ANSI \
-    -u COMPOSE_STATUS_STDOUT -u COMPOSE_PROGRESS -u COMPOSE_DRY_RUN \
-    -u COMPOSE_SERVICE -u COMPOSE_DISABLE_ENV_FILE docker compose --env-file "$env_file_pin" \
+  validate_compose_plugin_boundary || return 1
+  docker_cli compose --env-file "$env_file_pin" \
     --project-directory "$project_dir" --project-name "$project_name" -f "$compose_definition" "$@"
 }
 
@@ -708,13 +970,61 @@ compose_single_id() {
   read_single_compose_id "$output_file" "$label"
 }
 
-container_state() { docker inspect --format '{{.State.Status}}' "$1"; }
-container_health() { docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$1" 2>/dev/null || true; }
-container_image_id() { docker inspect --format '{{.Image}}' "$1"; }
-container_config_user() { docker inspect --format '{{.Config.User}}' "$1"; }
-container_ports() { docker inspect --format '{{json .HostConfig.PortBindings}}' "$1"; }
-container_mounts() { docker inspect --format '{{json .Mounts}}' "$1"; }
-container_networks() { docker inspect --format '{{json .NetworkSettings.Networks}}' "$1"; }
+discover_legacy_current() {
+  local output_file="$pin_dir/legacy-ps.$$.txt" id count=0 only="" legacy_project legacy_service legacy_name
+  legacy_project_name="$(printf '%s' "${project_dir##*/}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]//g; s/^[^a-z0-9]+//')"
+  [ -n "$legacy_project_name" ] && [ "$legacy_project_name" != "$project_name" ] || {
+    fail "directory-derived legacy Compose project name is not distinct and valid"
+    return 1
+  }
+  create_exclusive_file "$output_file" || return 1
+  if ! docker_cli ps -aq --filter "name=^/${service_name}$" > "$output_file"; then
+    rm -f -- "$output_file"
+    return 1
+  fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    count=$((count + 1)); only="$id"
+  done < "$output_file"
+  rm -f -- "$output_file"
+  [ "$count" -eq 1 ] || {
+    fail "fixed Compose project has no current container and legacy discovery was not unique"
+    return 1
+  }
+  legacy_project="$(docker_cli inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$only")" || return 1
+  legacy_service="$(docker_cli inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$only")" || return 1
+  legacy_name="$(docker_cli inspect --format '{{.Name}}' "$only")" || return 1
+  [ "$legacy_project" = "$legacy_project_name" ] && [ "$legacy_service" = "$service_name" ] && [ "$legacy_name" = "/$service_name" ] || {
+    fail "legacy container identity is not the verified directory-derived Compose project"
+    return 1
+  }
+  current_project="$legacy_project"
+  legacy_current=1
+  # Do not return the ID through command substitution: that would execute this
+  # function in a subshell and silently discard the migration state.  Keep the
+  # verified ID and project binding in the parent updater state machine.
+  current_id="$only"
+}
+
+remove_legacy_current() {
+  [ "$legacy_current" -eq 1 ] || return 0
+  current_removed_expected=1
+  state="legacy-migration-remove"
+  write_journal legacy-migration-remove || return 1
+  docker_cli rm "$current_id" >/dev/null || return 1
+  if container_state "$current_id" >/dev/null 2>&1; then
+    fail "verified legacy container remained after migration removal"
+    return 1
+  fi
+}
+
+container_state() { docker_cli inspect --format '{{.State.Status}}' "$1"; }
+container_health() { docker_cli inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$1" 2>/dev/null || true; }
+container_image_id() { docker_cli inspect --format '{{.Image}}' "$1"; }
+container_config_user() { docker_cli inspect --format '{{.Config.User}}' "$1"; }
+container_ports() { docker_cli inspect --format '{{json .HostConfig.PortBindings}}' "$1"; }
+container_mounts() { docker_cli inspect --format '{{json .Mounts}}' "$1"; }
+container_networks() { docker_cli inspect --format '{{json .NetworkSettings.Networks}}' "$1"; }
 
 read_secret_sources() {
   local definitions source target path
@@ -777,7 +1087,7 @@ write_runtime_contract() {
   local id="$1" output="$2" raw env_json operator_environment item name value digest
   raw="$pin_dir/runtime.$$.${id}.raw.json"
   create_exclusive_file "$raw" || return 1
-  if ! docker inspect --format '{{json .}}' "$id" > "$raw"; then
+  if ! docker_cli inspect --format '{{json .}}' "$id" > "$raw"; then
     rm -f -- "$raw"
     return 1
   fi
@@ -850,7 +1160,6 @@ write_runtime_contract() {
   fi
   rm -f -- "$raw" || return 1
   validate_existing_file "$output" "runtime contract" || return 1
-  runtime_contract_file="$output"
   runtime_contract_hash="$(sha256_file "$output")" || return 1
 }
 
@@ -866,9 +1175,10 @@ validate_runtime_contract() {
 }
 
 validate_runtime_safety() {
-  local id="$1" label="$2" raw="$pin_dir/runtime-safety.$$.${id}.json"
+  local id="$1" label="$2" raw
+  raw="$pin_dir/runtime-safety.$$.${id}.json"
   create_exclusive_file "$raw" || return 1
-  if ! docker inspect --format '{{json .}}' "$id" > "$raw"; then
+  if ! docker_cli inspect --format '{{json .}}' "$id" > "$raw"; then
     rm -f -- "$raw"
     return 1
   fi
@@ -893,8 +1203,80 @@ validate_runtime_safety() {
   rm -f -- "$raw" || return 1
 }
 
+validate_desired_environment() {
+  local id="$1" label="$2" expected_file="$pin_dir/environment-expected.$$.json" actual_file="$pin_dir/environment-actual.$$.json"
+  create_exclusive_file "$expected_file" || return 1
+  create_exclusive_file "$actual_file" || { rm -f -- "$expected_file"; return 1; }
+  if ! jq -c '
+    .services["omni-money"].environment // {} |
+    if type == "object" then to_entries | map({name:.key,value:(.value|tostring)})
+    elif type == "array" then map(capture("^(?<name>[^=]*)(?:=(?<value>.*))?$") | .value = (.value // ""))
+    else [] end | sort_by(.name)
+  ' "$compose_snapshot" > "$expected_file"; then
+    rm -f -- "$expected_file" "$actual_file"; return 1
+  fi
+  if ! docker_cli inspect --format '{{json .Config.Env}}' "$id" > "$actual_file"; then
+    rm -f -- "$expected_file" "$actual_file"; return 1
+  fi
+  if ! jq -n -e --slurpfile expected "$expected_file" --slurpfile actual "$actual_file" '
+    ($expected[0] // [] | sort_by(.name)) as $want |
+    (($actual[0] // []) | map(select(type == "string") |
+      capture("^(?<name>[^=]*)(?:=(?<value>.*))?$") | .value = (.value // ""))) as $got |
+    ($want | map(.name)) as $names |
+    ($got | map(select(.name as $n | ($names | index($n) != null))) | sort_by(.name)) as $selected |
+    (($want | map(.name) | length) == ($want | map(.name) | unique | length)) and
+    (($selected | map(.name) | length) == ($want | length)) and
+    (($selected | map(.name) | length) == ($selected | map(.name) | unique | length)) and
+    ($selected == $want)
+  ' >/dev/null; then
+    rm -f -- "$expected_file" "$actual_file"
+    fail "$label runtime environment differs from the resolved Compose environment"
+    return 1
+  fi
+  rm -f -- "$expected_file" "$actual_file"
+}
+
+validate_desired_host_config() {
+  local id="$1" label="$2" actual
+  actual="$pin_dir/host-config.$$.${id}.json"
+  create_exclusive_file "$actual" || return 1
+  if ! docker_cli inspect --format '{{json .HostConfig}}' "$id" > "$actual"; then
+    rm -f -- "$actual"; return 1
+  fi
+  if ! jq -n -e --slurpfile actual "$actual" --slurpfile desired "$compose_snapshot" '
+    def bytes:
+      if type == "number" then .
+      elif test("^[0-9]+$") then tonumber
+      else (ascii_downcase | capture("^(?<n>[0-9]+)(?<u>[kmgt])(?:i?b)?$") |
+        (.n|tonumber) * ({k:1024,m:1048576,g:1073741824,t:1099511627776}[.u])) end;
+    ($actual[0]) as $a | ($desired[0].services["omni-money"]) as $s |
+    ($desired[0].networks.pangolin_target.name) as $network |
+    (($s.restart // "no") as $restart |
+      ($a.RestartPolicy.Name // "no") == $restart and
+      (($a.RestartPolicy.MaximumRetryCount // 0) == 0)) and
+    (($a.NetworkMode // "") == $network) and
+    (($a.ReadonlyRootfs // false) == true) and (($a.Privileged // false) == false) and
+    (($a.Init // false) == false) and
+    (($a.CapDrop // [] | sort) == ($s.cap_drop // [] | sort)) and
+    (($a.CapAdd // [] | sort) == ($s.cap_add // [] | sort)) and
+    (($a.Devices // []) | length == 0) and (($a.PidMode // "") == "") and (($a.IpcMode // "") == "") and
+    (($a.NanoCpus // 0) == ((($s.cpus | tonumber) * 1000000000) | floor)) and
+    (($a.Memory // 0) == ($s.mem_limit | bytes)) and
+    (($a.PidsLimit // 0) == ($s.pids_limit | tonumber)) and
+    (($a.LogConfig.Type // "") == $s.logging.driver) and
+    (($a.LogConfig.Config["max-size"] // "" | tostring) == ($s.logging.options["max-size"] | tostring)) and
+    (($a.LogConfig.Config["max-file"] // "" | tostring) == ($s.logging.options["max-file"] | tostring)) and
+    (($a.SecurityOpt // [] | sort) == ($s.security_opt // [] | sort))
+  ' >/dev/null; then
+    rm -f -- "$actual"
+    fail "$label host runtime differs from the resolved Compose contract"
+    return 1
+  fi
+  rm -f -- "$actual"
+}
+
 validate_container_config() {
-  local id="$1" expected_image="$2" expected_state="$3" label="$4" ports mounts networks user readonly capdrop security
+  local id="$1" expected_image="$2" expected_state="$3" label="$4" ports mounts networks user readonly_root capdrop security
   [ "$(container_image_id "$id")" = "$expected_image" ] || { fail "$label image ID does not match the resolved image"; return 1; }
   [ "$(container_state "$id")" = "$expected_state" ] || { fail "$label must be in $expected_state state"; return 1; }
   ports="$(container_ports "$id")"
@@ -912,19 +1294,21 @@ validate_container_config() {
   jq -e --arg network "$network_name" '((keys | length) == 1) and (has($network))' <<< "$networks" >/dev/null || { fail "$label has an unexpected network set"; return 1; }
   user="$(container_config_user "$id")"
   case "$user" in ''|0|root|0:0|root:root) fail "$label must not be configured as root"; return 1 ;; esac
-  readonly="$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$id")"
-  [ "$readonly" = "true" ] || { fail "$label must use a read-only root filesystem"; return 1; }
-  capdrop="$(docker inspect --format '{{json .HostConfig.CapDrop}}' "$id")"
+  readonly_root="$(docker_cli inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$id")"
+  [ "$readonly_root" = "true" ] || { fail "$label must use a read-only root filesystem"; return 1; }
+  capdrop="$(docker_cli inspect --format '{{json .HostConfig.CapDrop}}' "$id")"
   jq -e 'index("ALL") != null' <<< "$capdrop" >/dev/null || { fail "$label must drop all capabilities"; return 1; }
-  security="$(docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$id")"
+  security="$(docker_cli inspect --format '{{json .HostConfig.SecurityOpt}}' "$id")"
   jq -e 'index("no-new-privileges:true") != null' <<< "$security" >/dev/null || { fail "$label must set no-new-privileges"; return 1; }
   validate_runtime_safety "$id" "$label" || return 1
+  validate_desired_environment "$id" "$label" || return 1
+  validate_desired_host_config "$id" "$label" || return 1
 }
 
 validate_container_user() {
   local id="$1" label="$2" uid gid
-  uid="$(docker exec "$id" id -u)" || { fail "$label UID could not be inspected"; return 1; }
-  gid="$(docker exec "$id" id -g)" || { fail "$label GID could not be inspected"; return 1; }
+  uid="$(docker_cli exec "$id" id -u)" || { fail "$label UID could not be inspected"; return 1; }
+  gid="$(docker_cli exec "$id" id -g)" || { fail "$label GID could not be inspected"; return 1; }
   [ "$uid" = "$data_uid" ] && [ "$gid" = "$data_gid" ] || { fail "$label must run as ${data_uid}:${data_gid}, got ${uid}:${gid}"; return 1; }
 }
 
@@ -932,7 +1316,7 @@ validate_single_network_ip() {
   local id="$1" networks
   networks="$(container_networks "$id")"
   jq -e --arg network "$network_name" '((keys | length) == 1) and (has($network))' <<< "$networks" >/dev/null || return 1
-  docker inspect --format "{{with index .NetworkSettings.Networks \"$network_name\"}}{{.IPAddress}}{{end}}" "$id"
+  docker_cli inspect --format "{{with index .NetworkSettings.Networks \"$network_name\"}}{{.IPAddress}}{{end}}" "$id"
 }
 
 disconnect_all_networks() {
@@ -940,7 +1324,7 @@ disconnect_all_networks() {
   networks="$(container_networks "$id")"
   while IFS= read -r network; do
     [ -n "$network" ] || continue
-    if ! docker network disconnect "$network" "$id" >/dev/null; then
+    if ! docker_cli network disconnect "$network" "$id" >/dev/null; then
       fail "could not disconnect $id from network $network"
       return 1
     fi
@@ -1018,7 +1402,7 @@ stop_container_safely() {
   # timeout or interrupted client). Retry once, then inspect the pinned ID;
   # rollback must not proceed while either the old or candidate container is
   # still running.
-  docker stop --time 30 "$id" >/dev/null 2>&1 || true
+  docker_cli stop --time 30 "$id" >/dev/null 2>&1 || true
   if ! state_value="$(container_state "$id" 2>/dev/null)"; then
     if [ "$label" = current ] && [ "$current_removed_expected" -eq 1 ]; then
       replacement_compose_state_is_safe || {
@@ -1031,7 +1415,7 @@ stop_container_safely() {
     return 1
   fi
   if [ "$state_value" = running ]; then
-    docker stop --time 30 "$id" >/dev/null 2>&1 || true
+    docker_cli stop --time 30 "$id" >/dev/null 2>&1 || true
     state_value="$(container_state "$id" 2>/dev/null || true)"
   fi
   case "$state_value" in
@@ -1113,7 +1497,7 @@ validate_tar_members() {
   }
   while IFS= read -r member; do
     case "$member" in
-      ''|/*|../*|*/../*|*/..|*\\*|*$'\n'*|*$'\r'*|*$'\t'*) rm -f -- "$members" "$details"; return 1 ;;
+      ''|/*|../*|*/../*|*/..|*\\*|*$'\n'*|*$'\r'*|*$'\t'*) rm -f -- "$members" "$details"; fail "archive contains an unsafe member name"; return 1 ;;
     esac
   done < "$members"
   if ! tar -tvf "$archive" > "$details"; then
@@ -1121,9 +1505,9 @@ validate_tar_members() {
     return 1
   fi
   while IFS= read -r line; do
-    case "$line" in *\\*|*$'\n'*|*$'\r'*|*$'\t'*) rm -f -- "$members" "$details"; return 1 ;; esac
+    case "$line" in *\\*|*$'\n'*|*$'\r'*|*$'\t'*) rm -f -- "$members" "$details"; fail "archive contains an unsafe detailed member name"; return 1 ;; esac
     type="${line:0:1}"
-    case "$type" in -|d) ;; *) rm -f -- "$members" "$details"; return 1 ;; esac
+    case "$type" in -|d) ;; *) rm -f -- "$members" "$details"; fail "archive contains unsupported member type: $type"; return 1 ;; esac
   done < "$details"
   rm -f -- "$members" "$details"
 }
@@ -1132,7 +1516,7 @@ validate_source_tree() {
   local root="$1" label="$2" entry tree owner links
   tree="$pin_dir/source-tree.$$.nul"
   create_exclusive_file "$tree" || return 1
-  if ! find -P "$root" -mindepth 1 -print0 > "$tree"; then
+  if ! find -P "$root" -xdev -mindepth 1 -print0 > "$tree"; then
     rm -f -- "$tree"
     return 1
   fi
@@ -1142,6 +1526,48 @@ validate_source_tree() {
     validate_data_entry "$entry" "$label entry" || { rm -f -- "$tree"; return 1; }
   done < "$tree"
   rm -f -- "$tree"
+  validate_data_tree_devices "$root" "$label" "$(stat_device "$root")" || return 1
+}
+
+validate_data_tree_devices() {
+  local root="$1" label="$2" expected_device="$3" entry tree mounts mount_list
+  tree="$pin_dir/source-devices.$$.nul"
+  create_exclusive_file "$tree" || return 1
+  if ! find -P "$root" -xdev -print0 > "$tree"; then
+    rm -f -- "$tree"; return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    [ "$(stat_device "$entry")" = "$expected_device" ] || {
+      rm -f -- "$tree"
+      fail "$label crosses the attested encrypted filesystem boundary: $entry"
+      return 1
+    }
+  done < "$tree"
+  rm -f -- "$tree"
+  # find -xdev is not sufficient by itself (a mount can share a device number
+  # with its parent), so use findmnt's mount table to reject every nested
+  # mount explicitly on production Linux hosts.
+  if [ "$safe_update_test_mode" -eq 0 ] && [ "$(uname -s)" = Linux ]; then
+    mounts="$pin_dir/source-mounts.$$.json"
+    create_exclusive_file "$mounts" || return 1
+    if ! findmnt --json --output TARGET > "$mounts"; then
+      rm -f -- "$mounts"; return 1
+    fi
+    mount_list="$pin_dir/source-mounts.$$.nul"
+    create_exclusive_file "$mount_list" || { rm -f -- "$mounts"; return 1; }
+    if ! jq -j '.filesystems[]?.target | . + "\u0000"' "$mounts" > "$mount_list"; then
+      rm -f -- "$mounts" "$mount_list"; return 1
+    fi
+    while IFS= read -r -d '' entry; do
+      [ -n "$entry" ] || continue
+      if [ "$entry" != "$root" ] && path_contains "$root" "$entry"; then
+        rm -f -- "$mounts" "$mount_list"
+        fail "$label contains a nested mount: $entry"
+        return 1
+      fi
+    done < "$mount_list"
+    rm -f -- "$mounts" "$mount_list"
+  fi
 }
 
 create_exclusive_file() {
@@ -1167,7 +1593,9 @@ restore_checkpoint() {
   validate_pinned_directory "$checkpoint_dir" "checkpoint directory" "$checkpoint_dir_device" "$checkpoint_dir_inode" "$checkpoint_dir_nlink" || return 1
   validate_pinned_file "$archive_path" "checkpoint archive" "$archive_device" "$archive_inode" "$archive_nlink" "$archive_hash" || return 1
   validate_pinned_file "$archive_path.sha256" "checkpoint checksum" "$checksum_device" "$checksum_inode" "$checksum_nlink" "$checksum_hash" || return 1
-  validate_pinned_file "$capacity_reservation" "rollback capacity reservation" "$capacity_reservation_device" "$capacity_reservation_inode" "$capacity_reservation_nlink" "$capacity_reservation_hash" || return 1
+  if [ "$capacity_reservation_released" -eq 0 ]; then
+    validate_capacity_reservation || return 1
+  fi
   validate_data_directory "$data_dir" "live data directory" || return 1
   [ ! -e "$failed_data" ] && [ ! -L "$failed_data" ] || return 1
   [ ! -e "$incomplete_restore" ] && [ ! -L "$incomplete_restore" ] || return 1
@@ -1183,7 +1611,8 @@ restore_checkpoint() {
   validate_data_directory "$data_dir" "restore data directory" || return 1
   fsync_directory "$(dirname -- "$data_dir")" || return 1
   write_journal restore-empty || return 1
-  if ! tar --numeric-owner --no-overwrite-dir -xpf "$archive_path" -C "$data_dir"; then
+  release_capacity_reservation || return 1
+  if ! tar --one-file-system --numeric-owner --no-overwrite-dir -xpf "$archive_path" -C "$data_dir"; then
     # Never silently ignore either half of the rollback move. If extraction
     # fails, park the incomplete tree only when that move succeeds, then put
     # the original tree back. A failed move leaves the original path (or the
@@ -1282,14 +1711,27 @@ cleanup_private_state() {
   fi
 }
 
+rollback_journal_or_stop() {
+  if ! write_journal "$1"; then
+    printf 'safe-update: durable rollback journal failed at phase %s; service remains stopped\n' "$1" >&2
+    cleanup_private_state
+    exit "${rollback_original_status:-1}"
+  fi
+}
+
 rollback_update() {
-  local original_status="$1" old_id="" old_image_id="${current_image_id:-}"
+  local original_status="$1" old_id="" old_image_id="${current_image_id:-}" legacy_state="" reuse_legacy=0
+  rollback_original_status="$original_status"
   trap - EXIT INT TERM
   rollback_running=1
   state="rolling-back"
   set +e
   printf 'safe-update: candidate failed; restoring the pre-update checkpoint and previous image\n' >&2
-  write_journal rollback-start || true
+  rollback_journal_or_stop rollback-start
+  if ! validate_pinned_toolchain || ! validate_pinned_docker_socket; then
+    printf 'safe-update: trusted toolchain or Docker socket changed; service remains stopped\n' >&2
+    cleanup_private_state; exit "$original_status"
+  fi
   if [ -n "$candidate_id" ] && ! stop_container_safely "$candidate_id" candidate; then
     printf 'safe-update: candidate could not be safely stopped; service remains stopped\n' >&2
     cleanup_private_state; exit "$original_status"
@@ -1299,7 +1741,7 @@ rollback_update() {
     cleanup_private_state; exit "$original_status"
   fi
   state="rollback-stopped"
-  write_journal rollback-stopped || true
+  rollback_journal_or_stop rollback-stopped
   if ! validate_pinned_directory "$project_dir" "Compose project directory" "$project_dir_device" "$project_dir_inode" "$project_dir_nlink" ||
      ! validate_pinned_file "$attestation_file" "update attestation" "$attestation_device" "$attestation_inode" "$attestation_nlink" "$attestation_hash" root ||
      ! validate_pinned_file "$attestation_pin" "pinned update attestation" "$attestation_pin_device" "$attestation_pin_inode" "$attestation_pin_nlink" "$attestation_pin_hash" ||
@@ -1318,45 +1760,75 @@ rollback_update() {
     printf 'safe-update: automatic data restore failed; service remains stopped. Recovery artifacts: %s\n' "$checkpoint_dir" >&2
     cleanup_private_state; exit "$original_status"
   fi
+  # Even when failure happened before the archive became durable, never bind a
+  # recreated service to a replaced data path.
+  if { [ "$checkpoint_ready" -eq 0 ] && ! validate_pinned_directory "$data_dir" "live data directory before rollback start" \
+       "$data_dir_device" "$data_dir_inode" "$data_dir_nlink" data; } ||
+     ! validate_source_tree "$data_dir" "live data tree before rollback start"; then
+    printf 'safe-update: live data path identity changed; service remains stopped\n' >&2
+    cleanup_private_state; exit "$original_status"
+  fi
   state="restored"
-  write_journal data-restored || true
+  rollback_journal_or_stop data-restored
   if ! restore_original_env; then
     printf 'safe-update: pre-update env file could not be restored; service remains stopped\n' >&2
     cleanup_private_state; exit "$original_status"
   fi
   candidate_id=""
+  if [ "$legacy_current" -eq 1 ] && legacy_state="$(container_state "$current_id" 2>/dev/null)"; then
+    case "$legacy_state" in created|exited|dead) reuse_legacy=1 ;; *) reuse_legacy=0 ;; esac
+  fi
+  if [ "$reuse_legacy" -eq 1 ]; then
+    # A failure before the explicit migration removal can restart the exact
+    # attested legacy container.  This is safer than asking the fixed project
+    # to recreate a colliding container name.
+    validate_runtime_contract "$current_id" "legacy rollback container" || {
+      printf 'safe-update: retained legacy runtime no longer matches its captured contract; service remains stopped\n' >&2
+      cleanup_private_state; exit "$original_status"
+    }
+    rollback_journal_or_stop rollback-restart-legacy
+    old_id="$current_id"
+  fi
   if ! prepare_rollback_definition; then
     printf 'safe-update: rollback Compose snapshot could not be prepared. Service remains stopped\n' >&2
     cleanup_private_state; exit "$original_status"
   fi
   compose_definition="$rollback_definition"
-  write_journal rollback-create || true
-  if ! create_disconnected_container "$rollback_image" "$old_image_id" "rollback"; then
-    if [ -n "$candidate_id" ]; then stop_container_safely "$candidate_id" rollback >/dev/null 2>&1 || true; fi
-    printf 'safe-update: previous container could not be recreated. Checkpoint: %s\n' "$checkpoint_dir" >&2
-    cleanup_private_state; exit "$original_status"
+  if [ "$reuse_legacy" -eq 0 ]; then
+    rollback_journal_or_stop rollback-create
+    if ! create_disconnected_container "$rollback_image" "$old_image_id" "rollback"; then
+      if [ -n "$candidate_id" ]; then stop_container_safely "$candidate_id" rollback >/dev/null 2>&1 || true; fi
+      printf 'safe-update: previous container could not be recreated. Checkpoint: %s\n' "$checkpoint_dir" >&2
+      cleanup_private_state; exit "$original_status"
+    fi
+    old_id="$candidate_id"
+    state="rollback-isolated"
+    rollback_journal_or_stop rollback-isolated
   fi
-  state="rollback-isolated"
-  write_journal rollback-isolated || true
-  old_id="$candidate_id"
-  if ! docker start "$old_id" >/dev/null || ! validate_container_user "$old_id" "rollback container" || ! wait_for_health "$old_id"; then
+  if ! docker_cli start "$old_id" >/dev/null || ! validate_container_user "$old_id" "rollback container" || ! wait_for_health "$old_id"; then
     stop_container_safely "$old_id" rollback >/dev/null 2>&1 || true
     printf 'safe-update: previous image did not become healthy after data restore. Service remains isolated. Checkpoint: %s\n' "$checkpoint_dir" >&2
     cleanup_private_state; exit "$original_status"
   fi
   state="rollback-healthy"
-  write_journal rollback-healthy || true
-  if ! docker network connect --ip "$network_ip" "$network_name" "$old_id" >/dev/null; then
-    stop_container_safely "$old_id" rollback >/dev/null 2>&1 || true
-    printf 'safe-update: previous image is healthy but could not be reconnected to ingress\n' >&2
-    cleanup_private_state; exit "$original_status"
+  rollback_journal_or_stop rollback-healthy
+  if [ "$reuse_legacy" -eq 0 ]; then
+    if ! docker_cli network connect --ip "$network_ip" "$network_name" "$old_id" >/dev/null; then
+      stop_container_safely "$old_id" rollback >/dev/null 2>&1 || true
+      printf 'safe-update: previous image is healthy but could not be reconnected to ingress\n' >&2
+      cleanup_private_state; exit "$original_status"
+    fi
   fi
   if [ "$(validate_single_network_ip "$old_id")" != "$network_ip" ]; then
     stop_container_safely "$old_id" rollback >/dev/null 2>&1 || true
     printf 'safe-update: rollback container was reconnected with an unexpected network identity\n' >&2
     cleanup_private_state; exit "$original_status"
   fi
-  write_journal rolled-back || true
+  if [ "$capacity_reservation_released" -eq 0 ] && ! release_capacity_reservation; then
+    printf 'safe-update: rollback service recovered but capacity reservation could not be released durably\n' >&2
+    cleanup_private_state; exit "$original_status"
+  fi
+  rollback_journal_or_stop rolled-back
   if [ "$compose_source_changed" -eq 1 ]; then
     printf 'safe-update: rollback completed from the pinned snapshot; inspect the changed Compose source before retrying. Checkpoint: %s\n' "$checkpoint_dir" >&2
   else
@@ -1383,12 +1855,13 @@ on_exit() {
 safe_update_main() {
   set -Eeuo pipefail
   umask 077
+  [ "$current_uid" = 0 ] || fail "safe-update must be run as root"
   [ -z "${OMNI_UPDATE_CHECKPOINT_DIR+x}" ] || fail "OMNI_UPDATE_CHECKPOINT_DIR is not supported; checkpoint root is attestation-bound"
+  validate_trusted_toolchain
   validate_local_docker
   clear_compose_environment
   [ -z "${TAR_OPTIONS+x}" ] || fail "TAR_OPTIONS must be unset for the trusted archive contract"
   (( BASH_VERSINFO[0] >= 3 )) || fail "safe-update requires Bash 3.2 or newer"
-  for command_name in bash docker jq sha256sum tar stat awk sed grep mktemp du df chown env find uname id dirname pwd cp chmod mkdir rmdir rm mv date sleep sync fallocate; do command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"; done
   [ "$(uname -s)" = "Linux" ] || fail "safe-update requires the Linux production host contract"
   tar_path="$(type -P tar)"; case "$tar_path" in /*) ;; *) fail "GNU tar path must be absolute" ;; esac
   validate_existing_file "$tar_path" "GNU tar executable" root
@@ -1416,6 +1889,8 @@ safe_update_main() {
   pin_dir="$(mktemp -d "$project_dir/.omni-money-safe-update-pin.XXXXXX")"; chmod 0700 "$pin_dir"
   validate_existing_directory "$pin_dir" "private safe-update pin directory"
   pin_device="$(stat_device "$pin_dir")"; pin_inode="$(stat_inode "$pin_dir")"; pin_nlink="$(stat_nlink "$pin_dir")"
+  configure_compose_plugin_boundary || fail "could not establish the trusted Docker Compose plugin boundary"
+  pin_nlink="$(stat_nlink "$pin_dir")"
   # Capture project-directory link count only after creating our own lock and
   # pin subdirectories; those expected entries must not look like a swap.
   project_dir_device="$(stat_device "$project_dir")"; project_dir_inode="$(stat_inode "$project_dir")"; project_dir_nlink="$(stat_nlink "$project_dir")"
@@ -1476,7 +1951,11 @@ safe_update_main() {
   [ "$attestation_pin_hash" = "$attestation_hash" ] || fail "update attestation changed while it was being pinned"
   jq -e 'type == "object" and .version == 1 and .protection == "external-encrypted-volume" and (.encrypted_volume_root | type == "string") and (.data_root | type == "string") and (.checkpoint_root | type == "string")' "$attestation_pin" >/dev/null || fail "update attestation schema is invalid"
   configured_data_dir="$(resolve_config_path "$configured_data_dir")"
-  current_id="$(compose_single_id "$target_image" "current Compose ps")"
+  if current_id="$(compose_single_id "$target_image" "current Compose ps")"; then
+    :
+  else
+    discover_legacy_current || fail "current container could not be discovered in the fixed or verified legacy Compose project"
+  fi
   current_image_id="$(container_image_id "$current_id")"
   mounts="$(container_mounts "$current_id")"
   data_mount_count="$(jq '[.[] | select(.Destination == "/app/data")] | length' <<< "$mounts")"; [ "$data_mount_count" -eq 1 ] || fail "current container must have exactly one /app/data mount"
@@ -1538,11 +2017,13 @@ safe_update_main() {
     jq -e 'type == "object" and .version == 1 and (.phase | IN(
       "prepared", "capacity-reserved", "images-pinned", "stopping", "stopped",
       "checkpoint-start", "checkpoint-archived", "checkpoint-durable",
+      "reservation-release-prepared", "reservation-released",
+      "legacy-migration-remove",
       "candidate-isolated", "candidate-healthy", "env-install", "env-staged",
       "env-installed", "network-connect", "network-connected", "committed",
       "rollback-start", "rollback-stopped", "restore-moving", "restore-data-parked",
       "restore-empty", "restore-extracted", "restore-complete", "data-restored",
-      "env-restore-staged", "env-restored", "rollback-create", "rollback-isolated",
+      "env-restore-staged", "env-restored", "rollback-create", "rollback-restart-legacy", "rollback-isolated",
       "rollback-healthy", "rolled-back"))' "$checkpoint_root_journal" >/dev/null || fail "durable update journal has an invalid recovery phase; manual recovery is required"
     fail "durable update journal exists; inspect and complete its recorded recovery before retrying"
   fi
@@ -1564,28 +2045,34 @@ safe_update_main() {
   prepare_recovery_bundle || fail "could not create durable root-owned recovery bundle"
   write_journal prepared
   data_allocated_kb="$(directory_size_kb "$data_dir")" || fail "allocated data size could not be measured safely"; data_logical_kb="$(directory_size_kb "$data_dir" 1)" || fail "logical data size could not be measured safely"; (( data_logical_kb > data_allocated_kb )) && data_kb="$data_logical_kb" || data_kb="$data_allocated_kb"; available_kb="$(free_space_kb "$checkpoint_root")" || fail "checkpoint free space could not be measured safely"; required_kb=$((data_kb * 4 + 262144)); (( available_kb >= required_kb * 2 )) || fail "insufficient free space: rollback-safe update needs at least $((required_kb * 2)) KiB free for operation and reservation"; reserve_capacity "$required_kb" || fail "could not reserve rollback capacity"; write_journal capacity-reserved
-  current_image="$(docker inspect --format '{{.Config.Image}}' "$current_id")"; rollback_image="omni-money:rollback-$timestamp"; docker pull "$target_image" >/dev/null; target_image_id="$(docker image inspect --format '{{.Id}}' "$target_image")"; docker tag "$current_image_id" "$rollback_image"; prepare_rollback_definition || fail "could not persist the durable rollback Compose snapshot"; write_journal images-pinned
+  rollback_image="omni-money:rollback-$timestamp"; docker_cli pull "$target_image" >/dev/null; target_image_id="$(docker_cli image inspect --format '{{.Id}}' "$target_image")"; docker_cli tag "$current_image_id" "$rollback_image"; prepare_rollback_definition || fail "could not persist the durable rollback Compose snapshot"; write_journal images-pinned
   # Nothing that can mutate the live deployment happens before this point.
   # Arm the EXIT state machine immediately before the direct stop of the
   # pinned current container so a signal/partial stop cannot leave it without
   # an automatic recovery attempt.
+  validate_pinned_toolchain || fail "trusted toolchain changed before stop"
+  validate_pinned_docker_socket || fail "Docker socket changed before stop"
   write_journal stopping
-  rollback_armed=1; state="armed"; docker stop --time 30 "$current_id" >/dev/null
-  [ "$(container_state "$current_id")" != "running" ] || fail "pinned current container remained running after stop"
+  rollback_armed=1; state="armed"; docker_cli stop --time 30 "$current_id" >/dev/null
+  case "$(container_state "$current_id")" in
+    created|exited|dead) ;;
+    *) fail "pinned current container did not reach an accepted stopped state"; return 1 ;;
+  esac
   state="stopped"; write_journal stopped
   validate_pinned_directory "$data_dir" "live data directory" "$data_dir_device" "$data_dir_inode" "$data_dir_nlink" data; validate_source_tree "$data_dir" "live data tree"; validate_pinned_directory "$checkpoint_root" "checkpoint root" "$checkpoint_root_device" "$checkpoint_root_inode" "$checkpoint_root_nlink"
   write_journal checkpoint-start
-  archive_tmp="$checkpoint_dir/.data.tar.tmp.$$"; create_exclusive_file "$archive_tmp" || fail "could not create exclusive archive staging file"; [ "$(stat_device "$archive_tmp")" = "$checkpoint_root_device" ] || fail "archive staging file is not on the attested checkpoint filesystem"; validate_tar_binary; tar --numeric-owner -cpf "$archive_tmp" -C "$data_dir" .; fsync_path "$archive_tmp"; validate_pinned_directory "$data_dir" "live data directory after archive" "$data_dir_device" "$data_dir_inode" "$data_dir_nlink" data || fail "live data directory changed while checkpoint was created"; validate_pinned_directory "$checkpoint_root" "checkpoint root after archive" "$checkpoint_root_device" "$checkpoint_root_inode" "$checkpoint_root_nlink" || fail "checkpoint root changed while checkpoint was created"; validate_pinned_directory "$checkpoint_dir" "checkpoint directory after archive" "$checkpoint_dir_device" "$checkpoint_dir_inode" "$checkpoint_dir_nlink" || fail "checkpoint directory changed while checkpoint was created"; validate_tar_members "$archive_tmp" || fail "new checkpoint archive contains unsafe members"; move_exclusive_file "$archive_tmp" "$archive_path" || fail "could not install checkpoint archive exclusively"; archive_device="$(stat_device "$archive_path")"; archive_inode="$(stat_inode "$archive_path")"; archive_nlink="$(stat_nlink "$archive_path")"; archive_hash="$(sha256_file "$archive_path")"; fsync_path "$archive_path"; fsync_directory "$checkpoint_dir"; write_journal checkpoint-archived
+  archive_tmp="$checkpoint_dir/.data.tar.tmp.$$"; create_exclusive_file "$archive_tmp" || fail "could not create exclusive archive staging file"; [ "$(stat_device "$archive_tmp")" = "$checkpoint_root_device" ] || fail "archive staging file is not on the attested checkpoint filesystem"; validate_tar_binary; tar --one-file-system --numeric-owner -cpf "$archive_tmp" -C "$data_dir" .; fsync_path "$archive_tmp"; validate_pinned_directory "$data_dir" "live data directory after archive" "$data_dir_device" "$data_dir_inode" "$data_dir_nlink" data || fail "live data directory changed while checkpoint was created"; validate_pinned_directory "$checkpoint_root" "checkpoint root after archive" "$checkpoint_root_device" "$checkpoint_root_inode" "$checkpoint_root_nlink" || fail "checkpoint root changed while checkpoint was created"; validate_pinned_directory "$checkpoint_dir" "checkpoint directory after archive" "$checkpoint_dir_device" "$checkpoint_dir_inode" "$checkpoint_dir_nlink" || fail "checkpoint directory changed while checkpoint was created"; validate_tar_members "$archive_tmp" || fail "new checkpoint archive contains unsafe members"; move_exclusive_file "$archive_tmp" "$archive_path" || fail "could not install checkpoint archive exclusively"; archive_device="$(stat_device "$archive_path")"; archive_inode="$(stat_inode "$archive_path")"; archive_nlink="$(stat_nlink "$archive_path")"; archive_hash="$(sha256_file "$archive_path")"; fsync_path "$archive_path"; fsync_directory "$checkpoint_dir"; write_journal checkpoint-archived
   checksum_tmp="$checkpoint_dir/.data.tar.sha256.tmp.$$"; create_exclusive_file "$checksum_tmp" || fail "could not create exclusive checksum staging file"; [ "$(stat_device "$checksum_tmp")" = "$checkpoint_root_device" ] || fail "checksum staging file is not on the attested checkpoint filesystem"; sha256sum -- "$archive_path" > "$checksum_tmp"; fsync_path "$checksum_tmp"; move_exclusive_file "$checksum_tmp" "$archive_path.sha256" || fail "could not install checkpoint checksum exclusively"; fsync_path "$archive_path.sha256"; fsync_directory "$checkpoint_dir"; sha256sum --check "$archive_path.sha256" >/dev/null
   archive_device="$(stat_device "$archive_path")"; archive_inode="$(stat_inode "$archive_path")"; archive_nlink="$(stat_nlink "$archive_path")"; archive_hash="$(sha256_file "$archive_path")"; checksum_device="$(stat_device "$archive_path.sha256")"; checksum_inode="$(stat_inode "$archive_path.sha256")"; checksum_nlink="$(stat_nlink "$archive_path.sha256")"; checksum_hash="$(sha256_file "$archive_path.sha256")"; checkpoint_ready=1
   write_journal checkpoint-durable
-  create_disconnected_container "$target_image" "$target_image_id" "candidate"; state="candidate-isolated"; write_journal candidate-isolated; docker start "$candidate_id" >/dev/null; validate_container_user "$candidate_id" "candidate container"; wait_for_health "$candidate_id" || fail "candidate did not become healthy while isolated"; jq -e 'length == 0' <<< "$(container_networks "$candidate_id")" >/dev/null || fail "candidate was not fully isolated before reconnect"; write_journal candidate-healthy
+  remove_legacy_current || fail "verified legacy Compose container could not be migrated safely"
+  create_disconnected_container "$target_image" "$target_image_id" "candidate"; state="candidate-isolated"; write_journal candidate-isolated; docker_cli start "$candidate_id" >/dev/null; validate_container_user "$candidate_id" "candidate container"; wait_for_health "$candidate_id" || fail "candidate did not become healthy while isolated"; jq -e 'length == 0' <<< "$(container_networks "$candidate_id")" >/dev/null || fail "candidate was not fully isolated before reconnect"; write_journal candidate-healthy
   validate_pinned_directory "$pin_dir" "private pin directory" "$pin_device" "$pin_inode" "$pin_nlink"; validate_pinned_directory "$project_dir" "Compose project directory" "$project_dir_device" "$project_dir_inode" "$project_dir_nlink"; validate_pinned_file "$compose_file" "Compose file" "$compose_device" "$compose_inode" "$compose_nlink" "$compose_hash"; validate_pinned_file "$compose_file_pin" "pinned Compose definition" "$compose_pin_device" "$compose_pin_inode" "$compose_pin_nlink" "$compose_pin_hash"; validate_pinned_file "$env_file" "update env file" "$env_device" "$env_inode" "$env_nlink" "$env_hash"; validate_pinned_file "$env_file_pin" "pinned update env file" "$env_pin_device" "$env_pin_inode" "$env_pin_nlink" "$env_pin_hash"; validate_pinned_file "$attestation_file" "update attestation" "$attestation_device" "$attestation_inode" "$attestation_nlink" "$attestation_hash" root; validate_pinned_file "$attestation_pin" "pinned update attestation" "$attestation_pin_device" "$attestation_pin_inode" "$attestation_pin_nlink" "$attestation_pin_hash"; validate_pinned_file "$compose_snapshot" "Compose config snapshot" "$compose_snapshot_device" "$compose_snapshot_inode" "$compose_snapshot_nlink" "$compose_snapshot_hash"; validate_secret_sources
   write_journal env-install
   updated_env_tmp="$(dirname -- "$env_file")/.omni-money-env.tmp.$$"; create_exclusive_file "$updated_env_tmp" || fail "could not create exclusive updated env file"; [ "$(stat_device "$updated_env_tmp")" = "$env_device" ] || fail "updated env staging file is not on the env filesystem"; image_line_count="$(grep -Ec '^[[:space:]]*(export[[:space:]]+)?OMNI_IMAGE=' "$env_file" || true)"; (( image_line_count <= 1 )) || fail "update env file contains duplicate OMNI_IMAGE entries"; if (( image_line_count == 1 )); then sed -E "s#^[[:space:]]*(export[[:space:]]+)?OMNI_IMAGE=.*#OMNI_IMAGE=$target_image#" "$env_file" > "$updated_env_tmp"; else cp -p -- "$env_file" "$updated_env_tmp"; printf '\nOMNI_IMAGE=%s\n' "$target_image" >> "$updated_env_tmp"; fi; chmod "$env_mode" "$updated_env_tmp"; chown "$env_owner:$env_group" "$updated_env_tmp" || fail "updated env staging ownership could not be preserved"; validate_existing_file "$updated_env_tmp" "updated env staging file"; fsync_path "$updated_env_tmp"; write_journal env-staged; mv -- "$updated_env_tmp" "$env_file"; updated_env_tmp=""; fsync_path "$env_file"; fsync_directory "$(dirname -- "$env_file")"; validate_existing_file "$env_file" "updated env file"; updated_env_device="$(stat_device "$env_file")"; updated_env_inode="$(stat_inode "$env_file")"; updated_env_nlink="$(stat_nlink "$env_file")"; updated_env_hash="$(sha256_file "$env_file")"; env_updated=1; write_journal env-installed
   write_journal network-connect
-  docker network connect --ip "$network_ip" "$network_name" "$candidate_id" >/dev/null; [ "$(validate_single_network_ip "$candidate_id")" = "$network_ip" ] || fail "candidate was reconnected with an unexpected IP"; validate_container_config "$candidate_id" "$target_image_id" running "candidate"; [ "$(container_health "$candidate_id")" = "healthy" ] || fail "candidate lost health while reconnecting ingress"; validate_secret_sources; write_journal network-connected
-  write_journal committed; remove_journal; update_verified=1; rollback_armed=0; state="verified"; printf 'safe-update: update succeeded with %s\n' "$target_image"; printf 'safe-update: retained checkpoint: %s\n' "$checkpoint_dir"; printf 'safe-update: retained rollback image: %s\n' "$rollback_image"
+  docker_cli network connect --ip "$network_ip" "$network_name" "$candidate_id" >/dev/null; [ "$(validate_single_network_ip "$candidate_id")" = "$network_ip" ] || fail "candidate was reconnected with an unexpected IP"; validate_container_config "$candidate_id" "$target_image_id" running "candidate"; [ "$(container_health "$candidate_id")" = "healthy" ] || fail "candidate lost health while reconnecting ingress"; validate_secret_sources; write_journal network-connected
+  release_capacity_reservation || fail "could not durably release rollback capacity after verification"; write_journal committed; remove_journal; update_verified=1; rollback_armed=0; state="verified"; printf 'safe-update: update succeeded with %s\n' "$target_image"; printf 'safe-update: retained checkpoint: %s\n' "$checkpoint_dir"; printf 'safe-update: retained rollback image: %s\n' "$rollback_image"
 }
 
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then safe_update_main "$@"; fi

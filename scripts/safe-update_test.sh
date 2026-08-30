@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034,SC2218
+# The sourced updater intentionally exports state variables and the Linux-only
+# fixture later exports a tar shim; portable preflight calls occur before that
+# fixture definition.
 set -Eeuo pipefail
 
 # Docker-free safe-update regression suite. Linux runs the real updater through
@@ -12,6 +16,13 @@ trap 'rm -rf -- "$test_root"' EXIT
 assert_rejected() {
   local label="$1"; shift
   if "$@" >/dev/null 2>&1; then printf 'FAIL: %s was accepted\n' "$label" >&2; exit 1; fi
+}
+
+assert_rejected_with() {
+  local label="$1" pattern="$2" output
+  shift 2
+  if output="$("$@" 2>&1)"; then printf 'FAIL: %s was accepted\n' "$label" >&2; exit 1; fi
+  grep -Eq "$pattern" <<< "$output" || { printf 'FAIL: %s failed for the wrong reason: %s\n' "$label" "$output" >&2; exit 1; }
 }
 
 # shellcheck disable=SC1091
@@ -37,27 +48,32 @@ tar -C "$pin_dir/source" -cf "$pin_dir/regular.tar" .
 validate_tar_members "$pin_dir/regular.tar"
 tar -cf "$pin_dir/empty.tar" -T /dev/null
 assert_rejected "empty archive" validate_tar_members "$pin_dir/empty.tar"
-printf 'newline\n' > "$pin_dir/source/$'bad\nname'"
-tar -C "$pin_dir/source" -cf "$pin_dir/newline.tar" .
-assert_rejected "newline archive member" validate_tar_members "$pin_dir/newline.tar"
-ln -s regular "$pin_dir/source/link"
-tar -C "$pin_dir/source" -cf "$pin_dir/symlink.tar" .
-assert_rejected "symlink archive member" validate_tar_members "$pin_dir/symlink.tar"
-rm -- "$pin_dir/source/link"
-ln "$pin_dir/source/regular" "$pin_dir/source/hardlink"
-tar -C "$pin_dir/source" -cf "$pin_dir/hardlink.tar" .
-assert_rejected "hardlink archive member" validate_tar_members "$pin_dir/hardlink.tar"
+mkdir -m 0700 -- "$pin_dir/archive-newline"
+newline_name="$(printf 'bad\nname')"
+printf 'newline\n' > "$pin_dir/archive-newline/$newline_name"
+tar -C "$pin_dir/archive-newline" -cf "$pin_dir/newline.tar" .
+assert_rejected_with "newline archive member" 'unsafe .*member name' validate_tar_members "$pin_dir/newline.tar"
+mkdir -m 0700 -- "$pin_dir/archive-symlink"
+printf 'target\n' > "$pin_dir/archive-symlink/target"
+ln -s target "$pin_dir/archive-symlink/link"
+tar -C "$pin_dir/archive-symlink" -cf "$pin_dir/symlink.tar" .
+assert_rejected_with "symlink archive member" 'unsupported member type: l' validate_tar_members "$pin_dir/symlink.tar"
+mkdir -m 0700 -- "$pin_dir/archive-hardlink"
+printf 'hardlink\n' > "$pin_dir/archive-hardlink/one"
+ln "$pin_dir/archive-hardlink/one" "$pin_dir/archive-hardlink/two"
+tar -C "$pin_dir/archive-hardlink" -cf "$pin_dir/hardlink.tar" .
+assert_rejected_with "hardlink archive member" 'unsupported member type: h' validate_tar_members "$pin_dir/hardlink.tar"
 if command -v mkfifo >/dev/null 2>&1; then
-  mkfifo "$pin_dir/source/fifo"
-  tar -C "$pin_dir/source" -cf "$pin_dir/fifo.tar" .
-  assert_rejected "FIFO archive member" validate_tar_members "$pin_dir/fifo.tar"
-  rm -f -- "$pin_dir/source/fifo"
+  mkdir -m 0700 -- "$pin_dir/archive-fifo"
+  mkfifo "$pin_dir/archive-fifo/fifo"
+  tar -C "$pin_dir/archive-fifo" -cf "$pin_dir/fifo.tar" .
+  assert_rejected_with "FIFO archive member" 'unsupported member type: p' validate_tar_members "$pin_dir/fifo.tar"
 fi
 if [ "$(id -u)" = 0 ] && command -v mknod >/dev/null 2>&1; then
-  mknod "$pin_dir/source/device" c 1 7
-  tar -C "$pin_dir/source" -cf "$pin_dir/device.tar" .
-  assert_rejected "device archive member" validate_tar_members "$pin_dir/device.tar"
-  rm -f -- "$pin_dir/source/device"
+  mkdir -m 0700 -- "$pin_dir/archive-device"
+  mknod "$pin_dir/archive-device/device" c 1 7
+  tar -C "$pin_dir/archive-device" -cf "$pin_dir/device.tar" .
+  assert_rejected_with "device archive member" 'unsupported member type: [bc]' validate_tar_members "$pin_dir/device.tar"
 fi
 
 # A normal directory has link count >=2 (and changes as children are added),
@@ -70,6 +86,30 @@ validate_source_tree "$pin_dir/source-tree" "nested source tree"
 ln "$pin_dir/source-tree/nested/file" "$pin_dir/source-tree/hardlink"
 assert_rejected "hard-linked source-tree file" validate_source_tree "$pin_dir/source-tree" "hardlink source tree"
 data_uid="10001"; data_gid="10001"
+
+# Identity validation must detect same-content inode swaps and type swaps; a
+# content-only mock cannot exercise this security boundary.
+printf 'same-content\n' > "$pin_dir/identity-file"
+identity_device="$(stat_device "$pin_dir/identity-file")"; identity_inode="$(stat_inode "$pin_dir/identity-file")"
+identity_nlink="$(stat_nlink "$pin_dir/identity-file")"; identity_hash="$(sha256_file "$pin_dir/identity-file")"
+mv -- "$pin_dir/identity-file" "$pin_dir/identity-file.old"
+cp -- "$pin_dir/identity-file.old" "$pin_dir/identity-file"
+assert_rejected "same-content inode swap" validate_pinned_file "$pin_dir/identity-file" identity-file "$identity_device" "$identity_inode" "$identity_nlink" "$identity_hash"
+mkdir -m 0700 -- "$pin_dir/identity-directory"
+directory_device="$(stat_device "$pin_dir/identity-directory")"; directory_inode="$(stat_inode "$pin_dir/identity-directory")"; directory_nlink="$(stat_nlink "$pin_dir/identity-directory")"
+mv -- "$pin_dir/identity-directory" "$pin_dir/identity-directory.old"
+mkdir -m 0700 -- "$pin_dir/identity-directory"
+assert_rejected "directory replacement" validate_pinned_directory "$pin_dir/identity-directory" identity-directory "$directory_device" "$directory_inode" "$directory_nlink"
+rm -rf -- "$pin_dir/identity-directory"
+printf 'file-instead\n' > "$pin_dir/identity-directory"
+assert_rejected "directory-to-file replacement" validate_pinned_directory "$pin_dir/identity-directory" identity-directory "$directory_device" "$directory_inode" "$directory_nlink"
+
+xtrace_status=0
+xtrace_output="$(bash -x "$script_dir/safe-update.sh" registry.example/do-not-log-this:1 2>&1)" || xtrace_status=$?
+[ "$xtrace_status" -eq 77 ] || { echo "FAIL: inherited xtrace returned $xtrace_status instead of 77" >&2; exit 1; }
+grep -q 'inherited xtrace is not allowed' <<< "$xtrace_output" || { echo "FAIL: inherited xtrace was not rejected" >&2; exit 1; }
+grep -q 'do-not-log-this' <<< "$xtrace_output" && { echo "FAIL: inherited xtrace logged the target image" >&2; exit 1; }
+grep -Fq 'sha256_file "$capacity_reservation"' "$script_dir/safe-update.sh" && { echo "FAIL: capacity reserve is still fully hashed" >&2; exit 1; }
 
 printf 'not a tar archive\n' > "$pin_dir/corrupt.tar"
 assert_rejected "corrupt archive" validate_tar_members "$pin_dir/corrupt.tar"
@@ -123,6 +163,7 @@ set -Eeuo pipefail
 fmt="$2"; if [ "$#" -eq 3 ]; then path="$3"; else path="$4"; fi
 if [ "${MOCK_SCENARIO:-}" = secret_permissions_bad ] && [ "$path" = "${MOCK_CONTROL_KEY:-}" ] && [ "$fmt" = %a ]; then echo 444; exit 0; fi
 if [ "${MOCK_SCENARIO:-}" = cross_fs_stage ] && [[ "$path" == */.data.tar.tmp.* ]] && [ "$fmt" = %d ]; then echo 999; exit 0; fi
+if [[ "$path" == */.capacity.reserve ]] && [ "$fmt" = %s ]; then cat "$MOCK_STATE_DIR/capacity_size"; exit 0; fi
 case "$fmt:$path" in
   "%u:$MOCK_DATA"|"%u:$MOCK_DATA"/*) echo 10001; exit 0 ;;
   "%g:$MOCK_DATA"|"%g:$MOCK_DATA"/*) echo 10001; exit 0 ;;
@@ -130,15 +171,11 @@ case "$fmt:$path" in
   "%u:$MOCK_FIXTURE"|"%u:$MOCK_FIXTURE"/*) echo 0; exit 0 ;;
   "%g:$MOCK_FIXTURE"|"%g:$MOCK_FIXTURE"/*) echo 0; exit 0 ;;
   "%d:$MOCK_FIXTURE"|"%d:$MOCK_FIXTURE"/*) echo 1; exit 0 ;;
-  "%i:$MOCK_FIXTURE"|"%i:$MOCK_FIXTURE"/*) echo 42; exit 0 ;;
+  "%d:"*"/omni-money-update-checkpoints"|"%d:"*"/omni-money-update-checkpoints/"*) echo 1; exit 0 ;;
   "%a:$MOCK_DATA") echo 700; exit 0 ;;
   "%a:/private/tmp"|"%Lp:/private/tmp") echo 755; exit 0 ;;
   "%a:/tmp"|"%Lp:/tmp") echo 755; exit 0 ;;
   "%a:/var/tmp"|"%Lp:/var/tmp") echo 755; exit 0 ;;
-  "%h:"*"/.capacity.reserve") echo 1; exit 0 ;;
-  "%l:"*"/.capacity.reserve") echo 1; exit 0 ;;
-  "%l:"*"/omni-money-update-checkpoints"|"%l:"*"/omni-money-update-checkpoints/"*) echo 2; exit 0 ;;
-  "%h:"*"/omni-money-update-checkpoints"|"%h:"*"/omni-money-update-checkpoints/"*) echo 2; exit 0 ;;
   "%u:$MOCK_AT_REST"|"%u:$MOCK_CONTROL_KEY"|"%u:"*"/.safe-update-journal"*) echo 0; exit 0 ;;
   "%g:$MOCK_AT_REST"|"%g:"*"/.safe-update-journal"*) echo 0; exit 0 ;;
   "%a:$MOCK_AT_REST") echo 444; exit 0 ;;
@@ -147,6 +184,7 @@ case "$fmt:$path" in
   "%u:"*"/.capacity.reserve") echo 0; exit 0 ;;
   "%g:"*"/.capacity.reserve") echo 0; exit 0 ;;
   "%a:"*"/.capacity.reserve") echo 600; exit 0 ;;
+  "%l:"*"/.capacity.reserve") echo 1; exit 0 ;;
   "%u:"*"/recovery"|"%u:"*"/recovery/"*) echo 0; exit 0 ;;
   "%g:"*"/recovery"|"%g:"*"/recovery/"*) echo 0; exit 0 ;;
   "%a:"*"/recovery") echo 700; exit 0 ;;
@@ -158,6 +196,9 @@ case "$fmt:$path" in
   "%g:"*"/mock-bin/tar") echo 0; exit 0 ;;
   "%a:"*"/mock-bin/tar") echo 755; exit 0 ;;
   "%l:"*"/.omni-money-safe-update-pin."*) echo 2; exit 0 ;;
+  "%l:"*"/recovery") echo 2; exit 0 ;;
+  "%l:"*"/omni-money-update-checkpoints") echo 3; exit 0 ;;
+  "%l:"*"/omni-money-update-checkpoints/"[0-9]*) echo 3; exit 0 ;;
 esac
 exec /usr/bin/stat "$@"
 MOCK_STAT
@@ -205,11 +246,11 @@ if [ "$1" = compose ]; then
     esac
   done
   case "$command_name" in
-    config) [ "$scenario" != compose_config_failure ] || exit 18; [ -z "${OMNI_DATA_DIR+x}" ] && [ -z "${OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE+x}" ] || exit 28; cat "$MOCK_CONFIG";;
+    config) [ "$scenario" != compose_config_failure ] || exit 18; [ -z "${OMNI_DATA_DIR+x}" ] && [ -z "${OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE+x}" ] && [ -z "${ALLOWED_HOSTS+x}" ] && [ -z "${TRUSTED_PROXIES+x}" ] && [ -z "${PASSKEY_RP_ID+x}" ] && [ -z "${SESSION_MAX_AGE_HOURS+x}" ] && [ -z "${AUTH_KDF_CONCURRENCY+x}" ] || exit 28; cat "$MOCK_CONFIG";;
     ps)
       [ "$all" -eq 1 ] || exit 17
       case "$(get phase)" in
-        current) echo current;;
+        current) [ "$scenario" != legacy_project ] && echo current;;
         candidate)
           if [ "$scenario" = unknown_removal ] && [ -e "$state_dir/candidate_ps_seen" ]; then echo unexpected; else echo candidate; : > "$state_dir/candidate_ps_seen"; fi
           ;;
@@ -217,10 +258,13 @@ if [ "$1" = compose ]; then
       esac;;
     up)
       if [[ "$OMNI_IMAGE" == *rollback-* ]]; then put phase rollback; put rollback_state created; put net_rollback connected
-      else put phase candidate; put candidate_state created; put net_candidate connected; put current_state absent; [ "$scenario" = partial_create ] && { put phase partial; exit 27; }; [ "$scenario" = extra_network ] && put net_candidate extra; case "$scenario" in env_swap) printf '# swapped during compose up\n' >> "$MOCK_ENV";; config_swap) printf '# swapped during compose up\n' >> "$MOCK_COMPOSE";; secret_inode_replacement) mv -- "$MOCK_AT_REST" "$MOCK_AT_REST.replaced"; printf 'tampered secret\n' > "$MOCK_AT_REST";; esac; fi;;
+      else put phase candidate; put candidate_state created; put net_candidate connected; put current_state absent; [ "$scenario" = partial_create ] && { put phase partial; exit 27; }; [ "$scenario" = extra_network ] && put net_candidate extra; case "$scenario" in env_swap) printf '# swapped during compose up\n' >> "$MOCK_ENV";; config_swap) printf '# swapped during compose up\n' >> "$MOCK_COMPOSE";; secret_inode_replacement) mv -- "$MOCK_AT_REST" "$MOCK_AT_REST.replaced"; printf 'tampered secret\n' > "$MOCK_AT_REST";; secret_inode_only_swap) mv -- "$MOCK_AT_REST" "$MOCK_AT_REST.replaced"; cp -- "$MOCK_AT_REST.replaced" "$MOCK_AT_REST";; esac; fi;;
   esac; exit 0
 fi
 case "$1" in
+  ps)
+    [ "$scenario" = legacy_project ] && echo current
+    ;;
   context)
     case "$2" in
       show) echo default ;;
@@ -233,16 +277,30 @@ case "$1" in
   inspect)
     fmt="$3"; id="$4"
     case "$fmt" in
+      *'index .Config.Labels "com.docker.compose.project"'*) [ "$scenario" = legacy_project ] && echo "${MOCK_FIXTURE##*/}" || exit 19;;
+      *'index .Config.Labels "com.docker.compose.service"'*) [ "$scenario" = legacy_project ] && echo omni-money || exit 19;;
+      *'{{.Name}}'*) [ "$scenario" = legacy_project ] && echo /omni-money || exit 19;;
       *'{{json .}}'*)
         mounts_json="$(container_mounts "$id")"; networks_json="$(container_networks_runtime "$id")"
         version=old; [ "$id" = candidate ] && version=target
         cap_add='[]'; [ "$id" = candidate ] && [ "$scenario" = unsafe_cap ] && cap_add='["SYS_ADMIN"]'
-        jq -cn --arg version "$version" --argjson cap_add "$cap_add" --argjson mounts "$mounts_json" --argjson networks "$networks_json" '{Config:{User:"10001:10001",Entrypoint:["/entrypoint"],Cmd:["server"],WorkingDir:"/app",StopSignal:"SIGTERM",Healthcheck:{Test:["CMD","health"],Interval:1000000000,Timeout:1000000000,Retries:3},Env:["APP_MODE=server","VERSION="+$version,"SECRET_VALUE=private"],Labels:{"com.example.role":"omni-money"}},HostConfig:{RestartPolicy:{Name:"unless-stopped",MaximumRetryCount:0},NetworkMode:"omni-money-pangolin",ReadonlyRootfs:true,Privileged:false,Init:false,CapDrop:["ALL"],CapAdd:$cap_add,Devices:[],PidMode:"",IpcMode:"",NanoCpus:2000000000,Memory:1073741824,PidsLimit:256,LogConfig:{Type:"json-file",Config:{"max-size":"10m","max-file":"3"}},SecurityOpt:["no-new-privileges:true"]},Mounts:$mounts,NetworkSettings:{Networks:$networks}}';;
+        service_env_json="$(jq -c '.services["omni-money"].environment | to_entries | map(.key + "=" + (.value|tostring))' "$MOCK_CONFIG")"
+        jq -cn --arg version "$version" --argjson service_env "$service_env_json" --argjson cap_add "$cap_add" --argjson mounts "$mounts_json" --argjson networks "$networks_json" '{Config:{User:"10001:10001",Entrypoint:["/entrypoint"],Cmd:["server"],WorkingDir:"/app",StopSignal:"SIGTERM",Healthcheck:{Test:["CMD","health"],Interval:1000000000,Timeout:1000000000,Retries:3},Env:($service_env + ["APP_MODE=server","VERSION="+$version,"SECRET_VALUE=private"]),Labels:{"com.example.role":"omni-money"}},HostConfig:{RestartPolicy:{Name:"unless-stopped",MaximumRetryCount:0},NetworkMode:"omni-money-pangolin",ReadonlyRootfs:true,Privileged:false,Init:false,CapDrop:["ALL"],CapAdd:$cap_add,Devices:[],PidMode:"",IpcMode:"",NanoCpus:2000000000,Memory:1073741824,PidsLimit:256,LogConfig:{Type:"json-file",Config:{"max-size":"10m","max-file":"3"}},SecurityOpt:["no-new-privileges:true"]},Mounts:$mounts,NetworkSettings:{Networks:$networks}}';;
       *State.Status*) container_state "$id";;
       *State.Health*) if [ "$id" = candidate ] && { [ "$scenario" = candidate_failure ] || [ "$scenario" = candidate_data_mutation ] || [ "$scenario" = rollback_failure ] || [ "$scenario" = rollback_tag_mutation ] || [ "$scenario" = unknown_removal ]; }; then echo missing; else echo healthy; fi;;
       *'.Image}'*) case "$id" in current) echo sha256:old;; rollback) [ "$scenario" = rollback_tag_mutation ] && echo sha256:tampered || echo sha256:old;; candidate) echo sha256:target;; esac;;
       *'.Config.Image}'*) case "$id" in current) echo omni-money:old;; *) echo omni-money:target;; esac;;
       *'.Config.User}'*) echo 10001:10001;;
+      *'{{json .Config.Env}}'*)
+        if [ "$id" = current ] && [ "$scenario" = runtime_env_drift ]; then
+          jq -c '.services["omni-money"].environment.ALLOWED_HOSTS = "drifted.example" | .services["omni-money"].environment | to_entries | map(.key + "=" + (.value|tostring)) + ["APP_MODE=server","VERSION=old","SECRET_VALUE=private"]' "$MOCK_CONFIG"
+        else
+          jq -c '.services["omni-money"].environment | to_entries | map(.key + "=" + (.value|tostring)) + ["APP_MODE=server","VERSION=old","SECRET_VALUE=private"]' "$MOCK_CONFIG"
+        fi;;
+      *'{{json .HostConfig}}'*)
+        nano_cpus=2000000000
+        [ "$id" = current ] && [ "$scenario" = runtime_resource_drift ] && nano_cpus=1000000000
+        jq -cn --argjson nano_cpus "$nano_cpus" '{RestartPolicy:{Name:"unless-stopped",MaximumRetryCount:0},NetworkMode:"omni-money-pangolin",ReadonlyRootfs:true,Privileged:false,Init:false,CapDrop:["ALL"],CapAdd:[],Devices:[],PidMode:"",IpcMode:"",NanoCpus:$nano_cpus,Memory:1073741824,PidsLimit:256,LogConfig:{Type:"json-file",Config:{"max-size":"10m","max-file":"3"}},SecurityOpt:["no-new-privileges:true"]}';;
       *PortBindings*) [ "$id" = candidate ] && [ "$scenario" = extra_port ] && echo '{"4000/tcp":[{"HostPort":"4000"}]}' || echo '{}';;
       *'.Mounts}'*) container_mounts "$id";;
       *'.NetworkSettings.Networks}'*) container_networks "$id";;
@@ -253,6 +311,9 @@ case "$1" in
       *) exit 19;;
     esac;;
   exec) [ "$scenario" = bad_user ] && echo 10000 || echo 10001;;
+  rm)
+    id="$2"; [ "$id" = current ] && { put current_state absent; put phase none; } || exit 1
+    ;;
   stop)
     id="$4"
     state_file="${id}_state"
@@ -262,6 +323,11 @@ case "$1" in
       if [ ! -e "$state_dir/signal_sent" ]; then : > "$state_dir/signal_sent"; state_file="$id""_state"; put "$state_file" exited; [ "$scenario" = signal_int ] && kill -INT "$PPID" || kill -TERM "$PPID"; fi
     fi
     state_file="$id""_state"; put "$state_file" exited
+    case "$scenario" in
+      paused_after_stop) put "$state_file" paused ;;
+      restarting_after_stop) put "$state_file" restarting ;;
+      removing_after_stop) put "$state_file" removing ;;
+    esac
     if [ "$id" = current ] && [ "$scenario" = partial_stop ] && [ ! -e "$state_dir/partial_sent" ]; then : > "$state_dir/partial_sent"; exit 23; fi;;
   start)
     id="$2"
@@ -310,19 +376,63 @@ cat > "$mock_bin/fallocate" <<'MOCK_FALLOCATE'
 set -Eeuo pipefail
 [ "${MOCK_SCENARIO:-}" = reserve_failure ] && exit 1
 path="${@: -1}"
+size_arg="$2"; size_kb="${size_arg%K}"
+printf '%s' "$((size_kb * 1024))" > "$MOCK_STATE_DIR/capacity_size"
 printf 'reserved\n' > "$path"
 MOCK_FALLOCATE
 chmod 0700 "$mock_bin/fallocate"
+cat > "$mock_bin/du" <<'MOCK_DU'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+path="${@: -1}"
+if [[ "$path" == */.capacity.reserve ]]; then
+  size_bytes="$(cat "$MOCK_STATE_DIR/capacity_size")"
+  printf '%s\t%s\n' "$((size_bytes / 1024))" "$path"
+else
+  exec /usr/bin/du "$@"
+fi
+MOCK_DU
+chmod 0700 "$mock_bin/du"
+
+# The updater pins its production PATH to canonical system directories. Linux
+# state-machine tests use exported Bash shims instead of placing attacker-like
+# directories on that PATH; the shims are accepted only for this fixture path.
+MOCK_BIN="$mock_bin"
+export MOCK_BIN
+docker() { "$MOCK_BIN/docker" "$@"; }
+stat() { "$MOCK_BIN/stat" "$@"; }
+tar() { "$MOCK_BIN/tar" "$@"; }
+chown() { "$MOCK_BIN/chown" "$@"; }
+df() { "$MOCK_BIN/df" "$@"; }
+du() { "$MOCK_BIN/du" "$@"; }
+sleep() { "$MOCK_BIN/sleep" "$@"; }
+sync() { "$MOCK_BIN/sync" "$@"; }
+fallocate() { "$MOCK_BIN/fallocate" "$@"; }
+findmnt() { return 0; }
+export -f docker stat tar chown df du sleep sync fallocate findmnt
+
+run_update() {
+  local seconds="${SAFE_UPDATE_CASE_TIMEOUT_SECONDS:-90}"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --signal=KILL "$seconds" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    SAFE_UPDATE_CASE_TIMEOUT_SECONDS="$seconds" perl -e '$s=$ENV{SAFE_UPDATE_CASE_TIMEOUT_SECONDS} || 90; alarm $s; exec @ARGV' "$@"
+  else
+    "$@"
+  fi
+}
 
 run_case() {
-  local scenario="$1" expected="$2" output status=0 original_env_hash original_data_hash journal_path stale_status pin_path
+  local scenario="$1" expected="$2" output status=0 original_env_hash original_data_hash journal_path stale_status pin_path reserve_path
   printf 'safe-update state-machine scenario: %s\n' "$scenario" >&2
   local -a scenario_env=(SAFE_UPDATE_TEST_SCENARIO="$scenario")
   [ "$scenario" = checkpoint_env ] && scenario_env=(OMNI_UPDATE_CHECKPOINT_DIR=/tmp/attacker-controlled)
   [ "$scenario" = remote_context ] && scenario_env=(DOCKER_CONTEXT=remote)
   [ "$scenario" = remote_host ] && scenario_env=(DOCKER_HOST=tcp://127.0.0.1:2375)
+  [ "$scenario" = docker_config_override ] && scenario_env=(DOCKER_CONFIG=/tmp/attacker-docker-config)
+  [ "$scenario" = plugin_path_override ] && scenario_env=(DOCKER_CLI_PLUGIN_EXTRA_DIRS=/tmp/attacker-plugin)
   [ "$scenario" = tar_options ] && scenario_env=(TAR_OPTIONS=--checkpoint=1)
-  [ "$scenario" = ambient_override ] && scenario_env=(OMNI_DATA_DIR=/attacker OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE=/attacker)
+  [ "$scenario" = ambient_override ] && scenario_env=(OMNI_DATA_DIR=/attacker OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE=/attacker ALLOWED_HOSTS=attacker.example TRUSTED_PROXIES=10.0.0.1 PASSKEY_RP_ID=attacker.example SESSION_MAX_AGE_HOURS=1 AUTH_KDF_CONCURRENCY=16)
   find "$mock_state" -mindepth 1 ! -name config.json -exec rm -f -- {} +
   if [ -d "$fixture_root/omni-money-update-checkpoints" ] && [ ! -L "$fixture_root/omni-money-update-checkpoints" ]; then rm -rf -- "$fixture_root/omni-money-update-checkpoints"; fi
   printf current > "$mock_state/phase"; printf running > "$mock_state/current_state"; printf connected > "$mock_state/net_current"; : > "$mock_state/log"
@@ -335,13 +445,13 @@ run_case() {
   rm -f -- "$fixture_root/at-rest.json.replaced"
   original_env_hash="$(sha256_file "$fixture_root/.env")"
   original_data_hash="$(sha256sum -- "$fixture_root/data/ledger.txt" | sed -E 's/[[:space:]].*$//')"
-  output="$(env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT PATH="$mock_bin:$PATH" MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO="$scenario" MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" OMNI_UPDATE_HEALTH_TIMEOUT_SECONDS=30 "${scenario_env[@]}" "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 2>&1)" || status=$?
+  output="$(run_update env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT -u DOCKER_CONFIG -u DOCKER_CLI_PLUGIN_EXTRA_DIRS -u DOCKER_CLI_EXPERIMENTAL MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO="$scenario" MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" OMNI_UPDATE_HEALTH_TIMEOUT_SECONDS=30 "${scenario_env[@]}" "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 2>&1)" || status=$?
   if [ "$status" -ne "$expected" ]; then printf 'FAIL: scenario %s returned %s (expected %s)\n%s\nmock log:\n' "$scenario" "$status" "$expected" "$output" >&2; sed -n '1,120p' "$mock_state/log" >&2; exit 1; fi
   if grep -Eq 'control-key|at-rest-secret-value' <<< "$output" || grep -Eq 'control-key|at-rest-secret-value' "$mock_state/log"; then
     echo "FAIL: $scenario exposed secret content in output or mock log" >&2
     exit 1
   fi
-  if [ "$scenario" = checkpoint_env ] || [ "$scenario" = remote_context ] || [ "$scenario" = remote_host ] || [ "$scenario" = tar_options ] || [ "$scenario" = secret_permissions_bad ] || [ "$scenario" = pull_failure ] || [ "$scenario" = compose_config_failure ] || [ "$scenario" = low_space ] || [ "$scenario" = reserve_failure ]; then
+  if [ "$scenario" = checkpoint_env ] || [ "$scenario" = remote_context ] || [ "$scenario" = remote_host ] || [ "$scenario" = docker_config_override ] || [ "$scenario" = plugin_path_override ] || [ "$scenario" = tar_options ] || [ "$scenario" = runtime_env_drift ] || [ "$scenario" = runtime_resource_drift ] || [ "$scenario" = secret_permissions_bad ] || [ "$scenario" = pull_failure ] || [ "$scenario" = compose_config_failure ] || [ "$scenario" = low_space ] || [ "$scenario" = reserve_failure ]; then
     [ "$(cat "$mock_state/current_state")" = running ] && [ "$(cat "$mock_state/phase")" = current ] || { echo "FAIL: $scenario stopped current before a pre-stop failure" >&2; exit 1; }
     [ "$(sha256_file "$fixture_root/.env")" = "$original_env_hash" ] || { echo "FAIL: $scenario changed the env before stop" >&2; exit 1; }
     return 0
@@ -351,7 +461,7 @@ run_case() {
     journal_path="$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
     [ -f "$journal_path" ] && [ -d "$fixture_root/.omni-money-safe-update.lock" ] || { echo "FAIL: SIGKILL did not leave durable recovery state" >&2; exit 1; }
     stale_status=0
-env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT PATH="$mock_bin:$PATH" MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO=stale_lock MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 >/dev/null 2>&1 || stale_status=$?
+env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO=stale_lock MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 >/dev/null 2>&1 || stale_status=$?
     [ "$stale_status" -ne 0 ] && [ -d "$fixture_root/.omni-money-safe-update.lock" ] || { echo "FAIL: stale SIGKILL lock was not fail-closed" >&2; exit 1; }
     rmdir -- "$fixture_root/.omni-money-safe-update.lock"
     for pin_path in "$fixture_root"/.omni-money-safe-update-pin.*; do [ -d "$pin_path" ] && [ ! -L "$pin_path" ] && rm -rf -- "$pin_path"; done
@@ -362,37 +472,60 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT PA
     [ "$(cat "$mock_state/current_state")" = absent ] && [ "$(cat "$mock_state/phase")" = candidate ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: unknown current disappearance was not kept stopped" >&2; exit 1; }
     return 0
   fi
+  if [ "$scenario" = paused_after_stop ] || [ "$scenario" = restarting_after_stop ] || [ "$scenario" = removing_after_stop ]; then
+    [ "$(cat "$mock_state/current_state")" = "${scenario%_after_stop}" ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: $scenario was not rejected while fail-closed" >&2; exit 1; }
+    return 0
+  fi
   if [ "$scenario" != partial_stop ] && [ "$scenario" != signal_int ] && [ "$scenario" != signal_term ] && [ "$scenario" != cross_fs_stage ]; then
     [ "$(cat "$mock_state/current_state")" = absent ] || { echo "FAIL: $scenario did not model Compose removal of the pinned current container (state=$(cat "$mock_state/current_state"))" >&2; printf '%s\n' "$output" >&2; sed -n '1,160p' "$mock_state/log" >&2; exit 1; }
   else
     [ "$(cat "$mock_state/current_state")" = exited ] || { echo "FAIL: $scenario did not leave the interrupted current container stopped" >&2; exit 1; }
   fi
-  if [ "$scenario" = success ] || [ "$scenario" = ambient_override ]; then
+  if [ "$scenario" = success ] || [ "$scenario" = ambient_override ] || [ "$scenario" = legacy_project ]; then
     grep -q 'update succeeded' <<< "$output" || { echo "FAIL: success scenario did not verify update" >&2; exit 1; }
     [ "$(cat "$mock_state/phase")" = candidate ] && [ "$(cat "$mock_state/candidate_state")" = running ] && [ "$(cat "$mock_state/net_candidate")" = connected ] || { echo "FAIL: success candidate was not healthy and connected" >&2; exit 1; }
     grep -q 'OMNI_IMAGE=registry.example/omni-money:1.2.3' "$fixture_root/.env" || { echo "FAIL: success did not persist the new image" >&2; exit 1; }
     grep -Fq 'inspect --format {{json .}} candidate' "$mock_state/log" || { echo "FAIL: success did not compare the candidate runtime contract" >&2; exit 1; }
+    for reserve_path in "$fixture_root/omni-money-update-checkpoints"/*/.capacity.reserve; do
+      [ ! -e "$reserve_path" ] || { echo "FAIL: success retained the capacity reservation" >&2; exit 1; }
+    done
+    if [ "$scenario" = legacy_project ]; then
+      grep -Fq 'rm current' "$mock_state/log" || { echo "FAIL: legacy project was not explicitly migrated" >&2; exit 1; }
+    fi
   elif [ "$scenario" = network_reconnect_failure ] || [ "$scenario" = rollback_failure ] || [ "$scenario" = network_disconnect_failure ] || [ "$scenario" = rollback_tag_mutation ]; then
     [ "$(cat "$mock_state/phase")" = rollback ] && [ "$(cat "$mock_state/rollback_state")" != running ] || { echo "FAIL: $scenario left rollback running (phase=$(cat "$mock_state/phase") state=$(cat "$mock_state/rollback_state"))" >&2; sed -n '1,120p' "$mock_state/log" >&2; exit 1; }
     [ "$scenario" = rollback_tag_mutation ] || grep -Fq 'inspect --format {{json .}} rollback' "$mock_state/log" || { echo "FAIL: $scenario did not compare the rollback runtime contract" >&2; exit 1; }
-  elif [ "$scenario" = secret_inode_replacement ]; then
+  elif [ "$scenario" = secret_inode_replacement ] || [ "$scenario" = secret_inode_only_swap ]; then
     [ "$(cat "$mock_state/phase")" = candidate ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: secret inode replacement was not fail-closed before rollback recreation" >&2; exit 1; }
   else
     [ "$(cat "$mock_state/phase")" = rollback ] && [ "$(cat "$mock_state/rollback_state")" = running ] && [ "$(cat "$mock_state/net_rollback")" = connected ] || { echo "FAIL: $scenario did not complete an isolated rollback" >&2; printf '%s\n' "$output" >&2; sed -n '1,180p' "$mock_state/log" >&2; exit 1; }
     grep -Fq 'inspect --format {{json .}} rollback' "$mock_state/log" || { echo "FAIL: $scenario did not compare the rollback runtime contract" >&2; exit 1; }
     [ "$scenario" != config_swap ] || grep -q 'pinned resolved snapshot' <<< "$output" || { echo "FAIL: config swap was not explicitly reported" >&2; exit 1; }
   fi
-  if [ "$scenario" != success ] && [ "$scenario" != ambient_override ]; then
+  if [ "$scenario" != success ] && [ "$scenario" != ambient_override ] && [ "$scenario" != legacy_project ]; then
     [ "$(sha256_file "$fixture_root/.env")" = "$original_env_hash" ] || { echo "FAIL: $scenario did not retain/restore the exact original env" >&2; exit 1; }
   fi
   if [ "$scenario" = candidate_data_mutation ]; then
     [ "$(sha256sum -- "$fixture_root/data/ledger.txt" | sed -E 's/[[:space:]].*$//')" = "$original_data_hash" ] || { echo "FAIL: candidate data mutation was not restored byte-for-byte" >&2; exit 1; }
   fi
+  journal_path="$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
+  if [ -f "$journal_path" ]; then
+    jq -e '
+      (.checkpoint_root != .checkpoint_dir) and
+      (.checkpoint_root_identity.inode != "") and (.checkpoint_dir_identity.inode != "") and
+      (.env_file != .env_pin_file) and (.env_pin_file != .recovery_env_file) and
+      (.env_identity.inode != "") and (.env_pin_identity.inode != "") and (.recovery_env_identity.inode != "") and
+      (.docker_socket_identity.type == "socket")
+    ' "$journal_path" >/dev/null || { echo "FAIL: $scenario journal path/identity pairs are invalid" >&2; exit 1; }
+    if [ -e "$mock_state/rollback_state" ] && [ "$(cat "$mock_state/rollback_state")" = running ]; then
+      jq -e '.capacity_reservation_state == "1"' "$journal_path" >/dev/null || { echo "FAIL: $scenario completed rollback without releasing capacity" >&2; exit 1; }
+    fi
+  fi
   [ "$scenario" != config_swap ] || grep -q 'swapped during compose up' "$fixture_root/compose.yaml" || { echo "FAIL: config swap marker was unexpectedly lost" >&2; exit 1; }
 }
 
 cat > "$mock_state/config.json" <<EOF
-{"name":"omni-money","x-omni-update-attestation-file":"./attestation.json","services":{"omni-money":{"image":"registry.example/omni-money:1.2.3","container_name":"omni-money","read_only":true,"cap_drop":["ALL"],"cap_add":[],"devices":[],"security_opt":["no-new-privileges:true"],"cpus":2.0,"mem_limit":"1g","pids_limit":256,"logging":{"driver":"json-file","options":{"max-size":"10m","max-file":"3"}},"ports":[],"volumes":[{"type":"bind","source":"$fixture_root/data","target":"/app/data","read_only":false},{"type":"tmpfs","target":"/tmp"}],"secrets":[{"source":"omni_data_at_rest_attestation","target":"omni_data_at_rest_attestation.json"},{"source":"omni_control_database_key","target":"omni_control_database_key"}],"networks":{"pangolin_target":{"ipv4_address":"172.30.240.2"}}}},"secrets":{"omni_data_at_rest_attestation":{"file":"$fixture_root/at-rest.json"},"omni_control_database_key":{"file":"$fixture_root/control.key"}},"networks":{"pangolin_target":{"name":"omni-money-pangolin","internal":true}}}
+{"name":"omni-money","x-omni-update-attestation-file":"./attestation.json","services":{"omni-money":{"image":"registry.example/omni-money:1.2.3","container_name":"omni-money","restart":"unless-stopped","read_only":true,"cap_drop":["ALL"],"cap_add":[],"devices":[],"security_opt":["no-new-privileges:true"],"cpus":2.0,"mem_limit":"1g","pids_limit":256,"logging":{"driver":"json-file","options":{"max-size":"10m","max-file":"3"}},"ports":[],"environment":{"CONTROL_DB_PATH":"/app/data/control/omni_control.db","CONTROL_DB_ENCRYPTION_KEY_FILE":"/run/secrets/omni_control_database_key","VAULT_ROOT":"/app/data/vaults","AUTH_KDF_CONCURRENCY":"2","TMPDIR":"/tmp","SQLITE_TMPDIR":"/tmp","DATA_AT_REST_MODE":"external-encrypted-volume","DATA_AT_REST_ATTESTATION_FILE":"/run/secrets/omni_data_at_rest_attestation.json","HOST_IP":"0.0.0.0","PORT":"4000","SESSION_MAX_AGE_HOURS":"8","SESSION_IDLE_TIMEOUT_MINUTES":"15","SESSION_REAUTH_MAX_AGE_MINUTES":"5","SESSION_MAX_CONCURRENT":"3","TRUSTED_PROXIES":"172.30.240.3/32","FORCE_HTTPS":"true","ALLOW_INSECURE_HTTP":"false","HTTPS_REDIRECT_HOST":"","PASSKEY_RP_ID":"","PASSKEY_ORIGINS":"","ALLOWED_HOSTS":"money.example.com","CORS_ALLOWED_ORIGINS":""},"volumes":[{"type":"bind","source":"$fixture_root/data","target":"/app/data","read_only":false},{"type":"tmpfs","target":"/tmp"}],"secrets":[{"source":"omni_data_at_rest_attestation","target":"omni_data_at_rest_attestation.json"},{"source":"omni_control_database_key","target":"omni_control_database_key"}],"networks":{"pangolin_target":{"ipv4_address":"172.30.240.2"}}}},"secrets":{"omni_data_at_rest_attestation":{"file":"$fixture_root/at-rest.json"},"omni_control_database_key":{"file":"$fixture_root/control.key"}},"networks":{"pangolin_target":{"name":"omni-money-pangolin","internal":true}}}
 EOF
 
 if [ -n "${SAFE_UPDATE_ONLY:-}" ]; then
@@ -405,11 +538,16 @@ if [ -n "${SAFE_UPDATE_ONLY:-}" ]; then
 fi
 
 run_case success 0
+run_case legacy_project 0
 run_case checkpoint_env 1
 run_case remote_context 1
 run_case remote_host 1
+run_case docker_config_override 1
+run_case plugin_path_override 1
 run_case tar_options 1
 run_case ambient_override 0
+run_case runtime_env_drift 1
+run_case runtime_resource_drift 1
 run_case secret_permissions_bad 1
 run_case pull_failure 1
 run_case compose_config_failure 18
@@ -421,6 +559,9 @@ run_case candidate_data_mutation 1
 run_case partial_create 1
 run_case unknown_removal 1
 run_case partial_stop 23
+run_case paused_after_stop 1
+run_case restarting_after_stop 1
+run_case removing_after_stop 1
 run_case signal_int 130
 run_case signal_term 130
 run_case network_reconnect_failure 25
@@ -429,6 +570,7 @@ run_case rollback_failure 1
 run_case rollback_tag_mutation 1
 run_case env_swap 1
 run_case secret_inode_replacement 1
+run_case secret_inode_only_swap 1
 run_case config_swap 1
 run_case extra_port 1
 run_case extra_network 1
@@ -442,7 +584,7 @@ mkdir -m 0700 -- "$fixture_root/omni-money-update-checkpoints"
 printf '%s\n' '{"version":1,"phase":"stopping"}' > "$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
 chmod 0600 "$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
 stale_status=0
-env PATH="$mock_bin:$PATH" MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO=stale_journal MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" OMNI_UPDATE_HEALTH_TIMEOUT_SECONDS=30 "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 >/dev/null 2>&1 || stale_status=$?
+env MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO=stale_journal MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" OMNI_UPDATE_HEALTH_TIMEOUT_SECONDS=30 "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 >/dev/null 2>&1 || stale_status=$?
 [ "$stale_status" -ne 0 ] && [ -f "$fixture_root/omni-money-update-checkpoints/.safe-update-journal" ] || { echo "FAIL: stale durable journal was not fail-closed" >&2; exit 1; }
 rm -rf -- "$fixture_root/omni-money-update-checkpoints"
 echo "safe-update state-machine tests passed"
