@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -184,6 +186,66 @@ func TestOpenDesktopCSVFileRejectsSymlinkAndNonRegularPath(t *testing.T) {
 			_ = file.Close()
 			t.Fatal("symlink was accepted as a Desktop CSV input")
 		}
+	}
+}
+
+func TestSnapshotDesktopCSVIsStableAndPrivateAfterSourceChanges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "archive.csv")
+	original := []byte("id,account,date,item,type,amount,balance\n1,cash,2026-01-01,item,income,1,1\n")
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := openDesktopCSVFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, cleanup, err := snapshotDesktopCSV(context.Background(), path, source)
+	if err != nil {
+		_ = source.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cleanup() })
+	mutator, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		_ = source.Close()
+		t.Fatal(err)
+	}
+	if _, err := mutator.Write([]byte("tampered")); err != nil {
+		_ = mutator.Close()
+		_ = source.Close()
+		t.Fatal(err)
+	}
+	if err := mutator.Close(); err != nil {
+		_ = source.Close()
+		t.Fatal(err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snapshot.File.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(snapshot.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("snapshot changed with source: got %q want %q", got, original)
+	}
+	info, err := snapshot.File.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		t.Fatalf("snapshot permissions/type = %o/%v", info.Mode().Perm(), info.Mode().Type())
+	}
+	tempPath := snapshot.Path
+	if err := cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(tempPath); !os.IsNotExist(err) {
+		t.Fatalf("snapshot file remained after cleanup: %v", err)
 	}
 }
 

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,6 +16,7 @@ import (
 
 	"omni_money/backend/core"
 	"omni_money/backend/desktopaccount"
+	"omni_money/backend/fileprivacy"
 	"omni_money/backend/keyenvelope"
 	"omni_money/backend/models"
 )
@@ -440,7 +444,7 @@ func (a *App) ImportCSV(content string, mode string) (int, error) {
 // ImportCSVFile imports through a native file descriptor and is the preferred
 // Desktop binding for v3 archives; the string method above remains for older
 // Wails clients.
-func (a *App) ImportCSVFile(mode string) (int, error) {
+func (a *App) ImportCSVFile(mode string) (count int, retErr error) {
 	a.mu.Lock()
 	ctx := a.ctx
 	chooser := a.chooseCSVFile
@@ -460,6 +464,47 @@ func (a *App) ImportCSVFile(mode string) (int, error) {
 	if path == "" {
 		return 0, ErrDesktopCSVSelectionCanceled
 	}
+	// Do not even open a picker-selected path after the vault has crossed a
+	// lock/reopen boundary. Apart from avoiding unnecessary I/O, this keeps a
+	// stale selection from creating a private snapshot that cannot be imported.
+	a.mu.Lock()
+	if generation != a.generation || a.coordinator == nil || !a.coordinator.Status().Unlocked {
+		a.mu.Unlock()
+		return 0, ErrDesktopVaultChanged
+	}
+	a.mu.Unlock()
+	// Copy the picker result into a private, stable descriptor before borrowing
+	// the vault service. The selected path is untrusted and may be replaced or
+	// mutated while the user is choosing; the parser must never consume it
+	// directly or let an external writer race the DB transaction.
+	source, err := openDesktopCSVFile(path)
+	if err != nil {
+		return 0, err
+	}
+	snapshot, cleanupSnapshot, err := snapshotDesktopCSV(ctx, path, source)
+	sourceCloseErr := source.Close()
+	if err != nil {
+		if sourceCloseErr != nil {
+			return 0, fmt.Errorf("%w (CSV入力ファイルのcloseにも失敗しました: %v)", err, sourceCloseErr)
+		}
+		return 0, err
+	}
+	if sourceCloseErr != nil {
+		if cleanupErr := cleanupSnapshot(); cleanupErr != nil {
+			return 0, fmt.Errorf("CSV入力ファイルのcloseに失敗しました: %v (snapshot cleanupにも失敗しました: %v)", sourceCloseErr, cleanupErr)
+		}
+		return 0, fmt.Errorf("CSV入力ファイルのcloseに失敗しました: %w", sourceCloseErr)
+	}
+	defer func() {
+		if cleanupErr := cleanupSnapshot(); cleanupErr != nil {
+			if retErr == nil {
+				count = 0
+				retErr = fmt.Errorf("CSV一時ファイルのcleanupに失敗しました: %w", cleanupErr)
+			} else {
+				retErr = fmt.Errorf("%w (CSV一時ファイルのcleanupにも失敗しました: %v)", retErr, cleanupErr)
+			}
+		}
+	}()
 	a.mu.Lock()
 	if generation != a.generation || a.coordinator == nil || !a.coordinator.Status().Unlocked {
 		a.mu.Unlock()
@@ -475,12 +520,113 @@ func (a *App) ImportCSVFile(mode string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	file, err := openDesktopCSVFile(path)
-	if err != nil {
+	return service.ImportCSVReaderContext(ctx, snapshot.File, mode)
+}
+
+type desktopCSVContextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r desktopCSVContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
 		return 0, err
 	}
-	defer file.Close()
-	return service.ImportCSVReaderContext(ctx, file, mode)
+	return r.r.Read(p)
+}
+
+func snapshotDesktopCSV(ctx context.Context, path string, source *os.File) (*fileprivacy.PrivateTempFile, func() error, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if source == nil {
+		return nil, nil, errors.New("CSV入力ファイルがありません")
+	}
+	clean, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return nil, nil, fmt.Errorf("CSVファイルパスが不正です: %w", err)
+	}
+	pathInfo, err := os.Lstat(clean)
+	if err != nil {
+		return nil, nil, fmt.Errorf("CSVファイルを検査できません: %w", err)
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
+		return nil, nil, errors.New("CSVパスはsymlinkやデバイスではない通常ファイルで指定してください")
+	}
+	initial, err := source.Stat()
+	if err != nil || !initial.Mode().IsRegular() || !os.SameFile(pathInfo, initial) {
+		return nil, nil, errors.New("CSVファイルが選択後に置き換えられました")
+	}
+	if initial.Size() > core.MaxCSVImportBytes {
+		return nil, nil, fmt.Errorf("CSV入力が上限%d bytesを超えました", core.MaxCSVImportBytes)
+	}
+	// Reserve the complete bounded-copy extent, rather than only the initial
+	// stat size. The source may grow while it is being copied; the +1 probe byte
+	// is written to the private snapshot before the copy is rejected. Charging
+	// the full extent keeps that transient file inside the process-wide budget.
+	reservationBytes := core.MaxCSVImportBytes + 1
+	releaseBudget, ok := core.TryAcquireCSVTempBudget(reservationBytes)
+	if !ok {
+		return nil, nil, errors.New("CSV一時領域が混雑しています")
+	}
+	temp, err := fileprivacy.CreatePrivateTempFile("omni-money-csv-snapshot-")
+	if err != nil {
+		releaseBudget()
+		return nil, nil, fmt.Errorf("CSV一時ファイル作成エラー: %w", err)
+	}
+	cleanup := func() error {
+		cleanupErr := temp.Cleanup()
+		releaseBudget()
+		return cleanupErr
+	}
+	fail := func(operationErr error) (*fileprivacy.PrivateTempFile, func() error, error) {
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			return nil, nil, fmt.Errorf("%w (CSV一時ファイルcleanupにも失敗しました: %v)", operationErr, cleanupErr)
+		}
+		return nil, nil, operationErr
+	}
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return fail(err)
+	}
+	firstDigest := sha256.New()
+	limited := io.LimitReader(desktopCSVContextReader{ctx: ctx, r: source}, core.MaxCSVImportBytes+1)
+	copied, err := io.Copy(io.MultiWriter(temp.File, firstDigest), limited)
+	if err != nil || copied != initial.Size() {
+		if err == nil {
+			err = errors.New("CSVファイルがコピー中に変更されました")
+		}
+		return fail(fmt.Errorf("CSV一時ファイルへのコピーに失敗しました: %w", err))
+	}
+	if err := temp.File.Sync(); err != nil {
+		return fail(err)
+	}
+	if _, err := temp.File.Seek(0, io.SeekStart); err != nil {
+		return fail(err)
+	}
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return fail(err)
+	}
+	secondDigest := sha256.New()
+	verified, err := io.Copy(secondDigest, io.LimitReader(desktopCSVContextReader{ctx: ctx, r: source}, core.MaxCSVImportBytes+1))
+	if err != nil || verified != initial.Size() {
+		if err == nil {
+			err = errors.New("CSVファイルが検証中に変更されました")
+		}
+		return fail(err)
+	}
+	if !bytes.Equal(firstDigest.Sum(nil), secondDigest.Sum(nil)) {
+		return fail(errors.New("CSVファイルの内容が検証中に変更されました"))
+	}
+	after, err := source.Stat()
+	currentPath, pathErr := os.Lstat(clean)
+	if err != nil || pathErr != nil || !os.SameFile(initial, after) || after.Size() != initial.Size() ||
+		currentPath.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, currentPath) {
+		return fail(errors.New("CSVファイルが選択後に置き換えられました"))
+	}
+	if info, err := temp.File.Stat(); err != nil || !info.Mode().IsRegular() || !fileprivacy.IsPrivate(temp.File, info) || info.Size() != initial.Size() {
+		return fail(errors.New("CSV一時ファイルの検証に失敗しました"))
+	}
+	return temp, cleanup, nil
 }
 
 // openDesktopCSVFile binds the import to a regular file handle. The native

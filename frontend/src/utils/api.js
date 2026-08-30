@@ -745,26 +745,39 @@ export async function backupToCSVFile() {
   if (isWails) {
     return await window.go.main.App.BackupToCSVFile()
   }
-  // サーバーモード時はブラウザダウンロードにフォールバック
-  const res = await apiFetch('/api/backup_csv')
-  await validateCSVResponse(res)
-
   const downloadName = `transactions_backup_${new Date().toISOString().slice(0, 10)}.csv`
-	if (typeof window.showSaveFilePicker === 'function' && res.body) {
+	// showSaveFilePicker requires transient user activation. Acquire the file
+	// handle before starting the network request, so a slow server response
+	// cannot consume that activation and a canceled picker starts no export.
+	let saveHandle = null
+	if (typeof window.showSaveFilePicker === 'function') {
+		saveHandle = await window.showSaveFilePicker({
+			suggestedName: downloadName,
+			types: [{ description: 'CSV', accept: { 'text/csv': ['.csv'] } }]
+		})
+	}
+	// サーバーモード時はブラウザダウンロードにフォールバック
+	let res = null
+	try {
+		res = await apiFetch('/api/backup_csv')
+		await validateCSVResponse(res)
+	} catch (error) {
+		try { await res?.body?.cancel?.() } catch (_) { /* best effort */ }
+		throw error
+	}
+	if (saveHandle) {
 		let writable = null
 		try {
-			const handle = await window.showSaveFilePicker({
-				suggestedName: downloadName,
-				types: [{ description: 'CSV', accept: { 'text/csv': ['.csv'] } }]
-			})
-			writable = await handle.createWritable()
+			if (!res.body || typeof res.body.pipeTo !== 'function') {
+				throw new Error('CSVストリームが利用できません')
+			}
+			writable = await saveHandle.createWritable()
 			await res.body.pipeTo(writable)
 			return downloadName
 		} catch (error) {
 			try { await writable?.abort() } catch (_) { /* best effort */ }
-			// A canceled picker or createWritable failure can leave the response
-			// body unread. Explicitly cancel it so the server can release its
-			// private export spool and weighted admission slot.
+			// A writable failure can leave the response body unread. Explicitly
+			// cancel it so the server can release its export spool and admission.
 			try { await res.body?.cancel?.() } catch (_) { /* best effort */ }
 			throw error
 		}

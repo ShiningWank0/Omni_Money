@@ -119,18 +119,75 @@ test('CSV export refuses oversized legacy-browser fallback before reading the bo
   assert.equal(domState.blobs.length, 0)
 })
 
-test('CSV export cancels the response when the save picker or writable fails', async () => {
+test('CSV export acquires the picker before fetch and does not fetch on cancel', async () => {
   let canceled = 0
+  let fetchCalls = 0
   const previousPicker = window.showSaveFilePicker
   window.showSaveFilePicker = async () => { throw new Error('picker canceled') }
+  globalThis.fetch = async () => { fetchCalls++; throw new Error('network must not start') }
+  await assert.rejects(backupToCSVFile(), /picker canceled/)
+  assert.equal(fetchCalls, 0)
+  assert.equal(canceled, 0)
+
+  window.showSaveFilePicker = async () => ({
+    createWritable: async () => { throw new Error('writable failed') }
+  })
   globalThis.fetch = async () => ({
     ok: true,
     status: 200,
     headers: new Headers({ 'Content-Type': 'text/csv; charset=utf-8' }),
-    body: { cancel: async () => { canceled++ } }
+    body: {
+      pipeTo: async () => { throw new Error('stream failed') },
+      cancel: async () => { canceled++ }
+    }
   })
-  await assert.rejects(backupToCSVFile(), /picker canceled/)
+  await assert.rejects(backupToCSVFile(), /writable failed/)
   assert.equal(canceled, 1)
+  if (previousPicker === undefined) delete window.showSaveFilePicker
+  else window.showSaveFilePicker = previousPicker
+})
+
+test('CSV export propagates picker SecurityError without starting fetch', async () => {
+  let fetchCalls = 0
+  const previousPicker = window.showSaveFilePicker
+  window.showSaveFilePicker = async () => { throw new DOMException('activation lost', 'SecurityError') }
+  globalThis.fetch = async () => { fetchCalls++; throw new Error('network must not start') }
+  await assert.rejects(backupToCSVFile(), error => error.name === 'SecurityError')
+  assert.equal(fetchCalls, 0)
+  if (previousPicker === undefined) delete window.showSaveFilePicker
+  else window.showSaveFilePicker = previousPicker
+})
+
+test('CSV export streams the response into the handle acquired by the click', async () => {
+  const events = []
+  const previousPicker = window.showSaveFilePicker
+  window.showSaveFilePicker = async () => {
+    events.push('picker')
+    return {
+      createWritable: async () => {
+        events.push('writable')
+        return { close: async () => events.push('close') }
+      }
+    }
+  }
+  globalThis.fetch = async () => {
+    events.push('fetch')
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'Content-Type': 'text/csv; charset=utf-8' }),
+      body: {
+        pipeTo: async writable => {
+          assert.ok(writable)
+          events.push('pipe')
+        },
+        cancel: async () => events.push('cancel')
+      }
+    }
+  }
+  await backupToCSVFile()
+  assert.deepEqual(events, ['picker', 'fetch', 'writable', 'pipe'])
+  assert.equal(domState.anchors.length, 0)
   if (previousPicker === undefined) delete window.showSaveFilePicker
   else window.showSaveFilePicker = previousPicker
 })

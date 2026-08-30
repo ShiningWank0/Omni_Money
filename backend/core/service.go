@@ -1112,9 +1112,9 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 	if int64(len(content)) > MaxCSVStringImportBytes {
 		return 0, fmt.Errorf("文字列CSV入力が上限%d bytesを超えました", MaxCSVStringImportBytes)
 	}
-	// v3 is a normalized, typed row format. Detect it from the official full
-	// header or from an unambiguous first data row while retaining the
-	// historical parser for legacy/v2 transaction-only files.
+	// v3 is a normalized, typed row format. Only its official full header may
+	// select the typed parser: a subset cannot describe images/tags/links or
+	// settings and must never be allowed to enter destructive replace mode.
 	probeInput := &csvFieldLimitReader{ctx: ctx, input: strings.NewReader(content), maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
 	probe := csv.NewReader(probeInput)
 	probe.FieldsPerRecord = -1
@@ -1123,11 +1123,6 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 			headers[0] = strings.TrimPrefix(headers[0], "\ufeff")
 		}
 		isV3 := isCSVV3Header(headers)
-		if !isV3 {
-			if firstRecord, firstErr := probe.Read(); firstErr == nil {
-				isV3 = isCSVV3Record(headers, firstRecord)
-			}
-		}
 		if isV3 {
 			parsed, parseErr := s.parseCSVV3Reader(ctx, strings.NewReader(content), false)
 			if parseErr != nil {

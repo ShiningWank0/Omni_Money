@@ -214,19 +214,19 @@ func TestImportCSVLegacyStringRejectsEmptyAndDuplicateHeaders(t *testing.T) {
 	}
 }
 
-func TestImportCSVMinimalV3UsesTypedRecordDetection(t *testing.T) {
+func TestImportCSVMinimalV3IsRejectedForReplace(t *testing.T) {
 	setupCoreTestDB(t)
 	originalID := insertTestTransaction(t, "old", "2025-12-31", "before", "income", 1, 1)
 	content := "omni_money_csv_version,record_type,id,account,date,item,type,amount\n" +
 		"3,transaction,101,cash,2026-01-01,給与,income,1000\n"
-	if imported, err := ImportCSV(content, "replace"); err != nil || imported != 1 {
-		t.Fatalf("minimal v3 replace result = %d, %v", imported, err)
+	if imported, err := ImportCSV(content, "replace"); err == nil || !strings.Contains(err.Error(), "CSV v3") {
+		t.Fatalf("minimal v3 replace result = %d, %v; want strict full-header rejection", imported, err)
 	}
 	var count int
 	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transactions WHERE id = ?", originalID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 {
-		t.Fatalf("minimal v3 replace retained old transaction count = %d", count)
+	if count != 1 {
+		t.Fatalf("minimal v3 replace changed old transaction count = %d", count)
 	}
 }

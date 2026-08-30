@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/csv"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"omni_money/backend/database"
@@ -57,6 +60,38 @@ func TestCSVTempBudgetAccountsForDecodedImageWorkingCopy(t *testing.T) {
 	}
 }
 
+func TestCSVTempBudgetReservationsAreAtomicUnderConcurrency(t *testing.T) {
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	var mu sync.Mutex
+	var releases []func()
+	for i := 0; i < 8; i++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			release, ok := TryAcquireCSVTempBudget(MaxCSVImportWireBytes)
+			if !ok {
+				return
+			}
+			mu.Lock()
+			releases = append(releases, release)
+			mu.Unlock()
+		}()
+	}
+	close(start)
+	wait.Wait()
+	if len(releases) != 2 {
+		for _, release := range releases {
+			release()
+		}
+		t.Fatalf("concurrent full reservations = %d, want exactly 2", len(releases))
+	}
+	for _, release := range releases {
+		release()
+	}
+}
+
 func TestCSVReaderLegacyAppendAllowsExtraRecordTypeColumn(t *testing.T) {
 	setupCoreTestDB(t)
 	service := &Service{db: database.GetDB(), legacy: true}
@@ -93,7 +128,7 @@ func TestBackupToCSVDefaultAlwaysEmitsV3AndV2IsExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 2 || len(records[0]) != len(csvV3Headers) || records[0][0] != csvVersionHeader || records[1][0] != csvVersion3 {
+	if len(records) != 3 || len(records[0]) != len(csvV3Headers) || records[0][0] != csvVersionHeader || records[1][0] != csvVersion3 || records[2][1] != csvV3ManifestRecordType {
 		t.Fatalf("default backup was not v3: %#v", records)
 	}
 
@@ -149,6 +184,18 @@ func TestCSVFieldLimitReaderHandlesQuotedRecordsBeforeCSVAllocation(t *testing.T
 	}
 	if _, err := aggregateReader.Read(); err == nil || !strings.Contains(err.Error(), "レコード") {
 		t.Fatalf("aggregate CSV record was not bounded before allocation: %v", err)
+	}
+}
+
+func TestCSVV3RejectsUnframedQuotedCRLFInsteadOfNormalizingIt(t *testing.T) {
+	row := csvV3Record(map[string]string{
+		csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash",
+		"date": "2026-08-01", "item": "item", "type": "income", "amount": "1",
+		"memo": "line one\r\nline two",
+	})
+	content := writeCSVRecordsForTest(t, [][]string{csvV3Headers, row})
+	if _, err := (&Service{}).parseCSVV3Reader(context.Background(), strings.NewReader(content), false); err == nil || !strings.Contains(err.Error(), "lossless") {
+		t.Fatalf("unframed quoted CRLF result = %v", err)
 	}
 }
 
@@ -292,6 +339,46 @@ func TestCSVV3ImageSpoolRejectsSameInodeMutationAfterValidation(t *testing.T) {
 	}
 	if err := parsed.cleanup(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCSVV3TempImageReadReservationIsOwnedThroughConsumer(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	content := csvV3TestContent(t,
+		map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash", "date": "2026-08-01", "item": "item", "type": "income", "amount": "1"},
+		map[string]string{csvVersionHeader: "3", "record_type": "image", "id": "1", "transaction_id": "1", "filename": "receipt.png", "mime_type": "image/png", "data_base64": base64.StdEncoding.EncodeToString(encodePNG(t))},
+	)
+	parsed, err := service.parseCSVV3Reader(context.Background(), strings.NewReader(content), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parsed.cleanup()
+	size := parsed.images[0].tempInfo.Size()
+	data, release, err := readCSVTempImage(parsed.images[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if release == nil || len(data) != int(size) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("read reservation/data = %v/%d, want non-nil/%d", release != nil, len(data), size)
+	}
+	// Parsing retains one reservation for the private spool. Reading the
+	// descriptor adds a second reservation for the heap buffer that the SQL
+	// driver will consume. It must remain charged until the caller finishes the
+	// INSERT, so a request that needs more than the remaining budget is rejected.
+	if extra, ok := TryAcquireCSVTempBudget(MaxCSVTempBudgetBytes - 2*size + 1); ok {
+		extra()
+		release()
+		t.Fatal("image read reservation was released before its consumer")
+	}
+	release()
+	if extra, ok := TryAcquireCSVTempBudget(MaxCSVTempBudgetBytes - size); !ok {
+		t.Fatal("image read reservation was not released after consumer completion")
+	} else {
+		extra()
 	}
 }
 
@@ -554,6 +641,148 @@ func TestCSVV3RejectsUnsafeVersionAndRollsBackReplace(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("original transaction count = %d, want 1 after rollback", count)
 	}
+}
+
+func TestCSVV3ReplaceRequiresValidFinalManifestBeforeMutation(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, records [][]string, headers map[string]int) [][]string
+	}{
+		{
+			name: "header only",
+			mutate: func(_ *testing.T, records [][]string, _ map[string]int) [][]string {
+				return records[:1]
+			},
+		},
+		{
+			name: "row boundary truncation missing trailer",
+			mutate: func(_ *testing.T, records [][]string, _ map[string]int) [][]string {
+				return records[:len(records)-1]
+			},
+		},
+		{
+			name: "duplicate trailer",
+			mutate: func(_ *testing.T, records [][]string, _ map[string]int) [][]string {
+				return append(append([][]string(nil), records...), append([]string(nil), records[len(records)-1]...))
+			},
+		},
+		{
+			name: "tampered digest",
+			mutate: func(t *testing.T, records [][]string, headers map[string]int) [][]string {
+				copyRecords := cloneCSVRecords(records)
+				manifestIndex := len(copyRecords) - 1
+				value, err := decodeCSVV3TextCell(copyRecords[manifestIndex][headers["setting_value"]])
+				if err != nil {
+					t.Fatal(err)
+				}
+				var manifest csvV3Manifest
+				if err := json.Unmarshal([]byte(value), &manifest); err != nil {
+					t.Fatal(err)
+				}
+				manifest.Digest = strings.Repeat("0", sha256.Size*2)
+				encoded, err := json.Marshal(manifest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				copyRecords[manifestIndex][headers["setting_value"]] = csvV3Text(string(encoded))
+				return copyRecords
+			},
+		},
+		{
+			name: "tampered count",
+			mutate: func(t *testing.T, records [][]string, headers map[string]int) [][]string {
+				copyRecords := cloneCSVRecords(records)
+				manifestIndex := len(copyRecords) - 1
+				value, err := decodeCSVV3TextCell(copyRecords[manifestIndex][headers["setting_value"]])
+				if err != nil {
+					t.Fatal(err)
+				}
+				var manifest csvV3Manifest
+				if err := json.Unmarshal([]byte(value), &manifest); err != nil {
+					t.Fatal(err)
+				}
+				manifest.Counts["transaction"]++
+				encoded, err := json.Marshal(manifest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				copyRecords[manifestIndex][headers["setting_value"]] = csvV3Text(string(encoded))
+				return copyRecords
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupCoreTestDB(t)
+			originalID := insertTestTransaction(t, "keep", "2026-01-01", "original", "income", 100, 100)
+			valid := csvV3TestContent(t, map[string]string{
+				csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash",
+				"date": "2026-08-01", "item": "imported", "type": "income", "amount": "1",
+			})
+			records, headers := readCSVRecordsForTest(t, valid)
+			invalid := writeCSVRecordsForTest(t, tc.mutate(t, records, headers))
+			if _, err := ImportCSV(invalid, "replace"); err == nil {
+				t.Fatal("invalid manifest was accepted")
+			}
+			var count int
+			if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transactions WHERE id = ?", originalID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 {
+				t.Fatalf("replace mutated the database after manifest failure: count=%d", count)
+			}
+		})
+	}
+}
+
+func TestCSVV3AppendRetainsCompatibilityWithoutManifest(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	valid := csvV3TestContent(t, map[string]string{
+		csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash",
+		"date": "2026-08-01", "item": "imported", "type": "income", "amount": "1",
+	})
+	records, _ := readCSVRecordsForTest(t, valid)
+	withoutManifest := writeCSVRecordsForTest(t, records[:len(records)-1])
+	if imported, err := service.ImportCSVReaderContext(context.Background(), strings.NewReader(withoutManifest), "append"); err != nil || imported != 1 {
+		t.Fatalf("manifest-less v3 append result=%d err=%v", imported, err)
+	}
+}
+
+func cloneCSVRecords(records [][]string) [][]string {
+	clone := make([][]string, len(records))
+	for i := range records {
+		clone[i] = append([]string(nil), records[i]...)
+	}
+	return clone
+}
+
+func readCSVRecordsForTest(t *testing.T, content string) ([][]string, map[string]int) {
+	t.Helper()
+	records, err := csv.NewReader(strings.NewReader(content)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers, err := csvV3HeaderMap(records[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return records, headers
+}
+
+func writeCSVRecordsForTest(t *testing.T, records [][]string) string {
+	t.Helper()
+	var output strings.Builder
+	writer := csv.NewWriter(&output)
+	if err := writer.WriteAll(records); err != nil {
+		t.Fatal(err)
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		t.Fatal(err)
+	}
+	return output.String()
 }
 
 func TestCSVV3RejectsDuplicateAndUnknownRowsBeforeWriting(t *testing.T) {
@@ -821,10 +1050,25 @@ func csvV3TestContent(t *testing.T, rows ...map[string]string) string {
 	if err := writer.Write(csvV3Headers); err != nil {
 		t.Fatal(err)
 	}
+	digest := sha256.New()
+	counts := make(map[string]int64)
 	for _, values := range rows {
-		if err := writer.Write(csvV3Record(values)); err != nil {
+		record := csvV3Record(values)
+		if err := writer.Write(record); err != nil {
 			t.Fatal(err)
 		}
+		updateCSVV3Digest(digest, record)
+		counts[values["record_type"]]++
+	}
+	manifestValue, err := newCSVV3Manifest(counts, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Write(csvV3Record(map[string]string{
+		csvVersionHeader: csvVersion3, "record_type": csvV3ManifestRecordType,
+		"setting_key": csvV3ManifestKey, "setting_value": manifestValue,
+	})); err != nil {
+		t.Fatal(err)
 	}
 	writer.Flush()
 	if err := writer.Error(); err != nil {
