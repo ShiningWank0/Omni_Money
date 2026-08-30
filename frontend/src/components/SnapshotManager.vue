@@ -49,7 +49,8 @@
 import { ref, onMounted } from 'vue'
 import {
   listSnapshots as apiListSnapshots,
-  restoreSnapshot as apiRestoreSnapshot
+  restoreSnapshot as apiRestoreSnapshot,
+  clearSessionSecrets
 } from '../utils/api'
 
 const emit = defineEmits(['close', 'restored'])
@@ -84,16 +85,33 @@ async function executeRestore(name) {
   message.value = ''
   try {
     await apiRestoreSnapshot(name)
-    localStorage.setItem('snapshot_restored', 'success')
-    setTimeout(() => {
-      window.location.reload()
-    }, 300)
+    finishRestoreAndRequireLogin('snapshot-restored')
   } catch (e) {
-    localStorage.setItem('snapshot_restored', 'error:' + (e.message || '不明なエラー'))
-    message.value = '復元に失敗しました: ' + e.message
-    messageType.value = 'error'
-    isRestoring.value = false
-    confirmingSnapshot.value = null
+    // The server drains sessions before attempting disk restore, so a
+    // failed restore still requires a fresh login and must not leave a
+    // stale modal/store visible in the browser.
+    finishRestoreAndRequireLogin('snapshot-restore-failed')
+  }
+}
+
+function finishRestoreAndRequireLogin(reason) {
+  clearSessionSecrets()
+  localStorage.removeItem('snapshot_restored')
+  snapshots.value = []
+  confirmingSnapshot.value = null
+  message.value = ''
+  isRestoring.value = false
+  emit('close')
+  const event = new CustomEvent('omni-money:session-expired', {
+    cancelable: true,
+    detail: { reason }
+  })
+  window.dispatchEvent(event)
+  // App.vue handles the event synchronously and clears its financial store and
+  // all mounted modal state before navigation. Keep a fallback for an
+  // embedded component without the shell listener.
+  if (!event.defaultPrevented && window.location.pathname !== '/login') {
+    window.location.replace(`/login?reason=${encodeURIComponent(reason)}`)
   }
 }
 

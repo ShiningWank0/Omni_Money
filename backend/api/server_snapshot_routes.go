@@ -91,6 +91,8 @@ func handleServerSnapshotRestore(dependencies ServerDependencies) http.HandlerFu
 			if operation != nil {
 				operation.Release()
 			}
+			dependencies.Sessions.ClearSessionCookie(w, r)
+			w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
 			log.Printf("security_event=snapshot_restore result=identity_error")
 			jsonError(w, "アカウントサービスを利用できません", http.StatusServiceUnavailable)
 			return
@@ -99,16 +101,24 @@ func handleServerSnapshotRestore(dependencies ServerDependencies) http.HandlerFu
 		// Invalidate every session for this user, including the current one, so
 		// no stale root can be used after restore.  Other users are untouched.
 		dependencies.Sessions.DeleteAllSessionsForUser(userID)
+		// Restore invalidates the current root as well as every sibling session.
+		// Clear the browser credential before doing the potentially slow disk
+		// operation; both success and failure require a fresh login.
+		dependencies.Sessions.ClearSessionCookie(w, r)
+		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
 		err = operation.RestoreSnapshot(r.Context(), request.Name)
 		if err != nil {
 			log.Printf("security_event=snapshot_restore result=error")
-			jsonError(w, "スナップショットを復元できません", http.StatusInternalServerError)
+			jsonResponse(w, map[string]interface{}{
+				"error": "スナップショットを復元できません", "login_required": true,
+			}, http.StatusInternalServerError)
 			return
 		}
 		log.Printf("security_event=snapshot_restore result=success")
 		jsonResponse(w, map[string]interface{}{
 			"message":         "スナップショットから復元しました。再ログインしてください",
 			"reauth_required": true,
+			"login_required":  true,
 		}, http.StatusOK)
 	}
 }

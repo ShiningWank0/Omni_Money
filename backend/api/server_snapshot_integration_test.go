@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,6 +135,16 @@ func TestServerSnapshotsStayBoundToUserAndRestoreRevokesSessions(t *testing.T) {
 	if restored.Code != http.StatusOK {
 		t.Fatalf("snapshot restore status = %d, body=%s", restored.Code, restored.Body.String())
 	}
+	var restoredBody map[string]interface{}
+	if err := json.Unmarshal(restored.Body.Bytes(), &restoredBody); err != nil {
+		t.Fatal(err)
+	}
+	if restoredBody["login_required"] != true {
+		t.Fatalf("restore response login_required = %#v", restoredBody["login_required"])
+	}
+	if !strings.Contains(restored.Header().Get("Set-Cookie"), "Max-Age=0") {
+		t.Fatalf("restore response did not clear the session cookie: %q", restored.Header().Get("Set-Cookie"))
+	}
 	if response := serveServerCSVRequest(t, handler, sessionA, http.MethodGet, "/api/snapshots", nil); response.Code != http.StatusUnauthorized {
 		t.Fatalf("restored user's stale session status = %d, want unauthorized", response.Code)
 	}
@@ -148,6 +159,13 @@ func TestServerSnapshotsStayBoundToUserAndRestoreRevokesSessions(t *testing.T) {
 	foreignRestore := serveServerCSVRequest(t, handler, sessionB, http.MethodPost, "/api/snapshots/restore", foreignRestoreBody)
 	if foreignRestore.Code != http.StatusInternalServerError {
 		t.Fatalf("other user's restore of user A snapshot status = %d, body=%s", foreignRestore.Code, foreignRestore.Body.String())
+	}
+	var foreignBody map[string]interface{}
+	if err := json.Unmarshal(foreignRestore.Body.Bytes(), &foreignBody); err != nil {
+		t.Fatal(err)
+	}
+	if foreignBody["login_required"] != true {
+		t.Fatalf("failed restore response login_required = %#v", foreignBody["login_required"])
 	}
 }
 

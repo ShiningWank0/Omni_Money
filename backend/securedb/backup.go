@@ -8,6 +8,7 @@ import (
 	"time"
 
 	sqlite3 "github.com/mattn/go-sqlite3"
+	"omni_money/backend/fileprivacy"
 )
 
 // Backup creates a consistent SQLite online backup. The destination is opened
@@ -24,12 +25,20 @@ func (o *Opener) Backup(ctx context.Context, source *sql.DB, snapshotPath string
 	if err != nil {
 		return err
 	}
-	if err := placeholder.Close(); err != nil {
+	if err := fileprivacy.Harden(placeholder); err != nil {
+		_ = placeholder.Close()
+		_ = os.Remove(snapshotPath)
+		return err
+	}
+	placeholderInfo, err := placeholder.Stat()
+	if err != nil {
+		_ = placeholder.Close()
 		_ = os.Remove(snapshotPath)
 		return err
 	}
 	succeeded := false
 	defer func() {
+		_ = placeholder.Close()
 		if !succeeded {
 			_ = os.Remove(snapshotPath)
 		}
@@ -40,9 +49,25 @@ func (o *Opener) Backup(ctx context.Context, source *sql.DB, snapshotPath string
 		return err
 	}
 	defer func() { _ = destination.Close() }()
+	assertDestination := func() error {
+		info, statErr := os.Stat(snapshotPath)
+		if statErr != nil {
+			return statErr
+		}
+		if !os.SameFile(placeholderInfo, info) {
+			return fmt.Errorf("snapshot destination was replaced during backup")
+		}
+		return nil
+	}
+	if err := assertDestination(); err != nil {
+		return err
+	}
 
 	sourceConn, err := source.Conn(ctx)
 	if err != nil {
+		return err
+	}
+	if err := assertDestination(); err != nil {
 		return err
 	}
 	defer sourceConn.Close()
@@ -114,6 +139,12 @@ func (o *Opener) Backup(ctx context.Context, source *sql.DB, snapshotPath string
 		if err := RequireEncryptedHeader(snapshotPath); err != nil {
 			return err
 		}
+	}
+	if err := assertDestination(); err != nil {
+		return err
+	}
+	if err := placeholder.Close(); err != nil {
+		return err
 	}
 	succeeded = true
 	return nil

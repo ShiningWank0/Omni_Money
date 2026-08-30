@@ -2,8 +2,11 @@ package database
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
+
+	"omni_money/backend/securedb"
 )
 
 func TestLedgerSchemaRecordsCurrentVersion(t *testing.T) {
@@ -177,5 +180,107 @@ func TestLedgerSchemaMigrationFailureRollsBackAtomically(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatal("failed migration left a partially-created transaction_links table")
+	}
+}
+
+func TestLedgerSchemaRejectsFutureVersion(t *testing.T) {
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "future.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("PRAGMA user_version = 999"); err != nil {
+		t.Fatal(err)
+	}
+	if err := createTablesOn(db); err == nil {
+		t.Fatal("future ledger schema was accepted")
+	}
+}
+
+func TestLedgerSchemaRejectsCurrentMissingIndexAndForeignKeyOrphan(t *testing.T) {
+	instance, err := OpenPlainInstance(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	if _, err := instance.DB().Exec("DROP INDEX idx_transaction_images_txid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLedgerSchema(instance.DB(), true); err == nil {
+		t.Fatal("current ledger missing a critical index was accepted")
+	}
+
+	// Re-open a clean current ledger and place an orphan while FK enforcement
+	// is disabled only for fixture construction. foreign_key_check must still
+	// reject the candidate before it can be restored or listed.
+	if err := instance.Close(); err != nil {
+		t.Fatal(err)
+	}
+	instance, err = OpenPlainInstance(filepath.Join(t.TempDir(), "orphan.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	if _, err := instance.DB().Exec("PRAGMA foreign_keys = OFF; INSERT INTO transaction_links(parent_id, child_id) VALUES (9999, 9998);"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLedgerSchema(instance.DB(), true); err == nil {
+		t.Fatal("current ledger with an orphan foreign-key row was accepted")
+	}
+}
+
+func TestCurrentVersionWithoutIdentityStillRequiresFullConstraints(t *testing.T) {
+	instance, err := OpenPlainInstance(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	if _, err := instance.DB().Exec("PRAGMA application_id = 0; DROP INDEX idx_transaction_images_txid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLedgerSchema(instance.DB(), true); err == nil {
+		t.Fatal("current version with application_id=0 bypassed full schema validation")
+	}
+}
+
+func TestBlankSQLiteFileIsNotAListableSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "blank.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	probe := &Instance{opener: securedb.NewPlainOpener()}
+	readonly, err := probe.opener.Open(t.Context(), path, securedb.ReadOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readonly.Close()
+	if err := probe.validateSnapshotDatabase(readonly, path); err == nil {
+		t.Fatal("blank SQLite file was accepted as a snapshot")
+	}
+	probe.opener.Destroy()
+}
+
+func TestBlankSameKeySnapshotIsNotRestored(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	blankPath := filepath.Join(snapshotDir, "blank-same-key.db")
+	db, err := sql.Open("sqlite3", blankPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(blankPath, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.RestoreSnapshot(snapshotDir, filepath.Base(blankPath)); err == nil {
+		t.Fatal("blank same-key SQLite snapshot was accepted")
+	}
+	if instance.DB() == nil {
+		t.Fatal("blank snapshot rejection unpublished the live database")
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 
 	"omni_money/backend/core"
@@ -82,6 +83,10 @@ type leaseState struct {
 	once     sync.Once
 	mu       sync.RWMutex
 	released bool
+	// releasedFlag is read by the SessionManager registration barrier while
+	// its own mutex is held. It avoids taking leaseState.mu in the opposite
+	// order from BeginRestore/Borrow/Release.
+	releasedFlag atomic.Bool
 }
 
 func newLease(manager *Manager, current *entry, root bool) *Lease {
@@ -355,6 +360,47 @@ func (l *Lease) BeginRestore() (*RestoreOperation, error) {
 	return &RestoreOperation{manager: m, entry: current}, nil
 }
 
+// ValidateSessionRoot is the registration barrier used by SessionManager.
+// It performs the same manager-entry/liveness check as Borrow while taking no
+// reference. The caller must hold SessionManager's mutex; BeginRestore takes
+// that mutex before this lease state/manager sequence, making publication and
+// draining a single deterministic order.
+func (l *Lease) ValidateSessionRoot() error {
+	if l == nil || l.state == nil {
+		return ErrLeaseReleased
+	}
+	if l.state.releasedFlag.Load() || !l.root || l.manager == nil || l.entry == nil {
+		return ErrLeaseReleased
+	}
+	m := l.manager
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return l.validateSessionRootLocked()
+}
+
+// ValidateSessionRootLocked is the registration barrier used by
+// SessionManager.createSession. The caller must hold the exact Manager mutex;
+// it intentionally does not acquire it again, preventing a lock inversion
+// with BeginRestore and Release.
+func (l *Lease) ValidateSessionRootLocked() error {
+	return l.validateSessionRootLocked()
+}
+
+func (l *Lease) validateSessionRootLocked() error {
+	if l == nil || l.state == nil || l.state.releasedFlag.Load() || !l.root || l.manager == nil || l.entry == nil {
+		return ErrLeaseReleased
+	}
+	m := l.manager
+	if m.closing {
+		return ErrClosed
+	}
+	current := m.entries[l.entry.userID]
+	if current != l.entry || current.draining || current.ready != nil || current.instance == nil {
+		return ErrDraining
+	}
+	return nil
+}
+
 // waitForReferences waits until the operation is the sole remaining reference
 // on its exact entry.  A context cancellation leaves the entry draining, but
 // releases the operation's internal reference so normal cleanup can complete.
@@ -500,6 +546,7 @@ func (l *Lease) Release() {
 	l.state.once.Do(func() {
 		l.state.mu.Lock()
 		l.state.released = true
+		l.state.releasedFlag.Store(true)
 		m := l.manager
 		root := l.root
 		if m == nil || l.entry == nil {

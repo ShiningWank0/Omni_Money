@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"omni_money/backend/fileprivacy"
 	"omni_money/backend/models"
 	"omni_money/backend/securedb"
 	"omni_money/backend/validation"
@@ -27,8 +28,26 @@ import (
 const defaultSnapshotMaxTotalBytes int64 = 2 * 1024 * 1024 * 1024
 const ledgerSchemaVersion = 5
 
+// application_id is the SQLite file identity for Omni Money ledgers. Zero is
+// accepted only for legacy files that predate the identity marker; another
+// non-zero identity is never treated as a ledger merely because it has a
+// familiar table name.
+const ledgerSchemaIdentity = 0x4f4d4e59
+
+// This marker is written only by the explicit pre-identity migration path.
+// It distinguishes a recognized historical layout from an arbitrary current
+// version file with application_id=0; the latter must pass current constraint
+// validation and is never granted the legacy compatibility exception.
+const legacySchemaCompatibilityTable = "omni_legacy_schema_compat"
+
 const writableSQLiteQuery = "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 const snapshotSQLiteQuery = "mode=rw&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
+
+// Validation copies are bounded before they are opened.  The retention
+// budget is the upper bound for an individual snapshot in normal operation;
+// keeping the same bound here prevents a hostile off-host file from turning a
+// GET /snapshots into an unbounded disk/CPU operation.
+const maxSnapshotValidationBytes int64 = defaultSnapshotMaxTotalBytes
 
 var umask sync.Once
 
@@ -53,10 +72,23 @@ type Instance struct {
 	snapshotRunning   bool
 	snapshotPending   bool
 	snapshotClosing   bool
+	// snapshotValidation is a bounded positive cache. Listing never trusts a
+	// filename alone: an entry is shown only after it has been opened with the
+	// same opener and passed integrity/schema validation. File identity and
+	// metadata bind the cache to the object that was validated, so a replaced
+	// off-host file is revalidated.
+	snapshotValidationMu sync.Mutex
+	snapshotValidation   map[string]snapshotValidationEntry
+}
+
+const maxSnapshotValidationEntries = 256
+
+type snapshotValidationEntry struct {
+	info os.FileInfo
 }
 
 func newInstance() *Instance {
-	instance := &Instance{}
+	instance := &Instance{snapshotValidation: make(map[string]snapshotValidationEntry)}
 	instance.ensureSnapshotCond()
 	return instance
 }
@@ -234,6 +266,14 @@ func (i *Instance) initDBLocked(path string, opener *securedb.Opener, migratePla
 			return fmt.Errorf("SQLCipher暗号化検証エラー: %w", err)
 		}
 	}
+	// A process crash can leave a durable old-copy or candidate beside the
+	// atomically replaced live file. Once this live file has passed the same
+	// schema/integrity checks, reclaim those artifacts. Cleanup is retried on
+	// the next startup and never blocks publication of an otherwise valid
+	// ledger, so a stale unreadable artifact cannot become a login DoS.
+	if err := cleanupRestoreArtifacts(path); err != nil {
+		log.Printf("security_event=snapshot_restore_cleanup result=deferred")
+	}
 
 	log.Printf("データベース初期化完了: %s", path)
 	return nil
@@ -296,6 +336,17 @@ func createTablesOn(target *sql.DB) error {
 	}
 	if version > ledgerSchemaVersion {
 		return fmt.Errorf("データベースschema version %dは対応version %dより新しいため開けません", version, ledgerSchemaVersion)
+	}
+	if err := validateLedgerSchema(target, false); err != nil {
+		return fmt.Errorf("schema identity/minimum validation failed: %w", err)
+	}
+	var identity int64
+	if err := target.QueryRow("PRAGMA application_id").Scan(&identity); err != nil {
+		return fmt.Errorf("スキーマidentity取得エラー: %w", err)
+	}
+	var userTables int
+	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&userTables); err != nil {
+		return fmt.Errorf("schema table count取得エラー: %w", err)
 	}
 
 	tx, err := target.Begin()
@@ -574,6 +625,25 @@ func createTablesOn(target *sql.DB) error {
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", ledgerSchemaVersion)); err != nil {
 			return fmt.Errorf("スキーマversion更新エラー: %w", err)
 		}
+		if identity == 0 && userTables > 0 {
+			if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS omni_legacy_schema_compat (
+				legacy_version INTEGER PRIMARY KEY CHECK(legacy_version >= 0 AND legacy_version < 2)
+			)`); err != nil {
+				return fmt.Errorf("legacy schema compatibility marker作成エラー: %w", err)
+			}
+			if _, err := tx.Exec("INSERT OR IGNORE INTO omni_legacy_schema_compat(legacy_version) VALUES (?)", version); err != nil {
+				return fmt.Errorf("legacy schema compatibility marker記録エラー: %w", err)
+			}
+		}
+	}
+	// A blank new database receives the identity marker. Legacy databases keep
+	// application_id=0 so their explicitly supported pre-marker layout can be
+	// reopened after migration without pretending that old table definitions
+	// had constraints that SQLite cannot add with CREATE IF NOT EXISTS.
+	if identity == ledgerSchemaIdentity || userTables == 0 {
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA application_id = %d", ledgerSchemaIdentity)); err != nil {
+			return fmt.Errorf("スキーマidentity更新エラー: %w", err)
+		}
 	}
 	if err := validateCriticalSchema(tx); err != nil {
 		return err
@@ -581,7 +651,9 @@ func createTablesOn(target *sql.DB) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("スキーマtransaction確定エラー: %w", err)
 	}
-
+	if err := validateLedgerSchemaAfterMigration(target, version == ledgerSchemaVersion || identity == ledgerSchemaIdentity); err != nil {
+		return fmt.Errorf("完全なschema validation failed: %w", err)
+	}
 	return nil
 }
 
@@ -661,6 +733,248 @@ func validateCriticalSchema(target schemaQueryer) error {
 		return err
 	}
 	return nil
+}
+
+// validateLedgerSchema validates both the pre-migration trust boundary and
+// the complete current schema. requireCurrent is false for read-only listing:
+// an explicitly supported legacy version may be shown, but it still needs a
+// recognizable ledger identity/minimum shape and is never migrated there.
+func validateLedgerSchema(target schemaQueryer, requireCurrent bool) error {
+	return validateLedgerSchemaInternal(target, requireCurrent, true)
+}
+
+func validateLedgerSchemaInternal(target schemaQueryer, requireCurrent, strictCurrent bool) error {
+	if target == nil {
+		return errors.New("database schema target is nil")
+	}
+	var version int
+	if err := target.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
+	if version < 0 || version > ledgerSchemaVersion {
+		return fmt.Errorf("unsupported ledger schema version %d", version)
+	}
+	var identity int64
+	if err := target.QueryRow("PRAGMA application_id").Scan(&identity); err != nil {
+		return fmt.Errorf("read ledger identity: %w", err)
+	}
+	if identity != 0 && identity != ledgerSchemaIdentity {
+		return fmt.Errorf("database identity %08x is not an Omni Money ledger", identity)
+	}
+	var userTables int
+	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&userTables); err != nil {
+		return err
+	}
+	if userTables == 0 {
+		if requireCurrent && version != 0 {
+			return fmt.Errorf("empty database has schema version %d", version)
+		}
+		return nil
+	}
+	// Before migration, require the historical transaction shape. This keeps a
+	// random SQLite file from being upgraded by CREATE TABLE IF NOT EXISTS.
+	if err := requireColumns(target, "transactions", []string{"id", "account", "date", "item", "type", "amount", "balance", "memo"}); err != nil {
+		return fmt.Errorf("ledger minimum schema: %w", err)
+	}
+	if version == ledgerSchemaVersion {
+		strict := strictCurrent
+		if strictCurrent && identity == 0 {
+			// Do not use application_id=0 itself as a broad bypass. Only a
+			// database that this migration code explicitly marked as a supported
+			// historical layout may retain its pre-marker table definitions.
+			legacy, err := hasLegacySchemaCompatibilityMarker(target)
+			if err != nil {
+				return err
+			}
+			strict = !legacy
+		}
+		return validateFullLedgerSchema(target, strict)
+	}
+	if !requireCurrent {
+		return nil
+	}
+	if version != ledgerSchemaVersion {
+		return fmt.Errorf("schema version %d was not migrated", version)
+	}
+	return validateFullLedgerSchema(target, strictCurrent)
+}
+
+func validateLedgerSchemaAfterMigration(target schemaQueryer, strict bool) error {
+	return validateLedgerSchemaInternal(target, true, strict)
+}
+
+func hasLegacySchemaCompatibilityMarker(target schemaQueryer) (bool, error) {
+	var count int
+	if err := target.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+		legacySchemaCompatibilityTable,
+	).Scan(&count); err != nil {
+		return false, fmt.Errorf("legacy schema compatibility marker検査エラー: %w", err)
+	}
+	if count == 0 {
+		return false, nil
+	}
+	var definition sql.NullString
+	if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", legacySchemaCompatibilityTable).Scan(&definition); err != nil || !definition.Valid {
+		return false, fmt.Errorf("legacy schema compatibility marker SQL定義を検査できません: %w", err)
+	}
+	canonical := strings.Join(strings.Fields(strings.ToLower(definition.String)), " ")
+	if canonical != "create table omni_legacy_schema_compat ( legacy_version integer primary key check(legacy_version >= 0 and legacy_version < 2) )" {
+		return false, fmt.Errorf("legacy schema compatibility marker SQL定義が不正です")
+	}
+	if err := requireColumns(target, legacySchemaCompatibilityTable, []string{"legacy_version"}); err != nil {
+		return false, fmt.Errorf("legacy schema compatibility marker定義エラー: %w", err)
+	}
+	var version, rows int
+	if err := target.QueryRow("SELECT COUNT(*), COALESCE(MIN(legacy_version), -1) FROM omni_legacy_schema_compat").Scan(&rows, &version); err != nil {
+		return false, fmt.Errorf("legacy schema compatibility marker値検査エラー: %w", err)
+	}
+	if rows != 1 || version < 0 || version >= ledgerSchemaVersion {
+		return false, fmt.Errorf("legacy schema compatibility marker値が不正です")
+	}
+	return true, nil
+}
+
+func requireColumns(target schemaQueryer, table string, required []string) error {
+	rows, err := target.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	found := make(map[string]bool, len(required))
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		found[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, column := range required {
+		if !found[column] {
+			return fmt.Errorf("missing %s.%s", table, column)
+		}
+	}
+	return nil
+}
+
+func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) error {
+	requiredColumns := map[string][]string{
+		"transactions":               {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
+		"transaction_links":          {"parent_id", "child_id"},
+		"transaction_images":         {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
+		"tags":                       {"id", "name", "parent_id", "level"},
+		"transaction_tags":           {"transaction_id", "tag_id"},
+		"ai_transaction_idempotency": {"credential_id", "idempotency_key_sha256", "request_sha256", "transaction_id", "response_account", "response_date", "created_at"},
+		"ai_daily_transaction_usage": {"credential_id", "utc_date", "successful_creates"},
+		"settings":                   {"key", "value"},
+	}
+	for table, columns := range requiredColumns {
+		if err := requireColumns(target, table, columns); err != nil {
+			return fmt.Errorf("full schema: %w", err)
+		}
+	}
+	objects := []struct{ typ, name string }{
+		{"index", "idx_transactions_account"}, {"index", "idx_transactions_account_date_id"},
+		{"index", "idx_transactions_date"}, {"index", "idx_transactions_item"}, {"index", "idx_transactions_memo"},
+		{"index", "idx_transaction_links_child_id"}, {"index", "idx_transaction_images_txid"},
+		{"index", "idx_tags_parent"}, {"index", "idx_tags_root_name_unique"},
+		{"index", "idx_transaction_tags_txid"}, {"index", "idx_transaction_tags_tagid"},
+		{"index", "idx_ai_idempotency_credential_key"}, {"index", "idx_ai_idempotency_transaction"},
+		{"index", "idx_ai_daily_usage_credential_date"},
+		{"trigger", "trg_transaction_images_quota_insert"}, {"trigger", "trg_transaction_images_immutable_update"},
+		{"trigger", "validate_transactions_amount_insert"}, {"trigger", "validate_transactions_amount_update"},
+	}
+	for _, object := range objects {
+		var count int
+		if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?", object.typ, object.name).Scan(&count); err != nil {
+			return err
+		}
+		if count != 1 {
+			return fmt.Errorf("missing required %s %s", object.typ, object.name)
+		}
+	}
+	for table, indexes := range map[string][]string{
+		"transactions":               {"idx_transactions_account", "idx_transactions_account_date_id", "idx_transactions_date", "idx_transactions_item", "idx_transactions_memo"},
+		"transaction_links":          {"idx_transaction_links_child_id"},
+		"transaction_images":         {"idx_transaction_images_txid"},
+		"tags":                       {"idx_tags_parent", "idx_tags_root_name_unique"},
+		"transaction_tags":           {"idx_transaction_tags_txid", "idx_transaction_tags_tagid"},
+		"ai_transaction_idempotency": {"idx_ai_idempotency_credential_key", "idx_ai_idempotency_transaction"},
+		"ai_daily_transaction_usage": {"idx_ai_daily_usage_credential_date"},
+	} {
+		for _, index := range indexes {
+			var tableName string
+			if err := target.QueryRow("SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?", index).Scan(&tableName); err != nil || tableName != table {
+				return fmt.Errorf("index %s is not attached to %s", index, table)
+			}
+		}
+	}
+	if err := validateRootTagIndex(target); err != nil {
+		return err
+	}
+	if !strictConstraints {
+		return nil
+	}
+	// Check the declared constraints as well as table/column names. The
+	// foreign_key_check below catches orphan rows in otherwise valid schemas.
+	for table, required := range map[string][]string{
+		"transactions":               {"check(type in", "check(amount between"},
+		"transaction_links":          {"foreign key"},
+		"transaction_images":         {"foreign key"},
+		"tags":                       {"foreign key", "check(level in", "unique(name, parent_id)"},
+		"ai_transaction_idempotency": {"check(length(idempotency_key_sha256)", "check(length(request_sha256)"},
+		"ai_daily_transaction_usage": {"check(length(utc_date)", "check(successful_creates >= 0)"},
+		"transaction_tags":           {"foreign key"},
+	} {
+		var definition sql.NullString
+		if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&definition); err != nil || !definition.Valid {
+			return fmt.Errorf("missing definition for %s: %w", table, err)
+		}
+		canonical := strings.ToLower(definition.String)
+		for _, token := range required {
+			if !strings.Contains(canonical, token) {
+				return fmt.Errorf("%s lacks %s constraint", table, token)
+			}
+		}
+	}
+	for table, expectedCount := range map[string]int{"transaction_links": 2, "transaction_images": 1, "tags": 1, "transaction_tags": 2} {
+		rows, err := target.Query("PRAGMA foreign_key_list(" + table + ")")
+		if err != nil {
+			return err
+		}
+		count := 0
+		for rows.Next() {
+			var id, seq int
+			var referenced, from, to, onUpdate, onDelete, match string
+			if err := rows.Scan(&id, &seq, &referenced, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if referenced == "transactions" || referenced == "tags" {
+				count++
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if count != expectedCount {
+			return fmt.Errorf("%s has %d expected foreign keys, found %d", table, expectedCount, count)
+		}
+	}
+	rows, err := target.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return errors.New("foreign_key_check reported an orphan row")
+	}
+	return rows.Err()
 }
 
 // validateRootTagIndex verifies the definition, not just the object name.
@@ -799,6 +1113,9 @@ func (i *Instance) createSnapshot(snapshotDir string) (string, error) {
 			return "", fmt.Errorf("スナップショットディレクトリ権限設定エラー: %w", err)
 		}
 	}
+	if err := validateSnapshotDirectory(snapshotDir); err != nil {
+		return "", fmt.Errorf("スナップショットディレクトリが安全ではありません: %w", err)
+	}
 
 	budget, err := snapshotMaxTotalBytes()
 	if err != nil {
@@ -862,7 +1179,20 @@ func (i *Instance) ListSnapshots(snapshotDir string) ([]string, error) {
 	if snapshotDir == "" {
 		snapshotDir = i.getSnapshotDir()
 	}
+	if err := validateSnapshotDirectory(snapshotDir); err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, fmt.Errorf("スナップショットディレクトリが安全ではありません: %w", err)
+	}
 
+	i.mu.RLock()
+	opener := i.opener
+	encrypted := opener != nil && opener.Encrypted()
+	i.mu.RUnlock()
+	if opener == nil {
+		return nil, fmt.Errorf("データベースopenerが初期化されていません")
+	}
 	entries, err := os.ReadDir(snapshotDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -872,23 +1202,150 @@ func (i *Instance) ListSnapshots(snapshotDir string) ([]string, error) {
 	}
 
 	var snapshots []string
+	checked := 0
 	for _, entry := range entries {
+		if checked >= maxSnapshotValidationEntries {
+			break
+		}
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".db") {
 			continue
 		}
 		if err := validateSnapshotName(entry.Name()); err != nil {
 			continue
 		}
-		info, err := os.Lstat(filepath.Join(snapshotDir, entry.Name()))
-		if err != nil || !validSnapshotFile(info) || !validSnapshotMode(info, i.opener != nil && i.opener.Encrypted()) {
+		path := filepath.Join(snapshotDir, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil || !validSnapshotFile(info) || !validSnapshotMode(info, encrypted) {
 			// Listing is intentionally fail-closed per entry: a stray symlink,
 			// hard link, or non-regular file must never become a restore target.
 			continue
 		}
-		snapshots = append(snapshots, entry.Name())
+		checked++
+		if i.validateSnapshotEntry(path, snapshotDir, info, encrypted) {
+			snapshots = append(snapshots, entry.Name())
+		}
 	}
 	sort.Strings(snapshots)
 	return snapshots, nil
+}
+
+// validateSnapshotEntry validates the bytes copied from one no-follow source
+// descriptor. Keeping all cleanup in this bounded helper is important: a
+// defer in the ListSnapshots loop would retain up to 256 full candidates
+// until the whole directory scan returned.
+func (i *Instance) validateSnapshotEntry(path, snapshotDir string, inspected os.FileInfo, encrypted bool) bool {
+	file, err := openSnapshotFile(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	fdInfo, err := file.Stat()
+	if err != nil || fdInfo.Size() < 0 || fdInfo.Size() > maxSnapshotValidationBytes ||
+		!validSnapshotFile(fdInfo) || !validSnapshotMode(fdInfo, encrypted) ||
+		!snapshotSourceMatches(inspected, fdInfo) {
+		return false
+	}
+	// The descriptor-level checks above are required even for a positive
+	// cache hit. In particular, Windows does not expose hard-link count in
+	// os.FileInfo, while openSnapshotFile verifies it with the handle.
+	if i.snapshotIsValidated(path, fdInfo) {
+		postInfo, postErr := os.Lstat(path)
+		return postErr == nil && sameSnapshotInfo(fdInfo, postInfo)
+	}
+	candidatePath, candidateFile, err := temporaryDatabaseFile(snapshotDir, ".omni-money-list-validation-")
+	if err != nil {
+		return false
+	}
+	defer func() {
+		_ = candidateFile.Close()
+		_ = removeSQLiteFiles(candidatePath)
+	}()
+	if err := copyFileToOpenBounded(file, candidateFile, maxSnapshotValidationBytes); err != nil {
+		return false
+	}
+	if err := candidateFile.Sync(); err != nil {
+		return false
+	}
+	if err := candidateFile.Close(); err != nil {
+		return false
+	}
+	// Re-check the source descriptor after copying. A same-inode writer or
+	// replacement must not cause a partially copied object to be treated as a
+	// validated snapshot.
+	postFDInfo, err := file.Stat()
+	if err != nil || !snapshotSourceMatches(fdInfo, postFDInfo) {
+		return false
+	}
+	db, err := i.opener.Open(context.Background(), candidatePath, securedb.ReadOnly)
+	if err != nil {
+		return false
+	}
+	validErr := i.validateSnapshotDatabase(db, candidatePath)
+	closeErr := db.Close()
+	if validErr != nil || closeErr != nil {
+		return false
+	}
+	// The path may not have been replaced while its descriptor was being
+	// copied/validated. The candidate remains the validated bytes even if the
+	// path was briefly swapped away, but do not cache or expose that name.
+	postInfo, postErr := os.Lstat(path)
+	if postErr != nil || !sameSnapshotInfo(fdInfo, postInfo) {
+		return false
+	}
+	i.rememberValidatedSnapshot(path, fdInfo)
+	return true
+}
+
+func (i *Instance) snapshotIsValidated(path string, info os.FileInfo) bool {
+	i.snapshotValidationMu.Lock()
+	defer i.snapshotValidationMu.Unlock()
+	entry, ok := i.snapshotValidation[path]
+	return ok && sameSnapshotInfo(entry.info, info)
+}
+
+func (i *Instance) rememberValidatedSnapshot(path string, info os.FileInfo) {
+	i.snapshotValidationMu.Lock()
+	defer i.snapshotValidationMu.Unlock()
+	if i.snapshotValidation == nil {
+		i.snapshotValidation = make(map[string]snapshotValidationEntry)
+	}
+	if len(i.snapshotValidation) >= maxSnapshotValidationEntries {
+		// Positive entries are only a performance hint. Evicting an arbitrary
+		// entry keeps memory bounded and simply causes a later revalidation.
+		for key := range i.snapshotValidation {
+			delete(i.snapshotValidation, key)
+			break
+		}
+	}
+	i.snapshotValidation[path] = snapshotValidationEntry{info: info}
+}
+
+func sameSnapshotInfo(a, b os.FileInfo) bool {
+	return a != nil && b != nil && os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime()) && a.Mode().Perm() == b.Mode().Perm()
+}
+
+// validateSnapshotDatabase is deliberately read-only. Legacy snapshots may
+// be migrated only during restore; listing must not mutate an off-host file.
+func (i *Instance) validateSnapshotDatabase(target *sql.DB, path string) error {
+	if target == nil {
+		return errors.New("snapshot database is not open")
+	}
+	if i.opener != nil && i.opener.Encrypted() {
+		if err := securedb.RequireEncryptedHeader(path); err != nil {
+			return err
+		}
+	}
+	if err := i.checkIntegrity(target); err != nil {
+		return err
+	}
+	var userTables int
+	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&userTables); err != nil {
+		return err
+	}
+	if userTables == 0 {
+		return errors.New("empty database is not a ledger snapshot")
+	}
+	return validateLedgerSchema(target, false)
 }
 
 // RestoreSnapshot はスナップショットからDBを復元する。
@@ -1001,15 +1458,19 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 		return fmt.Errorf("復元候補のfsyncエラー: %w", err)
 	}
 
-	// Close the live handle only after candidate validation.  Its WAL is
-	// checkpointed first so the renamed live file is a complete database.
+	// Close the live handle only after candidate validation. Its WAL is
+	// checkpointed first so the live file is a complete database. The original
+	// pathname is deliberately kept in place until the replacement is ready:
+	// a rename of live -> backup followed by a second rename would expose a
+	// missing database if the process were killed at the boundary.
 	if _, err := i.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		return fmt.Errorf("現行DBのcheckpointエラー: %w", err)
 	}
-	if err := i.db.Close(); err != nil {
-		return fmt.Errorf("現行DBのクローズエラー: %w", err)
-	}
+	closeErr := i.db.Close()
 	i.db = nil
+	if closeErr != nil {
+		return fmt.Errorf("現行DBのクローズエラー: %w", closeErr)
+	}
 	if err := removeSQLiteSidecars(currentPath); err != nil {
 		// The live handle is intentionally not republished after a post-close
 		// filesystem failure. The vault manager still owns the drained entry and
@@ -1022,16 +1483,24 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if err != nil {
 		return fmt.Errorf("現行DB退避先を作成できません: %w", err)
 	}
-	if err := os.Rename(currentPath, backupPath); err != nil {
-		return fmt.Errorf("現行DB退避エラー: %w", err)
+	if err := copyDatabaseFile(currentPath, backupPath); err != nil {
+		return fmt.Errorf("現行DB退避コピーエラー: %w", err)
 	}
-	if err := syncDirectory(dir); err != nil {
-		return errors.Join(fmt.Errorf("現行DB退避のfsyncエラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+	if err := syncFileAndDirectory(backupPath, dir); err != nil {
+		return fmt.Errorf("現行DB退避のfsyncエラー: %w", err)
 	}
 
-	if err := os.Rename(candidatePath, currentPath); err != nil {
-		return errors.Join(fmt.Errorf("復元候補の配置エラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+	// Replace the live pathname in one filesystem operation. POSIX rename is
+	// atomic and replaces the old file; Windows uses ReplaceFileW and retains
+	// its backup argument. At every crash boundary either the old live file or
+	// the complete candidate remains addressable as currentPath.
+	if err := replaceDatabaseFile(candidatePath, currentPath, backupPath); err != nil {
+		// The single replace failed, therefore currentPath still names the old
+		// live database. Do not delete it in a rollback path designed for the
+		// post-replace case.
+		return fmt.Errorf("復元候補の配置エラー: %w", err)
 	}
+	removeCandidate = false
 	if err := syncDirectory(dir); err != nil {
 		return errors.Join(fmt.Errorf("復元配置のfsyncエラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
 	}
@@ -1063,9 +1532,13 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 		return errors.Join(fmt.Errorf("復元後DB再検証エラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
 	}
 	i.db = newDB
-	removeCandidate = false
-	_ = os.Remove(backupPath)
-	_ = syncDirectory(dir)
+	if err := removeRestoreBackup(backupPath, dir); err != nil {
+		// The new live database is valid and published, but report cleanup
+		// failure so the manager closes the drained instance. The backup is
+		// retained for startup cleanup/recovery rather than silently losing the
+		// only rollback image.
+		return errors.Join(errors.New("復元後の旧DB退避ファイル削除に失敗しました"), err)
+	}
 	log.Printf("snapshot_restore result=success")
 	return nil
 }
@@ -1073,6 +1546,21 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 func (i *Instance) validateRestoreDatabase(target *sql.DB, path string) error {
 	if target == nil {
 		return fmt.Errorf("復元候補DBが初期化されていません")
+	}
+	// Restore validation is not fresh-database initialization. A blank
+	// user_version=0 SQLite file must never be accepted and then populated by
+	// createTablesOn, otherwise a same-key but unrelated file becomes a valid
+	// ledger. Supported legacy snapshots must at least contain the historical
+	// transaction shape before migration.
+	var userTables int
+	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&userTables); err != nil {
+		return fmt.Errorf("復元DB table count検査エラー: %w", err)
+	}
+	if userTables == 0 {
+		return errors.New("空のSQLiteファイルは復元候補ではありません")
+	}
+	if err := validateLedgerSchema(target, false); err != nil {
+		return fmt.Errorf("復元DB schema最低要件エラー: %w", err)
 	}
 	if err := requireFullSynchronous(target); err != nil {
 		return fmt.Errorf("復元DB耐久性設定エラー: %w", err)
@@ -1287,6 +1775,7 @@ func pruneSnapshots(snapshotDir string, maxKeep int, maxBytes int64, protectedPa
 		usage = append(usage, snapshotUsageEntry{name: entry.Name(), path: path, size: info.Size()})
 	}
 	sort.Slice(usage, func(i, j int) bool { return usage[i].name < usage[j].name })
+	removed := false
 	for len(usage) > maxKeep || total > maxBytes {
 		candidate := -1
 		for index := range usage {
@@ -1304,7 +1793,13 @@ func pruneSnapshots(snapshotDir string, maxKeep int, maxBytes int64, protectedPa
 		}
 		total -= victim.size
 		usage = append(usage[:candidate], usage[candidate+1:]...)
+		removed = true
 		log.Printf("security_event=snapshot_prune result=success remaining_bytes=%d", total)
+	}
+	if removed {
+		if err := syncDirectory(snapshotDir); err != nil {
+			return fmt.Errorf("スナップショットprune directory fsyncエラー: %w", err)
+		}
 	}
 	return nil
 }
@@ -1448,6 +1943,9 @@ func hardenSQLiteFiles(path string) error {
 		if err := os.Chmod(candidate, 0600); err != nil {
 			return err
 		}
+		if err := hardenPrivateFile(candidate); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1493,7 +1991,10 @@ func copyFile(src, dst string) error {
 	if err := out.Chmod(0600); err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	if err := fileprivacy.Harden(out); err != nil {
+		return err
+	}
+	if err := copyFileToOpenBounded(in, out, maxSnapshotValidationBytes); err != nil {
 		return err
 	}
 	if err := out.Sync(); err != nil {
@@ -1511,7 +2012,7 @@ func validateSnapshotDirectory(path string) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("スナップショットディレクトリは通常のdirectoryである必要があります")
 	}
-	if info.Mode().Perm() != 0700 {
+	if !snapshotDirectoryModeAllowed(info) {
 		return fmt.Errorf("スナップショットディレクトリ権限は0700が必要です")
 	}
 	return nil
@@ -1538,15 +2039,7 @@ func validateSnapshotSource(path, dir, name string, encrypted ...bool) (os.FileI
 }
 
 func validSnapshotMode(info os.FileInfo, encrypted bool) bool {
-	if info == nil {
-		return false
-	}
-	if encrypted {
-		return info.Mode().Perm() == 0600
-	}
-	// Desktop migration may encounter read-only legacy snapshots. They cannot
-	// be modified by another user, while group/other write access is rejected.
-	return info.Mode().Perm()&0022 == 0
+	return snapshotModeAllowed(info, encrypted)
 }
 
 // snapshotSourceMatches binds the descriptor used for the copy to the
@@ -1565,6 +2058,11 @@ func temporaryDatabaseFile(dir, prefix string) (string, *os.File, error) {
 	}
 	path := file.Name()
 	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", nil, err
+	}
+	if err := fileprivacy.Harden(file); err != nil {
 		_ = file.Close()
 		_ = os.Remove(path)
 		return "", nil, err
@@ -1595,9 +2093,122 @@ func randomDatabasePath(dir, prefix string) (string, error) {
 	return "", errors.New("一意な復元退避先を生成できません")
 }
 
+// copyDatabaseFile creates a new private destination and copies the complete
+// database bytes without ever unlinking or replacing the source. The O_EXCL
+// destination is important even though the name is random: it preserves the
+// no-overwrite boundary if a hostile process can influence the directory.
+func copyDatabaseFile(source, destination string) error {
+	in, err := openSnapshotFile(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- destination is generated in the private DB directory.
+	if err != nil {
+		return err
+	}
+	completed := false
+	defer func() {
+		_ = out.Close()
+		if !completed {
+			_ = os.Remove(destination)
+		}
+	}()
+	if err := out.Chmod(0600); err != nil {
+		return err
+	}
+	if err := fileprivacy.Harden(out); err != nil {
+		return err
+	}
+	if err := copyFileToOpenBounded(in, out, maxSnapshotValidationBytes); err != nil {
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	completed = true
+	return nil
+}
+
+func removeRestoreBackup(path, dir string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return syncDirectory(dir)
+}
+
+func cleanupRestoreArtifacts(databasePath string) error {
+	dir := filepath.Dir(databasePath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	base := filepath.Base(databasePath)
+	prefixes := []string{
+		".omni-money-restore-backup-",
+		".omni-money-restore-candidate-",
+	}
+	var cleanupErrs []error
+	removed := false
+	for _, entry := range entries {
+		name := entry.Name()
+		matched := false
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ".db") {
+				matched = true
+				break
+			}
+		}
+		if !matched || name == base {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			if !os.IsNotExist(statErr) {
+				cleanupErrs = append(cleanupErrs, statErr)
+			}
+			continue
+		}
+		if !validSnapshotFile(info) {
+			// Never unlink a symlink/reparse or a multi-link object during
+			// recovery cleanup; leave it for an operator to inspect.
+			continue
+		}
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			cleanupErrs = append(cleanupErrs, removeErr)
+		} else {
+			removed = true
+		}
+	}
+	if removed {
+		if err := syncDirectory(dir); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+		}
+	}
+	return errors.Join(cleanupErrs...)
+}
+
 func copyFileToOpen(src, dst *os.File) error {
+	return copyFileToOpenBounded(src, dst, maxSnapshotValidationBytes)
+}
+
+func copyFileToOpenBounded(src, dst *os.File, maxBytes int64) error {
 	if src == nil || dst == nil {
 		return errors.New("コピー元またはコピー先が開かれていません")
+	}
+	if maxBytes <= 0 {
+		return errors.New("コピー上限が無効です")
+	}
+	info, err := src.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() < 0 || info.Size() > maxBytes {
+		return fmt.Errorf("コピー元がサイズ上限を超えています")
 	}
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
 		return err
@@ -1608,8 +2219,21 @@ func copyFileToOpen(src, dst *os.File) error {
 	if err := dst.Truncate(0); err != nil {
 		return err
 	}
-	_, err := io.Copy(dst, src)
-	return err
+	written, err := io.Copy(dst, io.LimitReader(src, maxBytes+1))
+	if err != nil {
+		return err
+	}
+	if written != info.Size() {
+		return fmt.Errorf("コピー元のサイズがコピー中に変化しました")
+	}
+	postInfo, err := src.Stat()
+	if err != nil {
+		return err
+	}
+	if !snapshotSourceMatches(info, postInfo) {
+		return errors.New("コピー元がコピー後に置き換えられました")
+	}
+	return nil
 }
 
 func removeSQLiteFiles(path string) error {
@@ -1650,15 +2274,16 @@ func syncFileAndDirectory(path, dir string) error {
 func rollbackRestoreFiles(currentPath, backupPath, candidatePath string, instance *Instance) error {
 	dir := filepath.Dir(currentPath)
 	var errs []error
-	if err := removeSQLiteFiles(currentPath); err != nil {
-		errs = append(errs, fmt.Errorf("remove failed restore candidate: %w", err))
+	// Never unlink currentPath: this rollback runs after the candidate has
+	// already replaced it, and unlink-then-rename would recreate the same
+	// crash window as the original restore implementation. Sidecars can be
+	// removed first; the main file is replaced in one OS atomic operation.
+	if err := removeSQLiteSidecars(currentPath); err != nil {
+		errs = append(errs, fmt.Errorf("remove failed restore sidecars: %w", err))
 	}
-	if err := removeSQLiteFiles(candidatePath); err != nil {
-		errs = append(errs, fmt.Errorf("remove restore candidate: %w", err))
-	}
-	if _, err := os.Stat(backupPath); err == nil {
-		if err := os.Rename(backupPath, currentPath); err != nil {
-			errs = append(errs, fmt.Errorf("restore backup rename: %w", err))
+	if _, err := os.Lstat(backupPath); err == nil {
+		if err := replaceDatabaseFile(backupPath, currentPath, candidatePath); err != nil {
+			errs = append(errs, fmt.Errorf("restore backup atomic replace: %w", err))
 		}
 	} else if os.IsNotExist(err) {
 		// Never turn a missing rollback image into a newly-created empty
@@ -1679,6 +2304,15 @@ func rollbackRestoreFiles(currentPath, backupPath, candidatePath string, instanc
 		if err := instance.reopenAfterRestoreFailure(currentPath); err != nil {
 			errs = append(errs, fmt.Errorf("rollback reopen: %w", err))
 		}
+	}
+	// On Windows ReplaceFileW stores the failed new live file at
+	// candidatePath. POSIX rename-overwrite consumes backupPath and leaves no
+	// such artifact. Cleanup happens only after the old live file is durable.
+	if err := removeSQLiteFiles(candidatePath); err != nil {
+		errs = append(errs, fmt.Errorf("remove failed restore image: %w", err))
+	}
+	if err := syncDirectory(dir); err != nil {
+		errs = append(errs, fmt.Errorf("restore cleanup directory sync: %w", err))
 	}
 	return errors.Join(errs...)
 }

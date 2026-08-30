@@ -149,6 +149,7 @@ type sessionRecord struct {
 // exporting constructors or retaining a raw vault lease beyond its closure.
 type sessionVaultRoot struct {
 	userID       string
+	validate     func() error
 	borrow       func() (*requestVaultLease, error)
 	beginRestore func() (*vault.RestoreOperation, error)
 	release      func()
@@ -194,6 +195,7 @@ func newSessionVaultRoot(lease *vault.Lease) (*sessionVaultRoot, error) {
 	}
 	root := &sessionVaultRoot{
 		userID:       lease.UserID(),
+		validate:     lease.ValidateSessionRootLocked,
 		release:      lease.Release,
 		beginRestore: lease.BeginRestore,
 	}
@@ -233,6 +235,7 @@ func (root *sessionVaultRoot) Release() {
 			root.release()
 		}
 		root.borrow = nil
+		root.validate = nil
 		root.beginRestore = nil
 		root.release = nil
 	})
@@ -471,6 +474,15 @@ func (m *SessionManager) createSession(username string, user *control.UserSummar
 	if m.closed {
 		m.mu.Unlock()
 		return nil, ErrSessionManagerClosed
+	}
+	// SessionManager's mutex is held while the exact vault entry is checked.
+	// BeginRestore takes this same lock before marking the entry draining, so a
+	// login that loses the race cannot publish a root after DeleteAllSessions.
+	if root != nil && root.validate != nil {
+		if err := root.validate(); err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
 	}
 	roots := m.purgeExpiredLocked(now)
 	roots = append(roots, m.evictOldestForOwnerLocked(sessionOwnerKey(session))...)

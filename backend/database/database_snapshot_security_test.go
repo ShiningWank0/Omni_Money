@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,6 +49,15 @@ func TestRestoreSnapshotRejectsCorruptionAndPreservesLiveDatabase(t *testing.T) 
 	}
 	if err := instance.RestoreSnapshot(snapshotDir, filepath.Base(snapshotPath)); err == nil {
 		t.Fatal("corrupt snapshot was accepted")
+	}
+	entries, err := instance.ListSnapshots(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry == filepath.Base(snapshotPath) {
+			t.Fatal("corrupt snapshot was exposed by ListSnapshots")
+		}
 	}
 	if instance.DB() == nil {
 		t.Fatal("live database was unpublished after a candidate validation failure")
@@ -189,6 +199,76 @@ func TestSnapshotSourceIdentityRejectsReplacement(t *testing.T) {
 	}
 }
 
+func TestListValidationUsesStableSourceDescriptorAcrossPathSwap(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	insertSnapshotTestTransaction(t, instance, "descriptor-source")
+	snapshotPath, err := instance.CreateSnapshot(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	source, err := openSnapshotFile(snapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	sourceInfo, err := source.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	movedPath := snapshotPath + ".moved"
+	if err := os.Rename(snapshotPath, movedPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(snapshotPath, []byte("attacker replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Restore the original pathname after the source path was swapped. The
+	// candidate must still contain bytes from the already-open descriptor, not
+	// from either pathname lookup.
+	defer func() {
+		_ = os.Remove(snapshotPath)
+		_ = os.Rename(movedPath, snapshotPath)
+	}()
+	candidatePath, candidate, err := temporaryDatabaseFile(snapshotDir, ".omni-money-list-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = candidate.Close()
+		_ = removeSQLiteFiles(candidatePath)
+	}()
+	if err := copyFileToOpenBounded(source, candidate, maxSnapshotValidationBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := candidate.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := candidate.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if after, err := source.Stat(); err != nil || !snapshotSourceMatches(sourceInfo, after) {
+		t.Fatalf("source descriptor changed during copy: %v", err)
+	}
+	if err := os.Remove(snapshotPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(movedPath, snapshotPath); err != nil {
+		t.Fatal(err)
+	}
+	validated, err := instance.opener.Open(t.Context(), candidatePath, securedb.ReadOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.validateSnapshotDatabase(validated, candidatePath); err != nil {
+		_ = validated.Close()
+		t.Fatalf("descriptor candidate did not validate: %v", err)
+	}
+	if err := validated.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRollbackRestoreFailureKeepsInstanceClosed(t *testing.T) {
 	instance, dbPath, _ := newPlainSnapshotTestInstance(t)
 	if _, err := instance.DB().Exec("INSERT INTO transactions (account, date, item, type, amount, balance) VALUES ('cash', '2026-01-01', 'original', 'income', 1, 1)"); err != nil {
@@ -238,6 +318,38 @@ func TestRestoreBackupDestinationSupportsAtomicRename(t *testing.T) {
 	}
 	if _, err := os.Stat(backup); err != nil {
 		t.Fatalf("backup path missing after rename: %v", err)
+	}
+}
+
+func TestStartupReclaimsDurableRestoreArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ledger.db")
+	instance, err := OpenPlainInstance(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []string{".omni-money-restore-backup-", ".omni-money-restore-candidate-"} {
+		artifact := filepath.Join(dir, prefix+"stale.db")
+		if err := os.WriteFile(artifact, []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reopened, err := OpenPlainInstance(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".omni-money-restore-") {
+			t.Fatalf("stale restore artifact was not reclaimed: %s", entry.Name())
+		}
 	}
 }
 

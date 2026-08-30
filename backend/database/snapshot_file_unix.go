@@ -25,10 +25,30 @@ func validSnapshotFile(info os.FileInfo) bool {
 		return false
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Getuid()) {
+	uid := os.Getuid()
+	if !ok || uid < 0 {
 		return false
 	}
-	return stat.Nlink == 1
+	ownerUID := uint64(stat.Uid)
+	// #nosec G115 -- uid is checked non-negative before this widening
+	// conversion; Unix process UIDs are represented in this range.
+	return ownerUID == uint64(uid) && stat.Nlink == 1
+}
+
+func snapshotModeAllowed(info os.FileInfo, encrypted bool) bool {
+	if info == nil {
+		return false
+	}
+	if encrypted {
+		return info.Mode().Perm() == 0600
+	}
+	// Desktop migration may encounter read-only legacy snapshots. They cannot
+	// be modified by another user, while group/other write access is rejected.
+	return info.Mode().Perm()&0022 == 0
+}
+
+func snapshotDirectoryModeAllowed(info os.FileInfo) bool {
+	return info != nil && info.Mode().Perm() == 0700
 }
 
 func syncDirectory(path string) error {
@@ -38,4 +58,11 @@ func syncDirectory(path string) error {
 	}
 	defer dir.Close()
 	return dir.Sync()
+}
+
+// replaceDatabaseFile keeps the live pathname continuously present. POSIX
+// rename replaces the destination atomically; backupPath is already a durable
+// copy used if post-swap validation fails.
+func replaceDatabaseFile(replacement, target, _ string) error {
+	return os.Rename(replacement, target)
 }
