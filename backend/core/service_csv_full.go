@@ -36,7 +36,6 @@ const (
 	maxCSVFieldBytes              = 8 * 1024 * 1024
 	maxCSVSettingKeyBytes         = 256
 	maxCSVSettingValueBytes       = 2 * 1024 * 1024
-	maxCSVTagNameBytes            = 255
 	maxCSVSettingItemBytes        = 255
 	maxCSVAccountBytes            = 256
 	maxCSVItemBytes               = 512
@@ -125,24 +124,6 @@ func csvV3Record(values map[string]string) []string {
 }
 
 func csvV3Text(value string) string { return encodeCSVTextCell(value) }
-
-func validateCSVV3TagName(name string) error {
-	if name == "" || strings.TrimSpace(name) != name {
-		return fmt.Errorf("タグ名は前後の空白を除いた空でない値にしてください")
-	}
-	if !utf8.ValidString(name) || len([]byte(name)) > maxCSVTagNameBytes {
-		return fmt.Errorf("タグ名はUTF-8で%dバイト以内にしてください", maxCSVTagNameBytes)
-	}
-	if strings.ContainsAny(name, "/\\") {
-		return fmt.Errorf("タグ名にパス区切り文字を含めることはできません")
-	}
-	if strings.ContainsFunc(name, func(r rune) bool {
-		return unicode.IsControl(r) || unicode.In(r, unicode.Cf)
-	}) {
-		return fmt.Errorf("タグ名に制御文字を含めることはできません")
-	}
-	return nil
-}
 
 func validateCSVV3Setting(key, value string) error {
 	if key != "credit_card_items" && key != "bank_account_items" {
@@ -298,7 +279,7 @@ func (s *Service) backupToCSVV3() (string, error) {
 		if parentID.Valid {
 			parent = strconv.FormatInt(parentID.Int64, 10)
 		}
-		if err := validateCSVV3TagName(name); err != nil {
+		if _, err := validation.ValidateTagName(name); err != nil {
 			_ = rows.Close()
 			return "", fmt.Errorf("CSV v3タグ名が不正です (id %d): %w", id, err)
 		}
@@ -741,22 +722,26 @@ func (s *Service) parseCSVV3(content string) (csvV3Import, error) {
 			if err != nil {
 				return csvV3Import{}, fmt.Errorf("行%d: %w", rowNumber, err)
 			}
-			if err := validateCSVV3TagName(name); err != nil {
+			canonicalName, err := validation.ValidateTagName(name)
+			if err != nil {
 				return csvV3Import{}, fmt.Errorf("タグ名が不正です (行%d): %w", rowNumber, err)
 			}
+			name = canonicalName
 			level, err := csvV3Int(record, headerMap, "tag_level", true, true)
-			if err != nil || level < 1 || level > 3 {
+			if err != nil {
 				return csvV3Import{}, fmt.Errorf("タグ階層が不正です (行%d)", rowNumber)
+			}
+			if err := validation.ValidateTagLevel(int(level)); err != nil {
+				return csvV3Import{}, fmt.Errorf("タグ階層が不正です (行%d): %w", rowNumber, err)
 			}
 			parent, err := csvV3Int(record, headerMap, "tag_parent_id", false, true)
 			if err != nil {
 				return csvV3Import{}, fmt.Errorf("タグ親id (行%d): %w", rowNumber, err)
 			}
-			if level == 1 && parent != 0 {
-				return csvV3Import{}, fmt.Errorf("最上位タグに親は指定できません (行%d)", rowNumber)
-			}
-			if level > 1 && parent == 0 {
-				return csvV3Import{}, fmt.Errorf("下位タグには親が必要です (行%d)", rowNumber)
+			if parent == 0 {
+				if err := validation.ValidateTagHierarchy(int(level), nil); err != nil {
+					return csvV3Import{}, fmt.Errorf("タグ階層が不正です (行%d): %w", rowNumber, err)
+				}
 			}
 			row := csvV3Tag{id: id, parentID: parent, name: name, level: int(level)}
 			if parent == 0 {
@@ -837,8 +822,8 @@ func (s *Service) parseCSVV3(content string) (csvV3Import, error) {
 	}
 	for _, row := range parsed.tags {
 		if row.parentID == 0 {
-			if row.level != 1 {
-				return csvV3Import{}, fmt.Errorf("タグ親なしの階層が不正です: %d", row.id)
+			if err := validation.ValidateTagHierarchy(row.level, nil); err != nil {
+				return csvV3Import{}, fmt.Errorf("タグ親なしの階層が不正です: %d: %w", row.id, err)
 			}
 			continue
 		}
@@ -846,8 +831,8 @@ func (s *Service) parseCSVV3(content string) (csvV3Import, error) {
 		if !ok {
 			return csvV3Import{}, fmt.Errorf("タグ親が見つかりません: %d", row.parentID)
 		}
-		if parent.level+1 != row.level {
-			return csvV3Import{}, fmt.Errorf("タグ親の階層が不正です: %d", row.id)
+		if err := validation.ValidateTagHierarchy(row.level, &parent.level); err != nil {
+			return csvV3Import{}, fmt.Errorf("タグ親の階層が不正です: %d: %w", row.id, err)
 		}
 	}
 	for _, row := range parsed.images {
@@ -970,7 +955,7 @@ func (s *Service) importCSVV3(content, mode string) (int, error) {
 		}
 	}
 	tagMap := make(map[int64]int64, len(parsed.tags))
-	for level := 1; level <= 3; level++ {
+	for level := 1; level <= validation.MaxTagLevel; level++ {
 		for _, row := range parsed.tags {
 			if row.level != level {
 				continue

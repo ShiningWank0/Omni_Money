@@ -1625,10 +1625,12 @@ func (s *Service) CreateTag(name string, parentID *int64) (*models.Tag, error) {
 		if err != nil {
 			return nil, fmt.Errorf("親タグが見つかりません: %w", err)
 		}
-		if parentLevel >= 3 {
-			return nil, fmt.Errorf("タグは3階層までです")
+		if err := validation.ValidateTagHierarchy(parentLevel+1, &parentLevel); err != nil {
+			return nil, err
 		}
 		level = parentLevel + 1
+	} else if err := validation.ValidateTagHierarchy(level, nil); err != nil {
+		return nil, err
 	}
 
 	result, err := db.Exec(
@@ -1795,8 +1797,8 @@ func (s *Service) CreateTagByPath(path string) (*models.Tag, error) {
 	if len(segments) == 0 {
 		return nil, fmt.Errorf("タグ名が空です")
 	}
-	if len(segments) > 3 {
-		return nil, fmt.Errorf("タグは3階層までです")
+	if err := validation.ValidateTagLevel(len(segments)); err != nil {
+		return nil, err
 	}
 
 	for attempt := 0; attempt < 5; attempt++ {
@@ -1823,6 +1825,14 @@ func createTagPathIn(db *sql.DB, segments []string) (*models.Tag, error) {
 	var tag *models.Tag
 	for i, name := range segments {
 		level := i + 1
+		parentLevel := i
+		if i == 0 {
+			if err := validation.ValidateTagHierarchy(level, nil); err != nil {
+				return nil, err
+			}
+		} else if err := validation.ValidateTagHierarchy(level, &parentLevel); err != nil {
+			return nil, err
+		}
 		var existingID int64
 		if parentID == nil {
 			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&existingID)

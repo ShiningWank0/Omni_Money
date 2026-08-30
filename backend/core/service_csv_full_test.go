@@ -8,6 +8,7 @@ import (
 
 	"omni_money/backend/database"
 	"omni_money/backend/models"
+	"omni_money/backend/validation"
 )
 
 func TestCSVV3RoundTripPreservesExtendedLedgerDataAndRemapsIDs(t *testing.T) {
@@ -204,7 +205,7 @@ func TestCSVV3RejectsUnsafeTagSettingsAndCreatedAt(t *testing.T) {
 		})
 	}
 
-	tooLongName := strings.Repeat("a", maxCSVTagNameBytes+1)
+	tooLongName := strings.Repeat("a", validation.MaxTagNameBytes+1)
 	if _, err := (&Service{}).parseCSVV3(csvV3TestContent(t, map[string]string{
 		csvVersionHeader: "3", "record_type": "tag", "id": "1", "tag_name": tooLongName, "tag_level": "1",
 	})); err == nil || !strings.Contains(err.Error(), "255バイト") {

@@ -12,6 +12,9 @@ import (
 // API must enforce the same limit regardless of the caller (Wails or HTTP).
 const MaxTagNameBytes = 255
 
+// MaxTagLevel is the maximum supported tag depth, including the root level.
+const MaxTagLevel = 3
+
 // ValidateTagName trims user-facing whitespace and rejects values that cannot
 // be represented safely in a tag path or UI. The returned value is the
 // canonical value that must be persisted by every write path.
@@ -45,4 +48,34 @@ func ValidateTagName(name string) (string, error) {
 		}
 	}
 	return name, nil
+}
+
+// ValidateTagLevel validates the persisted level independently of a parent.
+func ValidateTagLevel(level int) error {
+	if level < 1 || level > MaxTagLevel {
+		return fmt.Errorf("タグ階層は1から%dの範囲で指定してください", MaxTagLevel)
+	}
+	return nil
+}
+
+// ValidateTagHierarchy enforces the invariant shared by every tag write and
+// every import path: roots are level 1 and a child is exactly one level below
+// its parent.
+func ValidateTagHierarchy(level int, parentLevel *int) error {
+	if err := ValidateTagLevel(level); err != nil {
+		return err
+	}
+	if parentLevel == nil {
+		if level != 1 {
+			return fmt.Errorf("親のないタグはlevel 1である必要があります")
+		}
+		return nil
+	}
+	if err := ValidateTagLevel(*parentLevel); err != nil {
+		return fmt.Errorf("親タグの階層が不正です: %w", err)
+	}
+	if *parentLevel+1 != level {
+		return fmt.Errorf("タグの階層は親のlevel+1である必要があります")
+	}
+	return nil
 }
