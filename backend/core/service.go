@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -141,7 +142,7 @@ func (s *Service) GetTransactions(account string, search string) ([]models.Trans
 		whereClause += " AND (item LIKE ? OR memo LIKE ?)"
 		args = append(args, "%"+search+"%", "%"+search+"%")
 	}
-	query := "SELECT id, account, date, item, type, amount, balance, memo FROM transactions" + whereClause
+	query := "SELECT id, account, date, item, type, COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = transactions.id), amount), balance, memo FROM transactions" + whereClause
 	query += " ORDER BY date, id"
 
 	rows, err := db.Query(query, args...)
@@ -330,7 +331,7 @@ func addPreparedTransactionIn(tx *sql.Tx, prepared preparedTransactionInsert) (*
 	var inserted models.Transaction
 	var dateStr string
 	if err := tx.QueryRow(
-		"SELECT id, account, date, item, type, amount, balance, memo FROM transactions WHERE id = ?", id,
+		"SELECT id, account, date, item, type, COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = transactions.id), amount), balance, memo FROM transactions WHERE id = ?", id,
 	).Scan(&inserted.ID, &inserted.Account, &dateStr, &inserted.Item, &inserted.Type, &inserted.Amount, &inserted.Balance, &inserted.Memo); err != nil {
 		return nil, fmt.Errorf("追加後データ取得エラー: %w", err)
 	}
@@ -390,6 +391,12 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 	if err != nil {
 		return nil, fmt.Errorf("取引更新エラー: %w", err)
 	}
+	// A user edit is an ordinary current write. It deliberately replaces any
+	// archive-only amount provenance instead of leaving a hidden historical
+	// value that would override the validated request.
+	if _, err := tx.Exec("DELETE FROM transaction_archive_amounts WHERE transaction_id = ?", id); err != nil {
+		return nil, fmt.Errorf("archive金額解除エラー: %w", err)
+	}
 	if err := insertPreparedTransactionImages(tx, id, preparedImages); err != nil {
 		return nil, err
 	}
@@ -426,7 +433,7 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 	var t models.Transaction
 	var dateStr string
 	err = tx.QueryRow(
-		"SELECT id, account, date, item, type, amount, balance, memo FROM transactions WHERE id = ?", id,
+		"SELECT id, account, date, item, type, COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = transactions.id), amount), balance, memo FROM transactions WHERE id = ?", id,
 	).Scan(&t.ID, &t.Account, &dateStr, &t.Item, &t.Type, &t.Amount, &t.Balance, &t.Memo)
 	if err != nil {
 		return nil, fmt.Errorf("更新後データ取得エラー: %w", err)
@@ -862,7 +869,7 @@ func backupToCSVV2In(ctx context.Context, q csvContextQueryer, dst io.Writer) er
 	}
 	exportedRows := 0
 	rows, err := q.QueryContext(ctx,
-		"SELECT id, account, date, item, type, amount, balance, memo FROM transactions ORDER BY date, id",
+		"SELECT id, account, date, item, type, COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = transactions.id), amount), balance, memo FROM transactions ORDER BY date, id",
 	)
 	if err != nil {
 		return fmt.Errorf("バックアップ用データ取得エラー: %w", err)
@@ -1184,12 +1191,13 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 	}
 
 	type importRow struct {
-		account string
-		date    time.Time
-		item    string
-		txType  string
-		amount  int64
-		memo    string
+		account       string
+		date          time.Time
+		item          string
+		txType        string
+		amount        int64
+		memo          string
+		archiveAmount bool
 	}
 	var parsedRows []importRow
 	for {
@@ -1307,15 +1315,12 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 		if err != nil || amount <= 0 {
 			return 0, fmt.Errorf("金額は正の整数である必要があります (行%d)", rowNumber)
 		}
-		if err := validation.ValidateTransactionAmount(amount); err != nil {
-			return 0, fmt.Errorf("金額が不正です (行%d): %w", rowNumber, err)
-		}
 
 		date, err := parseDateStrict(dateStr)
 		if err != nil {
 			return 0, fmt.Errorf("日付形式が正しくありません (行%d): %w", rowNumber, err)
 		}
-		parsedRows = append(parsedRows, importRow{account: account, date: date, item: item, txType: txType, amount: amount, memo: memo})
+		parsedRows = append(parsedRows, importRow{account: account, date: date, item: item, txType: txType, amount: amount, memo: memo, archiveAmount: amount > validation.MaxTransactionAmount})
 	}
 
 	tx, err := db.BeginTx(ctx, nil)
@@ -1335,9 +1340,25 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 			_ = stmt.Close()
 			return 0, err
 		}
-		if _, err := stmt.ExecContext(ctx, row.account, row.date, row.item, row.txType, row.amount, row.memo); err != nil {
+		storedAmount := row.amount
+		if row.archiveAmount {
+			storedAmount = validation.MaxTransactionAmount
+		}
+		result, err := stmt.ExecContext(ctx, row.account, row.date, row.item, row.txType, storedAmount, row.memo)
+		if err != nil {
 			_ = stmt.Close()
 			return 0, fmt.Errorf("CSVインポートエラー (行%d): %w", index+2, err)
+		}
+		if row.archiveAmount {
+			id, idErr := result.LastInsertId()
+			if idErr != nil {
+				_ = stmt.Close()
+				return 0, fmt.Errorf("CSV legacy取引ID取得エラー (行%d): %w", index+2, idErr)
+			}
+			if _, archiveErr := tx.ExecContext(ctx, "INSERT INTO transaction_archive_amounts (transaction_id, amount) VALUES (?, ?)", id, row.amount); archiveErr != nil {
+				_ = stmt.Close()
+				return 0, fmt.Errorf("CSV legacy金額保存エラー (行%d): %w", index+2, archiveErr)
+			}
 		}
 		affectedAccounts[row.account] = struct{}{}
 	}
@@ -1380,7 +1401,7 @@ func recalculateBalanceInContext(ctx context.Context, q sqlContextExecutor, acco
 		ctx = context.Background()
 	}
 	rows, err := q.QueryContext(ctx,
-		"SELECT id, type, amount FROM transactions WHERE account = ? ORDER BY date, id", account)
+		"SELECT id, type, COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = transactions.id), amount) FROM transactions WHERE account = ? ORDER BY date, id", account)
 	if err != nil {
 		return fmt.Errorf("残高再計算クエリエラー: %w", err)
 	}
@@ -1436,7 +1457,7 @@ func recalculateBalanceInContext(ctx context.Context, q sqlContextExecutor, acco
 func recalculateBalanceIn(q sqlExecutor, account string) error {
 	// 時系列順で取引データを取得
 	rows, err := q.Query(
-		"SELECT id, type, amount FROM transactions WHERE account = ? ORDER BY date, id",
+		"SELECT id, type, COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = transactions.id), amount) FROM transactions WHERE account = ? ORDER BY date, id",
 		account,
 	)
 	if err != nil {
@@ -1711,8 +1732,11 @@ func (s *Service) GetTransactionImagesContext(ctx context.Context, transactionID
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx,
-		"SELECT id, filename, data, mime_type, created_at FROM transaction_images WHERE transaction_id = ? ORDER BY created_at",
-		transactionID,
+		`SELECT id, filename, data, mime_type, created_at FROM transaction_images WHERE transaction_id = ?
+		 UNION ALL
+		 SELECT -id, filename, data, mime_type, created_at FROM transaction_image_archive WHERE transaction_id = ?
+		 ORDER BY created_at`,
+		transactionID, transactionID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("画像一覧取得エラー: %w", err)
@@ -1755,6 +1779,14 @@ func (s *Service) DeleteTransactionImage(imageID int64) error {
 	if err != nil {
 		return err
 	}
+	if imageID < 0 {
+		if imageID == math.MinInt64 {
+			return fmt.Errorf("画像が見つかりません")
+		}
+		imageID = -imageID
+		result, err := db.Exec("DELETE FROM transaction_image_archive WHERE id = ?", imageID)
+		return s.finishTransactionImageDelete(result, err)
+	}
 	result, err := db.Exec("DELETE FROM transaction_images WHERE id = ?", imageID)
 	return s.finishTransactionImageDelete(result, err)
 }
@@ -1764,6 +1796,17 @@ func (s *Service) DeleteTransactionImageForTransaction(transactionID, imageID in
 	db, err := s.database()
 	if err != nil {
 		return err
+	}
+	if imageID < 0 {
+		if imageID == math.MinInt64 {
+			return fmt.Errorf("画像が見つかりません")
+		}
+		imageID = -imageID
+		result, err := db.Exec(
+			"DELETE FROM transaction_image_archive WHERE transaction_id = ? AND id = ?",
+			transactionID, imageID,
+		)
+		return s.finishTransactionImageDelete(result, err)
 	}
 	result, err := db.Exec(
 		"DELETE FROM transaction_images WHERE transaction_id = ? AND id = ?",
@@ -1825,8 +1868,10 @@ func checkImageStorageQuota(db sqlExecutor, transactionID int64, images []prepar
 
 	var transactionCount, transactionBytes int64
 	if err := db.QueryRow(
-		"SELECT COUNT(*), COALESCE(SUM(length(data)), 0) FROM transaction_images WHERE transaction_id = ?",
-		transactionID,
+		`SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM (
+			SELECT length(data) AS bytes FROM transaction_images WHERE transaction_id = ?
+			UNION ALL SELECT length(data) AS bytes FROM transaction_image_archive WHERE transaction_id = ?
+		)`, transactionID, transactionID,
 	).Scan(&transactionCount, &transactionBytes); err != nil {
 		return fmt.Errorf("取引画像使用量確認エラー: %w", err)
 	}
@@ -1838,11 +1883,10 @@ func checkImageStorageQuota(db sqlExecutor, transactionID int64, images []prepar
 	}
 
 	var accountBytes int64
-	if err := db.QueryRow(`
-		SELECT COALESCE(SUM(length(ti.data)), 0)
-		FROM transaction_images ti
-		JOIN transactions t ON t.id = ti.transaction_id
-		WHERE t.account = ?`, account,
+	if err := db.QueryRow(`SELECT COALESCE(SUM(bytes), 0) FROM (
+		SELECT length(ti.data) AS bytes FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id WHERE t.account = ?
+		UNION ALL SELECT length(ai.data) AS bytes FROM transaction_image_archive ai JOIN transactions t ON t.id = ai.transaction_id WHERE t.account = ?
+	)`, account, account,
 	).Scan(&accountBytes); err != nil {
 		return fmt.Errorf("口座画像使用量確認エラー: %w", err)
 	}
@@ -1851,7 +1895,10 @@ func checkImageStorageQuota(db sqlExecutor, transactionID int64, images []prepar
 	}
 
 	var databaseBytes int64
-	if err := db.QueryRow("SELECT COALESCE(SUM(length(data)), 0) FROM transaction_images").Scan(&databaseBytes); err != nil {
+	if err := db.QueryRow(`SELECT COALESCE(SUM(bytes), 0) FROM (
+		SELECT length(data) AS bytes FROM transaction_images
+		UNION ALL SELECT length(data) AS bytes FROM transaction_image_archive
+	)`).Scan(&databaseBytes); err != nil {
 		return fmt.Errorf("画像DB使用量確認エラー: %w", err)
 	}
 	if databaseBytes+additionalBytes > models.MaxImageBytesDatabase {
@@ -1876,17 +1923,18 @@ func (s *Service) GetImageStorageUsage() (*models.ImageStorageUsage, error) {
 		Accounts:                []models.AccountImageStorageUsage{},
 	}
 	if err := db.QueryRow(
-		"SELECT COUNT(*), COALESCE(SUM(length(data)), 0) FROM transaction_images",
+		`SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM (
+			SELECT length(data) AS bytes FROM transaction_images
+			UNION ALL SELECT length(data) AS bytes FROM transaction_image_archive
+		)`,
 	).Scan(&usage.ImageCount, &usage.Bytes); err != nil {
 		return nil, fmt.Errorf("画像使用量取得エラー: %w", err)
 	}
 
-	rows, err := db.Query(`
-		SELECT t.account, COUNT(*), COALESCE(SUM(length(ti.data)), 0)
-		FROM transaction_images ti
-		JOIN transactions t ON t.id = ti.transaction_id
-		GROUP BY t.account
-		ORDER BY t.account`)
+	rows, err := db.Query(`SELECT account, COUNT(*), COALESCE(SUM(bytes), 0) FROM (
+		SELECT t.account AS account, length(ti.data) AS bytes FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id
+		UNION ALL SELECT t.account AS account, length(ai.data) AS bytes FROM transaction_image_archive ai JOIN transactions t ON t.id = ai.transaction_id
+	) GROUP BY account ORDER BY account`)
 	if err != nil {
 		return nil, fmt.Errorf("口座別画像使用量取得エラー: %w", err)
 	}
@@ -2504,7 +2552,7 @@ func (s *Service) getTagSummaryFilteredContext(
 	// #nosec G202 -- joinConditions contains only fixed SQL fragments selected
 	// by code; all user values remain bound parameters.
 	query := `SELECT t.id, t.name, t.level, t.parent_id,
-		COALESCE(SUM(tr.amount), 0) as total_amount,
+		COALESCE(SUM(COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = tr.id), tr.amount)), 0) as total_amount,
 		COUNT(tr.id) as tx_count
 		FROM tags t
 		LEFT JOIN transaction_tags tt ON t.id = tt.tag_id
@@ -2837,8 +2885,8 @@ func (s *Service) AnalyzeTransactionsContext(ctx context.Context, req models.Ana
 	resp := &models.AnalysisResponse{}
 	aggregateQuery := `SELECT
 		COUNT(*),
-		COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0)
+		COALESCE(SUM(CASE WHEN type = 'income' THEN COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = transactions.id), amount) ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN type = 'expense' THEN COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = transactions.id), amount) ELSE 0 END), 0)
 		FROM transactions` + where
 	if err := db.QueryRowContext(ctx, aggregateQuery, args...).Scan(&resp.Count, &resp.TotalIncome, &resp.TotalExpense); err != nil {
 		return nil, fmt.Errorf("分析集計エラー: %w", err)
@@ -2894,7 +2942,8 @@ func (s *Service) AnalyzeTransactionsContext(ctx context.Context, req models.Ana
 	detailArgs = append(detailArgs, limit+1)
 	// #nosec G202 -- detailWhere contains only fixed SQL predicates selected by
 	// validated filters; every request value remains a bound placeholder.
-	rows, err := db.QueryContext(ctx, `SELECT id, account, datetime(date), item, type, amount, memo
+	rows, err := db.QueryContext(ctx, `SELECT id, account, datetime(date), item, type,
+		COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = transactions.id), amount), memo
 		FROM transactions`+detailWhere+`
 		ORDER BY datetime(date) DESC, id DESC
 		LIMIT ?`, detailArgs...)
@@ -3037,7 +3086,8 @@ func (s *Service) GetTransactionLinks(transactionID int64) ([]models.LinkedTrans
 		return nil, err
 	}
 	query := `
-		SELECT t.id, t.account, t.date, t.item, t.type, t.amount, t.memo
+		SELECT t.id, t.account, t.date, t.item, t.type,
+			COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = t.id), t.amount), t.memo
 		FROM transactions t
 		WHERE t.id IN (
 			SELECT child_id FROM transaction_links WHERE parent_id = ?

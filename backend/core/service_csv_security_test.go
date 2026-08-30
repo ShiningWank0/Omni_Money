@@ -1,13 +1,249 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	"omni_money/backend/database"
 )
+
+func TestLegacyCSVLargeInt64AmountUsesArchiveProvenanceAndRoundTrips(t *testing.T) {
+	const legacyAmount int64 = 1_000_000_001
+	for _, version := range []string{"v1", "v2"} {
+		for _, path := range []string{"string", "raw stream"} {
+			t.Run(version+"/"+path, func(t *testing.T) {
+				setupCoreTestDB(t)
+				service := &Service{db: database.GetDB(), legacy: true}
+				content := "account,date,item,type,amount,memo\nlegacy,2026-01-01,old,income,1000000001,kept\n"
+				if version == "v2" {
+					content = "account,date,item,type,amount,memo,omni_money_csv_version\nlegacy,2026-01-01,old,income,1000000001,kept,2\n"
+				}
+				var imported int
+				var err error
+				if path == "string" {
+					imported, err = service.ImportCSV(content, "append")
+				} else {
+					imported, err = service.ImportCSVReaderContext(context.Background(), strings.NewReader(content), "append")
+				}
+				if err != nil || imported != 1 {
+					t.Fatalf("legacy amount import = %d, %v", imported, err)
+				}
+				var stored, archived, balance int64
+				if err := database.GetDB().QueryRow(`SELECT t.amount, a.amount, t.balance FROM transactions t
+				JOIN transaction_archive_amounts a ON a.transaction_id = t.id`).Scan(&stored, &archived, &balance); err != nil {
+					t.Fatal(err)
+				}
+				if stored != 1_000_000_000 || archived != legacyAmount || balance != legacyAmount {
+					t.Fatalf("archive amount storage = %d/%d balance=%d", stored, archived, balance)
+				}
+				archive, err := service.BackupToCSV()
+				if err != nil || !strings.Contains(archive, "transaction_legacy") || !strings.Contains(archive, "1000000001") {
+					t.Fatalf("v3 archive did not preserve amount: %v %q", err, archive)
+				}
+				if _, err := service.ImportCSV(archive, "replace"); err != nil {
+					t.Fatalf("v3 restore: %v", err)
+				}
+				var effective int64
+				if err := database.GetDB().QueryRow(`SELECT COALESCE(a.amount, t.amount) FROM transactions t
+				LEFT JOIN transaction_archive_amounts a ON a.transaction_id = t.id`).Scan(&effective); err != nil {
+					t.Fatal(err)
+				}
+				if effective != legacyAmount {
+					t.Fatalf("restored amount = %d", effective)
+				}
+			})
+		}
+	}
+}
+
+func TestCSVV3LegacyImagePreservesMetadataAndOpaqueBlob(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	result, err := database.GetDB().Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+		VALUES ('cash', '2026-01-01', 'old', 'expense', 1, -1, '')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txID, _ := result.LastInsertId()
+	wantData := []byte("not-an-image")
+	wantFilename, wantMIME := " Receipt.PNG ", " IMAGE/PNG "
+	if _, err := database.GetDB().Exec(`INSERT INTO transaction_images (transaction_id, filename, data, mime_type)
+		VALUES (?, ?, ?, ?)`, txID, wantFilename, wantData, wantMIME); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := service.BackupToCSV()
+	if err != nil || !strings.Contains(archive, "image_legacy") {
+		t.Fatalf("legacy image export: %v %q", err, archive)
+	}
+	if _, err := service.ImportCSV(archive, "replace"); err != nil {
+		t.Fatalf("legacy image restore: %v", err)
+	}
+	var filename, mime string
+	var data []byte
+	if err := database.GetDB().QueryRow(`SELECT filename, mime_type, data FROM transaction_image_archive`).Scan(&filename, &mime, &data); err != nil {
+		t.Fatal(err)
+	}
+	if filename != wantFilename || mime != wantMIME || !bytes.Equal(data, wantData) {
+		t.Fatalf("legacy image changed: %q/%q/%x", filename, mime, data)
+	}
+	var restoredTxID int64
+	if err := database.GetDB().QueryRow(`SELECT transaction_id FROM transaction_image_archive`).Scan(&restoredTxID); err != nil {
+		t.Fatal(err)
+	}
+	images, err := service.GetTransactionImages(restoredTxID)
+	if err != nil || len(images) != 1 || !images[0].Invalid || images[0].DataURL != "" {
+		t.Fatalf("unsafe legacy image was exposed: %#v %v", images, err)
+	}
+}
+
+func TestCSVV3RestoresPreQuotaTransactionImageSet(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	result, err := database.GetDB().Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+		VALUES ('cash', '2026-01-01', 'old', 'expense', 1, -1, '')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txID, _ := result.LastInsertId()
+	if _, err := database.GetDB().Exec(`DROP TRIGGER trg_transaction_images_quota_insert`); err != nil {
+		t.Fatal(err)
+	}
+	png := encodePNG(t)
+	for i := 0; i < 11; i++ {
+		if _, err := database.GetDB().Exec(`INSERT INTO transaction_images (transaction_id, filename, data, mime_type)
+			VALUES (?, ?, ?, 'image/png')`, txID, fmt.Sprintf("old-%02d.png", i), png); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archive, err := service.BackupToCSV()
+	if err != nil || strings.Count(archive, "image_legacy") < 11 {
+		t.Fatalf("pre-quota export: %v legacy rows=%d", err, strings.Count(archive, "image_legacy"))
+	}
+	if _, err := service.ImportCSV(archive, "replace"); err != nil {
+		t.Fatalf("pre-quota restore: %v", err)
+	}
+	var restored int
+	if err := database.GetDB().QueryRow(`SELECT COUNT(*) FROM transaction_image_archive`).Scan(&restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored != 11 {
+		t.Fatalf("restored archive images = %d", restored)
+	}
+}
+
+func TestLegacyCSVAppendNeverPrunesExistingExtensions(t *testing.T) {
+	for _, version := range []string{"v1", "v2"} {
+		for _, path := range []string{"string", "raw stream"} {
+			t.Run(version+"/"+path, func(t *testing.T) {
+				setupCoreTestDB(t)
+				service := &Service{db: database.GetDB(), legacy: true}
+				first, err := database.GetDB().Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+					VALUES ('card', '2026-01-01', 'a', 'expense', 1, -1, '')`)
+				if err != nil {
+					t.Fatal(err)
+				}
+				second, err := database.GetDB().Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+					VALUES ('bank', '2026-01-02', 'b', 'income', 1, 1, '')`)
+				if err != nil {
+					t.Fatal(err)
+				}
+				firstID, _ := first.LastInsertId()
+				secondID, _ := second.LastInsertId()
+				tag, err := database.GetDB().Exec(`INSERT INTO tags (name, level) VALUES ('kept', 1)`)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tagID, _ := tag.LastInsertId()
+				png := encodePNG(t)
+				statements := []struct {
+					query string
+					args  []any
+				}{
+					{`INSERT INTO transaction_images (transaction_id, filename, data, mime_type) VALUES (?, 'kept.png', ?, 'image/png')`, []any{firstID, png}},
+					{`INSERT INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)`, []any{firstID, tagID}},
+					{`INSERT INTO transaction_links (parent_id, child_id) VALUES (?, ?)`, []any{firstID, secondID}},
+					{`INSERT OR REPLACE INTO settings (key, value) VALUES ('credit_card_items', '["card"]')`, nil},
+					{`INSERT OR REPLACE INTO settings (key, value) VALUES ('bank_account_items', '["bank"]')`, nil},
+				}
+				for _, statement := range statements {
+					if _, err := database.GetDB().Exec(statement.query, statement.args...); err != nil {
+						t.Fatal(err)
+					}
+				}
+				content := "account,date,item,type,amount,memo\nwallet,2026-02-01,new,income,2,memo\n"
+				if version == "v2" {
+					content = "account,date,item,type,amount,memo,omni_money_csv_version\nwallet,2026-02-01,new,income,2,memo,2\n"
+				}
+				var imported int
+				if path == "string" {
+					imported, err = service.ImportCSV(content, "append")
+				} else {
+					imported, err = service.ImportCSVReaderContext(context.Background(), strings.NewReader(content), "append")
+				}
+				if err != nil || imported != 1 {
+					t.Fatalf("legacy append = %d, %v", imported, err)
+				}
+				for table, want := range map[string]int{"transaction_images": 1, "tags": 1, "transaction_tags": 1, "transaction_links": 1, "settings": 2} {
+					var got int
+					if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM " + table).Scan(&got); err != nil || got != want {
+						t.Fatalf("%s after append = %d/%v, want %d", table, got, err, want)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestCSVV3AcceptsManifestFromBeforeImageLegacyExtension(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	if _, err := database.GetDB().Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+		VALUES ('cash', '2026-01-01', 'kept', 'income', 1, 1, '')`); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := service.BackupToCSV()
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := csv.NewReader(strings.NewReader(archive)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := map[string]int{}
+	for i, name := range records[0] {
+		header[name] = i
+	}
+	manifestRow := records[len(records)-1]
+	value, err := decodeCSVV3TextCell(manifestRow[header["setting_value"]])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest csvV3Manifest
+	if err := json.Unmarshal([]byte(value), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	delete(manifest.Counts, "image_legacy")
+	legacyJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestRow[header["setting_value"]] = csvV3Text(string(legacyJSON))
+	var rewritten strings.Builder
+	writer := csv.NewWriter(&rewritten)
+	writer.WriteAll(records)
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		t.Fatal(err)
+	}
+	if imported, err := service.ImportCSV(rewritten.String(), "replace"); err != nil || imported != 1 {
+		t.Fatalf("old v3 manifest import = %d, %v", imported, err)
+	}
+}
 
 func TestImportCSVV1PreservesHistoricalTextBeyondNewWriteLimits(t *testing.T) {
 	wantAccount := strings.Repeat("a", 300)

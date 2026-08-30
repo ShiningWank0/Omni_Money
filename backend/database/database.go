@@ -22,7 +22,7 @@ import (
 )
 
 const defaultSnapshotMaxTotalBytes int64 = 2 * 1024 * 1024 * 1024
-const ledgerSchemaVersion = 3
+const ledgerSchemaVersion = 4
 
 const writableSQLiteQuery = "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 const snapshotSQLiteQuery = "mode=rw&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
@@ -300,6 +300,14 @@ func createTablesOn(target *sql.DB) error {
 		return fmt.Errorf("スキーマtransaction開始エラー: %w", err)
 	}
 	defer tx.Rollback()
+	if version < 4 {
+		// v4 extends the quota accounting to archive sidecars. Recreate the named
+		// trigger in this same schema transaction so an older definition cannot be
+		// retained by CREATE TRIGGER IF NOT EXISTS.
+		if _, err := tx.Exec(`DROP TRIGGER IF EXISTS trg_transaction_images_quota_insert`); err != nil {
+			return fmt.Errorf("旧画像quota trigger削除エラー: %w", err)
+		}
+	}
 
 	statements := []string{
 		// 取引テーブル
@@ -331,6 +339,23 @@ func createTablesOn(target *sql.DB) error {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
 		)`,
+		// Archive sidecars preserve historical values that cannot be represented by
+		// current write constraints. They are not writable by normal APIs: CSV
+		// restore is the sole producer and validates int64/binary/global bounds.
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS transaction_archive_amounts (
+			transaction_id INTEGER PRIMARY KEY,
+			amount INTEGER NOT NULL CHECK(amount > %d),
+			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+		)`, validation.MaxTransactionAmount),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS transaction_image_archive (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			transaction_id INTEGER NOT NULL,
+			filename TEXT NOT NULL,
+			data BLOB NOT NULL CHECK(length(data) BETWEEN 1 AND %d),
+			mime_type TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+		)`, models.MaxImageBytes),
 		// タグテーブル（Agent.md §6.6: 3階層タグシステム）
 		`CREATE TABLE IF NOT EXISTS tags (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -388,6 +413,7 @@ func createTablesOn(target *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_transactions_memo ON transactions(memo)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_links_child_id ON transaction_links(child_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_images_txid ON transaction_images(transaction_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_transaction_image_archive_txid ON transaction_image_archive(transaction_id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_idempotency_credential_key
 			ON ai_transaction_idempotency(credential_id, idempotency_key_sha256)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_idempotency_transaction
@@ -398,15 +424,24 @@ func createTablesOn(target *sql.DB) error {
 			BEFORE INSERT ON transaction_images
 			WHEN length(NEW.data) <= 0
 				OR length(NEW.data) > %d
-				OR (SELECT COUNT(*) FROM transaction_images WHERE transaction_id = NEW.transaction_id) >= %d
-				OR COALESCE((SELECT SUM(length(data)) FROM transaction_images WHERE transaction_id = NEW.transaction_id), 0) + length(NEW.data) > %d
+				OR ((SELECT COUNT(*) FROM transaction_images WHERE transaction_id = NEW.transaction_id)
+					+ (SELECT COUNT(*) FROM transaction_image_archive WHERE transaction_id = NEW.transaction_id)) >= %d
+				OR (COALESCE((SELECT SUM(length(data)) FROM transaction_images WHERE transaction_id = NEW.transaction_id), 0)
+					+ COALESCE((SELECT SUM(length(data)) FROM transaction_image_archive WHERE transaction_id = NEW.transaction_id), 0)
+					+ length(NEW.data)) > %d
 				OR COALESCE((
-					SELECT SUM(length(ti.data))
-					FROM transaction_images ti
-					JOIN transactions t ON t.id = ti.transaction_id
-					WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+					SELECT SUM(bytes) FROM (
+						SELECT length(ti.data) AS bytes FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id
+						WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+						UNION ALL
+						SELECT length(ai.data) AS bytes FROM transaction_image_archive ai JOIN transactions t ON t.id = ai.transaction_id
+						WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+					)
 				), 0) + length(NEW.data) > %d
-				OR COALESCE((SELECT SUM(length(data)) FROM transaction_images), 0) + length(NEW.data) > %d
+				OR COALESCE((SELECT SUM(bytes) FROM (
+					SELECT length(data) AS bytes FROM transaction_images
+					UNION ALL SELECT length(data) AS bytes FROM transaction_image_archive
+				)), 0) + length(NEW.data) > %d
 			BEGIN
 				SELECT RAISE(ABORT, 'image storage quota exceeded');
 			END`,
@@ -421,6 +456,26 @@ func createTablesOn(target *sql.DB) error {
 			BEGIN
 				SELECT RAISE(ABORT, 'transaction images are immutable; delete and re-add the image');
 			END`,
+		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS trg_transaction_image_archive_quota_insert
+			BEFORE INSERT ON transaction_image_archive
+			WHEN length(NEW.data) <= 0
+				OR length(NEW.data) > %d
+				OR COALESCE((
+					SELECT SUM(bytes) FROM (
+						SELECT length(ti.data) AS bytes FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id
+						WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+						UNION ALL
+						SELECT length(ai.data) AS bytes FROM transaction_image_archive ai JOIN transactions t ON t.id = ai.transaction_id
+						WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+					)
+				), 0) + length(NEW.data) > %d
+				OR COALESCE((SELECT SUM(bytes) FROM (
+					SELECT length(data) AS bytes FROM transaction_images
+					UNION ALL SELECT length(data) AS bytes FROM transaction_image_archive
+				)), 0) + length(NEW.data) > %d
+			BEGIN
+				SELECT RAISE(ABORT, 'archive image storage quota exceeded');
+			END`, models.MaxImageBytes, models.MaxImageBytesPerAccount, models.MaxImageBytesDatabase),
 		`CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_txid ON transaction_tags(transaction_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_tagid ON transaction_tags(tag_id)`,
@@ -497,11 +552,13 @@ func validateCriticalSchema(target schemaQueryer) error {
 		return fmt.Errorf("データベース接続が初期化されていません")
 	}
 	requiredColumns := map[string][]string{
-		"transactions":               {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
-		"transaction_images":         {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
-		"tags":                       {"id", "name", "parent_id", "level", "legacy_duplicate"},
-		"ai_transaction_idempotency": {"credential_id", "idempotency_key_sha256", "request_sha256", "transaction_id", "response_account", "response_date", "created_at"},
-		"ai_daily_transaction_usage": {"credential_id", "utc_date", "successful_creates"},
+		"transactions":                {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
+		"transaction_images":          {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
+		"transaction_archive_amounts": {"transaction_id", "amount"},
+		"transaction_image_archive":   {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
+		"tags":                        {"id", "name", "parent_id", "level", "legacy_duplicate"},
+		"ai_transaction_idempotency":  {"credential_id", "idempotency_key_sha256", "request_sha256", "transaction_id", "response_account", "response_date", "created_at"},
+		"ai_daily_transaction_usage":  {"credential_id", "utc_date", "successful_creates"},
 	}
 	for table, required := range requiredColumns {
 		rows, err := target.Query("PRAGMA table_info(" + table + ")")
@@ -535,12 +592,14 @@ func validateCriticalSchema(target schemaQueryer) error {
 		name       string
 	}{
 		{objectType: "index", name: "idx_transaction_images_txid"},
+		{objectType: "index", name: "idx_transaction_image_archive_txid"},
 		{objectType: "index", name: "idx_tags_root_name_unique"},
 		{objectType: "index", name: "idx_ai_idempotency_credential_key"},
 		{objectType: "index", name: "idx_ai_idempotency_transaction"},
 		{objectType: "index", name: "idx_ai_daily_usage_credential_date"},
 		{objectType: "trigger", name: "trg_transaction_images_quota_insert"},
 		{objectType: "trigger", name: "trg_transaction_images_immutable_update"},
+		{objectType: "trigger", name: "trg_transaction_image_archive_quota_insert"},
 	}
 	for _, object := range requiredObjects {
 		var count int
