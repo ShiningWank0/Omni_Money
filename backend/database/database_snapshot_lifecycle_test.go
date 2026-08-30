@@ -250,7 +250,7 @@ func TestSnapshotPruneJournalDoesNotResurrectPublishedVictims(t *testing.T) {
 }
 
 func TestSnapshotPruneJournalRollsBackPreparedQuarantine(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateSnapshotTestDir(t)
 	victimPath := filepath.Join(dir, "omni_money_20260101_000000_000000001.db")
 	otherPath := filepath.Join(dir, "omni_money_20260102_000000_000000001.db")
 	for _, path := range []string{victimPath, otherPath} {
@@ -405,7 +405,7 @@ func TestCreateSnapshotPruneManifestIsExclusiveAcrossConcurrentWriters(t *testin
 }
 
 func TestSnapshotTransactionLockSerializesConcurrentOwners(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateSnapshotTestDir(t)
 	firstLock, err := acquireSnapshotTransactionLock(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
@@ -599,6 +599,192 @@ func TestSnapshotTransactionRejectsDirectorySubstitutionAcrossProcesses(t *testi
 	}
 }
 
+type snapshotListCandidateProcessResult struct {
+	Snapshots []string `json:"snapshots"`
+	Error     string   `json:"error"`
+}
+
+func TestListSnapshotsCandidateProcessHelper(t *testing.T) {
+	if os.Getenv("OMNI_TEST_SNAPSHOT_LIST_CANDIDATE_HELPER") != "1" {
+		return
+	}
+	instance, err := OpenPlainInstance(os.Getenv("OMNI_TEST_SNAPSHOT_LIST_DATABASE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	ready := os.Getenv("OMNI_TEST_SNAPSHOT_LIST_READY")
+	continuePath := os.Getenv("OMNI_TEST_SNAPSHOT_LIST_CONTINUE")
+	candidatePathFile := os.Getenv("OMNI_TEST_SNAPSHOT_LIST_CANDIDATE_PATH")
+	resultPath := os.Getenv("OMNI_TEST_SNAPSHOT_LIST_RESULT")
+	snapshots, listErr := instance.listSnapshotsContext(context.Background(), os.Getenv("OMNI_TEST_SNAPSHOT_LIST_DIR"), func(candidatePath string) error {
+		if err := os.WriteFile(candidatePathFile, []byte(candidatePath), 0600); err != nil {
+			return err
+		}
+		if err := os.WriteFile(ready, []byte("ready"), 0600); err != nil {
+			return err
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(continuePath); err == nil {
+				return nil
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return errors.New("candidate helper continue timeout")
+	})
+	result := snapshotListCandidateProcessResult{Snapshots: snapshots}
+	if listErr != nil {
+		result.Error = listErr.Error()
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resultPath, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func startSnapshotListCandidateHelper(t *testing.T, databasePath, snapshotDir string) (*exec.Cmd, string, string, string, string) {
+	t.Helper()
+	control := t.TempDir()
+	ready := filepath.Join(control, "ready")
+	continuePath := filepath.Join(control, "continue")
+	candidatePathFile := filepath.Join(control, "candidate-path")
+	resultPath := filepath.Join(control, "result")
+	command := exec.Command(os.Args[0], "-test.run=^TestListSnapshotsCandidateProcessHelper$", "-test.count=1")
+	command.Env = append(os.Environ(),
+		"OMNI_TEST_SNAPSHOT_LIST_CANDIDATE_HELPER=1",
+		"OMNI_TEST_SNAPSHOT_LIST_DATABASE="+databasePath,
+		"OMNI_TEST_SNAPSHOT_LIST_DIR="+snapshotDir,
+		"OMNI_TEST_SNAPSHOT_LIST_READY="+ready,
+		"OMNI_TEST_SNAPSHOT_LIST_CONTINUE="+continuePath,
+		"OMNI_TEST_SNAPSHOT_LIST_CANDIDATE_PATH="+candidatePathFile,
+		"OMNI_TEST_SNAPSHOT_LIST_RESULT="+resultPath,
+	)
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if command.ProcessState == nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	})
+	waitForSnapshotTestSignal(t, ready)
+	return command, continuePath, candidatePathFile, resultPath, ready
+}
+
+func readSnapshotListCandidateResult(t *testing.T, command *exec.Cmd, resultPath string) snapshotListCandidateProcessResult {
+	t.Helper()
+	waitForSnapshotTestSignal(t, resultPath)
+	if err := command.Wait(); err != nil {
+		t.Fatalf("list candidate helper failed: %v", err)
+	}
+	encoded, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result snapshotListCandidateProcessResult
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func TestListSnapshotsCandidateLifetimeSerializesAcrossProcesses(t *testing.T) {
+	instance, databasePath, snapshotDir := newPlainSnapshotTestInstance(t)
+	snapshotPath, err := instance.CreateSnapshot(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, continuePath, candidatePathFile, resultPath, _ := startSnapshotListCandidateHelper(t, databasePath, snapshotDir)
+	candidatePathBytes, err := os.ReadFile(candidatePathFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidatePath := string(candidatePathBytes)
+	if _, err := os.Stat(candidatePath); err != nil {
+		t.Fatalf("paused validation candidate is missing: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if _, err := instance.ListSnapshotsContext(ctx, snapshotDir); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("competing list error=%v, want transaction-lock deadline", err)
+	}
+	if _, err := os.Stat(candidatePath); err != nil {
+		t.Fatalf("competing cleanup removed live validation candidate: %v", err)
+	}
+	if err := os.WriteFile(continuePath, []byte("continue"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result := readSnapshotListCandidateResult(t, command, resultPath)
+	if result.Error != "" {
+		t.Fatalf("list candidate helper error: %s", result.Error)
+	}
+	if len(result.Snapshots) != 1 || result.Snapshots[0] != filepath.Base(snapshotPath) {
+		t.Fatalf("listed snapshots=%v, want %s", result.Snapshots, filepath.Base(snapshotPath))
+	}
+	if _, err := os.Stat(candidatePath); !os.IsNotExist(err) {
+		t.Fatalf("validation candidate remains after list: %v", err)
+	}
+}
+
+func TestListSnapshotsCandidateRejectsDirectorySubstitutionAcrossProcesses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows prevents renaming the opened transaction directory")
+	}
+	parent := t.TempDir()
+	databasePath := filepath.Join(parent, "ledger.db")
+	snapshotDir := filepath.Join(parent, "snapshots")
+	instance, err := OpenPlainInstance(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = instance.Close() })
+	if err := os.Mkdir(snapshotDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := instance.CreateSnapshot(snapshotDir); err != nil {
+		t.Fatal(err)
+	}
+	command, continuePath, candidatePathFile, resultPath, _ := startSnapshotListCandidateHelper(t, databasePath, snapshotDir)
+	candidatePathBytes, err := os.ReadFile(candidatePathFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(parent, "snapshots-moved")
+	if err := os.Rename(snapshotDir, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(snapshotDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(continuePath, []byte("continue"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result := readSnapshotListCandidateResult(t, command, resultPath)
+	if result.Error == "" {
+		t.Fatalf("directory substitution silently returned snapshots: %v", result.Snapshots)
+	}
+	if len(result.Snapshots) != 0 {
+		t.Fatalf("directory substitution exposed snapshots: %v", result.Snapshots)
+	}
+	if entries, err := os.ReadDir(snapshotDir); err != nil {
+		t.Fatal(err)
+	} else if len(entries) != 0 {
+		t.Fatalf("replacement D2 received list transaction artifacts: %v", entries)
+	}
+	movedCandidate := filepath.Join(moved, filepath.Base(string(candidatePathBytes)))
+	if _, err := os.Stat(movedCandidate); !os.IsNotExist(err) {
+		t.Fatalf("pinned D1 validation candidate remains: %v", err)
+	}
+}
+
 func waitForSnapshotTestSignal(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -663,7 +849,7 @@ func TestPreparedPruneRollbackStateMatrixIsCrashIdempotent(t *testing.T) {
 }
 
 func TestPublishedPruneFinalizeStateMatrixIsCrashIdempotent(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateSnapshotTestDir(t)
 	original := filepath.Join(dir, "omni_money_20260101_000000_000000001.db")
 	quarantined := filepath.Join(dir, snapshotPruneArtifactPrefix+strings.Repeat("3", 32)+"-"+filepath.Base(original))
 	if err := os.WriteFile(quarantined, []byte("victim"), 0600); err != nil {

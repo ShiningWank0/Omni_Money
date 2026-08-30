@@ -240,6 +240,23 @@ jobs:
           SQLCIPHER_PREFIX: /ucrt64/omni-sqlcipher-4.18.0
         run: sh scripts/build-sqlcipher-windows.sh
 
+      - name: Test Windows SQLCipher snapshot transaction lifecycle
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        env:
+          SQLCIPHER_PREFIX: /ucrt64/omni-sqlcipher-4.18.0
+          OMNI_REQUIRE_SQLCIPHER_TESTS: "1"
+        run: |
+          export CC=gcc
+          export CGO_ENABLED=1
+          SQLCIPHER_WINDOWS="$(cygpath -m "$SQLCIPHER_PREFIX")"
+          OPENSSL_WINDOWS="$(cygpath -m /ucrt64)"
+          export CGO_CFLAGS="-I${SQLCIPHER_WINDOWS}/include -I${OPENSSL_WINDOWS}/include"
+          export CGO_LDFLAGS="-L${SQLCIPHER_WINDOWS}/lib ${OPENSSL_WINDOWS}/lib/libcrypto.a -lws2_32 -lcrypt32 -lgdi32"
+          go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" \
+            -run '^(TestEncryptedDatabaseSnapshotAndRestoreLifecycle|TestSnapshotPruneJournalRollsBackPreparedQuarantine|TestCreateSnapshotRecoversPreparedPruneJournalBeforeNewTransaction|TestPublishedPruneFinalizeStateMatrixIsCrashIdempotent|TestListSnapshotsCandidateLifetimeSerializesAcrossProcesses|TestSnapshotTransactionLockSerializesConcurrentOwners)$' \
+            ./backend/database
+
       - name: Build application on Linux or macOS
         if: runner.os != 'Windows'
         shell: bash

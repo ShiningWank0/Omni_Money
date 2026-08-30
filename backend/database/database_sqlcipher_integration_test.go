@@ -36,6 +36,13 @@ func TestEncryptedDatabaseSnapshotAndRestoreLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	listed, err := ListSnapshots(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0] != filepath.Base(snapshotPath) {
+		t.Fatalf("encrypted snapshot list=%v, want %s", listed, filepath.Base(snapshotPath))
+	}
 	assertDatabaseCiphertext(t, path, before)
 	assertDatabaseCiphertext(t, snapshotPath, before)
 

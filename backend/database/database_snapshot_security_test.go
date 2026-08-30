@@ -9,8 +9,18 @@ import (
 	"testing"
 	"time"
 
+	"omni_money/backend/fileprivacy"
 	"omni_money/backend/securedb"
 )
+
+func privateSnapshotTestDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := fileprivacy.HardenDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
 
 func newPlainSnapshotTestInstance(t *testing.T) (*Instance, string, string) {
 	t.Helper()
@@ -23,6 +33,9 @@ func newPlainSnapshotTestInstance(t *testing.T) (*Instance, string, string) {
 	t.Cleanup(func() { _ = instance.Close() })
 	snapshotDir := filepath.Join(dir, "snapshots")
 	if err := os.Mkdir(snapshotDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fileprivacy.HardenDirectory(snapshotDir); err != nil {
 		t.Fatal(err)
 	}
 	return instance, path, snapshotDir

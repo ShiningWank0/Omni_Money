@@ -2418,6 +2418,14 @@ func (i *Instance) ListSnapshots(snapshotDir string) ([]string, error) {
 // potentially expensive copy/open/integrity operation observes ctx, and the
 // process-wide admission gate bounds temporary disk/I/O across tenants.
 func (i *Instance) ListSnapshotsContext(ctx context.Context, snapshotDir string) ([]string, error) {
+	return i.listSnapshotsContext(ctx, snapshotDir, nil)
+}
+
+// listSnapshotsContext keeps the snapshot transaction lock from stale
+// artifact cleanup through the last validation candidate removal. The
+// checkpoint is used only by cross-process regressions to stop at the exact
+// candidate lifetime boundary.
+func (i *Instance) listSnapshotsContext(ctx context.Context, snapshotDir string, candidateCreated func(string) error) ([]string, error) {
 	if i == nil {
 		return nil, fmt.Errorf("データベースinstanceが初期化されていません")
 	}
@@ -2442,7 +2450,15 @@ func (i *Instance) ListSnapshotsContext(ctx context.Context, snapshotDir string)
 		}
 		return nil, fmt.Errorf("スナップショットディレクトリが安全ではありません: %w", err)
 	}
-	if err := cleanupSnapshotStagingDir(ctx, snapshotDir); err != nil {
+	transactionLock, err := acquireSnapshotTransactionLock(ctx, snapshotDir)
+	if err != nil {
+		return nil, fmt.Errorf("スナップショットtransaction lockエラー: %w", err)
+	}
+	defer transactionLock.release()
+	if err := transactionLock.verify(); err != nil {
+		return nil, fmt.Errorf("スナップショットtransaction boundaryエラー: %w", err)
+	}
+	if err := cleanupSnapshotStagingDirLocked(ctx, snapshotDir, transactionLock); err != nil {
 		return nil, fmt.Errorf("スナップショットstaging cleanupエラー: %w", err)
 	}
 
@@ -2453,7 +2469,7 @@ func (i *Instance) ListSnapshotsContext(ctx context.Context, snapshotDir string)
 	if opener == nil {
 		return nil, fmt.Errorf("データベースopenerが初期化されていません")
 	}
-	entries, err := readDirectoryEntriesContext(ctx, snapshotDir, maxSnapshotDirectoryEntries)
+	entries, err := transactionLock.readDir(ctx, maxSnapshotDirectoryEntries)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []string{}, nil
@@ -2478,14 +2494,14 @@ func (i *Instance) ListSnapshotsContext(ctx context.Context, snapshotDir string)
 			continue
 		}
 		path := filepath.Join(snapshotDir, entry.Name())
-		info, err := os.Lstat(path)
+		info, err := transactionLock.lstat(path)
 		if err != nil || !validSnapshotFile(info) || !validSnapshotMode(info, encrypted) {
 			// Listing is intentionally fail-closed per entry: a stray symlink,
 			// hard link, or non-regular file must never become a restore target.
 			continue
 		}
 		checked++
-		valid, used, err := i.validateSnapshotEntry(ctx, path, snapshotDir, info, encrypted, maxSnapshotValidationWorkBytes-validationBytes)
+		valid, used, err := i.validateSnapshotEntry(ctx, path, info, encrypted, maxSnapshotValidationWorkBytes-validationBytes, transactionLock, candidateCreated)
 		validationBytes += used
 		if err != nil {
 			return nil, err
@@ -2495,6 +2511,9 @@ func (i *Instance) ListSnapshotsContext(ctx context.Context, snapshotDir string)
 		}
 	}
 	sort.Strings(snapshots)
+	if err := transactionLock.verify(); err != nil {
+		return nil, fmt.Errorf("スナップショットtransaction boundaryが変更されました: %w", err)
+	}
 	return snapshots, nil
 }
 
@@ -2502,14 +2521,14 @@ func (i *Instance) ListSnapshotsContext(ctx context.Context, snapshotDir string)
 // descriptor. Keeping all cleanup in this bounded helper is important: a
 // defer in the ListSnapshots loop would retain up to 256 full candidates
 // until the whole directory scan returned.
-func (i *Instance) validateSnapshotEntry(ctx context.Context, path, snapshotDir string, inspected os.FileInfo, encrypted bool, remainingWork int64) (bool, int64, error) {
+func (i *Instance) validateSnapshotEntry(ctx context.Context, path string, inspected os.FileInfo, encrypted bool, remainingWork int64, transactionLock *snapshotTransactionLock, candidateCreated func(string) error) (valid bool, used int64, resultErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if remainingWork <= 0 {
 		return false, 0, errors.New("snapshot validation work budget exhausted")
 	}
-	file, err := openSnapshotFile(path)
+	file, err := transactionLock.openArtifact(path)
 	if err != nil {
 		return false, 0, nil
 	}
@@ -2523,26 +2542,61 @@ func (i *Instance) validateSnapshotEntry(ctx context.Context, path, snapshotDir 
 	if err := ctx.Err(); err != nil {
 		return false, 0, err
 	}
-	used := fdInfo.Size()
+	used = fdInfo.Size()
 	// The descriptor-level checks above are required even for a positive
 	// cache hit. In particular, Windows does not expose hard-link count in
 	// os.FileInfo, while openSnapshotFile verifies it with the handle.
-	candidatePath, candidateFile, err := temporaryDatabaseFile(snapshotDir, ".omni-money-list-validation-")
+	candidateFile, candidatePath, err := transactionLock.createTemporary(".omni-money-list-validation-", ".db")
 	if err != nil {
-		return false, used, nil
+		return false, used, fmt.Errorf("snapshot validation candidate create: %w", err)
 	}
+	candidateClosed := false
 	defer func() {
-		_ = candidateFile.Close()
-		_ = removeSQLiteFiles(candidatePath)
+		var closeErr error
+		if !candidateClosed {
+			closeErr = candidateFile.Close()
+		}
+		removeErr := removeSnapshotTransactionSQLiteFiles(transactionLock, candidatePath)
+		if closeErr != nil || removeErr != nil {
+			resultErr = errors.Join(resultErr, closeErr, removeErr)
+			valid = false
+		}
 	}()
+	if err := candidateFile.Chmod(0600); err != nil {
+		return false, used, fmt.Errorf("snapshot validation candidate chmod: %w", err)
+	}
+	if err := fileprivacy.Harden(candidateFile); err != nil {
+		return false, used, fmt.Errorf("snapshot validation candidate harden: %w", err)
+	}
+	if candidateCreated != nil {
+		if err := candidateCreated(candidatePath); err != nil {
+			return false, used, err
+		}
+	}
 	if err := copyFileToOpenBoundedContext(ctx, file, candidateFile, maxSnapshotValidationBytes); err != nil {
-		return false, used, errIfContextDone(ctx, err)
+		return false, used, fmt.Errorf("snapshot validation candidate copy: %w", err)
 	}
 	if err := candidateFile.Sync(); err != nil {
-		return false, used, nil
+		return false, used, fmt.Errorf("snapshot validation candidate sync: %w", err)
 	}
 	if err := candidateFile.Close(); err != nil {
-		return false, used, nil
+		return false, used, fmt.Errorf("snapshot validation candidate close: %w", err)
+	}
+	candidateClosed = true
+	reopened, err := transactionLock.openArtifact(candidatePath)
+	if err != nil {
+		return false, used, fmt.Errorf("snapshot validation candidate reopen: %w", err)
+	}
+	candidateInfo, err := reopened.Stat()
+	if err != nil {
+		_ = reopened.Close()
+		return false, used, fmt.Errorf("snapshot validation candidate reopen stat: %w", err)
+	}
+	if err := reopened.Close(); err != nil {
+		return false, used, fmt.Errorf("snapshot validation candidate reopen close: %w", err)
+	}
+	if err := transactionLock.verify(); err != nil {
+		return false, used, fmt.Errorf("snapshot validation transaction boundary: %w", err)
 	}
 	// Re-check the source descriptor after copying. A same-inode writer or
 	// replacement must not cause a partially copied object to be treated as a
@@ -2556,21 +2610,44 @@ func (i *Instance) validateSnapshotEntry(ctx context.Context, path, snapshotDir 
 	}
 	db, err := i.opener.Open(ctx, candidatePath, securedb.ReadOnly)
 	if err != nil {
+		if boundaryErr := validateListSnapshotCandidateBoundary(transactionLock, candidatePath, candidateInfo); boundaryErr != nil {
+			return false, used, errors.Join(fmt.Errorf("snapshot validation candidate open: %w", err), boundaryErr)
+		}
 		return false, used, errIfContextDone(ctx, err)
 	}
 	validErr := i.validateSnapshotDatabaseContext(ctx, db, candidatePath)
 	closeErr := db.Close()
-	if validErr != nil || closeErr != nil {
-		return false, used, errIfContextDone(ctx, errors.Join(validErr, closeErr))
+	if closeErr != nil {
+		return false, used, fmt.Errorf("snapshot validation database close: %w", closeErr)
+	}
+	if boundaryErr := validateListSnapshotCandidateBoundary(transactionLock, candidatePath, candidateInfo); boundaryErr != nil {
+		return false, used, errors.Join(validErr, boundaryErr)
+	}
+	if validErr != nil {
+		return false, used, errIfContextDone(ctx, validErr)
 	}
 	// The path may not have been replaced while its descriptor was being
 	// copied/validated. The candidate remains the validated bytes even if the
 	// path was briefly swapped away, but do not cache or expose that name.
-	postInfo, postErr := os.Lstat(path)
+	postInfo, postErr := transactionLock.lstat(path)
 	if postErr != nil || !sameSnapshotInfo(fdInfo, postInfo) {
 		return false, used, nil
 	}
 	return true, used, nil
+}
+
+func validateListSnapshotCandidateBoundary(transactionLock *snapshotTransactionLock, candidatePath string, expected os.FileInfo) error {
+	if err := transactionLock.verify(); err != nil {
+		return fmt.Errorf("snapshot validation transaction boundary: %w", err)
+	}
+	actual, err := transactionLock.lstat(candidatePath)
+	if err != nil {
+		return fmt.Errorf("snapshot validation candidate path: %w", err)
+	}
+	if !sameSnapshotInfo(expected, actual) {
+		return errors.New("snapshot validation candidate identity changed")
+	}
+	return nil
 }
 
 func errIfContextDone(ctx context.Context, err error) error {
@@ -3311,6 +3388,13 @@ func cleanupSnapshotStagingDir(ctx context.Context, path string) error {
 	defer transactionLock.release()
 	if err := transactionLock.verify(); err != nil {
 		return err
+	}
+	return cleanupSnapshotStagingDirLocked(ctx, path, transactionLock)
+}
+
+func cleanupSnapshotStagingDirLocked(ctx context.Context, path string, transactionLock *snapshotTransactionLock) error {
+	if transactionLock == nil {
+		return errors.New("snapshot staging cleanup transaction lock is nil")
 	}
 	if err := cleanupSnapshotPruneManifestTemps(ctx, path, transactionLock); err != nil {
 		return err
