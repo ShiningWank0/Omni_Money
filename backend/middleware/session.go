@@ -54,6 +54,7 @@ var (
 type sessionContextKey struct{}
 type authenticatedUserContextKey struct{}
 type coreServiceContextKey struct{}
+type snapshotServiceContextKey struct{}
 
 var sessionKey sessionContextKey
 
@@ -147,17 +148,20 @@ type sessionRecord struct {
 // creation. The callbacks keep lifecycle bookkeeping testable without
 // exporting constructors or retaining a raw vault lease beyond its closure.
 type sessionVaultRoot struct {
-	userID  string
-	borrow  func() (*requestVaultLease, error)
-	release func()
-	once    sync.Once
+	userID       string
+	borrow       func() (*requestVaultLease, error)
+	beginRestore func() (*vault.RestoreOperation, error)
+	release      func()
+	once         sync.Once
 }
 
 type requestVaultLease struct {
-	service *core.Service
-	release func()
-	once    sync.Once
-	mu      sync.RWMutex
+	service        *core.Service
+	createSnapshot func() (string, error)
+	listSnapshots  func() ([]string, error)
+	release        func()
+	once           sync.Once
+	mu             sync.RWMutex
 }
 
 // requestVaultLeaseRelease is shared by the middleware defer and handlers
@@ -189,8 +193,9 @@ func newSessionVaultRoot(lease *vault.Lease) (*sessionVaultRoot, error) {
 		return nil, ErrInvalidVaultSession
 	}
 	root := &sessionVaultRoot{
-		userID:  lease.UserID(),
-		release: lease.Release,
+		userID:       lease.UserID(),
+		release:      lease.Release,
+		beginRestore: lease.BeginRestore,
 	}
 	root.borrow = func() (*requestVaultLease, error) {
 		child, err := lease.Borrow()
@@ -203,8 +208,10 @@ func newSessionVaultRoot(lease *vault.Lease) (*sessionVaultRoot, error) {
 			return nil, ErrInvalidVaultSession
 		}
 		return &requestVaultLease{
-			service: service,
-			release: child.Release,
+			service:        service,
+			createSnapshot: child.CreateSnapshot,
+			listSnapshots:  child.ListSnapshots,
+			release:        child.Release,
 		}, nil
 	}
 	return root, nil
@@ -226,8 +233,16 @@ func (root *sessionVaultRoot) Release() {
 			root.release()
 		}
 		root.borrow = nil
+		root.beginRestore = nil
 		root.release = nil
 	})
+}
+
+func (root *sessionVaultRoot) BeginRestore() (*vault.RestoreOperation, error) {
+	if root == nil || root.beginRestore == nil {
+		return nil, ErrInvalidVaultSession
+	}
+	return root.beginRestore()
 }
 
 func (lease *requestVaultLease) Release() {
@@ -241,6 +256,8 @@ func (lease *requestVaultLease) Release() {
 			lease.release()
 		}
 		lease.service = nil
+		lease.createSnapshot = nil
+		lease.listSnapshots = nil
 		lease.release = nil
 	})
 }
@@ -252,6 +269,30 @@ func (lease *requestVaultLease) Service() *core.Service {
 	lease.mu.RLock()
 	defer lease.mu.RUnlock()
 	return lease.service
+}
+
+func (lease *requestVaultLease) CreateSnapshot() (string, error) {
+	if lease == nil {
+		return "", vault.ErrLeaseReleased
+	}
+	lease.mu.RLock()
+	defer lease.mu.RUnlock()
+	if lease.release == nil || lease.createSnapshot == nil {
+		return "", vault.ErrLeaseReleased
+	}
+	return lease.createSnapshot()
+}
+
+func (lease *requestVaultLease) ListSnapshots() ([]string, error) {
+	if lease == nil {
+		return nil, vault.ErrLeaseReleased
+	}
+	lease.mu.RLock()
+	defer lease.mu.RUnlock()
+	if lease.release == nil || lease.listSnapshots == nil {
+		return nil, vault.ErrLeaseReleased
+	}
+	return lease.listSnapshots()
 }
 
 // SessionManager uses one mutex for lookup/touch/delete/rotation. This avoids
@@ -536,6 +577,31 @@ func (m *SessionManager) DeleteAllSessionsForUser(userID string) int {
 	return deleted
 }
 
+// BeginRestore atomically obtains a root-only restore capability from the
+// authenticated session's exact session record.  It never accepts a target
+// user or vault identifier from a request.  The caller must invalidate all
+// sessions for the returned operation's user after this method succeeds.
+func (m *SessionManager) BeginRestore(sessionID string) (*vault.RestoreOperation, string, error) {
+	if m == nil || !isCanonicalSessionSecret(sessionID) {
+		return nil, "", errSessionNotFound
+	}
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil, "", errSessionNotFound
+	}
+	record, ok := m.sessions[sessionID]
+	if !ok || m.expiredLocked(record, now) || record.root == nil || record.session.UserID == "" {
+		return nil, "", errSessionNotFound
+	}
+	operation, err := record.root.BeginRestore()
+	if err != nil {
+		return nil, "", err
+	}
+	return operation, record.session.UserID, nil
+}
+
 // RotateAfterReauthentication invalidates both the old session ID and old
 // CSRF token atomically without extending the absolute lifetime.
 func (m *SessionManager) RotateAfterReauthentication(oldSessionID string) (*Session, error) {
@@ -754,6 +820,17 @@ func (m *SessionManager) borrowVaultSessionFromRequest(r *http.Request) (*Sessio
 	return result, child, true
 }
 
+func (m *SessionManager) sessionForVaultRequest(r *http.Request) (*Session, bool) {
+	if m == nil || r == nil {
+		return nil, false
+	}
+	session, ok := m.GetSessionFromRequest(r)
+	if !ok || session.UserID == "" {
+		return nil, false
+	}
+	return session, true
+}
+
 func sessionIDFromRequest(r *http.Request) (string, error) {
 	expected := SessionCookieName
 	unexpected := SecureSessionCookieName
@@ -857,6 +934,25 @@ func VaultSessionAuthMiddleware(sessionManager *SessionManager, users CurrentUse
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Restore is intentionally the one route that authenticates the identity
+		// without borrowing a child lease.  The handler later acquires the
+		// root-only restore operation after CSRF and recent-auth checks; borrowing
+		// here would leave the operation waiting on this very request.
+		if isSnapshotRestoreRequest(r) {
+			session, ok := sessionManager.sessionForVaultRequest(r)
+			if !ok {
+				writeAuthRequired(w)
+				return
+			}
+			currentUser, ok := currentVaultUser(w, r, sessionManager, users, session.UserID)
+			if !ok {
+				return
+			}
+			ctx := context.WithValue(r.Context(), sessionKey, session)
+			ctx = context.WithValue(ctx, authenticatedUserContextKey{}, currentUser)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
 		session, child, ok := sessionManager.borrowVaultSessionFromRequest(r)
 		if !ok {
 			writeAuthRequired(w)
@@ -865,24 +961,8 @@ func VaultSessionAuthMiddleware(sessionManager *SessionManager, users CurrentUse
 		leaseRelease := &requestVaultLeaseRelease{release: child.Release}
 		defer leaseRelease.Release()
 
-		if users == nil {
-			writeVaultRoutingUnavailable(w)
-			return
-		}
-		currentUser, err := users.GetUser(r.Context(), session.UserID)
-		if err != nil {
-			if errors.Is(err, control.ErrNotFound) {
-				sessionManager.DeleteAllSessionsForUser(session.UserID)
-				writeAuthRequired(w)
-				return
-			}
-			writeVaultRoutingUnavailable(w)
-			return
-		}
-		if currentUser.ID != session.UserID || currentUser.State != control.UserActive ||
-			(currentUser.Role != control.RoleAdmin && currentUser.Role != control.RoleUser) {
-			sessionManager.DeleteAllSessionsForUser(session.UserID)
-			writeAuthRequired(w)
+		currentUser, ok := currentVaultUser(w, r, sessionManager, users, session.UserID)
+		if !ok {
 			return
 		}
 		session.Username = currentUser.Email
@@ -903,6 +983,7 @@ func VaultSessionAuthMiddleware(sessionManager *SessionManager, users CurrentUse
 		// long response stream.
 		ctx = context.WithValue(ctx, coreServiceContextKey{}, child)
 		ctx = context.WithValue(ctx, requestVaultLeaseReleaseContextKey{}, leaseRelease)
+		ctx = context.WithValue(ctx, snapshotServiceContextKey{}, child)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -919,6 +1000,34 @@ func ReleaseRequestVaultLease(ctx context.Context) {
 	if release != nil {
 		release.Release()
 	}
+}
+
+func currentVaultUser(w http.ResponseWriter, r *http.Request, sessionManager *SessionManager, users CurrentUserStore, userID string) (control.UserSummary, bool) {
+	if users == nil {
+		writeVaultRoutingUnavailable(w)
+		return control.UserSummary{}, false
+	}
+	currentUser, err := users.GetUser(r.Context(), userID)
+	if err != nil {
+		if errors.Is(err, control.ErrNotFound) {
+			sessionManager.DeleteAllSessionsForUser(userID)
+			writeAuthRequired(w)
+			return control.UserSummary{}, false
+		}
+		writeVaultRoutingUnavailable(w)
+		return control.UserSummary{}, false
+	}
+	if currentUser.ID != userID || currentUser.State != control.UserActive ||
+		(currentUser.Role != control.RoleAdmin && currentUser.Role != control.RoleUser) {
+		sessionManager.DeleteAllSessionsForUser(userID)
+		writeAuthRequired(w)
+		return control.UserSummary{}, false
+	}
+	return currentUser, true
+}
+
+func isSnapshotRestoreRequest(r *http.Request) bool {
+	return r != nil && r.URL.Path == "/api/snapshots/restore" && r.Method == http.MethodPost
 }
 
 func writeVaultRoutingUnavailable(w http.ResponseWriter) {
@@ -1013,6 +1122,22 @@ func CoreServiceFromContext(ctx context.Context) (*core.Service, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// SnapshotService is the request-bound snapshot capability.  It exposes no
+// user/vault/path selection; the middleware supplies methods backed by the
+// authenticated user's borrowed lease.
+type SnapshotService interface {
+	CreateSnapshot() (string, error)
+	ListSnapshots() ([]string, error)
+}
+
+func SnapshotServiceFromContext(ctx context.Context) (SnapshotService, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	service, ok := ctx.Value(snapshotServiceContextKey{}).(SnapshotService)
+	return service, ok && service != nil
 }
 
 // SessionMaxAgeFromEnv remains for source compatibility. New code should use

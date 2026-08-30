@@ -3,7 +3,10 @@ package database
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"database/sql"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -832,8 +835,14 @@ func (i *Instance) createSnapshot(snapshotDir string) (string, error) {
 		_ = os.Remove(snapshotPath)
 		return "", fmt.Errorf("スナップショット容量検査エラー: %w", err)
 	}
+	if err := syncDirectory(snapshotDir); err != nil {
+		_ = os.Remove(snapshotPath)
+		return "", fmt.Errorf("スナップショットdirectory fsyncエラー: %w", err)
+	}
 
-	log.Printf("スナップショット作成完了: %s", snapshotPath)
+	// Audit records deliberately contain only the operation and result.  The
+	// vault directory and snapshot basename are sensitive metadata.
+	log.Printf("security_event=snapshot_create result=success")
 	return snapshotPath, nil
 }
 
@@ -848,6 +857,8 @@ func (i *Instance) ListSnapshots(snapshotDir string) ([]string, error) {
 	if i == nil {
 		return nil, fmt.Errorf("データベースinstanceが初期化されていません")
 	}
+	i.snapshotLifecycle.RLock()
+	defer i.snapshotLifecycle.RUnlock()
 	if snapshotDir == "" {
 		snapshotDir = i.getSnapshotDir()
 	}
@@ -862,9 +873,19 @@ func (i *Instance) ListSnapshots(snapshotDir string) ([]string, error) {
 
 	var snapshots []string
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".db") {
-			snapshots = append(snapshots, entry.Name())
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".db") {
+			continue
 		}
+		if err := validateSnapshotName(entry.Name()); err != nil {
+			continue
+		}
+		info, err := os.Lstat(filepath.Join(snapshotDir, entry.Name()))
+		if err != nil || !validSnapshotFile(info) || !validSnapshotMode(info, i.opener != nil && i.opener.Encrypted()) {
+			// Listing is intentionally fail-closed per entry: a stray symlink,
+			// hard link, or non-regular file must never become a restore target.
+			continue
+		}
+		snapshots = append(snapshots, entry.Name())
 	}
 	sort.Strings(snapshots)
 	return snapshots, nil
@@ -886,6 +907,12 @@ func RestoreSnapshot(snapshotDir, snapshotName string) error {
 
 // RestoreSnapshot replaces this instance's database with a validated
 // snapshot and reopens it with the same opener (and therefore the same key).
+//
+// The snapshot is first copied to a private, randomly named candidate in the
+// live database directory.  The candidate is opened with the same SQLCipher
+// opener, migrated, integrity checked, and fsynced before the live file is
+// touched.  Only after that validation does the lifecycle lock permit an
+// atomic rename swap.  A failed reopen rolls the old file back into place.
 func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if i == nil {
 		return fmt.Errorf("データベースinstanceが初期化されていません")
@@ -905,105 +932,206 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
-	if snapshotDir == "" {
-		snapshotDir = filepath.Join(filepath.Dir(i.path), "snapshots")
+	if i.path == "" || i.db == nil || i.opener == nil {
+		return fmt.Errorf("データベースが初期化されていません")
 	}
-
-	snapshotPath := filepath.Join(snapshotDir, snapshotName)
-	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
-		return fmt.Errorf("スナップショットが見つかりません: %s", snapshotName)
-	}
-
-	// --- 手順1: データベース接続の完全な遮断 ---
 	currentPath := i.path
-	if i.db != nil {
-		// WALの内容をメインDBファイルにフラッシュしてからCloseする
-		i.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
-		i.db.Close()
-		i.db = nil
+	if snapshotDir == "" {
+		snapshotDir = filepath.Join(filepath.Dir(currentPath), "snapshots")
+	}
+	if err := validateSnapshotDirectory(snapshotDir); err != nil {
+		return fmt.Errorf("スナップショットディレクトリが安全ではありません: %w", err)
+	}
+	snapshotPath := filepath.Join(snapshotDir, snapshotName)
+	snapshotInfo, err := validateSnapshotSource(snapshotPath, snapshotDir, snapshotName, i.opener.Encrypted())
+	if err != nil {
+		return err
 	}
 
-	backupPath := currentPath + ".bak"
-	restoreFailed := true
-	var candidateDB *sql.DB
-
-	// 失敗時は退避ファイルから元の状態に自動復旧する
+	// Validate an isolated candidate while the live database remains open.
+	dir := filepath.Dir(currentPath)
+	candidatePath, candidateFile, err := temporaryDatabaseFile(dir, ".omni-money-restore-candidate-")
+	if err != nil {
+		return fmt.Errorf("復元候補を作成できません: %w", err)
+	}
+	removeCandidate := true
 	defer func() {
-		if restoreFailed {
-			log.Printf("復元失敗: 退避ファイルから元の状態に復旧します")
-			if candidateDB != nil {
-				_ = candidateDB.Close()
-				candidateDB = nil
-			}
-			if i.db != nil {
-				_ = i.db.Close()
-				i.db = nil
-			}
-			os.Remove(currentPath)
-			os.Remove(currentPath + "-wal")
-			os.Remove(currentPath + "-shm")
-			if err := os.Rename(backupPath, currentPath); err != nil {
-				log.Printf("退避データベースの復旧エラー: %v", err)
-				return
-			}
-			if err := i.initDBLocked(currentPath, i.opener, false); err != nil {
-				log.Printf("復旧後のDB再接続エラー: %v", err)
-			}
+		if candidateFile != nil {
+			_ = candidateFile.Close()
+		}
+		if removeCandidate {
+			_ = removeSQLiteFiles(candidatePath)
 		}
 	}()
+	snapshotFile, err := openSnapshotFile(snapshotPath)
+	if err != nil {
+		return fmt.Errorf("スナップショットを開けません: %w", err)
+	}
+	defer snapshotFile.Close()
+	info, err := snapshotFile.Stat()
+	if err != nil || !validSnapshotFile(info) || !validSnapshotMode(info, i.opener.Encrypted()) ||
+		!snapshotSourceMatches(snapshotInfo, info) {
+		if err == nil {
+			err = errors.New("スナップショットが検査後に置き換えられました")
+		}
+		return fmt.Errorf("スナップショットfd検証エラー: %w", err)
+	}
+	if err := copyFileToOpen(snapshotFile, candidateFile); err != nil {
+		return fmt.Errorf("スナップショット候補コピーエラー: %w", err)
+	}
+	if err := candidateFile.Sync(); err != nil {
+		return fmt.Errorf("復元候補のsyncエラー: %w", err)
+	}
+	if err := candidateFile.Close(); err != nil {
+		return fmt.Errorf("復元候補のクローズエラー: %w", err)
+	}
+	candidateFile = nil
+	candidateDB, err := i.opener.Open(context.Background(), candidatePath, securedb.Writable)
+	if err != nil {
+		return fmt.Errorf("復元候補のDB接続エラー: %w", err)
+	}
+	if err := i.validateRestoreDatabase(candidateDB, candidatePath); err != nil {
+		_ = candidateDB.Close()
+		return err
+	}
+	if err := checkpointAndClose(candidateDB, candidatePath); err != nil {
+		return fmt.Errorf("復元候補の耐久化エラー: %w", err)
+	}
+	if err := syncFileAndDirectory(candidatePath, dir); err != nil {
+		return fmt.Errorf("復元候補のfsyncエラー: %w", err)
+	}
 
-	// --- 手順2: 現在状態の退避 ---
+	// Close the live handle only after candidate validation.  Its WAL is
+	// checkpointed first so the renamed live file is a complete database.
+	if _, err := i.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return fmt.Errorf("現行DBのcheckpointエラー: %w", err)
+	}
+	if err := i.db.Close(); err != nil {
+		return fmt.Errorf("現行DBのクローズエラー: %w", err)
+	}
+	i.db = nil
+	if err := removeSQLiteSidecars(currentPath); err != nil {
+		// The live handle is intentionally not republished after a post-close
+		// filesystem failure. The vault manager still owns the drained entry and
+		// will close it fail-closed; a later fresh acquire can reopen the intact
+		// live file after the failed operation has been fully released.
+		return fmt.Errorf("現行DB一時ファイル削除エラー: %w", err)
+	}
+
+	backupPath, err := randomDatabasePath(dir, ".omni-money-restore-backup-")
+	if err != nil {
+		return fmt.Errorf("現行DB退避先を作成できません: %w", err)
+	}
 	if err := os.Rename(currentPath, backupPath); err != nil {
-		// リネーム失敗時はそのまま再接続して返す
-		restoreFailed = false
-		i.initDBLocked(currentPath, i.opener, false)
-		return fmt.Errorf("データベース退避エラー: %w", err)
+		return fmt.Errorf("現行DB退避エラー: %w", err)
+	}
+	if err := syncDirectory(dir); err != nil {
+		return errors.Join(fmt.Errorf("現行DB退避のfsyncエラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
 	}
 
-	// --- 手順3: WAL/SHM 一時ファイルの確実な消去 ---
-	os.Remove(currentPath + "-wal")
-	os.Remove(currentPath + "-shm")
-
-	// --- 手順4: スナップショットの複製と配置 ---
-	if err := copyFile(snapshotPath, currentPath); err != nil {
-		return fmt.Errorf("スナップショットコピーエラー: %w", err)
+	if err := os.Rename(candidatePath, currentPath); err != nil {
+		return errors.Join(fmt.Errorf("復元候補の配置エラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+	}
+	if err := syncDirectory(dir); err != nil {
+		return errors.Join(fmt.Errorf("復元配置のfsyncエラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
 	}
 
-	// --- 手順5: 再接続と現行スキーマの再適用 ---
+	newDB, err := i.opener.Open(context.Background(), currentPath, securedb.Writable)
+	if err == nil {
+		err = i.validateRestoreDatabase(newDB, currentPath)
+	}
+	if err != nil {
+		if newDB != nil {
+			_ = newDB.Close()
+		}
+		return errors.Join(fmt.Errorf("復元後DB検証エラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+	}
+	if err := checkpointAndClose(newDB, currentPath); err != nil {
+		_ = newDB.Close()
+		return errors.Join(fmt.Errorf("復元後DB耐久化エラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+	}
+	// Reopen once more after checkpointing so i.db never references a handle
+	// whose pager state predates the final durable candidate.
+	newDB, err = i.opener.Open(context.Background(), currentPath, securedb.Writable)
+	if err == nil {
+		err = i.validateRestoreDatabase(newDB, currentPath)
+	}
+	if err != nil {
+		if newDB != nil {
+			_ = newDB.Close()
+		}
+		return errors.Join(fmt.Errorf("復元後DB再検証エラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+	}
+	i.db = newDB
+	removeCandidate = false
+	_ = os.Remove(backupPath)
+	_ = syncDirectory(dir)
+	log.Printf("snapshot_restore result=success")
+	return nil
+}
+
+func (i *Instance) validateRestoreDatabase(target *sql.DB, path string) error {
+	if target == nil {
+		return fmt.Errorf("復元候補DBが初期化されていません")
+	}
+	if err := requireFullSynchronous(target); err != nil {
+		return fmt.Errorf("復元DB耐久性設定エラー: %w", err)
+	}
+	if err := i.checkIntegrity(target); err != nil {
+		return err
+	}
+	if err := createTablesOn(target); err != nil {
+		return fmt.Errorf("復元DBスキーマ更新エラー: %w", err)
+	}
+	if err := i.checkIntegrity(target); err != nil {
+		return err
+	}
+	if i.opener != nil && i.opener.Encrypted() {
+		if err := securedb.RequireEncryptedHeader(path); err != nil {
+			return fmt.Errorf("復元DB暗号化検証エラー: %w", err)
+		}
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		return fmt.Errorf("復元DB権限設定エラー: %w", err)
+	}
+	return nil
+}
+
+func checkpointAndClose(target *sql.DB, path string) error {
+	if target == nil {
+		return fmt.Errorf("DBが初期化されていません")
+	}
+	if _, err := target.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		_ = target.Close()
+		return err
+	}
+	return target.Close()
+}
+
+func (i *Instance) reopenAfterRestoreFailure(path string) error {
 	if i.opener == nil {
 		return fmt.Errorf("データベースopenerが初期化されていません")
 	}
-	newDB, err := i.opener.Open(context.Background(), currentPath, securedb.Writable)
+	info, err := os.Lstat(path)
 	if err != nil {
-		return fmt.Errorf("復元後のDB接続エラー: %w", err)
+		i.db = nil
+		return fmt.Errorf("復旧対象DBを検査できません: %w", err)
 	}
-	candidateDB = newDB
-	if err := requireFullSynchronous(newDB); err != nil {
-		return fmt.Errorf("復元後のDB耐久性設定エラー: %w", err)
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		i.db = nil
+		return errors.New("復旧対象DBが安全な通常ファイルではありません")
 	}
-
-	// 破損DBへDDLを適用しないよう、移行前にも整合性を確認する。
-	if err := i.checkIntegrity(newDB); err != nil {
+	db, err := i.opener.Open(context.Background(), path, securedb.Writable)
+	if err != nil {
+		i.db = nil
 		return err
 	}
-	if err := createTablesOn(newDB); err != nil {
-		return fmt.Errorf("復元後のスキーマ更新エラー: %w", err)
-	}
-
-	// --- 手順6: スキーマ更新後の整合性の検査 ---
-	if err := i.checkIntegrity(newDB); err != nil {
+	if err := i.validateRestoreDatabase(db, path); err != nil {
+		_ = db.Close()
+		i.db = nil
 		return err
 	}
-
-	// --- 手順7: 参照の更新と退避ファイルの削除 ---
-	i.db = newDB
-	candidateDB = nil
-	i.path = currentPath
-
-	restoreFailed = false
-	os.Remove(backupPath)
-
-	log.Printf("スナップショット復元完了: %s (integrity_check: ok)", snapshotName)
+	i.db = db
 	return nil
 }
 
@@ -1057,6 +1185,10 @@ func validateSnapshotName(name string) error {
 	}
 	return nil
 }
+
+// ValidateSnapshotName exposes the same strict basename validation used by
+// restore without exposing a database path or instance to HTTP callers.
+func ValidateSnapshotName(name string) error { return validateSnapshotName(name) }
 
 // CleanOldSnapshots は古いスナップショットを削除する（世代管理: 最新N件を残す）
 func CleanOldSnapshots(snapshotDir string, maxKeep int) error {
@@ -1145,7 +1277,7 @@ func pruneSnapshots(snapshotDir string, maxKeep int, maxBytes int64, protectedPa
 		if err != nil {
 			return err
 		}
-		if !info.Mode().IsRegular() {
+		if !validSnapshotFile(info) {
 			return fmt.Errorf("スナップショットが通常ファイルではありません: %s", entry.Name())
 		}
 		if info.Size() < 0 || total > (1<<63-1)-info.Size() {
@@ -1172,7 +1304,7 @@ func pruneSnapshots(snapshotDir string, maxKeep int, maxBytes int64, protectedPa
 		}
 		total -= victim.size
 		usage = append(usage[:candidate], usage[candidate+1:]...)
-		log.Printf("古いスナップショットを削除: %s (remaining_bytes=%d)", victim.name, total)
+		log.Printf("security_event=snapshot_prune result=success remaining_bytes=%d", total)
 	}
 	return nil
 }
@@ -1216,9 +1348,9 @@ func (i *Instance) runAutoSnapshots() {
 		i.snapshotLifecycle.RLock()
 		_, err := i.createSnapshot("")
 		if err != nil {
-			log.Printf("自動スナップショット作成エラー: %v", err)
+			log.Printf("security_event=snapshot_create result=error")
 		} else if err := i.cleanOldSnapshots("", 30); err != nil {
-			log.Printf("スナップショットクリーンアップエラー: %v", err)
+			log.Printf("security_event=snapshot_prune result=error")
 		}
 		i.snapshotLifecycle.RUnlock()
 
@@ -1369,4 +1501,184 @@ func copyFile(src, dst string) error {
 	}
 	completed = true
 	return nil
+}
+
+func validateSnapshotDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("スナップショットディレクトリは通常のdirectoryである必要があります")
+	}
+	if info.Mode().Perm() != 0700 {
+		return fmt.Errorf("スナップショットディレクトリ権限は0700が必要です")
+	}
+	return nil
+}
+
+func validateSnapshotSource(path, dir, name string, encrypted ...bool) (os.FileInfo, error) {
+	if err := validateSnapshotName(name); err != nil {
+		return nil, err
+	}
+	if filepath.Dir(filepath.Clean(path)) != filepath.Clean(dir) {
+		return nil, fmt.Errorf("スナップショットパスがdirectoryから逸脱しています")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("スナップショットが見つかりません: %s", name)
+		}
+		return nil, fmt.Errorf("スナップショット検査エラー: %w", err)
+	}
+	if !validSnapshotFile(info) || (len(encrypted) > 0 && !validSnapshotMode(info, encrypted[0])) {
+		return nil, fmt.Errorf("スナップショットが安全な通常ファイルではありません")
+	}
+	return info, nil
+}
+
+func validSnapshotMode(info os.FileInfo, encrypted bool) bool {
+	if info == nil {
+		return false
+	}
+	if encrypted {
+		return info.Mode().Perm() == 0600
+	}
+	// Desktop migration may encounter read-only legacy snapshots. They cannot
+	// be modified by another user, while group/other write access is rejected.
+	return info.Mode().Perm()&0022 == 0
+}
+
+// snapshotSourceMatches binds the descriptor used for the copy to the
+// metadata inspected before opening it.  A same-name replacement between
+// Lstat and open is therefore rejected instead of silently copying a
+// different file.  Size is checked as well because a writer can mutate a
+// regular file without changing its inode.
+func snapshotSourceMatches(expected, actual os.FileInfo) bool {
+	return expected != nil && actual != nil && os.SameFile(expected, actual) && expected.Size() == actual.Size()
+}
+
+func temporaryDatabaseFile(dir, prefix string) (string, *os.File, error) {
+	file, err := os.CreateTemp(dir, prefix+"*.db")
+	if err != nil {
+		return "", nil, err
+	}
+	path := file.Name()
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", nil, err
+	}
+	// Keep this descriptor open until the caller has populated or atomically
+	// replaced the reserved pathname. Closing and unlinking here would create a
+	// TOCTOU window in which another process could plant a symlink.
+	return path, file, nil
+}
+
+func randomDatabasePath(dir, prefix string) (string, error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		random := make([]byte, 16)
+		if _, err := cryptorand.Read(random); err != nil {
+			return "", err
+		}
+		path := filepath.Join(dir, prefix+hex.EncodeToString(random)+".db")
+		clear(random)
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			// The name is unguessable and the directory is private. Unlike a
+			// create-close-remove reservation this also works with Windows rename,
+			// which rejects replacing an existing destination.
+			return path, nil
+		} else if err != nil {
+			return "", err
+		}
+	}
+	return "", errors.New("一意な復元退避先を生成できません")
+}
+
+func copyFileToOpen(src, dst *os.File) error {
+	if src == nil || dst == nil {
+		return errors.New("コピー元またはコピー先が開かれていません")
+	}
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if _, err := dst.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if err := dst.Truncate(0); err != nil {
+		return err
+	}
+	_, err := io.Copy(dst, src)
+	return err
+}
+
+func removeSQLiteFiles(path string) error {
+	var errs []error
+	for _, candidate := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func removeSQLiteSidecars(path string) error {
+	var errs []error
+	for _, candidate := range []string{path + "-wal", path + "-shm", path + "-journal"} {
+		if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func syncFileAndDirectory(path, dir string) error {
+	file, err := os.Open(path) // #nosec G304 -- path is a generated candidate in the private DB directory.
+	if err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return syncDirectory(dir)
+}
+
+func rollbackRestoreFiles(currentPath, backupPath, candidatePath string, instance *Instance) error {
+	dir := filepath.Dir(currentPath)
+	var errs []error
+	if err := removeSQLiteFiles(currentPath); err != nil {
+		errs = append(errs, fmt.Errorf("remove failed restore candidate: %w", err))
+	}
+	if err := removeSQLiteFiles(candidatePath); err != nil {
+		errs = append(errs, fmt.Errorf("remove restore candidate: %w", err))
+	}
+	if _, err := os.Stat(backupPath); err == nil {
+		if err := os.Rename(backupPath, currentPath); err != nil {
+			errs = append(errs, fmt.Errorf("restore backup rename: %w", err))
+		}
+	} else if os.IsNotExist(err) {
+		// Never turn a missing rollback image into a newly-created empty
+		// plaintext/SQLCipher database during recovery.
+		errs = append(errs, fmt.Errorf("restore backup is missing: %w", os.ErrNotExist))
+	} else {
+		errs = append(errs, fmt.Errorf("inspect restore backup: %w", err))
+	}
+	if err := syncDirectory(dir); err != nil {
+		errs = append(errs, fmt.Errorf("restore rollback directory sync: %w", err))
+	}
+	if len(errs) != 0 {
+		// Do not reopen a potentially mixed or missing file.  The manager keeps
+		// the vault drained and the caller can surface a fail-closed error.
+		return errors.Join(errs...)
+	}
+	if instance != nil {
+		if err := instance.reopenAfterRestoreFailure(currentPath); err != nil {
+			errs = append(errs, fmt.Errorf("rollback reopen: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }

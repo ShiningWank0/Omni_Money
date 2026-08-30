@@ -64,6 +64,83 @@ func TestEncryptedDatabaseSnapshotAndRestoreLifecycle(t *testing.T) {
 	}
 }
 
+func TestEncryptedSnapshotRestoreRejectsWrongKeyAndCorruption(t *testing.T) {
+	root := t.TempDir()
+	firstPath := filepath.Join(root, "first", "ledger.db")
+	secondPath := filepath.Join(root, "second", "ledger.db")
+	first, err := OpenEncryptedInstance(firstPath, databaseTestKey(0x71))
+	if shouldSkipSQLCipherTest(err) {
+		t.Skipf("SQLCipher integration build is not active: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := OpenEncryptedInstance(secondPath, databaseTestKey(0x82))
+	if err != nil {
+		_ = first.Close()
+		if shouldSkipSQLCipherTest(err) {
+			t.Skipf("SQLCipher integration build is not active: %v", err)
+		}
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = first.Close()
+		_ = second.Close()
+	})
+	if _, err := first.DB().Exec("INSERT INTO settings(key, value) VALUES('marker', 'first-live')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.DB().Exec("INSERT INTO settings(key, value) VALUES('marker', 'second-live')"); err != nil {
+		t.Fatal(err)
+	}
+	foreignSnapshot, err := second.CreateSnapshot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.RestoreSnapshot(filepath.Dir(foreignSnapshot), filepath.Base(foreignSnapshot)); err == nil {
+		t.Fatal("snapshot encrypted with another vault key was accepted")
+	}
+	assertEncryptedSetting(t, first, "first-live")
+
+	ownedSnapshot, err := first.CreateSnapshot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(ownedSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content) < 64 {
+		t.Fatalf("encrypted snapshot unexpectedly short: %d", len(content))
+	}
+	content[48] ^= 0x5a
+	if err := os.WriteFile(ownedSnapshot, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.RestoreSnapshot(filepath.Dir(ownedSnapshot), filepath.Base(ownedSnapshot)); err == nil {
+		t.Fatal("corrupted encrypted snapshot was accepted")
+	}
+	assertEncryptedSetting(t, first, "first-live")
+}
+
+func assertEncryptedSetting(t *testing.T, instance *Instance, want string) {
+	t.Helper()
+	var got string
+	if err := instance.DB().QueryRow("SELECT value FROM settings WHERE key='marker'").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("live encrypted value=%q, want %q", got, want)
+	}
+}
+
+func shouldSkipSQLCipherTest(err error) bool {
+	return err != nil && os.Getenv("OMNI_REQUIRE_SQLCIPHER_TESTS") != "1" &&
+		(errors.Is(err, securedb.ErrCipherUnavailable) ||
+			errors.Is(err, securedb.ErrCipherVersion) ||
+			errors.Is(err, securedb.ErrCipherProvider))
+}
+
 func databaseTestKey(value byte) securedb.RawKey {
 	var key securedb.RawKey
 	for index := range key {

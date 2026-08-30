@@ -1,0 +1,304 @@
+package database
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func newPlainSnapshotTestInstance(t *testing.T) (*Instance, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ledger.db")
+	instance, err := OpenPlainInstance(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = instance.Close() })
+	snapshotDir := filepath.Join(dir, "snapshots")
+	if err := os.Mkdir(snapshotDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return instance, path, snapshotDir
+}
+
+func insertSnapshotTestTransaction(t *testing.T, instance *Instance, item string) {
+	t.Helper()
+	if _, err := instance.DB().Exec(
+		"INSERT INTO transactions (account, date, item, type, amount, balance) VALUES ('cash', ?, ?, 'income', 1, 1)",
+		time.Now().UTC().Format("2006-01-02"), item,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRestoreSnapshotRejectsCorruptionAndPreservesLiveDatabase(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	insertSnapshotTestTransaction(t, instance, "before")
+	snapshotPath, err := instance.CreateSnapshot(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertSnapshotTestTransaction(t, instance, "after")
+
+	if err := os.WriteFile(snapshotPath, []byte("not a sqlite database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.RestoreSnapshot(snapshotDir, filepath.Base(snapshotPath)); err == nil {
+		t.Fatal("corrupt snapshot was accepted")
+	}
+	if instance.DB() == nil {
+		t.Fatal("live database was unpublished after a candidate validation failure")
+	}
+	var count int
+	if err := instance.DB().QueryRow("SELECT COUNT(*) FROM transactions").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("live transaction count after corrupt restore = %d, want 2", count)
+	}
+}
+
+func TestRestoreSnapshotPostCloseFilesystemFailureLeavesInstanceUnpublished(t *testing.T) {
+	instance, dbPath, snapshotDir := newPlainSnapshotTestInstance(t)
+	insertSnapshotTestTransaction(t, instance, "before")
+	snapshotPath, err := instance.CreateSnapshot(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory at a SQLite sidecar pathname makes the explicit sidecar
+	// cleanup fail after the live connection has already been closed.
+	journalPath := dbPath + "-journal"
+	if err := os.Mkdir(journalPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(journalPath, "undeletable"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.RestoreSnapshot(snapshotDir, filepath.Base(snapshotPath)); err == nil {
+		t.Fatal("restore unexpectedly ignored sidecar cleanup failure")
+	}
+	if instance.DB() != nil {
+		t.Fatal("post-close filesystem failure republished the instance")
+	}
+}
+
+func TestRestoreSnapshotRejectsTraversalAndForeignPathNames(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	insertSnapshotTestTransaction(t, instance, "original")
+	for _, name := range []string{
+		"../ledger.db", "..\\ledger.db", "nested/ledger.db", "ledger", "ledger.sqlite", "",
+	} {
+		if err := instance.RestoreSnapshot(snapshotDir, name); err == nil {
+			t.Fatalf("unsafe snapshot name %q was accepted", name)
+		}
+	}
+	foreignDir := filepath.Join(t.TempDir(), "snapshots")
+	if err := os.Mkdir(foreignDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(foreignDir, "foreign.db"), []byte("foreign"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.RestoreSnapshot(foreignDir, "foreign.db"); err == nil {
+		t.Fatal("snapshot from an unrelated directory was accepted")
+	}
+}
+
+func TestListAndRestoreRejectSymlinkAndHardlinkSnapshots(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	insertSnapshotTestTransaction(t, instance, "original")
+	snapshotPath, err := instance.CreateSnapshot(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validName := filepath.Base(snapshotPath)
+	linkName := filepath.Join(snapshotDir, "symlink.db")
+	if err := os.Symlink(snapshotPath, linkName); err != nil {
+		// Windows CI may not grant symlink creation to the test process. The
+		// no-follow implementation is still covered by the Unix test build.
+		t.Logf("symlink unavailable: %v", err)
+	} else {
+		if err := instance.RestoreSnapshot(snapshotDir, filepath.Base(linkName)); err == nil {
+			t.Fatal("symlink snapshot was accepted")
+		}
+		entries, err := instance.ListSnapshots(snapshotDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if entry == filepath.Base(linkName) {
+				t.Fatal("symlink appeared in snapshot listing")
+			}
+		}
+	}
+
+	hardlinkName := filepath.Join(snapshotDir, "hardlink.db")
+	if err := os.Link(snapshotPath, hardlinkName); err != nil {
+		t.Skipf("hardlinks unavailable: %v", err)
+	}
+	if err := instance.RestoreSnapshot(snapshotDir, filepath.Base(hardlinkName)); err == nil {
+		t.Fatal("hardlink snapshot was accepted")
+	}
+	entries, err := instance.ListSnapshots(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry == validName || entry == filepath.Base(hardlinkName) {
+			t.Fatalf("hardlinked snapshot appeared in listing: %v", entries)
+		}
+	}
+}
+
+func TestSnapshotSourceIdentityRejectsReplacement(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	insertSnapshotTestTransaction(t, instance, "original")
+	snapshotPath, err := instance.CreateSnapshot(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := validateSnapshotSource(snapshotPath, snapshotDir, filepath.Base(snapshotPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(snapshotDir, "replacement.db")
+	if err := os.Rename(snapshotPath, replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(snapshotPath, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := openSnapshotFile(snapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	actual, err := opened.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshotSourceMatches(expected, actual) {
+		t.Fatal("same-name source replacement was treated as the inspected file")
+	}
+	// A replaced source is rejected before the live database is touched.
+	if err := instance.RestoreSnapshot(snapshotDir, filepath.Base(snapshotPath)); err == nil {
+		t.Fatal("replacement snapshot was accepted")
+	}
+}
+
+func TestRollbackRestoreFailureKeepsInstanceClosed(t *testing.T) {
+	instance, dbPath, _ := newPlainSnapshotTestInstance(t)
+	if _, err := instance.DB().Exec("INSERT INTO transactions (account, date, item, type, amount, balance) VALUES ('cash', '2026-01-01', 'original', 'income', 1, 1)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.DB().Close(); err != nil {
+		t.Fatal(err)
+	}
+	instance.mu.Lock()
+	instance.db = nil
+	instance.mu.Unlock()
+	backupPath := filepath.Join(filepath.Dir(dbPath), "restore-backup.db")
+	if err := os.Rename(dbPath, backupPath); err != nil {
+		t.Fatal(err)
+	}
+	candidatePath := filepath.Join(filepath.Dir(dbPath), "restore-candidate.db")
+	if err := os.WriteFile(candidatePath, []byte("candidate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Force the rollback reopen to fail. The old file is put back, but the
+	// instance must remain unpublished so a manager can close it fail-closed.
+	instance.opener.Destroy()
+	err := rollbackRestoreFiles(dbPath, backupPath, candidatePath, instance)
+	if err == nil {
+		t.Fatal("rollback unexpectedly reported success after reopen failure")
+	}
+	if instance.DB() != nil {
+		t.Fatal("rollback reopen failure republished an instance")
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("rollback did not restore original file: %v", err)
+	}
+}
+
+func TestRestoreBackupDestinationSupportsAtomicRename(t *testing.T) {
+	dir := t.TempDir()
+	current := filepath.Join(dir, "ledger.db")
+	if err := os.WriteFile(current, []byte("live"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := randomDatabasePath(dir, ".omni-money-restore-backup-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(current, backup); err != nil {
+		t.Fatalf("atomic rename to generated backup path failed: %v", err)
+	}
+	if _, err := os.Stat(backup); err != nil {
+		t.Fatalf("backup path missing after rename: %v", err)
+	}
+}
+
+func TestConcurrentSnapshotCreateListAndRestore(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	insertSnapshotTestTransaction(t, instance, "before")
+	snapshotPath, err := instance.CreateSnapshot(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertSnapshotTestTransaction(t, instance, "after")
+
+	start := make(chan struct{})
+	errorsCh := make(chan error, 20)
+	for range 8 {
+		go func() {
+			<-start
+			for range 10 {
+				if _, err := instance.ListSnapshots(snapshotDir); err != nil {
+					errorsCh <- err
+					return
+				}
+			}
+			errorsCh <- nil
+		}()
+	}
+	go func() {
+		<-start
+		_, createErr := instance.CreateSnapshot(snapshotDir)
+		errorsCh <- createErr
+	}()
+	go func() {
+		<-start
+		errorsCh <- instance.RestoreSnapshot(snapshotDir, filepath.Base(snapshotPath))
+	}()
+	close(start)
+	for range 10 {
+		if err := <-errorsCh; err != nil {
+			t.Fatalf("concurrent snapshot operation failed: %v", err)
+		}
+	}
+}
+
+func TestRollbackErrorsAreReturned(t *testing.T) {
+	instance, dbPath, _ := newPlainSnapshotTestInstance(t)
+	if err := instance.DB().Close(); err != nil {
+		t.Fatal(err)
+	}
+	instance.mu.Lock()
+	instance.db = nil
+	instance.mu.Unlock()
+	backupPath := filepath.Join(filepath.Dir(dbPath), "missing-backup.db")
+	candidatePath := filepath.Join(filepath.Dir(dbPath), "candidate.db")
+	if err := os.WriteFile(candidatePath, []byte("candidate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := rollbackRestoreFiles(dbPath, backupPath, candidatePath, instance)
+	if err == nil {
+		t.Fatal("rollback unexpectedly hid missing backup error")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback error = %v, want missing-file cause", err)
+	}
+}

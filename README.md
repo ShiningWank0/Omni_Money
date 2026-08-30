@@ -153,7 +153,7 @@ control鍵とinitial-admin setup tokenは別々のowner-only secretとして生�
 
 直接起動した公開Webは標準で `127.0.0.1:4000` で待ち受けます。`ALLOWED_HOSTS` は直接起動でも必須です。非loopback平文HTTPは許可されず、TLSまたは固定したtrusted proxy経由のHTTPSが必要です。同梱のComposeはPangolin/Newt専用構成で、ホストへポートを公開しません。ローカル利用時だけ `compose.local.yaml` を重ねます。
 
-現在のmulti-user serverでは、ユーザーvaultに安全に紐付かないAI APIと、vault managerを迂回するsnapshot restoreを無効化しています。旧AI環境変数を指定すると起動を拒否します。詳細は[server multi-vault security model](docs/server-multi-vault.md)を参照してください。
+multi-user serverのsnapshot APIは認証済み本人のvaultだけに束縛され、snapshotは既存per-vault SQLCipher DEKで暗号化されます。管理者でも他user vaultの列挙・復号・復元はできません。旧AI環境変数を指定すると起動を拒否します。詳細は[server multi-vault security model](docs/server-multi-vault.md)を参照してください。
 
 主な環境変数:
 
