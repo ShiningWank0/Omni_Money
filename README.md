@@ -25,6 +25,14 @@ macOS デスクトップアプリ、Mac + Colima、TrueNAS Custom App の詳し�
 - AI エージェント向けの取引追加 API と分析 API
 - GitHub Actions による VERSION 起点のデスクトップ版リリースと Docker イメージリリース
 
+### CSV 完全バックアップ（v3）
+
+拡張データ（画像、3階層タグと取引への紐付け、カード引落しの取引リンク、ledger設定）が存在する場合、CSV出力は自動的にv3の正規化形式になります。画像はファイル名・検証済みMIMEタイプ・Base64バイナリとして別レコードに格納し、タグ・リンクは元IDを参照して復元時に新しいIDへ安全に再採番します。拡張データがない場合は、旧クライアント互換のtransactions-only v2を出力します。必要ならDesktop/Wailsの `BackupToCSVFull` で常にv3を選べます。
+
+v1/v2（`id,account,date,item,type,amount,balance[,memo]`）は引き続きインポートできます。v3ではバージョン、レコード種別、Base64画像を厳格に検証し、サイズ・MIME・重複ID・CSV式注入を拒否します。replaceインポートは全レコードと設定を1つのSQLite transactionで処理し、画像や関連付けの途中失敗を含め完全にrollbackします。入力は384 MiB、解析済みテキストは64 MiB、行数は100万行までです。
+
+CSVは画像を含め暗号化されない平文です。DesktopではダイアログでFileVault・BitLocker・LUKS等に保護された保存先を選び、serverではブラウザのダウンロード先が暗号化volume上であることを確認してください。保存先や共有先の安全性はアプリから検証できません。
+
 ### 画像添付の安全上限
 
 通常Web、デスクトップ、AI APIの画像添付には同じ検証と保存上限が適用されます。

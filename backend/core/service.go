@@ -29,6 +29,7 @@ import (
 const (
 	csvVersionHeader = "omni_money_csv_version"
 	csvVersion2      = "2"
+	csvVersion3      = "3"
 )
 
 func encodeCSVTextCell(value string) string {
@@ -659,8 +660,32 @@ func (s *Service) saveStringSliceSetting(key string, items []string) error {
 	return err
 }
 
-// BackupToCSV はCSVバックアップファイルのパスを返す
+// BackupToCSV exports the ledger in the newest format needed to represent the
+// current data.  A plain transactions-only ledger keeps the historical v2
+// shape so old clients can continue to consume it.  Once extended data (images,
+// tags, links, or settings) exists, v3 is selected automatically.
 func (s *Service) BackupToCSV() (string, error) {
+	extended, err := s.hasCSVExtendedData()
+	if err != nil {
+		return "", err
+	}
+	if extended {
+		return s.backupToCSVV3()
+	}
+	return s.backupToCSVV2()
+}
+
+// BackupToCSVFull always emits the normalized v3 format, including empty
+// extension sections.  It is useful to callers that want a stable schema even
+// before the first image/tag/link/setting is created.
+func (s *Service) BackupToCSVFull() (string, error) {
+	return s.backupToCSVV3()
+}
+
+// backupToCSVV2 preserves the historical transactions-only export contract.
+// Keep this separate from the v3 writer so the legacy import/export tests and
+// existing Desktop clients remain source compatible.
+func (s *Service) backupToCSVV2() (string, error) {
 	db, err := s.database()
 	if err != nil {
 		return "", err
@@ -884,6 +909,40 @@ func getDownloadsDir() (string, error) {
 // replaceモードでは既存データのDELETEとINSERTをトランザクションで包み、
 // 途中失敗時にデータが消失しないようにする。
 func (s *Service) ImportCSV(content string, mode string) (int, error) {
+	// Parsing a full v3 export can temporarily hold the raw CSV, decoded JSON
+	// strings, and decoded image blobs at once. Keep direct callers subject to
+	// the same bounded process-wide concurrency policy as the HTTP endpoint.
+	release, ok := TryAcquireCSVImportSlot()
+	if !ok {
+		return 0, fmt.Errorf("CSVインポートが混雑しています。しばらくしてから再試行してください")
+	}
+	defer release()
+	return s.importCSV(content, mode)
+}
+
+func (s *Service) importCSV(content string, mode string) (int, error) {
+	if int64(len(content)) > MaxCSVImportBytes {
+		return 0, fmt.Errorf("CSV入力が上限%d bytesを超えました", MaxCSVImportBytes)
+	}
+	// v3 is a normalized, typed row format. Detect it from the header while
+	// retaining the historical parser for legacy/v2 transaction-only files.
+	probe := csv.NewReader(strings.NewReader(content))
+	probe.FieldsPerRecord = -1
+	if headers, probeErr := probe.Read(); probeErr == nil {
+		if len(headers) > 0 {
+			headers[0] = strings.TrimPrefix(headers[0], "\ufeff")
+		}
+		hasRecordType := false
+		for _, header := range headers {
+			if strings.TrimSpace(header) == "record_type" {
+				hasRecordType = true
+				break
+			}
+		}
+		if hasRecordType {
+			return s.importCSVV3(content, mode)
+		}
+	}
 	db, err := s.database()
 	if err != nil {
 		return 0, err
@@ -932,6 +991,14 @@ func (s *Service) ImportCSV(content string, mode string) (int, error) {
 		}
 
 		rowNumber := len(parsedRows) + 2
+		if len(parsedRows) >= maxCSVRows {
+			return 0, fmt.Errorf("CSV行数が上限%dを超えました", maxCSVRows)
+		}
+		for _, value := range record {
+			if len(value) > maxCSVFieldBytes {
+				return 0, fmt.Errorf("CSV列が大きすぎます (行%d)", rowNumber)
+			}
+		}
 		field := func(name string) (string, error) {
 			idx := headerMap[name]
 			if idx >= len(record) {

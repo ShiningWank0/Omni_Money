@@ -674,7 +674,8 @@ export async function saveBankAccountSettings(items) {
 }
 
 /**
- * CSVバックアップを取得
+ * CSVバックアップを取得。拡張データが存在する場合は、画像・タグ・
+ * タグ紐付け・取引リンク・ledger設定を含むCSV v3を返す。
  * @returns {Promise<string>}
  */
 export async function backupToCSV() {
@@ -727,7 +728,7 @@ export async function backupToCSVFile() {
 }
 
 /**
- * CSVインポート
+ * CSVインポート（旧v1/v2 transactions-only形式と、完全なv3形式に対応）
  * @param {string} content
  * @param {string} mode
  * @returns {Promise<number>}

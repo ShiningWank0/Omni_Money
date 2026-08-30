@@ -405,6 +405,19 @@ func (a *App) BackupToCSVFile() (string, error) {
 	return service.BackupToCSVDirectory(destination)
 }
 
+// BackupToCSVFull emits the stable normalized v3 CSV schema. BackupToCSVFile
+// remains the default UI path and selects v3 automatically when extended data
+// is present, while this method is available to integrations that need a
+// schema-stable export for an empty ledger as well.
+func (a *App) BackupToCSVFull() (string, error) {
+	service, release, err := a.borrowService()
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	return service.BackupToCSVFull()
+}
+
 func (a *App) ImportCSV(content string, mode string) (int, error) {
 	service, release, err := a.borrowService()
 	if err != nil {

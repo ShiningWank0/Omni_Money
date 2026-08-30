@@ -42,7 +42,8 @@
       <div class="format-info">
         <div style="font-weight: bold; margin-bottom: 8px; font-size: 0.95em; color: #333;">CSVファイル形式</div>
         <div>
-          <div style="margin-bottom: 4px;"><strong>必須ヘッダー:</strong> account, date, item, type, amount</div>
+          <div style="margin-bottom: 4px;"><strong>旧形式:</strong> account, date, item, type, amount（v1/v2も読み込み可能）</div>
+          <div style="margin-bottom: 4px;"><strong>完全バックアップ:</strong> v3（取引・画像・タグ・タグ紐付け・取引リンク・ledger設定）</div>
           <div style="margin-left: 12px;">
             <div>• <strong>account:</strong> 資金項目名</div>
             <div>• <strong>date:</strong> 取引日 (YYYY-MM-DD または YYYY-MM-DD HH:MM:SS)</div>
@@ -50,7 +51,10 @@
             <div>• <strong>type:</strong> income (収入) または expense (支出)</div>
             <div>• <strong>amount:</strong> 金額 (正の数値)</div>
             <div>• <strong>balance:</strong> 残高 (オプション、自動計算されます)</div>
+            <div>• v3の画像はファイル名・MIMEタイプ・Base64バイナリを含みます</div>
+            <div>• v3の関連付けはインポート時に安全な新しいIDへ再採番されます</div>
           </div>
+          <div class="csv-plaintext-note" role="note">CSVは暗号化されない平文です。出力・保存前に、FileVault・BitLocker・LUKS等で保護された保存先であることを確認してください。</div>
         </div>
       </div>
 
@@ -222,6 +226,14 @@ async function importCSVFile() {
   font-size: 0.85em;
   color: #555;
   line-height: 1.5;
+}
+
+.csv-plaintext-note {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #e0e0e0;
+  color: #721c24;
+  font-weight: 600;
 }
 
 .progress-section {

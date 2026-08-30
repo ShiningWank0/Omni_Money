@@ -22,6 +22,11 @@ import (
 	"omni_money/backend/models"
 )
 
+// This is a fixed wire hard limit for the JSON request. JSON escaping can be
+// more expensive than this allowance, so the decoded CSV limit is enforced
+// independently below rather than treating this as a worst-case overhead.
+const maxCSVImportWireBytes int64 = core.MaxCSVImportWireBytes
+
 // NewRouter は公開Web用ルーターを作成する。
 //
 // AI API は意図的にこのルーターへ登録しない。公開WebとAI APIの認証境界を
@@ -444,12 +449,23 @@ func handleBackupCSV(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("attachment; filename=transactions_backup_%s.csv",
 			time.Now().Format("20060102_150405")))
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(csvContent))
+	if _, err := io.WriteString(w, csvContent); err != nil {
+		// The headers/status are already sent, so only stop writing on a client
+		// disconnect rather than attempting an invalid second status response.
+		return
+	}
 }
 
 func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 	service, ok := financialService(w, r)
 	if !ok {
+		return
+	}
+	// MaxBodySizeMiddleware also enforces this bound for chunked requests; the
+	// Content-Length check fails early before allocating a JSON body when the
+	// client provides it.
+	if r.ContentLength > maxCSVImportWireBytes {
+		jsonError(w, "CSVリクエストが大きすぎます", http.StatusRequestEntityTooLarge)
 		return
 	}
 	var body struct {
@@ -460,11 +476,23 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "リクエストデータが無効です", http.StatusBadRequest)
 		return
 	}
+	if int64(len(body.Content)) > core.MaxCSVImportBytes {
+		jsonError(w, "CSV入力が大きすぎます", http.StatusRequestEntityTooLarge)
+		return
+	}
 	if body.Mode == "" {
 		body.Mode = "append"
 	}
 
-	count, err := service.ImportCSV(body.Content, body.Mode)
+	var count int
+	var err error
+	if core.HasCSVImportReservation(r.Context()) {
+		count, err = service.ImportCSVWithReservation(body.Content, body.Mode)
+	} else {
+		// Unit/embedded callers may invoke the handler without the outer
+		// middleware; the normal service entrypoint acquires the shared slot.
+		count, err = service.ImportCSV(body.Content, body.Mode)
+	}
 	if err != nil {
 		if errors.Is(err, core.ErrAIIdempotencyConflict) {
 			jsonError(w, "Idempotency-Keyは別のリクエストで使用済みです", http.StatusConflict)

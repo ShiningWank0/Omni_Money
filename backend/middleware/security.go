@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"omni_money/backend/core"
 )
 
 const (
@@ -13,6 +15,12 @@ const (
 
 	// maxRequestBodySize はリクエストボディの最大サイズ（10MB）
 	maxRequestBodySize = 10 * 1024 * 1024
+	// CSV v3 may carry the complete image quota as base64. Keep the larger
+	// allowance scoped to the authenticated import endpoint; every other route
+	// keeps the normal small request budget. This is a fixed wire-size cap; it is
+	// not an estimate of JSON escaping overhead (decoded CSV is checked again by
+	// the API/core layer).
+	maxCSVRequestBodySize = core.MaxCSVImportWireBytes
 )
 
 // SecurityHeadersMiddleware はセキュリティヘッダーを全レスポンスに付与する
@@ -35,8 +43,22 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 // MaxBodySizeMiddleware はリクエストボディサイズを制限しDoS攻撃を緩和する
 func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isCSVImport := r.URL.Path == "/api/import_csv"
+		if isCSVImport {
+			release, ok := core.TryAcquireCSVImportSlot()
+			if !ok {
+				http.Error(w, "CSV import is busy", http.StatusTooManyRequests)
+				return
+			}
+			defer release()
+			r = r.WithContext(core.WithCSVImportReservation(r.Context()))
+		}
 		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+			limit := int64(maxRequestBodySize)
+			if isCSVImport {
+				limit = maxCSVRequestBodySize
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
 		next.ServeHTTP(w, r)
 	})
