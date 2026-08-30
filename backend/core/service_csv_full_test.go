@@ -127,6 +127,50 @@ func TestCSVFieldLimitReaderHandlesQuotedRecordsBeforeCSVAllocation(t *testing.T
 	if _, err := guarded.Read(make([]byte, 32)); err == nil {
 		t.Fatal("canceled CSV reader unexpectedly read input")
 	}
+	aggregate := "a,b\n\"" + strings.Repeat("x", maxCSVGuardFieldBytes) + "\",\"" + strings.Repeat("y", maxCSVGuardFieldBytes) + "\"\n"
+	guarded = &csvFieldLimitReader{ctx: context.Background(), input: strings.NewReader(aggregate), maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
+	aggregateReader := csv.NewReader(guarded)
+	if _, err := aggregateReader.Read(); err != nil {
+		t.Fatalf("aggregate CSV header failed: %v", err)
+	}
+	if _, err := aggregateReader.Read(); err == nil || !strings.Contains(err.Error(), "レコード") {
+		t.Fatalf("aggregate CSV record was not bounded before allocation: %v", err)
+	}
+}
+
+func TestCSVV3ParseErrorCleansImageSpoolWhenResultIsZero(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	content := csvV3TestContent(t,
+		map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash", "date": "2026-08-01", "item": "item", "type": "income", "amount": "1"},
+		map[string]string{csvVersionHeader: "3", "record_type": "image", "id": "1", "transaction_id": "1", "filename": "receipt.png", "mime_type": "image/png", "data_base64": base64.StdEncoding.EncodeToString(encodePNG(t))},
+		map[string]string{csvVersionHeader: "3", "record_type": "unknown"},
+	)
+	before := csvImageSpoolDirectories(t)
+	if _, err := service.parseCSVV3Reader(context.Background(), strings.NewReader(content), true); err == nil {
+		t.Fatal("unknown record unexpectedly parsed")
+	}
+	after := csvImageSpoolDirectories(t)
+	for name := range after {
+		if _, existed := before[name]; !existed {
+			t.Fatalf("image spool directory leaked after parse error: %s", name)
+		}
+	}
+}
+
+func csvImageSpoolDirectories(t *testing.T) map[string]struct{} {
+	t.Helper()
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(map[string]struct{})
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "omni-money-csv-images-") && entry.IsDir() {
+			result[entry.Name()] = struct{}{}
+		}
+	}
+	return result
 }
 
 func TestCSVV3ImageAdmissionHappensBeforeBase64Decode(t *testing.T) {

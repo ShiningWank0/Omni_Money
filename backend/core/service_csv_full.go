@@ -59,6 +59,12 @@ const (
 	maxCSVExportBytes int64 = MaxCSVImportBytes - 3
 	maxCSVRows              = 1_000_000
 	maxCSVFieldBytes        = 8 * 1024 * 1024
+	// Bound the complete raw and decoded size of one CSV record before
+	// encoding/csv allocates its record buffer. A valid image/text field fits
+	// below this after CSV quoting and v3 text framing, while 23 hostile fields
+	// cannot multiply into an archive-sized heap allocation.
+	maxCSVRecordBytes  = 32 * 1024 * 1024
+	maxCSVRecordFields = 256
 	// csvV3Text uses a reserved marker and Base64 only for values containing CR,
 	// because encoding/csv normalizes quoted CRLF to LF. Allow the bounded wire
 	// expansion here, then enforce the exact decoded value size below.
@@ -228,14 +234,17 @@ type csvLimitedStringWriter struct {
 // newlines, and doubled quotes while retaining csv.Reader for the actual CSV
 // decoding and UTF-8 checks.
 type csvFieldLimitReader struct {
-	ctx           context.Context
-	input         io.Reader
-	maxFieldBytes int
-	fieldBytes    int
-	inQuotes      bool
-	quotePending  bool
-	fieldStart    bool
-	pendingCR     bool
+	ctx                context.Context
+	input              io.Reader
+	maxFieldBytes      int
+	fieldBytes         int
+	recordBytes        int
+	recordDecodedBytes int
+	recordFields       int
+	inQuotes           bool
+	quotePending       bool
+	fieldStart         bool
+	pendingCR          bool
 }
 
 func (r *csvFieldLimitReader) Read(p []byte) (int, error) {
@@ -245,6 +254,9 @@ func (r *csvFieldLimitReader) Read(p []byte) (int, error) {
 		}
 	}
 	n, readErr := r.input.Read(p)
+	if r.recordFields == 0 {
+		r.recordFields = 1
+	}
 	for i := 0; i < n; i++ {
 		if r.ctx != nil && i%4096 == 0 {
 			if err := r.ctx.Err(); err != nil {
@@ -266,11 +278,19 @@ func (r *csvFieldLimitReader) Read(p []byte) (int, error) {
 }
 
 func (r *csvFieldLimitReader) consume(b byte) error {
+	r.recordBytes++
+	if r.recordBytes > maxCSVRecordBytes {
+		return fmt.Errorf("CSVレコードが大きすぎます")
+	}
 	add := func(decoded bool) error {
 		if decoded {
 			r.fieldBytes++
+			r.recordDecodedBytes++
 			if r.fieldBytes > r.maxFieldBytes {
 				return fmt.Errorf("CSV列が大きすぎます")
+			}
+			if r.recordDecodedBytes > maxCSVRecordBytes {
+				return fmt.Errorf("CSVレコードの解析後サイズが大きすぎます")
 			}
 		}
 		return nil
@@ -287,6 +307,9 @@ func (r *csvFieldLimitReader) consume(b byte) error {
 				// Outside quotes CRLF is a record terminator, not field data.
 				r.fieldBytes = 0
 				r.fieldStart = true
+				r.recordBytes = 0
+				r.recordDecodedBytes = 0
+				r.recordFields = 1
 			}
 			return nil
 		}
@@ -321,8 +344,19 @@ func (r *csvFieldLimitReader) consume(b byte) error {
 		return nil
 	}
 	if b == ',' || b == '\n' {
+		if b == ',' {
+			r.recordFields++
+			if r.recordFields > maxCSVRecordFields {
+				return fmt.Errorf("CSVレコードの列数が上限%dを超えました", maxCSVRecordFields)
+			}
+		}
 		r.fieldBytes = 0
 		r.fieldStart = true
+		if b == '\n' {
+			r.recordBytes = 0
+			r.recordDecodedBytes = 0
+			r.recordFields = 1
+		}
 		return nil
 	}
 	if b == '\r' {
@@ -333,6 +367,31 @@ func (r *csvFieldLimitReader) consume(b byte) error {
 	}
 	r.fieldStart = false
 	return add(true)
+}
+
+// csvTotalLimitReader enforces the complete input limit across the format
+// probe and the replayed parser. It permits an exact-limit EOF, but reports a
+// sentinel error as soon as one byte beyond the limit is observed.
+type csvTotalLimitReader struct {
+	input     io.Reader
+	remaining int64
+}
+
+func (r *csvTotalLimitReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		var extra [1]byte
+		n, err := r.input.Read(extra[:])
+		if n > 0 {
+			return 0, fmt.Errorf("CSV入力が上限%d bytesを超えました", MaxCSVImportBytes)
+		}
+		return 0, err
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.input.Read(p)
+	r.remaining -= int64(n)
+	return n, err
 }
 
 func (w *csvLimitedStringWriter) Write(p []byte) (int, error) {
@@ -1071,28 +1130,27 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 		return csvV3Import{}, err
 	}
 	parsed = csvV3Import{settings: make(map[string]string)}
-	// Keep cleanup state outside the named return value as well. Most parse
-	// errors return a zero csvV3Import for a useful error boundary; a local
-	// copy still has to remove files and release reservations accumulated by
-	// earlier rows in that case.
+	// Keep cleanup ownership independent from the named return value. Many
+	// validation failures intentionally return a zero csvV3Import; that would
+	// otherwise overwrite the named result before this defer can clean files
+	// already created for earlier rows.
 	var parseTempDir string
+	var parseTempDirInfo os.FileInfo
 	var parseTempReleases []func()
 	var parseTempRoot *os.Root
+	var parseTempFiles []csvV3TempFile
 	defer func() {
 		if err != nil {
-			if parsed.imageTempDir != "" {
-				_ = parsed.cleanup()
-				parseTempDir = ""
-				parseTempRoot = nil
-			} else if parseTempDir != "" {
-				_ = os.Remove(parseTempDir)
+			owner := csvV3Import{
+				imageTempDir:     parseTempDir,
+				imageTempDirInfo: parseTempDirInfo,
+				imageTempRoot:    parseTempRoot,
+				imageTempFiles:   parseTempFiles,
+				tempReleases:     parseTempReleases,
 			}
-			if parseTempRoot != nil {
-				_ = parseTempRoot.Close()
-			}
-			for _, release := range parseTempReleases {
-				release()
-			}
+			// cleanup is identity-safe and nonrecursive. It also has once-guarded
+			// reservations, so an earlier explicit cleanup remains harmless.
+			_ = owner.cleanup()
 		}
 	}()
 	transactionIDs := make(map[int64]struct{})
@@ -1314,16 +1372,19 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 						parsed.cleanup()
 						return csvV3Import{}, fmt.Errorf("画像一時領域の作成に失敗しました: %w", err)
 					}
+					// Register the owner before any subsequent validation can fail.
+					// The defer below can therefore close and clean this root even
+					// when the function returns a zero result value.
+					parseTempDir = dir
+					parseTempRoot = imageRoot
 					dirInfo, statErr := os.Lstat(dir)
 					if statErr != nil || !dirInfo.Mode().IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 {
-						_ = imageRoot.Close()
 						return csvV3Import{}, fmt.Errorf("画像一時領域のidentity取得に失敗しました")
 					}
 					parsed.imageTempDir = dir
 					parsed.imageTempDirInfo = dirInfo
-					parseTempDir = dir
+					parseTempDirInfo = dirInfo
 					parsed.imageTempRoot = imageRoot
-					parseTempRoot = imageRoot
 				}
 				// During the write, decoded bytes remain in the Go heap while an
 				// identical private-file copy is live. The persistent admission above
@@ -1351,6 +1412,7 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 				}
 				tempFileIndex := len(parsed.imageTempFiles)
 				parsed.imageTempFiles = append(parsed.imageTempFiles, csvV3TempFile{name: name, info: createdInfo, file: file})
+				parseTempFiles = parsed.imageTempFiles
 				if err := fileprivacy.Harden(file); err != nil {
 					_ = file.Close()
 					parsed.cleanup()
@@ -1848,9 +1910,10 @@ func (s *Service) ImportCSVReaderContext(ctx context.Context, input io.Reader, m
 	if err != nil {
 		return 0, err
 	}
-	stream := io.MultiReader(strings.NewReader(firstLine), buffered)
+	source := io.MultiReader(strings.NewReader(firstLine), buffered)
 	var probeBytes bytes.Buffer
-	probeInput := &csvFieldLimitReader{ctx: ctx, input: io.TeeReader(stream, &probeBytes), maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
+	probeSource := &csvTotalLimitReader{input: source, remaining: MaxCSVImportBytes}
+	probeInput := &csvFieldLimitReader{ctx: ctx, input: io.TeeReader(probeSource, &probeBytes), maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
 	headerReader := csv.NewReader(probeInput)
 	headerReader.FieldsPerRecord = -1
 	header, headerErr := headerReader.Read()
@@ -1869,7 +1932,13 @@ func (s *Service) ImportCSVReaderContext(ctx context.Context, input io.Reader, m
 	// The probe consumed the header and, for an ambiguous minimal schema, one
 	// data record. Replay those exact bytes before the unread remainder so the
 	// selected parser sees the original CSV, including quoted newlines.
-	stream = io.MultiReader(bytes.NewReader(probeBytes.Bytes()), stream)
+	// The probe consumed bytes from source. Replay exactly those bytes and the
+	// unread remainder through a fresh total limiter, so the parser observes the
+	// same bounded archive rather than resetting the limit after the probe.
+	stream := &csvTotalLimitReader{
+		input:     io.MultiReader(bytes.NewReader(probeBytes.Bytes()), source),
+		remaining: MaxCSVImportBytes,
+	}
 	if hasV3RecordType {
 		parsed, parseErr := s.parseCSVV3Reader(ctx, stream, true)
 		if parseErr != nil {

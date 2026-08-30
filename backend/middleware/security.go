@@ -63,7 +63,10 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 // MaxBodySizeMiddleware はリクエストボディサイズを制限しDoS攻撃を緩和する
 func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		isCSVImport := r.URL.Path == "/api/import_csv"
+		// Only the registered financial import method gets the large-body
+		// spool/deadline path. Matching by path alone would let GET, trailing
+		// slash, or an unregistered route consume a 520 MiB reservation.
+		isCSVImport := r.Method == http.MethodPost && r.URL.Path == "/api/import_csv"
 		limit := int64(maxRequestBodySize)
 		csvBody := false
 		if r.Body != nil {

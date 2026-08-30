@@ -94,6 +94,41 @@ func TestMaxBodySizeMiddlewareReleasesCSVSlotAfterHandlerError(t *testing.T) {
 	}
 }
 
+func TestMaxBodySizeMiddlewareOnlyUsesLargeCSVPathForRegisteredPost(t *testing.T) {
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		ctype  string
+	}{
+		{name: "get registered path", method: http.MethodGet, path: "/api/import_csv", ctype: "text/csv"},
+		{name: "post trailing slash", method: http.MethodPost, path: "/api/import_csv/", ctype: "text/csv"},
+		{name: "post other route", method: http.MethodPost, path: "/api/ai/import_csv", ctype: "text/csv"},
+		{name: "get json", method: http.MethodGet, path: "/api/import_csv", ctype: "application/json"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			body := &countingRequestBody{reader: strings.NewReader("small body")}
+			nextCalled := false
+			handler := MaxBodySizeMiddleware(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				nextCalled = true
+				_, _ = io.ReadAll(req.Body)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			req := httptest.NewRequest(test.method, test.path, body)
+			req.Header.Set("Content-Type", test.ctype)
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusNoContent || !nextCalled {
+				t.Fatalf("status=%d next=%v, want successful non-spooled pass-through", recorder.Code, nextCalled)
+			}
+			if body.reads == 0 {
+				t.Fatal("pass-through request body was not read")
+			}
+		})
+	}
+}
+
 func TestCSVBodyIsNotReadBeforeAuthenticationAndCSRFChecks(t *testing.T) {
 	manager := NewSessionManager(time.Hour)
 	t.Cleanup(manager.Close)
