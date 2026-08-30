@@ -142,7 +142,9 @@ async function importCSVFile() {
       emit('imported')
     }, 1500)
   } catch (e) {
-    csvImportError.value = e.message || 'CSVインポートに失敗しました'
+    csvImportError.value = e.message?.includes('キャンセル')
+      ? 'CSV選択をキャンセルしました。ファイルを選び直せます'
+      : (e.message || 'CSVインポートに失敗しました')
   } finally {
     csvImporting.value = false
   }

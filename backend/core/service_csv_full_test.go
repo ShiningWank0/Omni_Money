@@ -57,6 +57,16 @@ func TestCSVTempBudgetAccountsForDecodedImageWorkingCopy(t *testing.T) {
 	}
 }
 
+func TestCSVReaderLegacyAppendAllowsExtraRecordTypeColumn(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	content := "id,account,date,item,type,amount,balance,memo,omni_money_csv_version,record_type\n" +
+		"101,cash,2026-01-01,給与,income,1000,1000,,2,legacy-note\n"
+	if imported, err := service.ImportCSVReaderContext(context.Background(), strings.NewReader(content), "append"); err != nil || imported != 1 {
+		t.Fatalf("legacy reader with extra record_type result = %d, %v; want append success", imported, err)
+	}
+}
+
 func TestCSVFieldLimitReaderHandlesQuotedRecordsBeforeCSVAllocation(t *testing.T) {
 	input := "account,detail\n" + "cash,\"line one\nline two with \"\"quotes\"\"\"\n"
 	guarded := &csvFieldLimitReader{ctx: context.Background(), input: strings.NewReader(input), maxFieldBytes: 64, fieldStart: true}
@@ -152,14 +162,52 @@ func TestCSVV3ImageSpoolRejectsReplacementAfterValidation(t *testing.T) {
 	_ = os.Remove(dir)
 }
 
-func TestCSVV3RoundTripPreservesExtendedLedgerDataAndRemapsIDs(t *testing.T) {
-	instance, service := openCoreTestService(t, "csv-v3-source")
-	_ = instance
-	card, err := service.AddTransaction(models.TransactionRequest{Account: "card", Date: "2026-08-01", Item: "coffee", Type: "expense", Amount: 500})
+func TestCSVV3ImageSpoolRejectsSameInodeMutationAfterValidation(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	content := csvV3TestContent(t,
+		map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash", "date": "2026-08-01", "item": "item", "type": "income", "amount": "1"},
+		map[string]string{csvVersionHeader: "3", "record_type": "image", "id": "1", "transaction_id": "1", "filename": "receipt.png", "mime_type": "image/png", "data_base64": base64.StdEncoding.EncodeToString(encodePNG(t))},
+	)
+	parsed, err := service.parseCSVV3Reader(context.Background(), strings.NewReader(content), true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bank, err := service.AddTransaction(models.TransactionRequest{Account: "bank", Date: "2026-08-02", Item: "card payment", Type: "expense", Amount: 500})
+	file := parsed.images[0].tempFile
+	if file == nil {
+		_ = parsed.cleanup()
+		t.Fatal("image spool did not retain its descriptor")
+	}
+	originalSize := parsed.images[0].tempInfo.Size()
+	if _, err := file.Seek(0, 0); err != nil {
+		_ = parsed.cleanup()
+		t.Fatal(err)
+	}
+	if _, err := file.Write(bytes.Repeat([]byte{0x5a}, int(originalSize))); err != nil {
+		_ = parsed.cleanup()
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = parsed.cleanup()
+		t.Fatal(err)
+	}
+	if _, err := service.importCSVV3Parsed(context.Background(), parsed, "replace"); err == nil || !strings.Contains(err.Error(), "内容") {
+		_ = parsed.cleanup()
+		t.Fatalf("same-inode image mutation result = %v", err)
+	}
+	if err := parsed.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCSVV3RoundTripPreservesExtendedLedgerDataAndRemapsIDs(t *testing.T) {
+	instance, service := openCoreTestService(t, "csv-v3-source")
+	_ = instance
+	card, err := service.AddTransaction(models.TransactionRequest{Account: "card", Date: "2026-08-01", Item: "coffee", Type: "expense", Amount: 500, Memo: "card line 1\r\ncard line 2\\r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bank, err := service.AddTransaction(models.TransactionRequest{Account: "bank", Date: "2026-08-02", Item: "card payment", Type: "expense", Amount: 500, Memo: "bank line 1\rbank line 2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,8 +444,8 @@ func TestCSVV3ReplacePreservesOtherSettingsAndRenormalizesRemappedLinks(t *testi
 		// by source IDs, while insertion allocates target IDs in row order.
 		map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "2", "account": "bank", "date": "2026-01-02", "item": "bank-side", "type": "expense", "amount": "100"},
 		map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "card", "date": "2026-01-01", "item": "card-side", "type": "expense", "amount": "100"},
-		map[string]string{csvVersionHeader: "3", "record_type": "setting", "setting_key": "credit_card_items", "setting_value": `["card"]`},
-		map[string]string{csvVersionHeader: "3", "record_type": "setting", "setting_key": "bank_account_items", "setting_value": `["bank"]`},
+		map[string]string{csvVersionHeader: "3", "record_type": "setting", "setting_key": "credit_card_items", "setting_value": `[" card "]`},
+		map[string]string{csvVersionHeader: "3", "record_type": "setting", "setting_key": "bank_account_items", "setting_value": `[" bank "]`},
 		map[string]string{csvVersionHeader: "3", "record_type": "transaction_link", "parent_id": "1", "child_id": "2"},
 	)
 	if count, err := ImportCSV(content, "replace"); err != nil || count != 2 {
@@ -426,6 +474,16 @@ func TestCSVV3ReplacePreservesOtherSettingsAndRenormalizesRemappedLinks(t *testi
 	}
 	if preserved != "preserve-me" {
 		t.Fatalf("future setting = %q, want preserve-me", preserved)
+	}
+	var credit, bankSetting string
+	if err := database.GetDB().QueryRow("SELECT value FROM settings WHERE key = 'credit_card_items'").Scan(&credit); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.GetDB().QueryRow("SELECT value FROM settings WHERE key = 'bank_account_items'").Scan(&bankSetting); err != nil {
+		t.Fatal(err)
+	}
+	if credit != `[" card "]` || bankSetting != `[" bank "]` {
+		t.Fatalf("whitespace settings changed: %q/%q", credit, bankSetting)
 	}
 }
 

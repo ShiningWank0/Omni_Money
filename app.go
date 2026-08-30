@@ -18,6 +18,7 @@ import (
 )
 
 var ErrDesktopVaultChanged = errors.New("Desktop vault was locked or reopened while the operation was awaiting input")
+var ErrDesktopCSVSelectionCanceled = errors.New("CSV選択がキャンセルされました")
 
 type desktopVaultCoordinator interface {
 	Status() desktopaccount.Status
@@ -393,7 +394,7 @@ func (a *App) BackupToCSVFile() (string, error) {
 		return "", fmt.Errorf("CSV保存先を選択できませんでした: %w", err)
 	}
 	if destination == "" {
-		return "", nil
+		return "", ErrDesktopCSVSelectionCanceled
 	}
 
 	a.mu.Lock()
@@ -457,7 +458,7 @@ func (a *App) ImportCSVFile(mode string) (int, error) {
 		return 0, fmt.Errorf("CSVファイルを選択できませんでした: %w", err)
 	}
 	if path == "" {
-		return 0, nil
+		return 0, ErrDesktopCSVSelectionCanceled
 	}
 	a.mu.Lock()
 	if generation != a.generation || a.coordinator == nil || !a.coordinator.Status().Unlocked {

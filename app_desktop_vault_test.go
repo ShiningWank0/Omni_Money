@@ -144,6 +144,27 @@ func TestImportCSVFileRejectsLockBoundaryAcrossDialog(t *testing.T) {
 	}
 }
 
+func TestCSVPickerCancellationReturnsExplicitErrorWithoutClosingImportFlow(t *testing.T) {
+	coordinator := &fakeDesktopCoordinator{
+		status: desktopaccount.Status{Configured: true, Unlocked: true, Role: desktopaccount.RoleAdmin},
+	}
+	app := newAppWithCoordinator(coordinator)
+	app.startup(context.Background())
+	app.chooseCSVDirectory = func(context.Context) (string, error) { return "", nil }
+	if _, err := app.BackupToCSVFile(); !errors.Is(err, ErrDesktopCSVSelectionCanceled) {
+		t.Fatalf("backup cancellation error = %v, want ErrDesktopCSVSelectionCanceled", err)
+	}
+	app.chooseCSVFile = func(context.Context) (string, error) { return "", nil }
+	if _, err := app.ImportCSVFile("append"); !errors.Is(err, ErrDesktopCSVSelectionCanceled) {
+		t.Fatalf("import cancellation error = %v, want ErrDesktopCSVSelectionCanceled", err)
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	if coordinator.serviceCalls != 0 {
+		t.Fatalf("Service called %d times after picker cancellation, want 0", coordinator.serviceCalls)
+	}
+}
+
 func TestOpenDesktopCSVFileRejectsSymlinkAndNonRegularPath(t *testing.T) {
 	dir := t.TempDir()
 	regular := filepath.Join(dir, "archive.csv")

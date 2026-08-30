@@ -22,7 +22,13 @@ func privateSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read current Windows account: %w", err)
 	}
-	sddl := "D:P(A;;FA;;;" + user.User.Sid.String() + ")(A;;FA;;;SY)"
+	currentSID := user.User.Sid.String()
+	// LocalSystem's current SID is already SY. Avoid emitting duplicate ACEs;
+	// the DACL still grants exactly the same principal set.
+	sddl := "D:P(A;;FA;;;" + currentSID + ")"
+	if currentSID != "S-1-5-18" {
+		sddl += "(A;;FA;;;SY)"
+	}
 	descriptor, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
 		return nil, fmt.Errorf("create private Windows DACL: %w", err)
@@ -137,7 +143,7 @@ func IsPrivate(file *os.File, info os.FileInfo) bool {
 		return false
 	}
 	dacl, _, err := descriptor.DACL()
-	if err != nil || dacl == nil || dacl.AceCount != 2 {
+	if err != nil || dacl == nil {
 		return false
 	}
 	current, err := windows.GetCurrentProcessToken().GetTokenUser()
@@ -148,7 +154,13 @@ func IsPrivate(file *os.File, info os.FileInfo) bool {
 	if err != nil {
 		return false
 	}
-	want := map[string]bool{current.User.Sid.String(): false, system.String(): false}
+	want := map[string]bool{current.User.Sid.String(): false}
+	if current.User.Sid.String() != system.String() {
+		want[system.String()] = false
+	}
+	if int(dacl.AceCount) != len(want) {
+		return false
+	}
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, i, &ace); err != nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask != windows.ACCESS_MASK(fileAllAccess) {

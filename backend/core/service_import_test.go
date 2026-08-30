@@ -167,3 +167,29 @@ func TestImportCSVReaderRejectsLegacyReplaceWithoutDatabaseChanges(t *testing.T)
 		t.Fatalf("original transaction count = %d, want 1", count)
 	}
 }
+
+func TestImportCSVLegacyAppendAllowsExtraRecordTypeColumn(t *testing.T) {
+	setupCoreTestDB(t)
+	content := "id,account,date,item,type,amount,balance,memo,omni_money_csv_version,record_type\n" +
+		"101,cash,2026-01-01,給与,income,1000,1000,,2,legacy-note\n"
+	if imported, err := ImportCSV(content, "append"); err != nil || imported != 1 {
+		t.Fatalf("legacy CSV with extra record_type result = %d, %v; want append success", imported, err)
+	}
+}
+
+func TestImportCSVMinimalV3UsesTypedRecordDetection(t *testing.T) {
+	setupCoreTestDB(t)
+	originalID := insertTestTransaction(t, "old", "2025-12-31", "before", "income", 1, 1)
+	content := "omni_money_csv_version,record_type,id,account,date,item,type,amount\n" +
+		"3,transaction,101,cash,2026-01-01,給与,income,1000\n"
+	if imported, err := ImportCSV(content, "replace"); err != nil || imported != 1 {
+		t.Fatalf("minimal v3 replace result = %d, %v", imported, err)
+	}
+	var count int
+	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transactions WHERE id = ?", originalID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("minimal v3 replace retained old transaction count = %d", count)
+	}
+}

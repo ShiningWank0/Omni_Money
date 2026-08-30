@@ -42,9 +42,14 @@ func CreatePrivateTempDir(prefix string) (string, *os.Root, error) {
 			}
 			return "", nil, err
 		}
+		created, statErr := os.Lstat(dir)
+		if statErr != nil {
+			_ = os.Remove(dir)
+			return "", nil, statErr
+		}
 		root, err := os.OpenRoot(dir)
 		if err != nil {
-			_ = os.RemoveAll(dir)
+			_ = removeCreatedPrivateDir(dir, created)
 			return "", nil, err
 		}
 		return dir, root, nil

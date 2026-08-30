@@ -1085,14 +1085,13 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 		if len(headers) > 0 {
 			headers[0] = strings.TrimPrefix(headers[0], "\ufeff")
 		}
-		hasRecordType := false
-		for _, header := range headers {
-			if strings.TrimSpace(header) == "record_type" {
-				hasRecordType = true
-				break
+		isV3 := isCSVV3Header(headers)
+		if !isV3 {
+			if firstRecord, firstErr := probe.Read(); firstErr == nil {
+				isV3 = isCSVV3Record(headers, firstRecord)
 			}
 		}
-		if hasRecordType {
+		if isV3 {
 			parsed, parseErr := s.parseCSVV3Reader(ctx, strings.NewReader(content), false)
 			if parseErr != nil {
 				return 0, parseErr

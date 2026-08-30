@@ -21,6 +21,21 @@ type PrivateTempFile struct {
 	dirInfo os.FileInfo
 }
 
+// removeCreatedPrivateDir is used only while unwinding creation of a newly
+// made directory. Compare the original directory identity and use a
+// non-recursive remove so a rename/replacement or unexpected child cannot turn
+// error cleanup into deletion of unrelated data.
+func removeCreatedPrivateDir(path string, created os.FileInfo) error {
+	current, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if created == nil || !os.SameFile(created, current) {
+		return fmt.Errorf("private temp directory identity changed")
+	}
+	return os.Remove(path)
+}
+
 // CreatePrivateTempFile creates a random, exclusive file in a private temp
 // directory and returns the pinned root used for identity checks.
 func CreatePrivateTempFile(prefix string) (*PrivateTempFile, error) {

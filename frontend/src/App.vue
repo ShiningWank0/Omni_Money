@@ -537,7 +537,11 @@ async function backupToCSV() {
     showToast(isWailsMode
       ? 'CSVバックアップを保存しました ✓'
       : 'CSVのダウンロードを開始しました。暗号化済みの保存先を確認してください ✓')
-  } catch {
+  } catch (e) {
+    if (e?.message?.includes('キャンセル')) {
+      showToast('CSV保存をキャンセルしました')
+      return
+    }
     showToast('CSVバックアップに失敗しました', 'error')
   }
 }

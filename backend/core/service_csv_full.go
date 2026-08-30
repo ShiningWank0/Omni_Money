@@ -8,7 +8,9 @@ package core
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/csv"
@@ -52,13 +54,15 @@ const (
 	// MaxCSVStringImportBytes; this small fixed allowance covers the envelope
 	// and ordinary escaping without allowing an archive-sized JSON allocation.
 	MaxCSVJSONWireBytes int64 = MaxCSVStringImportBytes + 1*1024*1024
-	maxCSVExportBytes   int64 = MaxCSVImportBytes
-	maxCSVRows                = 1_000_000
-	maxCSVFieldBytes          = 8 * 1024 * 1024
-	// encoding/csv removes CRLF normalization and decodeCSVTextCellV2 removes
-	// one formula-safety apostrophe. Permit that fixed wire overhead here, then
-	// enforce the exact decoded value size in the typed validators below.
-	maxCSVGuardFieldBytes         = maxCSVFieldBytes + 1
+	// Desktop file exports prepend a three-byte UTF-8 BOM. Keep the CSV body
+	// three bytes below the import limit so the resulting file is self-importable.
+	maxCSVExportBytes int64 = MaxCSVImportBytes - 3
+	maxCSVRows              = 1_000_000
+	maxCSVFieldBytes        = 8 * 1024 * 1024
+	// csvV3Text uses a reserved marker and Base64 only for values containing CR,
+	// because encoding/csv normalizes quoted CRLF to LF. Allow the bounded wire
+	// expansion here, then enforce the exact decoded value size below.
+	maxCSVGuardFieldBytes         = maxCSVFieldBytes*2 + 128
 	maxCSVHeaderBytes             = 64 * 1024
 	maxCSVSettingKeyBytes         = 256
 	maxCSVSettingValueBytes       = 2 * 1024 * 1024
@@ -379,7 +383,39 @@ func csvV3Record(values map[string]string) []string {
 	return record
 }
 
-func csvV3Text(value string) string { return encodeCSVTextCell(value) }
+// csvV3RawTextPrefix is intentionally an otherwise-invalid control-prefixed
+// value. ValidateLedgerText and ValidateArchivedLedgerText reject that control
+// byte, so it cannot collide with an existing persisted ledger value. Encoding
+// the complete UTF-8 payload makes CR, CRLF, and literal backslashes lossless
+// across encoding/csv's newline normalization while leaving old v3 rows (which
+// have no marker) readable.
+const csvV3RawTextPrefix = "\x01omni-money-csv-v3-text:"
+
+func csvV3Text(value string) string {
+	if strings.ContainsRune(value, '\r') {
+		value = csvV3RawTextPrefix + base64.RawStdEncoding.EncodeToString([]byte(value))
+	}
+	return encodeCSVTextCell(value)
+}
+
+func decodeCSVV3TextCell(value string) (string, error) {
+	decoded, err := decodeCSVTextCellV2(value)
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(decoded, csvV3RawTextPrefix) {
+		return decoded, nil
+	}
+	encoded := strings.TrimPrefix(decoded, csvV3RawTextPrefix)
+	if encoded == "" {
+		return "", fmt.Errorf("CSV v3テキストエンコーディングが空です")
+	}
+	raw, err := base64.RawStdEncoding.Strict().DecodeString(encoded)
+	if err != nil || !utf8.Valid(raw) {
+		return "", fmt.Errorf("CSV v3テキストエンコーディングが不正です")
+	}
+	return string(raw), nil
+}
 
 func validateCSVV3Setting(key, value string) error {
 	if key != "credit_card_items" && key != "bank_account_items" {
@@ -736,6 +772,7 @@ type csvV3Import struct {
 type csvV3TempFile struct {
 	name string
 	info os.FileInfo
+	file *os.File
 }
 
 type csvV3Transaction struct {
@@ -749,12 +786,15 @@ type csvV3Image struct {
 	filename, mimeType, createdAt string
 	data                          []byte
 	dataPath                      string
-	// tempRoot/name/info pin the exact private spool object created during
-	// parsing. Import never reopens dataPath by name, since another process
-	// with access to the directory could otherwise replace it after validation.
-	tempRoot *os.Root
-	tempName string
-	tempInfo os.FileInfo
+	// tempRoot/name/info/file pin the exact private spool object created during
+	// parsing. Import reads the retained descriptor rather than reopening
+	// dataPath by name, and compares the original size and digest immediately
+	// before insertion.
+	tempRoot   *os.Root
+	tempName   string
+	tempInfo   os.FileInfo
+	tempFile   *os.File
+	tempDigest [sha256.Size]byte
 }
 
 type csvV3Tag struct {
@@ -797,6 +837,63 @@ func csvV3HeaderMap(headers []string) (map[string]int, error) {
 	return m, nil
 }
 
+// isCSVV3Header requires the version marker and at least one field that cannot
+// occur in the historical transactions-only schema. A legacy/v2 export may
+// contain an application-specific column named record_type; treating that
+// column alone as v3 would route an otherwise compatible append through the
+// strict typed parser.
+func isCSVV3Header(headers []string) bool {
+	hasVersion, hasRecordType, hasV3Field := false, false, false
+	for _, raw := range headers {
+		header := strings.TrimSpace(raw)
+		switch header {
+		case csvVersionHeader:
+			hasVersion = true
+		case "record_type":
+			hasRecordType = true
+		case "transaction_id", "parent_id", "child_id", "tag_id", "filename", "mime_type", "data_base64", "tag_name", "tag_parent_id", "tag_level", "setting_key", "setting_value", "created_at":
+			hasV3Field = true
+		}
+	}
+	return hasVersion && hasRecordType && hasV3Field
+}
+
+func hasCSVV3Markers(headers []string) (versionIndex, recordTypeIndex int, ok bool) {
+	versionIndex, recordTypeIndex = -1, -1
+	for index, raw := range headers {
+		switch strings.TrimSpace(raw) {
+		case csvVersionHeader:
+			versionIndex = index
+		case "record_type":
+			recordTypeIndex = index
+		}
+	}
+	return versionIndex, recordTypeIndex, versionIndex >= 0 && recordTypeIndex >= 0
+}
+
+// isCSVV3Record handles the small, valid v3 subset containing only a
+// transaction row. It uses the row's version and typed record value so a
+// legacy/v2 file that merely adds an application column named record_type is
+// still parsed by the compatibility path.
+func isCSVV3Record(headers, record []string) bool {
+	if isCSVV3Header(headers) {
+		return true
+	}
+	versionIndex, recordTypeIndex, ok := hasCSVV3Markers(headers)
+	if !ok || versionIndex >= len(record) || recordTypeIndex >= len(record) {
+		return false
+	}
+	if strings.TrimSpace(record[versionIndex]) != csvVersion3 {
+		return false
+	}
+	switch strings.TrimSpace(record[recordTypeIndex]) {
+	case "transaction", "transaction_legacy", "image", "tag", "tag_legacy", "transaction_tag", "transaction_link", "setting", "setting_legacy":
+		return true
+	default:
+		return false
+	}
+}
+
 func csvV3Get(record []string, headers map[string]int, name string) (string, error) {
 	idx, ok := headers[name]
 	if !ok {
@@ -822,7 +919,7 @@ func csvV3DecodedText(record []string, headers map[string]int, name string, requ
 		}
 		return "", nil
 	}
-	decoded, err := decodeCSVTextCellV2(raw)
+	decoded, err := decodeCSVV3TextCell(raw)
 	if err != nil {
 		return "", fmt.Errorf("%s列のCSVエスケープが不正です: %w", name, err)
 	}
@@ -868,6 +965,12 @@ func (p *csvV3Import) cleanup() error {
 		for _, temp := range p.imageTempFiles {
 			if temp.name == "" {
 				continue
+			}
+			if temp.file != nil {
+				if err := temp.file.Close(); err != nil && first == nil {
+					first = err
+				}
+				temp.file = nil
 			}
 			current, err := p.imageTempRoot.Lstat(temp.name)
 			if err != nil {
@@ -1241,7 +1344,7 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 					return csvV3Import{}, fmt.Errorf("画像一時ファイルのidentity取得に失敗しました: %w", statErr)
 				}
 				tempFileIndex := len(parsed.imageTempFiles)
-				parsed.imageTempFiles = append(parsed.imageTempFiles, csvV3TempFile{name: name, info: createdInfo})
+				parsed.imageTempFiles = append(parsed.imageTempFiles, csvV3TempFile{name: name, info: createdInfo, file: file})
 				if err := fileprivacy.Harden(file); err != nil {
 					_ = file.Close()
 					parsed.cleanup()
@@ -1259,10 +1362,6 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 					return csvV3Import{}, fmt.Errorf("画像一時ファイルのidentity取得に失敗しました")
 				}
 				parsed.imageTempFiles[tempFileIndex].info = tempInfo
-				if err := file.Close(); err != nil {
-					parsed.cleanup()
-					return csvV3Import{}, fmt.Errorf("画像一時ファイルのクローズに失敗しました: %w", err)
-				}
 				// The decoded heap buffer is no longer live after the write. Keep
 				// only the persistent-file reservation until parsed.cleanup.
 				tempRelease()
@@ -1270,6 +1369,8 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 				image.tempRoot = parsed.imageTempRoot
 				image.tempName = name
 				image.tempInfo = tempInfo
+				image.tempFile = file
+				image.tempDigest = sha256.Sum256(prepared.data)
 				image.data = nil
 			}
 			parsed.images = append(parsed.images, image)
@@ -1535,7 +1636,6 @@ func csvV3ImageBytes(row csvV3Image) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
 		return 0, err
@@ -1551,7 +1651,6 @@ func readCSVTempImage(row csvV3Image) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err
@@ -1570,8 +1669,11 @@ func readCSVTempImage(row csvV3Image) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(data) == 0 || int64(len(data)) > models.MaxImageBytes {
+	if len(data) == 0 || int64(len(data)) > models.MaxImageBytes || int64(len(data)) != row.tempInfo.Size() {
 		return nil, fmt.Errorf("画像一時ファイルのサイズが不正です")
+	}
+	if sha256.Sum256(data) != row.tempDigest {
+		return nil, fmt.Errorf("画像一時ファイルの内容が検証後に変更されています")
 	}
 	return data, nil
 }
@@ -1580,7 +1682,7 @@ func readCSVTempImage(row csvV3Image) ([]byte, error) {
 // creation-time identity is checked again immediately before reading, so a
 // same-account rename/replacement cannot substitute bytes after validation.
 func openCSVTempImage(row csvV3Image) (*os.File, error) {
-	if row.tempRoot == nil || row.tempName == "" || row.tempInfo == nil {
+	if row.tempRoot == nil || row.tempName == "" || row.tempInfo == nil || row.tempFile == nil {
 		return nil, fmt.Errorf("画像一時ファイルのidentity情報がありません")
 	}
 	entry, err := row.tempRoot.Lstat(row.tempName)
@@ -1590,14 +1692,25 @@ func openCSVTempImage(row csvV3Image) (*os.File, error) {
 	if !os.SameFile(row.tempInfo, entry) {
 		return nil, fmt.Errorf("画像一時ファイルのidentityが変更されています")
 	}
-	file, err := row.tempRoot.Open(row.tempName)
-	if err != nil {
+	file := row.tempFile
+	opened, err := file.Stat()
+	if err != nil || !fileprivacy.IsPrivate(file, opened) || !opened.Mode().IsRegular() || !os.SameFile(row.tempInfo, opened) || opened.Size() != row.tempInfo.Size() || !os.SameFile(opened, entry) {
+		return nil, fmt.Errorf("画像一時ファイルのidentity検証に失敗しました")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	opened, err := file.Stat()
-	if err != nil || !fileprivacy.IsPrivate(file, opened) || !opened.Mode().IsRegular() || !os.SameFile(row.tempInfo, opened) || !os.SameFile(opened, entry) {
-		_ = file.Close()
-		return nil, fmt.Errorf("画像一時ファイルのidentity検証に失敗しました")
+	hash := sha256.New()
+	if _, err := io.CopyN(hash, file, opened.Size()); err != nil {
+		return nil, fmt.Errorf("画像一時ファイルの内容検証に失敗しました: %w", err)
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	if digest != row.tempDigest {
+		return nil, fmt.Errorf("画像一時ファイルの内容が検証後に変更されています")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
 	}
 	return file, nil
 }
@@ -1730,20 +1843,27 @@ func (s *Service) ImportCSVReaderContext(ctx context.Context, input io.Reader, m
 		return 0, err
 	}
 	stream := io.MultiReader(strings.NewReader(firstLine), buffered)
-	headerReader := csv.NewReader(strings.NewReader(firstLine))
+	var probeBytes bytes.Buffer
+	probeInput := &csvFieldLimitReader{ctx: ctx, input: io.TeeReader(stream, &probeBytes), maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
+	headerReader := csv.NewReader(probeInput)
 	headerReader.FieldsPerRecord = -1
 	header, headerErr := headerReader.Read()
-	hasV3RecordType := headerErr == nil
-	if hasV3RecordType && len(header) > 0 {
-		header[0] = strings.TrimPrefix(header[0], "\ufeff")
-		hasV3RecordType = false
-		for _, field := range header {
-			if strings.TrimSpace(field) == "record_type" {
-				hasV3RecordType = true
-				break
+	hasV3RecordType := false
+	if headerErr == nil {
+		if len(header) > 0 {
+			header[0] = strings.TrimPrefix(header[0], "\ufeff")
+		}
+		hasV3RecordType = isCSVV3Header(header)
+		if !hasV3RecordType {
+			if firstRecord, firstErr := headerReader.Read(); firstErr == nil {
+				hasV3RecordType = isCSVV3Record(header, firstRecord)
 			}
 		}
 	}
+	// The probe consumed the header and, for an ambiguous minimal schema, one
+	// data record. Replay those exact bytes before the unread remainder so the
+	// selected parser sees the original CSV, including quoted newlines.
+	stream = io.MultiReader(bytes.NewReader(probeBytes.Bytes()), stream)
 	if hasV3RecordType {
 		parsed, parseErr := s.parseCSVV3Reader(ctx, stream, true)
 		if parseErr != nil {
@@ -2239,7 +2359,7 @@ func (s *Service) importCSVV3Parsed(ctx context.Context, parsed csvV3Import, mod
 		if err := tx.QueryRowContext(ctx, "SELECT account FROM transactions WHERE id = ?", child).Scan(&accountB); err != nil {
 			return 0, err
 		}
-		if !((creditCards[accountA] && bankAccounts[accountB]) || (bankAccounts[accountA] && creditCards[accountB])) {
+		if !isCardWithdrawalLinkAccountsWithSettings(accountA, accountB, creditCards, bankAccounts) {
 			return 0, fmt.Errorf("CSV v3リンクはクレジットカード項目と銀行口座項目の取引間でのみ追加できます")
 		}
 		if _, err := tx.ExecContext(ctx, "INSERT INTO transaction_links (parent_id, child_id) VALUES (?, ?)", parent, child); err != nil {
