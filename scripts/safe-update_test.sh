@@ -10,7 +10,7 @@ set -Eeuo pipefail
 
 script_dir="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 project_dir="$(cd -- "$script_dir/.." && pwd -P)"
-test_root="$(mktemp -d "$project_dir/.omni-safe-update-test.XXXXXX")"
+test_root="$(mktemp -d "${TMPDIR:-/tmp}/.omni-safe-update-test.XXXXXX")"
 trap 'rm -rf -- "$test_root"' EXIT
 
 assert_rejected() {
@@ -41,6 +41,15 @@ assert_rejected "registry port without immutable tag" validate_image_reference "
 assert_rejected "mutable latest tag" validate_image_reference "registry:5000/image:latest"
 validate_image_reference "registry:5000/image:1.2.3"
 validate_image_reference "registry:5000/image@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+printf '# safe dotenv\nOMNI_IMAGE=registry.example/omni:1.2.3\nEMPTY=\nQUOTED='"'"'single line'"'"'\n' > "$pin_dir-safe-env"
+validate_compose_env_syntax "$pin_dir-safe-env"
+printf 'MALICIOUS : value\n' > "$pin_dir-colon-env"
+assert_rejected "colon dotenv syntax" validate_compose_env_syntax "$pin_dir-colon-env"
+printf ' MALICIOUS=value\n' > "$pin_dir-space-env"
+assert_rejected "whitespace dotenv syntax" validate_compose_env_syntax "$pin_dir-space-env"
+printf "MALICIOUS='first\nsecond'\n" > "$pin_dir-multiline-env"
+assert_rejected "multiline single-quoted dotenv" validate_compose_env_syntax "$pin_dir-multiline-env"
 
 mkdir -m 0700 -- "$pin_dir/source"
 printf 'ok\n' > "$pin_dir/source/regular"
@@ -86,6 +95,21 @@ validate_source_tree "$pin_dir/source-tree" "nested source tree"
 ln "$pin_dir/source-tree/nested/file" "$pin_dir/source-tree/hardlink"
 assert_rejected "hard-linked source-tree file" validate_source_tree "$pin_dir/source-tree" "hardlink source tree"
 data_uid="10001"; data_gid="10001"
+
+# Realistic util-linux JSON may retain children even when callers request a
+# list. Both a foreign filesystem and a same-device bind can therefore hide
+# below the top-level entry unless the tree is traversed recursively.
+cat > "$pin_dir/findmnt.json" <<'EOF'
+{"filesystems":[{"target":"/srv","children":[{"target":"/srv/omni/data","children":[{"target":"/srv/omni/data/foreign-fs"},{"target":"/srv/omni/data/same-device-bind"}]}]}]}
+EOF
+create_exclusive_file "$pin_dir/findmnt-targets.nul"
+write_findmnt_targets "$pin_dir/findmnt.json" "$pin_dir/findmnt-targets.nul"
+foreign_seen=0; bind_seen=0
+while IFS= read -r -d '' mount_target; do
+  [ "$mount_target" = /srv/omni/data/foreign-fs ] && foreign_seen=1
+  [ "$mount_target" = /srv/omni/data/same-device-bind ] && bind_seen=1
+done < "$pin_dir/findmnt-targets.nul"
+[ "$foreign_seen" -eq 1 ] && [ "$bind_seen" -eq 1 ] || { echo "FAIL: recursive findmnt targets were omitted" >&2; exit 1; }
 
 # Identity validation must detect same-content inode swaps and type swaps; a
 # content-only mock cannot exercise this security boundary.
@@ -162,7 +186,7 @@ cat > "$mock_bin/stat" <<'MOCK_STAT'
 set -Eeuo pipefail
 fmt="$2"; if [ "$#" -eq 3 ]; then path="$3"; else path="$4"; fi
 if [ "${MOCK_SCENARIO:-}" = secret_permissions_bad ] && [ "$path" = "${MOCK_CONTROL_KEY:-}" ] && [ "$fmt" = %a ]; then echo 444; exit 0; fi
-if [ "${MOCK_SCENARIO:-}" = cross_fs_stage ] && [[ "$path" == */.data.tar.tmp.* ]] && [ "$fmt" = %d ]; then echo 999; exit 0; fi
+if { [ "${MOCK_SCENARIO:-}" = cross_fs_stage ] || [ "${MOCK_SCENARIO:-}" = legacy_archive_failure ]; } && [[ "$path" == */.data.tar.tmp.* ]] && [ "$fmt" = %d ]; then echo 999; exit 0; fi
 if [[ "$path" == */.capacity.reserve ]] && [ "$fmt" = %s ]; then cat "$MOCK_STATE_DIR/capacity_size"; exit 0; fi
 case "$fmt:$path" in
   "%u:$MOCK_DATA"|"%u:$MOCK_DATA"/*) echo 10001; exit 0 ;;
@@ -214,15 +238,15 @@ put() { printf '%s' "$2" > "$state_dir/$1"; }
 container_state() { local value; case "$1" in current) value="$(get current_state)";; candidate) value="$(get candidate_state)";; rollback) value="$(get rollback_state)";; *) value=missing;; esac; [ "$value" = absent ] && return 1; printf '%s' "$value"; }
 container_networks() {
   case "$1:$(get net_$1)" in
-    current:connected|candidate:connected|rollback:connected) echo '{"omni-money-pangolin":{"IPAddress":"172.30.240.2"}}' ;;
-    candidate:extra) echo '{"omni-money-pangolin":{"IPAddress":"172.30.240.2"},"unexpected":{}}' ;;
+    current:connected|candidate:connected|rollback:connected) echo '{"omni-money-pangolin":{"NetworkID":"network-123","IPAddress":"172.30.240.2"}}' ;;
+    candidate:extra) echo '{"omni-money-pangolin":{"NetworkID":"network-123","IPAddress":"172.30.240.2"},"unexpected":{}}' ;;
     *) echo '{}' ;;
   esac
 }
 container_networks_runtime() {
   case "$1:$(get net_$1)" in
-    current:connected|candidate:connected|rollback:connected) echo '{"omni-money-pangolin":{"Aliases":["omni-money"],"IPAddress":"172.30.240.2","GlobalIPv6Address":"","IPAMConfig":{"IPv4Address":"172.30.240.2"}}}' ;;
-    candidate:extra) echo '{"omni-money-pangolin":{"Aliases":["omni-money"],"IPAddress":"172.30.240.2","GlobalIPv6Address":"","IPAMConfig":{"IPv4Address":"172.30.240.2"}},"unexpected":{"Aliases":[],"IPAddress":""}}' ;;
+    current:connected|candidate:connected|rollback:connected) echo '{"omni-money-pangolin":{"NetworkID":"network-123","Aliases":["omni-money"],"IPAddress":"172.30.240.2","GlobalIPv6Address":"","IPAMConfig":{"IPv4Address":"172.30.240.2"}}}' ;;
+    candidate:extra) echo '{"omni-money-pangolin":{"NetworkID":"network-123","Aliases":["omni-money"],"IPAddress":"172.30.240.2","GlobalIPv6Address":"","IPAMConfig":{"IPv4Address":"172.30.240.2"}},"unexpected":{"Aliases":[],"IPAddress":""}}' ;;
     *) echo '{}' ;;
   esac
 }
@@ -250,7 +274,7 @@ if [ "$1" = compose ]; then
     ps)
       [ "$all" -eq 1 ] || exit 17
       case "$(get phase)" in
-        current) [ "$scenario" != legacy_project ] && echo current;;
+        current) [ "$scenario" != legacy_project ] && [ "$scenario" != legacy_archive_failure ] && echo current;;
         candidate)
           if [ "$scenario" = unknown_removal ] && [ -e "$state_dir/candidate_ps_seen" ]; then echo unexpected; else echo candidate; : > "$state_dir/candidate_ps_seen"; fi
           ;;
@@ -263,7 +287,7 @@ if [ "$1" = compose ]; then
 fi
 case "$1" in
   ps)
-    [ "$scenario" = legacy_project ] && echo current
+    { [ "$scenario" = legacy_project ] || [ "$scenario" = legacy_archive_failure ]; } && echo current
     ;;
   context)
     case "$2" in
@@ -277,20 +301,23 @@ case "$1" in
   inspect)
     fmt="$3"; id="$4"
     case "$fmt" in
-      *'index .Config.Labels "com.docker.compose.project"'*) [ "$scenario" = legacy_project ] && echo "${MOCK_FIXTURE##*/}" || exit 19;;
-      *'index .Config.Labels "com.docker.compose.service"'*) [ "$scenario" = legacy_project ] && echo omni-money || exit 19;;
-      *'{{.Name}}'*) [ "$scenario" = legacy_project ] && echo /omni-money || exit 19;;
+      *'index .Config.Labels "com.docker.compose.project"'*) { [ "$scenario" = legacy_project ] || [ "$scenario" = legacy_archive_failure ]; } && echo "${MOCK_FIXTURE##*/}" || exit 19;;
+      *'index .Config.Labels "com.docker.compose.service"'*) { [ "$scenario" = legacy_project ] || [ "$scenario" = legacy_archive_failure ]; } && echo omni-money || exit 19;;
+      *'{{.Name}}'*) { [ "$scenario" = legacy_project ] || [ "$scenario" = legacy_archive_failure ]; } && echo /omni-money || exit 19;;
       *'{{json .}}'*)
         mounts_json="$(container_mounts "$id")"; networks_json="$(container_networks_runtime "$id")"
         version=old; [ "$id" = candidate ] && version=target
         cap_add='[]'; [ "$id" = candidate ] && [ "$scenario" = unsafe_cap ] && cap_add='["SYS_ADMIN"]'
         service_env_json="$(jq -c '.services["omni-money"].environment | to_entries | map(.key + "=" + (.value|tostring))' "$MOCK_CONFIG")"
-        jq -cn --arg version "$version" --argjson service_env "$service_env_json" --argjson cap_add "$cap_add" --argjson mounts "$mounts_json" --argjson networks "$networks_json" '{Config:{User:"10001:10001",Entrypoint:["/entrypoint"],Cmd:["server"],WorkingDir:"/app",StopSignal:"SIGTERM",Healthcheck:{Test:["CMD","health"],Interval:1000000000,Timeout:1000000000,Retries:3},Env:($service_env + ["APP_MODE=server","VERSION="+$version,"SECRET_VALUE=private"]),Labels:{"com.example.role":"omni-money"}},HostConfig:{RestartPolicy:{Name:"unless-stopped",MaximumRetryCount:0},NetworkMode:"omni-money-pangolin",ReadonlyRootfs:true,Privileged:false,Init:false,CapDrop:["ALL"],CapAdd:$cap_add,Devices:[],PidMode:"",IpcMode:"",NanoCpus:2000000000,Memory:1073741824,PidsLimit:256,LogConfig:{Type:"json-file",Config:{"max-size":"10m","max-file":"3"}},SecurityOpt:["no-new-privileges:true"]},Mounts:$mounts,NetworkSettings:{Networks:$networks}}';;
+        config_user="10001:10001"; [ "$id" = candidate ] && [ "$scenario" = named_uid0_user ] && config_user=omni
+        group_add='[]'; [ "$id" = candidate ] && [ "$scenario" = supplementary_group ] && group_add='["0"]'
+        jq -cn --arg version "$version" --arg user "$config_user" --argjson service_env "$service_env_json" --argjson cap_add "$cap_add" --argjson group_add "$group_add" --argjson mounts "$mounts_json" --argjson networks "$networks_json" '{Config:{User:$user,Entrypoint:["/entrypoint"],Cmd:["server"],WorkingDir:"/app",StopSignal:"SIGTERM",Healthcheck:{Test:["CMD","health"],Interval:1000000000,Timeout:1000000000,Retries:3},Env:($service_env + ["APP_MODE=server","VERSION="+$version,"SECRET_VALUE=private"]),Labels:{"com.example.role":"omni-money"}},HostConfig:{RestartPolicy:{Name:"unless-stopped",MaximumRetryCount:0},NetworkMode:"omni-money-pangolin",ReadonlyRootfs:true,Privileged:false,Init:false,CapDrop:["ALL"],CapAdd:$cap_add,GroupAdd:$group_add,Devices:[],PidMode:"",IpcMode:"",NanoCpus:2000000000,Memory:1073741824,PidsLimit:256,LogConfig:{Type:"json-file",Config:{"max-size":"10m","max-file":"3"}},SecurityOpt:["no-new-privileges:true"]},Mounts:$mounts,NetworkSettings:{Networks:$networks}}';;
       *State.Status*) container_state "$id";;
-      *State.Health*) if [ "$id" = candidate ] && { [ "$scenario" = candidate_failure ] || [ "$scenario" = candidate_data_mutation ] || [ "$scenario" = rollback_failure ] || [ "$scenario" = rollback_tag_mutation ] || [ "$scenario" = unknown_removal ]; }; then echo missing; else echo healthy; fi;;
+      *State.Health*) if [ "$id" = candidate ] && { [ "$scenario" = candidate_failure ] || [ "$scenario" = candidate_data_mutation ] || [ "$scenario" = rollback_failure ] || [ "$scenario" = rollback_tag_mutation ] || [ "$scenario" = unknown_removal ] || { [ "$scenario" = candidate_ingress_health_failure ] && [ "$(get net_candidate)" = connected ]; }; }; then echo missing; else echo healthy; fi;;
       *'.Image}'*) case "$id" in current) echo sha256:old;; rollback) [ "$scenario" = rollback_tag_mutation ] && echo sha256:tampered || echo sha256:old;; candidate) echo sha256:target;; esac;;
       *'.Config.Image}'*) case "$id" in current) echo omni-money:old;; *) echo omni-money:target;; esac;;
-      *'.Config.User}'*) echo 10001:10001;;
+      *'.Config.User}'*) [ "$id" = candidate ] && [ "$scenario" = named_uid0_user ] && echo omni || echo 10001:10001;;
+      *'{{json .HostConfig.GroupAdd}}'*) [ "$id" = candidate ] && [ "$scenario" = supplementary_group ] && echo '["0"]' || echo '[]';;
       *'{{json .Config.Env}}'*)
         if [ "$id" = current ] && [ "$scenario" = runtime_env_drift ]; then
           jq -c '.services["omni-money"].environment.ALLOWED_HOSTS = "drifted.example" | .services["omni-money"].environment | to_entries | map(.key + "=" + (.value|tostring)) + ["APP_MODE=server","VERSION=old","SECRET_VALUE=private"]' "$MOCK_CONFIG"
@@ -300,7 +327,8 @@ case "$1" in
       *'{{json .HostConfig}}'*)
         nano_cpus=2000000000
         [ "$id" = current ] && [ "$scenario" = runtime_resource_drift ] && nano_cpus=1000000000
-        jq -cn --argjson nano_cpus "$nano_cpus" '{RestartPolicy:{Name:"unless-stopped",MaximumRetryCount:0},NetworkMode:"omni-money-pangolin",ReadonlyRootfs:true,Privileged:false,Init:false,CapDrop:["ALL"],CapAdd:[],Devices:[],PidMode:"",IpcMode:"",NanoCpus:$nano_cpus,Memory:1073741824,PidsLimit:256,LogConfig:{Type:"json-file",Config:{"max-size":"10m","max-file":"3"}},SecurityOpt:["no-new-privileges:true"]}';;
+        group_add='[]'; [ "$id" = candidate ] && [ "$scenario" = supplementary_group ] && group_add='["0"]'
+        jq -cn --argjson nano_cpus "$nano_cpus" --argjson group_add "$group_add" '{RestartPolicy:{Name:"unless-stopped",MaximumRetryCount:0},NetworkMode:"omni-money-pangolin",ReadonlyRootfs:true,Privileged:false,Init:false,CapDrop:["ALL"],CapAdd:[],GroupAdd:$group_add,Devices:[],PidMode:"",IpcMode:"",NanoCpus:$nano_cpus,Memory:1073741824,PidsLimit:256,LogConfig:{Type:"json-file",Config:{"max-size":"10m","max-file":"3"}},SecurityOpt:["no-new-privileges:true"]}';;
       *PortBindings*) [ "$id" = candidate ] && [ "$scenario" = extra_port ] && echo '{"4000/tcp":[{"HostPort":"4000"}]}' || echo '{}';;
       *'.Mounts}'*) container_mounts "$id";;
       *'.NetworkSettings.Networks}'*) container_networks "$id";;
@@ -310,7 +338,6 @@ case "$1" in
       *'IPAddress'*|*'index .NetworkSettings.Networks'*) [ "$(get net_$id)" = connected ] && echo 172.30.240.2 || true;;
       *) exit 19;;
     esac;;
-  exec) [ "$scenario" = bad_user ] && echo 10000 || echo 10001;;
   rm)
     id="$2"; [ "$id" = current ] && { put current_state absent; put phase none; } || exit 1
     ;;
@@ -323,6 +350,7 @@ case "$1" in
       if [ ! -e "$state_dir/signal_sent" ]; then : > "$state_dir/signal_sent"; state_file="$id""_state"; put "$state_file" exited; [ "$scenario" = signal_int ] && kill -INT "$PPID" || kill -TERM "$PPID"; fi
     fi
     state_file="$id""_state"; put "$state_file" exited
+    [ "$id" = current ] && : > "$state_dir/current_stopped"
     case "$scenario" in
       paused_after_stop) put "$state_file" paused ;;
       restarting_after_stop) put "$state_file" restarting ;;
@@ -337,6 +365,11 @@ case "$1" in
   network)
     action="$2"
     case "$action" in
+      inspect)
+        network_id=network-123
+        [ "$scenario" = network_contract_drift ] && [ -e "$state_dir/current_stopped" ] && network_id=network-tampered
+        printf '[{"Name":"omni-money-pangolin","Id":"%s","Driver":"bridge","Internal":true,"IPAM":{"Driver":"default","Config":[{"Subnet":"172.30.240.0/28"}]}}]\n' "$network_id"
+        ;;
       disconnect) id="$4"; [ "$scenario" != network_disconnect_failure ] || exit 24; put "net_$id" none;;
       connect) id="$6"; if [ "$scenario" = network_reconnect_failure ] || { [ "$scenario" = rollback_failure ] && [ "$id" = rollback ]; }; then exit 25; fi; put "net_$id" connected;;
     esac;;
@@ -435,10 +468,17 @@ run_case() {
   [ "$scenario" = ambient_override ] && scenario_env=(OMNI_DATA_DIR=/attacker OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE=/attacker ALLOWED_HOSTS=attacker.example TRUSTED_PROXIES=10.0.0.1 PASSKEY_RP_ID=attacker.example SESSION_MAX_AGE_HOURS=1 AUTH_KDF_CONCURRENCY=16)
   find "$mock_state" -mindepth 1 ! -name config.json -exec rm -f -- {} +
   if [ -d "$fixture_root/omni-money-update-checkpoints" ] && [ ! -L "$fixture_root/omni-money-update-checkpoints" ]; then rm -rf -- "$fixture_root/omni-money-update-checkpoints"; fi
+  mkdir -m 0700 -p -- "$fixture_root/data"
+  printf 'fixture ledger\n' > "$fixture_root/data/ledger.txt"
   printf current > "$mock_state/phase"; printf running > "$mock_state/current_state"; printf connected > "$mock_state/net_current"; : > "$mock_state/log"
   chmod 0600 "$fixture_root/.env" "$fixture_root/compose.yaml"
   chmod 0644 "$fixture_root/at-rest.json"; chmod 0600 "$fixture_root/control.key"
   printf 'OMNI_DATA_DIR=%s\nOMNI_IMAGE=omni-money:old\nOMNI_UPDATE_ATTESTATION_FILE=%s\n' "$fixture_root/data" "$fixture_root/attestation.json" > "$fixture_root/.env"
+  case "$scenario" in
+    env_colon_syntax) printf 'MALICIOUS : value\n' >> "$fixture_root/.env" ;;
+    env_whitespace_syntax) printf ' MALICIOUS=value\n' >> "$fixture_root/.env" ;;
+    env_multiline_quote) printf "MALICIOUS='first\nsecond'\n" >> "$fixture_root/.env" ;;
+  esac
   printf 'fixture compose\n' > "$fixture_root/compose.yaml"
   printf 'at-rest-secret-value\n' > "$fixture_root/at-rest.json"; printf 'control-key\n' > "$fixture_root/control.key"
   chmod 0444 "$fixture_root/at-rest.json"; chmod 0440 "$fixture_root/control.key"
@@ -451,7 +491,7 @@ run_case() {
     echo "FAIL: $scenario exposed secret content in output or mock log" >&2
     exit 1
   fi
-  if [ "$scenario" = checkpoint_env ] || [ "$scenario" = remote_context ] || [ "$scenario" = remote_host ] || [ "$scenario" = docker_config_override ] || [ "$scenario" = plugin_path_override ] || [ "$scenario" = tar_options ] || [ "$scenario" = runtime_env_drift ] || [ "$scenario" = runtime_resource_drift ] || [ "$scenario" = secret_permissions_bad ] || [ "$scenario" = pull_failure ] || [ "$scenario" = compose_config_failure ] || [ "$scenario" = low_space ] || [ "$scenario" = reserve_failure ]; then
+  if [ "$scenario" = checkpoint_env ] || [ "$scenario" = remote_context ] || [ "$scenario" = remote_host ] || [ "$scenario" = docker_config_override ] || [ "$scenario" = plugin_path_override ] || [ "$scenario" = tar_options ] || [ "$scenario" = env_colon_syntax ] || [ "$scenario" = env_whitespace_syntax ] || [ "$scenario" = env_multiline_quote ] || [ "$scenario" = runtime_env_drift ] || [ "$scenario" = runtime_resource_drift ] || [ "$scenario" = secret_permissions_bad ] || [ "$scenario" = pull_failure ] || [ "$scenario" = compose_config_failure ] || [ "$scenario" = low_space ] || [ "$scenario" = reserve_failure ]; then
     [ "$(cat "$mock_state/current_state")" = running ] && [ "$(cat "$mock_state/phase")" = current ] || { echo "FAIL: $scenario stopped current before a pre-stop failure" >&2; exit 1; }
     [ "$(sha256_file "$fixture_root/.env")" = "$original_env_hash" ] || { echo "FAIL: $scenario changed the env before stop" >&2; exit 1; }
     return 0
@@ -468,7 +508,21 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MO
     rm -rf -- "$fixture_root/omni-money-update-checkpoints"
     return 0
   fi
-  if [ "$scenario" = unknown_removal ]; then
+  if [ "$scenario" = legacy_archive_failure ]; then
+    [ "$(cat "$mock_state/current_state")" = running ] && [ "$(cat "$mock_state/net_current")" = connected ] || { echo "FAIL: legacy rollback did not recover healthy ingress" >&2; exit 1; }
+    disconnect_line="$(grep -n -F 'network disconnect omni-money-pangolin current' "$mock_state/log" | tail -1 | cut -d: -f1)"
+    start_line="$(grep -n -F 'start current' "$mock_state/log" | tail -1 | cut -d: -f1)"
+    connect_line="$(grep -n -F 'network connect --ip 172.30.240.2 omni-money-pangolin current' "$mock_state/log" | tail -1 | cut -d: -f1)"
+    [ -n "$disconnect_line" ] && [ -n "$start_line" ] && [ -n "$connect_line" ] && [ "$disconnect_line" -lt "$start_line" ] && [ "$start_line" -lt "$connect_line" ] || { echo "FAIL: legacy rollback was not disconnect -> start/health -> reconnect" >&2; exit 1; }
+  elif [ "$scenario" = network_reconnect_failure ] || [ "$scenario" = candidate_ingress_health_failure ]; then
+    [ "$(cat "$mock_state/phase")" = candidate ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: $scenario recreated rollback after candidate ingress became uncertain" >&2; exit 1; }
+    shopt -s nullglob
+    failed_paths=("$fixture_root/omni-money-update-checkpoints"/*/failed-candidate-data)
+    shopt -u nullglob
+    [ "${#failed_paths[@]}" -eq 1 ] && [ -d "${failed_paths[0]}" ] && [ -f "${failed_paths[0]}/ledger.txt" ] && [ ! -e "$fixture_root/data" ] || { echo "FAIL: $scenario did not quarantine candidate data for manual reconciliation" >&2; exit 1; }
+    journal_path="$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
+    jq -e '.phase == "manual-reconciliation-required" and (.candidate_ingress_state == "uncertain" or .candidate_ingress_state == "connected") and (.failed_candidate_data_identity.inode != "") and (.active_data_location == "")' "$journal_path" >/dev/null || { echo "FAIL: $scenario did not durably record manual reconciliation identities" >&2; exit 1; }
+  elif [ "$scenario" = unknown_removal ]; then
     [ "$(cat "$mock_state/current_state")" = absent ] && [ "$(cat "$mock_state/phase")" = candidate ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: unknown current disappearance was not kept stopped" >&2; exit 1; }
     return 0
   fi
@@ -476,7 +530,9 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MO
     [ "$(cat "$mock_state/current_state")" = "${scenario%_after_stop}" ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: $scenario was not rejected while fail-closed" >&2; exit 1; }
     return 0
   fi
-  if [ "$scenario" != partial_stop ] && [ "$scenario" != signal_int ] && [ "$scenario" != signal_term ] && [ "$scenario" != cross_fs_stage ]; then
+  if [ "$scenario" = legacy_archive_failure ]; then
+    [ "$(cat "$mock_state/current_state")" = running ] || { echo "FAIL: legacy rollback did not restart current" >&2; exit 1; }
+  elif [ "$scenario" != partial_stop ] && [ "$scenario" != signal_int ] && [ "$scenario" != signal_term ] && [ "$scenario" != cross_fs_stage ]; then
     [ "$(cat "$mock_state/current_state")" = absent ] || { echo "FAIL: $scenario did not model Compose removal of the pinned current container (state=$(cat "$mock_state/current_state"))" >&2; printf '%s\n' "$output" >&2; sed -n '1,160p' "$mock_state/log" >&2; exit 1; }
   else
     [ "$(cat "$mock_state/current_state")" = exited ] || { echo "FAIL: $scenario did not leave the interrupted current container stopped" >&2; exit 1; }
@@ -492,7 +548,7 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MO
     if [ "$scenario" = legacy_project ]; then
       grep -Fq 'rm current' "$mock_state/log" || { echo "FAIL: legacy project was not explicitly migrated" >&2; exit 1; }
     fi
-  elif [ "$scenario" = network_reconnect_failure ] || [ "$scenario" = rollback_failure ] || [ "$scenario" = network_disconnect_failure ] || [ "$scenario" = rollback_tag_mutation ]; then
+  elif [ "$scenario" = rollback_failure ] || [ "$scenario" = network_disconnect_failure ] || [ "$scenario" = rollback_tag_mutation ] || [ "$scenario" = network_contract_drift ]; then
     [ "$(cat "$mock_state/phase")" = rollback ] && [ "$(cat "$mock_state/rollback_state")" != running ] || { echo "FAIL: $scenario left rollback running (phase=$(cat "$mock_state/phase") state=$(cat "$mock_state/rollback_state"))" >&2; sed -n '1,120p' "$mock_state/log" >&2; exit 1; }
     [ "$scenario" = rollback_tag_mutation ] || grep -Fq 'inspect --format {{json .}} rollback' "$mock_state/log" || { echo "FAIL: $scenario did not compare the rollback runtime contract" >&2; exit 1; }
   elif [ "$scenario" = secret_inode_replacement ] || [ "$scenario" = secret_inode_only_swap ]; then
@@ -514,7 +570,10 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MO
       (.checkpoint_root != .checkpoint_dir) and
       (.checkpoint_root_identity.inode != "") and (.checkpoint_dir_identity.inode != "") and
       (.env_file != .env_pin_file) and (.env_pin_file != .recovery_env_file) and
-      (.env_identity.inode != "") and (.env_pin_identity.inode != "") and (.recovery_env_identity.inode != "") and
+      (.original_env_identity.inode != "") and (.active_env_identity.inode != "") and
+      (.env_pin_identity.inode != "") and (.recovery_env_identity.inode != "") and
+      (.original_data_identity.inode != "") and
+      (.network_identity.id != "") and (.network_contract_identity.inode != "") and
       (.docker_socket_identity.type == "socket")
     ' "$journal_path" >/dev/null || { echo "FAIL: $scenario journal path/identity pairs are invalid" >&2; exit 1; }
     if [ -e "$mock_state/rollback_state" ] && [ "$(cat "$mock_state/rollback_state")" = running ]; then
@@ -525,7 +584,7 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MO
 }
 
 cat > "$mock_state/config.json" <<EOF
-{"name":"omni-money","x-omni-update-attestation-file":"./attestation.json","services":{"omni-money":{"image":"registry.example/omni-money:1.2.3","container_name":"omni-money","restart":"unless-stopped","read_only":true,"cap_drop":["ALL"],"cap_add":[],"devices":[],"security_opt":["no-new-privileges:true"],"cpus":2.0,"mem_limit":"1g","pids_limit":256,"logging":{"driver":"json-file","options":{"max-size":"10m","max-file":"3"}},"ports":[],"environment":{"CONTROL_DB_PATH":"/app/data/control/omni_control.db","CONTROL_DB_ENCRYPTION_KEY_FILE":"/run/secrets/omni_control_database_key","VAULT_ROOT":"/app/data/vaults","AUTH_KDF_CONCURRENCY":"2","TMPDIR":"/tmp","SQLITE_TMPDIR":"/tmp","DATA_AT_REST_MODE":"external-encrypted-volume","DATA_AT_REST_ATTESTATION_FILE":"/run/secrets/omni_data_at_rest_attestation.json","HOST_IP":"0.0.0.0","PORT":"4000","SESSION_MAX_AGE_HOURS":"8","SESSION_IDLE_TIMEOUT_MINUTES":"15","SESSION_REAUTH_MAX_AGE_MINUTES":"5","SESSION_MAX_CONCURRENT":"3","TRUSTED_PROXIES":"172.30.240.3/32","FORCE_HTTPS":"true","ALLOW_INSECURE_HTTP":"false","HTTPS_REDIRECT_HOST":"","PASSKEY_RP_ID":"","PASSKEY_ORIGINS":"","ALLOWED_HOSTS":"money.example.com","CORS_ALLOWED_ORIGINS":""},"volumes":[{"type":"bind","source":"$fixture_root/data","target":"/app/data","read_only":false},{"type":"tmpfs","target":"/tmp"}],"secrets":[{"source":"omni_data_at_rest_attestation","target":"omni_data_at_rest_attestation.json"},{"source":"omni_control_database_key","target":"omni_control_database_key"}],"networks":{"pangolin_target":{"ipv4_address":"172.30.240.2"}}}},"secrets":{"omni_data_at_rest_attestation":{"file":"$fixture_root/at-rest.json"},"omni_control_database_key":{"file":"$fixture_root/control.key"}},"networks":{"pangolin_target":{"name":"omni-money-pangolin","internal":true}}}
+{"name":"omni-money","x-omni-update-attestation-file":"./attestation.json","services":{"omni-money":{"image":"registry.example/omni-money:1.2.3","container_name":"omni-money","user":"10001:10001","group_add":[],"restart":"unless-stopped","read_only":true,"cap_drop":["ALL"],"cap_add":[],"devices":[],"security_opt":["no-new-privileges:true"],"cpus":2.0,"mem_limit":"1g","pids_limit":256,"logging":{"driver":"json-file","options":{"max-size":"10m","max-file":"3"}},"ports":[],"environment":{"CONTROL_DB_PATH":"/app/data/control/omni_control.db","CONTROL_DB_ENCRYPTION_KEY_FILE":"/run/secrets/omni_control_database_key","VAULT_ROOT":"/app/data/vaults","AUTH_KDF_CONCURRENCY":"2","TMPDIR":"/tmp","SQLITE_TMPDIR":"/tmp","DATA_AT_REST_MODE":"external-encrypted-volume","DATA_AT_REST_ATTESTATION_FILE":"/run/secrets/omni_data_at_rest_attestation.json","HOST_IP":"0.0.0.0","PORT":"4000","SESSION_MAX_AGE_HOURS":"8","SESSION_IDLE_TIMEOUT_MINUTES":"15","SESSION_REAUTH_MAX_AGE_MINUTES":"5","SESSION_MAX_CONCURRENT":"3","TRUSTED_PROXIES":"172.30.240.3/32","FORCE_HTTPS":"true","ALLOW_INSECURE_HTTP":"false","HTTPS_REDIRECT_HOST":"","PASSKEY_RP_ID":"","PASSKEY_ORIGINS":"","ALLOWED_HOSTS":"money.example.com","CORS_ALLOWED_ORIGINS":""},"volumes":[{"type":"bind","source":"$fixture_root/data","target":"/app/data","read_only":false},{"type":"tmpfs","target":"/tmp"}],"secrets":[{"source":"omni_data_at_rest_attestation","target":"omni_data_at_rest_attestation.json"},{"source":"omni_control_database_key","target":"omni_control_database_key"}],"networks":{"pangolin_target":{"ipv4_address":"172.30.240.2"}}}},"secrets":{"omni_data_at_rest_attestation":{"file":"$fixture_root/at-rest.json"},"omni_control_database_key":{"file":"$fixture_root/control.key"}},"networks":{"pangolin_target":{"name":"omni-money-pangolin","internal":true,"ipam":{"config":[{"subnet":"172.30.240.0/28"}]}}}}
 EOF
 
 if [ -n "${SAFE_UPDATE_ONLY:-}" ]; then
@@ -539,12 +598,16 @@ fi
 
 run_case success 0
 run_case legacy_project 0
+run_case legacy_archive_failure 1
 run_case checkpoint_env 1
 run_case remote_context 1
 run_case remote_host 1
 run_case docker_config_override 1
 run_case plugin_path_override 1
 run_case tar_options 1
+run_case env_colon_syntax 1
+run_case env_whitespace_syntax 1
+run_case env_multiline_quote 1
 run_case ambient_override 0
 run_case runtime_env_drift 1
 run_case runtime_resource_drift 1
@@ -565,6 +628,7 @@ run_case removing_after_stop 1
 run_case signal_int 130
 run_case signal_term 130
 run_case network_reconnect_failure 25
+run_case candidate_ingress_health_failure 1
 run_case network_disconnect_failure 1
 run_case rollback_failure 1
 run_case rollback_tag_mutation 1
@@ -577,6 +641,9 @@ run_case extra_network 1
 run_case extra_mount 1
 run_case extra_secret 1
 run_case unsafe_cap 1
+run_case named_uid0_user 1
+run_case supplementary_group 1
+run_case network_contract_drift 1
 run_case sigkill 137
 find "$mock_state" -mindepth 1 ! -name config.json -exec rm -f -- {} +
 printf current > "$mock_state/phase"; printf running > "$mock_state/current_state"; printf connected > "$mock_state/net_current"; : > "$mock_state/log"

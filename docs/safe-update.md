@@ -15,6 +15,8 @@ Linux + Bash 3.2以降 + GNU tar の host contract を要求し、条件を満�
   へ pin します。device、inode、link count、SHA-256を保持し、途中の差替えを拒否します。
   Composeのshell変数優先順位による差替えも避けるため、repositoryの`OMNI_*`補間変数は
   呼び出し前に除去し、選択したprivate env fileを唯一のCompose環境入力にします。
+  dotenvは停止前に安全なsingle-line subsetへ限定し、`KEY=value`以外のcolon形式、assignment
+  前後の空白、未終端/multiline quote、展開・escape構文を拒否します。
 - image 引数は最後の path component に明示的な immutable version tag を持つか、完全な
   `@sha256:<64 hex>` digest でなければなりません。`registry:5000/image` は port を
   tag と誤認しないよう拒否し、`latest` も拒否します。
@@ -28,6 +30,11 @@ Linux + Bash 3.2以降 + GNU tar の host contract を要求し、条件を満�
   mount は resolved Compose と Docker inspect を突合し、/app/data の read-write bind、
   /tmp の tmpfs、base Compose が宣言した read-only secret mount だけを許可します。
   追加 bind、secret、network、port は拒否します。
+- service userはComposeで数値の`10001:10001`へ固定します。candidate image内の`id`や
+  `/etc/passwd`は検証に使わず、Docker hostが保持する`Config.User`と空の`GroupAdd`を
+  inspectして、named USERによるUID 0偽装やsupplementary group付与を拒否します。既存の
+  containerが`User=omni`等のnamed userなら、safe-updateを使う前にこのCompose定義で一度
+  計画停止・再作成し、数値userへ移行してください。
 - up --no-start の直後は必ず compose ps --all -q を読み、IDがちょうど1つで state が
   created（停止）であることを確認します。candidate と rollback のどちらも、network
   を全て disconnect してから start します。
@@ -39,6 +46,9 @@ Linux + Bash 3.2以降 + GNU tar の host contract を要求し、条件を満�
 - Docker操作とlocal filesystemのattestationは同じhostでなければなりません。`DOCKER_HOST`、
   TLS/cert override、remote `DOCKER_CONTEXT`、Unix socketでないdefault context、及び
   `TAR_OPTIONS` は拒否します。
+- 停止前に実Docker networkのID、name、internal flag、bridge driver、IPAM driver/subnetを
+  inspectしてdurable recovery bundleへ固定します。candidate/rollbackを接続する直前にも
+  同じ実体であることを再検証し、同名networkの差替えを拒否します。
 
 ## encrypted volume と checkpoint
 
@@ -80,7 +90,8 @@ archive/checksumの一時fileはpin directoryやrepositoryではなく、attesta
 filesystem内のgeneration directoryへ0600で作成し、同じdirectoryからchecksum/archiveへ
 exclusive renameします。checkpoint filesystemにはarchive、extract、failed-dataを保持できる
 保守的な容量をrollback reservationとしてfallocateし、reservation自体もowner/mode、
-device/inode/link count/digestでjournalへ固定します。
+device/inode/link countと正確な長さでjournalへ固定し、要求blockが実際に割り当てられたことを
+確認します。大容量reservationの内容digestは計算しません（bytes自体に復旧価値がないためです）。
 
 ## 状態機械と rollback
 
@@ -102,6 +113,12 @@ healthcheck、env 更新、network connect のどれかが失敗した場合、E
    pin を復元できるが、Compose source 差替え時も live file は使わず pinned resolved
    snapshot で rollback する。終了 status は失敗のままなので operator が source を確認
    する。
+
+candidateをingressへ接続する直前にdurable journalを`uncertain`へ更新します。connectが一度でも
+試行された、または結果を確定できない場合、candidateは停止・network切断後、そのdata treeを
+`failed-candidate-data`へidentity付きで隔離します。この境界を越えた後はpre-update archiveを
+自動restoreせず、archiveと隔離dataのmanual reconciliationを要求します。外部requestに応答した
+candidateのwriteを自動rollbackで失うことを防ぐためです。
 
 成功後も checkpoint と rollback image は自動削除しません。別 backup と restore 試験を
 完了してから operator が明示的に retire してください。latest、local overlay（host
@@ -145,7 +162,7 @@ lock/journal/recovery bundleを削除せず、serviceを停止したまま管理
 ## 実行例
 
     chmod 700 scripts/safe-update.sh
-    ./scripts/safe-update.sh ghcr.io/shiningwank0/omni_money:1.1.0
+    sudo ./scripts/safe-update.sh ghcr.io/shiningwank0/omni_money:1.1.0
 
 実行前に、data directory、固定 attestation、base Compose の secret file、暗号化 volume
 が production contract に一致していることを確認します。

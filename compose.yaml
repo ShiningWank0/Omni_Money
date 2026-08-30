@@ -6,6 +6,10 @@ services:
       context: .
     image: "${OMNI_IMAGE:-omni-money:local}"
     container_name: omni-money
+    # Pin the kernel credential numerically. A named USER is resolved from the
+    # candidate image's /etc/passwd and therefore is not a host-side security
+    # boundary during safe-update.
+    user: "10001:10001"
     restart: unless-stopped
     # The Pangolin deployment is intentionally HTTPS-at-the-edge only. The
     # trusted Newt address below is fixed on the private network so an
