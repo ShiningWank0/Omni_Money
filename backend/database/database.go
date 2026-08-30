@@ -2048,7 +2048,9 @@ func validSnapshotMode(info os.FileInfo, encrypted bool) bool {
 // different file.  Size is checked as well because a writer can mutate a
 // regular file without changing its inode.
 func snapshotSourceMatches(expected, actual os.FileInfo) bool {
-	return expected != nil && actual != nil && os.SameFile(expected, actual) && expected.Size() == actual.Size()
+	return expected != nil && actual != nil && os.SameFile(expected, actual) &&
+		expected.Size() == actual.Size() && expected.ModTime().Equal(actual.ModTime()) &&
+		expected.Mode().Perm() == actual.Mode().Perm()
 }
 
 func temporaryDatabaseFile(dir, prefix string) (string, *os.File, error) {
