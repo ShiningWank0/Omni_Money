@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -30,6 +31,11 @@ const (
 	csvVersionHeader = "omni_money_csv_version"
 	csvVersion2      = "2"
 )
+
+// Tag path creation is serialized within the process so the read-then-create
+// sequence remains deterministic for multiple Wails/API requests sharing one
+// SQLite file. The partial unique index remains the final cross-process guard.
+var tagMutationMu sync.Mutex
 
 func encodeCSVTextCell(value string) string {
 	if needsCSVFormulaEscape(value) {
@@ -297,6 +303,9 @@ func prepareTransactionInsertContext(ctx context.Context, req models.Transaction
 // path atomically combine idempotency, quota accounting, and the ledger write.
 func addPreparedTransactionIn(tx *sql.Tx, prepared preparedTransactionInsert) (*models.TransactionResponse, error) {
 	req := prepared.request
+	if err := validateTagIDsIn(tx, req.Tags); err != nil {
+		return nil, err
+	}
 	result, err := tx.Exec(
 		"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, ?)",
 		req.Account, prepared.date, req.Item, req.Type, req.Amount, req.Memo,
@@ -367,6 +376,9 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 		return nil, fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
 	defer tx.Rollback()
+	if err := validateTagIDsIn(tx, req.Tags); err != nil {
+		return nil, err
+	}
 
 	// 既存データの口座名を取得
 	var oldAccount string
@@ -435,6 +447,32 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 	resp.Tags, _ = s.GetTransactionTags(int64(t.ID))
 	s.autoSnapshot()
 	return &resp, nil
+}
+
+// validateTagIDsIn checks every requested reference before a transaction
+// mutation. This prevents INSERT OR IGNORE from silently dropping a bad tag
+// and makes Add/Update transaction writes agree with AddTransactionTags.
+func validateTagIDsIn(q interface {
+	QueryRow(query string, args ...interface{}) *sql.Row
+}, tagIDs []int64) error {
+	seen := make(map[int64]struct{}, len(tagIDs))
+	for _, tagID := range tagIDs {
+		if tagID <= 0 {
+			return fmt.Errorf("無効なタグIDです: %d", tagID)
+		}
+		if _, ok := seen[tagID]; ok {
+			continue
+		}
+		seen[tagID] = struct{}{}
+		var exists int
+		if err := q.QueryRow("SELECT 1 FROM tags WHERE id = ?", tagID).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("タグが見つかりません: %d", tagID)
+			}
+			return fmt.Errorf("タグ存在確認エラー: %w", err)
+		}
+	}
+	return nil
 }
 
 // DeleteTransaction は取引を削除する
@@ -1510,6 +1548,10 @@ func (s *Service) GetImageStorageUsage() (*models.ImageStorageUsage, error) {
 
 // CreateTag は新しいタグを作成する
 func (s *Service) CreateTag(name string, parentID *int64) (*models.Tag, error) {
+	name, err := validation.ValidateTagName(name)
+	if err != nil {
+		return nil, err
+	}
 	db, err := s.database()
 	if err != nil {
 		return nil, err
@@ -1536,7 +1578,10 @@ func (s *Service) CreateTag(name string, parentID *int64) (*models.Tag, error) {
 		return nil, fmt.Errorf("タグ作成エラー: %w", err)
 	}
 
-	id, _ := result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("タグID取得エラー: %w", err)
+	}
 	tag := &models.Tag{
 		ID:       id,
 		Name:     name,
@@ -1615,20 +1660,35 @@ func populateChildren(tag *models.Tag, tagMap map[int64]*models.Tag, allTags []m
 
 // UpdateTag はタグ名を更新する
 func (s *Service) UpdateTag(id int64, name string) error {
+	name, err := validation.ValidateTagName(name)
+	if err != nil {
+		return err
+	}
 	db, err := s.database()
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("UPDATE tags SET name = ? WHERE id = ?", name, id)
-	if err == nil {
-		s.autoSnapshot()
+	result, err := db.Exec("UPDATE tags SET name = ? WHERE id = ?", name, id)
+	if err != nil {
+		return fmt.Errorf("タグ更新エラー: %w", err)
 	}
-	return err
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("タグ更新結果確認エラー: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("タグが見つかりません: %w", sql.ErrNoRows)
+	}
+	s.autoSnapshot()
+	return nil
 }
 
 // CreateTagByPath は「/」区切りのパスからタグを階層的に作成する
 // 例: "推し活/超かぐや姫！" → 「推し活」(L1) → 「超かぐや姫！」(L2) を作成
 func (s *Service) CreateTagByPath(path string) (*models.Tag, error) {
+	tagMutationMu.Lock()
+	defer tagMutationMu.Unlock()
+
 	db, err := s.database()
 	if err != nil {
 		return nil, err
@@ -1637,10 +1697,11 @@ func (s *Service) CreateTagByPath(path string) (*models.Tag, error) {
 	parts := strings.Split(path, "/")
 	var segments []string
 	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			segments = append(segments, p)
+		canonical, validateErr := validation.ValidateTagName(p)
+		if validateErr != nil {
+			return nil, validateErr
 		}
+		segments = append(segments, canonical)
 	}
 
 	if len(segments) == 0 {
@@ -1649,6 +1710,12 @@ func (s *Service) CreateTagByPath(path string) (*models.Tag, error) {
 	if len(segments) > 3 {
 		return nil, fmt.Errorf("タグは3階層までです")
 	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("タグtransaction開始エラー: %w", err)
+	}
+	defer tx.Rollback()
 
 	var parentID *int64
 	var tag *models.Tag
@@ -1659,28 +1726,36 @@ func (s *Service) CreateTagByPath(path string) (*models.Tag, error) {
 		var err error
 
 		if parentID == nil {
-			err = db.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&existingID)
+			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&existingID)
 		} else {
-			err = db.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id = ?", name, *parentID).Scan(&existingID)
+			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id = ?", name, *parentID).Scan(&existingID)
 		}
 
 		if err == nil {
 			tag = &models.Tag{ID: existingID, Name: name, ParentID: parentID, Level: level}
 			pid := existingID
 			parentID = &pid
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("タグ検索エラー: %w", err)
 		} else {
-			result, insertErr := db.Exec(
+			result, insertErr := tx.Exec(
 				"INSERT INTO tags (name, parent_id, level) VALUES (?, ?, ?)",
 				name, parentID, level,
 			)
 			if insertErr != nil {
 				return nil, fmt.Errorf("タグ作成エラー: %w", insertErr)
 			}
-			id, _ := result.LastInsertId()
+			id, idErr := result.LastInsertId()
+			if idErr != nil {
+				return nil, fmt.Errorf("タグID取得エラー: %w", idErr)
+			}
 			tag = &models.Tag{ID: id, Name: name, ParentID: parentID, Level: level}
 			pid := id
 			parentID = &pid
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("タグtransaction確定エラー: %w", err)
 	}
 
 	s.autoSnapshot()
@@ -1693,11 +1768,19 @@ func (s *Service) DeleteTag(id int64) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("DELETE FROM tags WHERE id = ?", id)
-	if err == nil {
-		s.autoSnapshot()
+	result, err := db.Exec("DELETE FROM tags WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("タグ削除エラー: %w", err)
 	}
-	return err
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("タグ削除結果確認エラー: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("タグが見つかりません: %w", sql.ErrNoRows)
+	}
+	s.autoSnapshot()
+	return nil
 }
 
 // GetTransactionTags は取引に紐付いたタグを返す
@@ -1740,14 +1823,46 @@ func (s *Service) AddTransactionTags(transactionID int64, tagIDs []int64) error 
 	if err != nil {
 		return err
 	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("タグtransaction開始エラー: %w", err)
+	}
+	defer tx.Rollback()
+
+	var exists int
+	if err := tx.QueryRow("SELECT 1 FROM transactions WHERE id = ?", transactionID).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("取引が見つかりません: %w", err)
+		}
+		return fmt.Errorf("取引存在確認エラー: %w", err)
+	}
+	seen := make(map[int64]struct{}, len(tagIDs))
 	for _, tagID := range tagIDs {
-		_, err := db.Exec(
+		if tagID <= 0 {
+			return fmt.Errorf("無効なタグIDです: %d", tagID)
+		}
+		if _, ok := seen[tagID]; ok {
+			continue
+		}
+		seen[tagID] = struct{}{}
+		if err := tx.QueryRow("SELECT 1 FROM tags WHERE id = ?", tagID).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("タグが見つかりません: %d", tagID)
+			}
+			return fmt.Errorf("タグ存在確認エラー: %w", err)
+		}
+	}
+	for tagID := range seen {
+		_, err := tx.Exec(
 			"INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)",
 			transactionID, tagID,
 		)
 		if err != nil {
 			return fmt.Errorf("タグ追加エラー: %w", err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("タグtransaction確定エラー: %w", err)
 	}
 	s.autoSnapshot()
 	return nil

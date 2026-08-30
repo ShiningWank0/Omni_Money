@@ -851,6 +851,7 @@ export async function getTags() {
     return await window.go.main.App.GetTags()
   }
   const res = await apiFetch('/api/tags')
+  await throwIfNotOk(res, 'タグ一覧の取得に失敗しました')
   return await res.json()
 }
 
@@ -869,6 +870,7 @@ export async function createTag(name, parentId = null) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, parent_id: parentId })
   })
+  await throwIfNotOk(res, 'タグの作成に失敗しました')
   return await res.json()
 }
 
@@ -886,6 +888,7 @@ export async function createTagByPath(path) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path })
   })
+  await throwIfNotOk(res, 'タグ階層の作成に失敗しました')
   return await res.json()
 }
 
@@ -899,11 +902,12 @@ export async function updateTag(id, name) {
   if (isWails) {
     return await window.go.main.App.UpdateTag(id, name)
   }
-  await apiFetch(`/api/tags/${id}`, {
+  const res = await apiFetch(`/api/tags/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name })
   })
+  await throwIfNotOk(res, 'タグ名の変更に失敗しました')
 }
 
 /**
@@ -915,7 +919,8 @@ export async function deleteTag(id) {
   if (isWails) {
     return await window.go.main.App.DeleteTag(id)
   }
-  await apiFetch(`/api/tags/${id}`, { method: 'DELETE' })
+  const res = await apiFetch(`/api/tags/${id}`, { method: 'DELETE' })
+  await throwIfNotOk(res, 'タグの削除に失敗しました')
 }
 
 /**

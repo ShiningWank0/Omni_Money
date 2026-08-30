@@ -4,6 +4,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -22,7 +23,7 @@ import (
 )
 
 const defaultSnapshotMaxTotalBytes int64 = 2 * 1024 * 1024 * 1024
-const ledgerSchemaVersion = 1
+const ledgerSchemaVersion = 2
 
 const writableSQLiteQuery = "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 const snapshotSQLiteQuery = "mode=rw&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
@@ -447,6 +448,27 @@ func createTablesOn(target *sql.DB) error {
 				return fmt.Errorf("SQL実行エラー (%s): %w", stmt[:50], err)
 			}
 		}
+		// SQLite considers NULL values distinct in a regular UNIQUE index, so
+		// the historical UNIQUE(name, parent_id) did not protect root tags.
+		// Never guess which duplicate a user intended: refuse the migration
+		// atomically and require an explicit, user-audited merge instead.
+		var duplicateRoot string
+		err := tx.QueryRow(`
+			SELECT name FROM tags
+			WHERE parent_id IS NULL
+			GROUP BY name
+			HAVING COUNT(*) > 1
+			ORDER BY name
+			LIMIT 1`).Scan(&duplicateRoot)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("rootタグ重複検査エラー: %w", err)
+		}
+		if err == nil {
+			return fmt.Errorf("rootタグ名が重複しているためschema migrationを中止しました: %q", duplicateRoot)
+		}
+		if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_root_name_unique ON tags(name) WHERE parent_id IS NULL`); err != nil {
+			return fmt.Errorf("rootタグ一意index作成エラー: %w", err)
+		}
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", ledgerSchemaVersion)); err != nil {
 			return fmt.Errorf("スキーマversion更新エラー: %w", err)
 		}
@@ -508,6 +530,7 @@ func validateCriticalSchema(target schemaQueryer) error {
 		name       string
 	}{
 		{objectType: "index", name: "idx_transaction_images_txid"},
+		{objectType: "index", name: "idx_tags_root_name_unique"},
 		{objectType: "index", name: "idx_ai_idempotency_credential_key"},
 		{objectType: "index", name: "idx_ai_idempotency_transaction"},
 		{objectType: "index", name: "idx_ai_daily_usage_credential_date"},

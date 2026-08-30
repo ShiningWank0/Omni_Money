@@ -799,14 +799,14 @@ func handleTagByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := service.UpdateTag(id, body.Name); err != nil {
-			writeFinancialError(w, err, http.StatusInternalServerError)
+			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "タグを更新しました"}, http.StatusOK)
 
 	case http.MethodDelete:
 		if err := service.DeleteTag(id); err != nil {
-			writeFinancialError(w, err, http.StatusInternalServerError)
+			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "タグを削除しました"}, http.StatusOK)
