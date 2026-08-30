@@ -52,7 +52,7 @@
               :class="{ clickable: item.children && item.children.length > 0 }">
               <span class="legend-color" :style="{ background: chartColors[i % chartColors.length] }"></span>
               <span class="legend-name">{{ item.tag_name }}</span>
-              <span class="legend-amount">¥{{ item.amount.toLocaleString() }}</span>
+              <span class="legend-amount">¥{{ formatExactInteger(item.amount, item.amount_exact) }}</span>
               <span class="legend-ratio">{{ (item.ratio * 100).toFixed(1) }}%</span>
               <span v-if="item.children && item.children.length > 0" class="legend-drill">▶</span>
             </div>
@@ -67,6 +67,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { getTagSummary } from '../utils/api'
 import Chart from 'chart.js/auto'
+import { exactInteger, formatExactInteger } from '../utils/exactAmount'
 
 const props = defineProps({
   creditCardItems: { type: Array, default: () => [] }
@@ -118,7 +119,7 @@ const currentPeriodLabel = computed(() => {
 })
 
 const totalAmount = computed(() => {
-  return currentData.value.reduce((sum, item) => sum + item.amount, 0)
+  return currentData.value.reduce((sum, item) => sum + exactInteger(item.amount, item.amount_exact), BigInt(0))
 })
 
 function getDateRange() {
@@ -211,7 +212,7 @@ function renderChart() {
     data: {
       labels: data.map(d => d.tag_name),
       datasets: [{
-        data: data.map(d => d.amount),
+        data: data.map(d => Number(exactInteger(d.amount, d.amount_exact))),
         backgroundColor: data.map((_, i) => chartColors[i % chartColors.length]),
         borderWidth: 2,
         borderColor: '#fff'
@@ -231,7 +232,7 @@ function renderChart() {
           callbacks: {
             label: (ctx) => {
               const item = data[ctx.dataIndex]
-              return `${item.tag_name}: ¥${item.amount.toLocaleString()} (${(item.ratio * 100).toFixed(1)}%)`
+              return `${item.tag_name}: ¥${formatExactInteger(item.amount, item.amount_exact)} (${(item.ratio * 100).toFixed(1)}%)`
             }
           }
         }

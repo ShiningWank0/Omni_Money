@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -10,18 +11,20 @@ import (
 	"testing"
 
 	"omni_money/backend/database"
+	"omni_money/backend/models"
 )
 
 func TestLegacyCSVLargeInt64AmountUsesArchiveProvenanceAndRoundTrips(t *testing.T) {
 	const legacyAmount int64 = 1_000_000_001
-	for _, version := range []string{"v1", "v2"} {
+	for _, version := range []string{"unversioned", "v1", "v2"} {
 		for _, path := range []string{"string", "raw stream"} {
 			t.Run(version+"/"+path, func(t *testing.T) {
 				setupCoreTestDB(t)
 				service := &Service{db: database.GetDB(), legacy: true}
 				content := "account,date,item,type,amount,memo\nlegacy,2026-01-01,old,income,1000000001,kept\n"
-				if version == "v2" {
-					content = "account,date,item,type,amount,memo,omni_money_csv_version\nlegacy,2026-01-01,old,income,1000000001,kept,2\n"
+				if version == "v1" || version == "v2" {
+					value := map[string]string{"v1": "1", "v2": "2"}[version]
+					content = "account,date,item,type,amount,memo,omni_money_csv_version\nlegacy,2026-01-01,old,income,1000000001,kept," + value + "\n"
 				}
 				var imported int
 				var err error
@@ -136,8 +139,154 @@ func TestCSVV3RestoresPreQuotaTransactionImageSet(t *testing.T) {
 	}
 }
 
+func TestCSVV3MixedImageRowsRestoreIndependentOfRowOrder(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	png := encodePNG(t)
+	content := csvV3TestContent(t,
+		map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash", "date": "2026-01-01", "item": "old", "type": "expense", "amount": "1"},
+		// Deliberately place archive-only data before the current image. Import
+		// must normalize insertion order before DB triggers observe the rows.
+		map[string]string{csvVersionHeader: "3", "record_type": "image_legacy", "id": "-1", "transaction_id": "1", "filename": "", "mime_type": "", "data_base64": ""},
+		map[string]string{csvVersionHeader: "3", "record_type": "image", "id": "2", "transaction_id": "1", "filename": "current.png", "mime_type": "image/png", "data_base64": base64.StdEncoding.EncodeToString(png)},
+	)
+	if _, err := service.ImportCSV(content, "replace"); err != nil {
+		t.Fatalf("mixed row restore: %v", err)
+	}
+	for table, want := range map[string]int{"transaction_images": 1, "transaction_image_archive": 1} {
+		var got int
+		if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM " + table).Scan(&got); err != nil || got != want {
+			t.Fatalf("%s count = %d/%v, want %d", table, got, err, want)
+		}
+	}
+}
+
+func TestCSVV3PreservesBoundedEmptyAndLargeLegacyImages(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	result, err := database.GetDB().Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+		VALUES ('cash', '2026-01-01', 'old', 'expense', 1, -1, '')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txID, _ := result.LastInsertId()
+	large := bytes.Repeat([]byte{0x5a}, 6*1024*1024)
+	for _, image := range []struct {
+		filename string
+		mime     string
+		data     []byte
+	}{{"", "", []byte{}}, {" legacy.bin ", " APPLICATION/OCTET-STREAM ", large}} {
+		if _, err := database.GetDB().Exec(`INSERT INTO transaction_image_archive (transaction_id, filename, data, mime_type)
+			VALUES (?, ?, ?, ?)`, txID, image.filename, image.data, image.mime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archive, err := service.BackupToCSV()
+	if err != nil {
+		t.Fatalf("export bounded legacy images: %v", err)
+	}
+	if _, err := service.ImportCSV(archive, "replace"); err != nil {
+		t.Fatalf("restore bounded legacy images: %v", err)
+	}
+	rows, err := database.GetDB().Query(`SELECT filename, mime_type, data FROM transaction_image_archive ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	seen := make(map[string]bool)
+	for rows.Next() {
+		var filename, mime string
+		var data []byte
+		if err := rows.Scan(&filename, &mime, &data); err != nil {
+			t.Fatal(err)
+		}
+		switch filename {
+		case "":
+			if mime != "" || len(data) != 0 {
+				t.Fatalf("empty legacy image changed: %q/%d", mime, len(data))
+			}
+			seen["empty"] = true
+		case " legacy.bin ":
+			if mime != " APPLICATION/OCTET-STREAM " || !bytes.Equal(data, large) {
+				t.Fatalf("large legacy image changed: %q/%d", mime, len(data))
+			}
+			seen["large"] = true
+		default:
+			t.Fatalf("restored unexpected legacy filename %q", filename)
+		}
+	}
+	if !seen["empty"] || !seen["large"] {
+		t.Fatalf("restored legacy images = %#v", seen)
+	}
+}
+
+func TestTransactionImagePaginationAndGrandfatheredAccountMove(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	result, err := database.GetDB().Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+		VALUES ('old-account', '2026-01-01', 'old', 'expense', 1, -1, '')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txID, _ := result.LastInsertId()
+	for i := 0; i < 11; i++ {
+		if _, err := database.GetDB().Exec(`INSERT INTO transaction_image_archive (transaction_id, filename, data, mime_type)
+			VALUES (?, ?, X'', '')`, txID, fmt.Sprintf("legacy-%02d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := service.GetTransactionImagesPage(txID, "", 2)
+	if err != nil || len(first.Images) != 2 || first.NextCursor != "2" {
+		t.Fatalf("first image page = %#v/%v", first, err)
+	}
+	second, err := service.GetTransactionImagesPage(txID, "10", 2)
+	if err != nil || len(second.Images) != 1 || second.NextCursor != "" {
+		t.Fatalf("second image page = %#v/%v", second, err)
+	}
+	if _, err := service.GetTransactionImages(txID); err == nil || !strings.Contains(err.Error(), "pagination") {
+		t.Fatalf("unbounded compatibility list result = %v", err)
+	}
+	updated, err := service.UpdateTransaction(txID, models.TransactionRequest{
+		Account: "new-account", Date: "2026-01-01", Item: "moved", Type: "expense", Amount: 1,
+	})
+	if err != nil {
+		t.Fatalf("zero-image grandfathered account move: %v", err)
+	}
+	if updated.Account != "new-account" {
+		t.Fatalf("updated account = %q", updated.Account)
+	}
+}
+
+func TestCSVV3RejectsArchiveImageCountAndMetadataBeyondBounds(t *testing.T) {
+	t.Run("per transaction count", func(t *testing.T) {
+		setupCoreTestDB(t)
+		rows := make([]map[string]string, 0, models.MaxArchivedImagesPerTransaction+2)
+		rows = append(rows, map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash", "date": "2026-01-01", "item": "old", "type": "income", "amount": "1"})
+		for i := 1; i <= models.MaxArchivedImagesPerTransaction+1; i++ {
+			rows = append(rows, map[string]string{csvVersionHeader: "3", "record_type": "image_legacy", "id": fmt.Sprintf("-%d", i), "transaction_id": "1", "filename": "", "mime_type": "", "data_base64": ""})
+		}
+		content := csvV3TestContent(t, rows...)
+		service := &Service{db: database.GetDB(), legacy: true}
+		if _, err := service.ImportCSV(content, "replace"); err == nil || !strings.Contains(err.Error(), "archive上限") {
+			t.Fatalf("archive count result = %v", err)
+		}
+	})
+
+	t.Run("metadata bytes", func(t *testing.T) {
+		setupCoreTestDB(t)
+		content := csvV3TestContent(t,
+			map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash", "date": "2026-01-01", "item": "old", "type": "income", "amount": "1"},
+			map[string]string{csvVersionHeader: "3", "record_type": "image_legacy", "id": "-1", "transaction_id": "1", "filename": strings.Repeat("x", models.MaxArchivedImageMetadataBytes+1), "mime_type": "", "data_base64": ""},
+		)
+		service := &Service{db: database.GetDB(), legacy: true}
+		if _, err := service.ImportCSV(content, "replace"); err == nil || !strings.Contains(err.Error(), "4096") {
+			t.Fatalf("archive metadata result = %v", err)
+		}
+	})
+}
+
 func TestLegacyCSVAppendNeverPrunesExistingExtensions(t *testing.T) {
-	for _, version := range []string{"v1", "v2"} {
+	for _, version := range []string{"unversioned", "v1", "v2"} {
 		for _, path := range []string{"string", "raw stream"} {
 			t.Run(version+"/"+path, func(t *testing.T) {
 				setupCoreTestDB(t)
@@ -176,8 +325,9 @@ func TestLegacyCSVAppendNeverPrunesExistingExtensions(t *testing.T) {
 					}
 				}
 				content := "account,date,item,type,amount,memo\nwallet,2026-02-01,new,income,2,memo\n"
-				if version == "v2" {
-					content = "account,date,item,type,amount,memo,omni_money_csv_version\nwallet,2026-02-01,new,income,2,memo,2\n"
+				if version == "v1" || version == "v2" {
+					value := map[string]string{"v1": "1", "v2": "2"}[version]
+					content = "account,date,item,type,amount,memo,omni_money_csv_version\nwallet,2026-02-01,new,income,2,memo," + value + "\n"
 				}
 				var imported int
 				if path == "string" {

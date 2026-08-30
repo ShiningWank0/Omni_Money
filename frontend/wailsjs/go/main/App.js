@@ -86,6 +86,10 @@ export function GetItems(arg1) {
   return window['go']['main']['App']['GetItems'](arg1);
 }
 
+export function GetTagDeleteImpact(arg1) {
+  return window['go']['main']['App']['GetTagDeleteImpact'](arg1);
+}
+
 export function GetTagSummary(arg1, arg2, arg3) {
   return window['go']['main']['App']['GetTagSummary'](arg1, arg2, arg3);
 }
@@ -96,6 +100,10 @@ export function GetTags() {
 
 export function GetTransactionImages(arg1) {
   return window['go']['main']['App']['GetTransactionImages'](arg1);
+}
+
+export function GetTransactionImagesPage(arg1, arg2, arg3) {
+  return window['go']['main']['App']['GetTransactionImagesPage'](arg1, arg2, arg3);
 }
 
 export function GetTransactionLinks(arg1) {

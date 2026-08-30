@@ -29,6 +29,7 @@ import (
 
 const (
 	csvVersionHeader = "omni_money_csv_version"
+	csvVersion1      = "1"
 	csvVersion2      = "2"
 	csvVersion3      = "3"
 )
@@ -534,9 +535,10 @@ func (s *Service) GetBalanceHistory() (*models.BalanceHistoryResponse, error) {
 func (s *Service) GetBalanceHistoryFiltered(fundItems []string) (*models.BalanceHistoryResponse, error) {
 	if len(fundItems) == 0 {
 		return &models.BalanceHistoryResponse{
-			Accounts: []string{},
-			Dates:    []string{},
-			Balances: map[string][]int64{},
+			Accounts:      []string{},
+			Dates:         []string{},
+			Balances:      map[string][]int64{},
+			BalancesExact: map[string][]string{},
 		}, nil
 	}
 
@@ -1234,12 +1236,14 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 			return record[idx], nil
 		}
 
+		rowVersion := ""
 		if versionedCSV {
 			if versionIndex >= len(record) {
 				return 0, fmt.Errorf("CSVバージョン列が不足しています (行%d)", rowNumber)
 			}
-			if version := strings.TrimSpace(record[versionIndex]); version != csvVersion2 {
-				return 0, fmt.Errorf("未対応のCSVバージョンです (行%d): %q", rowNumber, version)
+			rowVersion = strings.TrimSpace(record[versionIndex])
+			if rowVersion != csvVersion1 && rowVersion != csvVersion2 {
+				return 0, fmt.Errorf("未対応のCSVバージョンです (行%d): %q", rowNumber, rowVersion)
 			}
 		}
 
@@ -1268,7 +1272,7 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 			memo = record[idx]
 		}
 
-		if versionedCSV {
+		if rowVersion == csvVersion2 {
 			for name, value := range map[string]*string{
 				"account": &account,
 				"date":    &dateStr,
@@ -1291,7 +1295,7 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 		txType = strings.ToLower(strings.TrimSpace(txType))
 		amountStr = strings.TrimSpace(amountStr)
 
-		// Both v1 (unversioned) and v2 are historical archive inputs. They may
+		// Unversioned v1, explicit v1, and v2 are historical archive inputs. They may
 		// contain values beyond current new-write limits (for example a 300-byte
 		// account), so validate against the bounded archive ceiling. v1 retains
 		// its historical trim/apostrophe behavior and treats formula-like prefixes
@@ -1643,21 +1647,25 @@ func buildBalanceHistory(rows interface {
 	sort.Strings(accounts)
 
 	balances := make(map[string][]int64)
+	balancesExact := make(map[string][]string)
 	for _, acc := range accounts {
 		balances[acc] = make([]int64, len(dates))
+		balancesExact[acc] = make([]string, len(dates))
 		var lastBalance int64
 		for i, date := range dates {
 			if b, ok := accountBalances[acc][date]; ok {
 				lastBalance = b
 			}
 			balances[acc][i] = lastBalance
+			balancesExact[acc][i] = models.ExactInt64(lastBalance)
 		}
 	}
 
 	return &models.BalanceHistoryResponse{
-		Accounts: accounts,
-		Dates:    dates,
-		Balances: balances,
+		Accounts:      accounts,
+		Dates:         dates,
+		Balances:      balances,
+		BalancesExact: balancesExact,
 	}, nil
 }
 
@@ -1724,26 +1732,75 @@ func (s *Service) GetTransactionImages(transactionID int64) ([]models.Transactio
 }
 
 func (s *Service) GetTransactionImagesContext(ctx context.Context, transactionID int64) ([]models.TransactionImageResponse, error) {
+	images := make([]models.TransactionImageResponse, 0, models.MaxImagesPerTransaction)
+	cursor := ""
+	for {
+		page, err := s.GetTransactionImagesPageContext(ctx, transactionID, cursor, maxTransactionImagePageSize)
+		if err != nil {
+			return nil, err
+		}
+		images = append(images, page.Images...)
+		if page.NextCursor == "" {
+			return images, nil
+		}
+		if len(images) >= models.MaxImagesPerTransaction {
+			return nil, fmt.Errorf("画像一覧が%d件を超えています。pagination APIを使用してください", models.MaxImagesPerTransaction)
+		}
+		cursor = page.NextCursor
+	}
+}
+
+const (
+	defaultTransactionImagePageSize = 2
+	maxTransactionImagePageSize     = 2
+	maxTransactionImageCursor       = models.MaxArchivedImagesDatabase + models.MaxImagesPerTransaction
+)
+
+func (s *Service) GetTransactionImagesPage(transactionID int64, cursor string, limit int) (*models.TransactionImagePage, error) {
+	return s.GetTransactionImagesPageContext(context.Background(), transactionID, cursor, limit)
+}
+
+func (s *Service) GetTransactionImagesPageContext(ctx context.Context, transactionID int64, cursor string, limit int) (*models.TransactionImagePage, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if transactionID <= 0 {
+		return nil, fmt.Errorf("無効な取引IDです")
+	}
+	if limit == 0 {
+		limit = defaultTransactionImagePageSize
+	}
+	if limit < 1 || limit > maxTransactionImagePageSize {
+		return nil, fmt.Errorf("画像一覧のlimitは1から%dまでです", maxTransactionImagePageSize)
+	}
+	offset := int64(0)
+	if cursor != "" {
+		parsed, err := strconv.ParseInt(cursor, 10, 64)
+		if err != nil || parsed < 0 || parsed > int64(maxTransactionImageCursor) {
+			return nil, fmt.Errorf("画像一覧のcursorが無効です")
+		}
+		offset = parsed
 	}
 	db, err := s.database()
 	if err != nil {
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx,
-		`SELECT id, filename, data, mime_type, created_at FROM transaction_images WHERE transaction_id = ?
+		`SELECT response_id, filename, data, mime_type, created_at FROM (
+		 SELECT id AS response_id, id AS sort_id, 0 AS source, filename, data, mime_type, created_at
+		 FROM transaction_images WHERE transaction_id = ?
 		 UNION ALL
-		 SELECT -id, filename, data, mime_type, created_at FROM transaction_image_archive WHERE transaction_id = ?
-		 ORDER BY created_at`,
-		transactionID, transactionID,
+		 SELECT -id AS response_id, id AS sort_id, 1 AS source, filename, data, mime_type, created_at
+		 FROM transaction_image_archive WHERE transaction_id = ?
+		) ORDER BY created_at, source, sort_id LIMIT ? OFFSET ?`,
+		transactionID, transactionID, limit+1, offset,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("画像一覧取得エラー: %w", err)
 	}
 	defer rows.Close()
 
-	var images []models.TransactionImageResponse
+	images := make([]models.TransactionImageResponse, 0, limit)
 	for rows.Next() {
 		var id int64
 		var filename, mimeType, createdAt string
@@ -1767,10 +1824,15 @@ func (s *Service) GetTransactionImagesContext(ctx context.Context, transactionID
 		}
 		images = append(images, response)
 	}
-	if images == nil {
-		images = []models.TransactionImageResponse{}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("画像一覧取得エラー: %w", err)
 	}
-	return images, nil
+	nextCursor := ""
+	if len(images) > limit {
+		images = images[:limit]
+		nextCursor = strconv.FormatInt(offset+int64(limit), 10)
+	}
+	return &models.TransactionImagePage{Images: images, NextCursor: nextCursor}, nil
 }
 
 // DeleteTransactionImage はWails互換用に画像IDを指定して削除する。
@@ -1866,20 +1928,26 @@ func checkImageStorageQuota(db sqlExecutor, transactionID int64, images []prepar
 		additionalBytes += int64(len(image.data))
 	}
 
-	var transactionCount, transactionBytes int64
-	if err := db.QueryRow(
-		`SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM (
-			SELECT length(data) AS bytes FROM transaction_images WHERE transaction_id = ?
-			UNION ALL SELECT length(data) AS bytes FROM transaction_image_archive WHERE transaction_id = ?
-		)`, transactionID, transactionID,
-	).Scan(&transactionCount, &transactionBytes); err != nil {
-		return fmt.Errorf("取引画像使用量確認エラー: %w", err)
-	}
-	if transactionCount+int64(len(images)) > int64(models.MaxImagesPerTransaction) {
-		return fmt.Errorf("画像は1取引につき%d件までです", models.MaxImagesPerTransaction)
-	}
-	if transactionBytes+additionalBytes > models.MaxImageBytesPerTransaction {
-		return fmt.Errorf("画像データの合計は1取引につき%d MiBまでです", models.MaxImageBytesPerTransaction/(1024*1024))
+	// A pre-quota transaction may legitimately contain more than today's
+	// per-transaction count/byte limits. Moving it between accounts with no new
+	// images must not strand the transaction. New image bytes still enforce the
+	// current per-transaction contract.
+	if len(images) > 0 {
+		var transactionCount, transactionBytes int64
+		if err := db.QueryRow(
+			`SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM (
+				SELECT length(data) AS bytes FROM transaction_images WHERE transaction_id = ?
+				UNION ALL SELECT length(data) AS bytes FROM transaction_image_archive WHERE transaction_id = ?
+			)`, transactionID, transactionID,
+		).Scan(&transactionCount, &transactionBytes); err != nil {
+			return fmt.Errorf("取引画像使用量確認エラー: %w", err)
+		}
+		if transactionCount+int64(len(images)) > int64(models.MaxImagesPerTransaction) {
+			return fmt.Errorf("画像は1取引につき%d件までです", models.MaxImagesPerTransaction)
+		}
+		if transactionBytes+additionalBytes > models.MaxImageBytesPerTransaction {
+			return fmt.Errorf("画像データの合計は1取引につき%d MiBまでです", models.MaxImageBytesPerTransaction/(1024*1024))
+		}
 	}
 
 	var accountBytes int64
@@ -2552,17 +2620,11 @@ func (s *Service) getTagSummaryFilteredContext(
 	// #nosec G202 -- joinConditions contains only fixed SQL fragments selected
 	// by code; all user values remain bound parameters.
 	query := `SELECT t.id, t.name, t.level, t.parent_id,
-		COALESCE(SUM(COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = tr.id), tr.amount)), 0) as total_amount,
-		COUNT(tr.id) as tx_count
+		COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = tr.id), tr.amount), tr.id
 		FROM tags t
 		LEFT JOIN transaction_tags tt ON t.id = tt.tag_id
 		LEFT JOIN transactions tr ON ` + strings.Join(joinConditions, " AND ") + `
-		GROUP BY t.id
-		ORDER BY total_amount DESC`
-	if options.maxScannedNodes > 0 {
-		query += "\n\t\tLIMIT ?"
-		args = append(args, options.maxScannedNodes+1)
-	}
+		ORDER BY t.id, tr.id`
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -2571,18 +2633,38 @@ func (s *Service) getTagSummaryFilteredContext(
 	defer rows.Close()
 
 	var allData []tagSummaryData
+	indexes := make(map[int64]int)
 
 	for rows.Next() {
 		if err := ctx.Err(); err != nil {
 			return nil, false, fmt.Errorf("タグ集計キャンセル: %w", err)
 		}
-		var td tagSummaryData
-		if err := rows.Scan(&td.id, &td.name, &td.level, &td.parentID, &td.amount, &td.count); err != nil {
+		var id int64
+		var name string
+		var level int
+		var parentID, amount, transactionID sql.NullInt64
+		if err := rows.Scan(&id, &name, &level, &parentID, &amount, &transactionID); err != nil {
 			return nil, false, err
 		}
-		allData = append(allData, td)
-		if options.maxScannedNodes > 0 && len(allData) > options.maxScannedNodes {
-			return nil, false, fmt.Errorf("タグ集計対象が内部上限%d件を超えています", options.maxScannedNodes)
+		index, exists := indexes[id]
+		if !exists {
+			if options.maxScannedNodes > 0 && len(allData) >= options.maxScannedNodes {
+				return nil, false, fmt.Errorf("タグ集計対象が内部上限%d件を超えています", options.maxScannedNodes)
+			}
+			index = len(allData)
+			indexes[id] = index
+			allData = append(allData, tagSummaryData{id: id, name: name, level: level, parentID: parentID})
+		}
+		if transactionID.Valid {
+			if !amount.Valid {
+				return nil, false, fmt.Errorf("タグ集計の取引金額が不正です: transaction_id=%d", transactionID.Int64)
+			}
+			var addErr error
+			allData[index].amount, addErr = validation.CheckedAddInt64(allData[index].amount, amount.Int64)
+			if addErr != nil {
+				return nil, false, fmt.Errorf("タグ直接金額集計オーバーフロー (tag_id=%d): %w", id, addErr)
+			}
+			allData[index].count++
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -2591,6 +2673,9 @@ func (s *Service) getTagSummaryFilteredContext(
 	if err := rows.Close(); err != nil {
 		return nil, false, fmt.Errorf("タグ集計行終了エラー: %w", err)
 	}
+	// Preserve the historical public ordering that SQL ORDER BY SUM provided,
+	// while doing the overflow-sensitive accumulation in checked Go arithmetic.
+	sort.SliceStable(allData, func(i, j int) bool { return allData[i].amount > allData[j].amount })
 
 	forest, err := buildTagSummaryForest(ctx, allData)
 	if err != nil {
@@ -2829,12 +2914,13 @@ func (forest *tagSummaryForest) materialize(
 				ratio = float64(node.amount) / float64(totalAmount)
 			}
 			summaries = append(summaries, models.TagSummary{
-				TagID:    node.data.id,
-				TagName:  node.data.name,
-				Amount:   node.amount,
-				Count:    node.count,
-				Ratio:    ratio,
-				Children: children,
+				TagID:       node.data.id,
+				TagName:     node.data.name,
+				Amount:      node.amount,
+				AmountExact: models.ExactInt64(node.amount),
+				Count:       node.count,
+				Ratio:       ratio,
+				Children:    children,
 			})
 		}
 		return summaries, nil
@@ -2883,15 +2969,55 @@ func (s *Service) AnalyzeTransactionsContext(ctx context.Context, req models.Ana
 	}
 
 	resp := &models.AnalysisResponse{}
-	aggregateQuery := `SELECT
-		COUNT(*),
-		COALESCE(SUM(CASE WHEN type = 'income' THEN COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = transactions.id), amount) ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN type = 'expense' THEN COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = transactions.id), amount) ELSE 0 END), 0)
-		FROM transactions` + where
-	if err := db.QueryRowContext(ctx, aggregateQuery, args...).Scan(&resp.Count, &resp.TotalIncome, &resp.TotalExpense); err != nil {
+	// #nosec G202 -- where contains only fixed predicates assembled by
+	// buildAIAnalysisFilter; every request value remains a bound argument.
+	aggregateQuery := `SELECT type,
+		COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = transactions.id), amount)
+		FROM transactions` + where + ` ORDER BY id`
+	aggregateRows, err := db.QueryContext(ctx, aggregateQuery, args...)
+	if err != nil {
 		return nil, fmt.Errorf("分析集計エラー: %w", err)
 	}
-	resp.NetAmount = resp.TotalIncome - resp.TotalExpense
+	for aggregateRows.Next() {
+		if err := ctx.Err(); err != nil {
+			_ = aggregateRows.Close()
+			return nil, fmt.Errorf("分析集計キャンセル: %w", err)
+		}
+		var txType string
+		var amount int64
+		if err := aggregateRows.Scan(&txType, &amount); err != nil {
+			_ = aggregateRows.Close()
+			return nil, fmt.Errorf("分析集計スキャンエラー: %w", err)
+		}
+		resp.Count++
+		var addErr error
+		switch txType {
+		case "income":
+			resp.TotalIncome, addErr = validation.CheckedAddInt64(resp.TotalIncome, amount)
+		case "expense":
+			resp.TotalExpense, addErr = validation.CheckedAddInt64(resp.TotalExpense, amount)
+		default:
+			addErr = fmt.Errorf("不明な取引種別です: %s", txType)
+		}
+		if addErr != nil {
+			_ = aggregateRows.Close()
+			return nil, fmt.Errorf("分析集計オーバーフロー: %w", addErr)
+		}
+	}
+	if err := aggregateRows.Err(); err != nil {
+		_ = aggregateRows.Close()
+		return nil, fmt.Errorf("分析集計エラー: %w", err)
+	}
+	if err := aggregateRows.Close(); err != nil {
+		return nil, fmt.Errorf("分析集計行終了エラー: %w", err)
+	}
+	resp.NetAmount, err = validation.CheckedSubInt64(resp.TotalIncome, resp.TotalExpense)
+	if err != nil {
+		return nil, fmt.Errorf("分析純額オーバーフロー: %w", err)
+	}
+	resp.TotalIncomeExact = models.ExactInt64(resp.TotalIncome)
+	resp.TotalExpenseExact = models.ExactInt64(resp.TotalExpense)
+	resp.NetAmountExact = models.ExactInt64(resp.NetAmount)
 
 	// タグ別集計にも取引一覧と同じフィルターを適用する。
 	// 全nodeのroll-up後に応答だけをbudget内へ切り詰めるため、親集計値は変わらない。
@@ -2961,6 +3087,7 @@ func (s *Service) AnalyzeTransactionsContext(ctx context.Context, req models.Ana
 		if err := rows.Scan(&detail.ID, &detail.Account, &detail.Date, &detail.Item, &detail.Type, &detail.Amount, &memo); err != nil {
 			return nil, fmt.Errorf("分析明細スキャンエラー: %w", err)
 		}
+		detail.AmountExact = models.ExactInt64(detail.Amount)
 		if req.IncludeMemo {
 			detail.Memo = memo
 		}
@@ -3109,6 +3236,7 @@ func (s *Service) GetTransactionLinks(transactionID int64) ([]models.LinkedTrans
 		if err := rows.Scan(&r.ID, &r.FundItem, &dateTime, &r.Item, &r.Type, &r.Amount, &r.Memo); err != nil {
 			return nil, fmt.Errorf("紐付け取引スキャンエラー: %w", err)
 		}
+		r.AmountExact = models.ExactInt64(r.Amount)
 		if dateTime.Hour() == 0 && dateTime.Minute() == 0 && dateTime.Second() == 0 {
 			r.Date = dateTime.Format("2006-01-02")
 		} else {

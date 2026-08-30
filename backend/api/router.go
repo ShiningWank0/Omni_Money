@@ -891,6 +891,23 @@ func handleTransactionImages(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
+		if r.URL.Query().Get("paged") == "1" {
+			limit := 0
+			if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+				limit, err = strconv.Atoi(rawLimit)
+				if err != nil {
+					jsonError(w, "画像一覧のlimitが無効です", http.StatusBadRequest)
+					return
+				}
+			}
+			page, err := service.GetTransactionImagesPageContext(r.Context(), txID, r.URL.Query().Get("cursor"), limit)
+			if err != nil {
+				writeFinancialError(w, err, http.StatusBadRequest)
+				return
+			}
+			jsonResponse(w, page, http.StatusOK)
+			return
+		}
 		images, err := service.GetTransactionImagesContext(r.Context(), txID)
 		if err != nil {
 			writeFinancialError(w, err, http.StatusInternalServerError)

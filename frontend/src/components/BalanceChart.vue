@@ -26,6 +26,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { Line } from 'vue-chartjs'
+import { exactInteger, formatExactInteger } from '../utils/exactAmount'
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -99,16 +100,19 @@ const filteredHistory = computed(() => {
 
   const filteredDates = history.dates.slice(startIdx)
   const filteredBalances = {}
+  const filteredBalancesExact = {}
   for (const acc of history.accounts) {
     if (history.balances[acc]) {
       filteredBalances[acc] = history.balances[acc].slice(startIdx)
+      if (history.balances_exact?.[acc]) filteredBalancesExact[acc] = history.balances_exact[acc].slice(startIdx)
     }
   }
 
   return {
     accounts: history.accounts,
     dates: filteredDates,
-    balances: filteredBalances
+    balances: filteredBalances,
+    balances_exact: filteredBalancesExact
   }
 })
 
@@ -153,9 +157,11 @@ function buildChartData(history, accounts) {
   const labels = thinLabels(history.dates)
   const datasets = accounts.map((acc, idx) => {
     const color = colorPalette[idx % colorPalette.length]
+    const exactData = history.balances_exact?.[acc] || []
     return {
       label: acc,
-      data: history.balances[acc] || [],
+      data: (history.balances[acc] || []).map((value, i) => Number(exactInteger(value, exactData[i]))),
+      exactData,
       borderColor: color.border,
       backgroundColor: color.bg,
       fill: true,
@@ -203,8 +209,8 @@ const chartOptions = computed(() => ({
           return history.dates[idx] || ''
         },
         label(item) {
-          const value = item.raw
-          return `${item.dataset.label}: ¥${value.toLocaleString('ja-JP')}`
+          const value = item.dataset.exactData?.[item.dataIndex]
+          return `${item.dataset.label}: ¥${formatExactInteger(item.raw, value)}`
         }
       }
     }

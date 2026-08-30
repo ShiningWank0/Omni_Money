@@ -1019,10 +1019,37 @@ export async function addTransactionImage(transactionId, imageData) {
  * @returns {Promise<object[]>}
  */
 export async function getTransactionImages(transactionId) {
+  const images = []
+  let cursor = ''
+  const seenCursors = new Set()
+  do {
+    if (seenCursors.has(cursor) || images.length > 1010) {
+      throw new Error('画像一覧のpagination応答が上限を超えています')
+    }
+    seenCursors.add(cursor)
+    const page = await getTransactionImagesPage(transactionId, cursor, 2)
+    images.push(...(page.images || []))
+    if (images.length > 1010) throw new Error('画像一覧の件数が上限を超えています')
+    cursor = page.next_cursor || ''
+  } while (cursor !== '')
+  return images
+}
+
+/**
+ * 取引画像を上限付きで取得
+ * @param {number} transactionId
+ * @param {string} cursor
+ * @param {number} limit
+ * @returns {Promise<{images: object[], next_cursor?: string}>}
+ */
+export async function getTransactionImagesPage(transactionId, cursor = '', limit = 2) {
   if (isWails) {
-    return await window.go.main.App.GetTransactionImages(transactionId)
+    return await window.go.main.App.GetTransactionImagesPage(transactionId, cursor, limit)
   }
-  const res = await apiFetch(`/api/transaction_images/${transactionId}`)
+  const params = new URLSearchParams({ paged: '1', limit: String(limit) })
+  if (cursor) params.set('cursor', cursor)
+  const res = await apiFetch(`/api/transaction_images/${transactionId}?${params.toString()}`)
+  await throwIfNotOk(res, '画像一覧の取得に失敗しました')
   return await res.json()
 }
 

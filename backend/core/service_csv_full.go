@@ -710,7 +710,51 @@ func validateCSVV3CreatedAt(value string) error {
 	return nil
 }
 
+func validateCSVV3ExportImageRestoreBounds(ctx context.Context, tx *sql.Tx) error {
+	var archiveOutputCount, maxArchiveOutputPerTransaction int64
+	if err := tx.QueryRowContext(ctx, `WITH usage AS (
+		SELECT transaction_id, COUNT(*) AS image_count, COALESCE(SUM(bytes), 0) AS image_bytes,
+			COALESCE(SUM(is_archive), 0) AS archive_count
+		FROM (
+			SELECT transaction_id, length(data) AS bytes, 0 AS is_archive FROM transaction_images
+			UNION ALL
+			SELECT transaction_id, length(data) AS bytes, 1 AS is_archive FROM transaction_image_archive
+		) GROUP BY transaction_id
+	), archive_output AS (
+		SELECT CASE WHEN image_count > ? OR image_bytes > ? THEN image_count ELSE archive_count END AS output_count
+		FROM usage
+	)
+	SELECT COALESCE(SUM(output_count), 0), COALESCE(MAX(output_count), 0) FROM archive_output`,
+		models.MaxImagesPerTransaction, models.MaxImageBytesPerTransaction,
+	).Scan(&archiveOutputCount, &maxArchiveOutputPerTransaction); err != nil {
+		return fmt.Errorf("CSV v3 legacy画像件数検査エラー: %w", err)
+	}
+	if maxArchiveOutputPerTransaction > int64(models.MaxArchivedImagesPerTransaction) {
+		return fmt.Errorf("CSV v3画像は1取引の復元可能archive上限%d件を超えています", models.MaxArchivedImagesPerTransaction)
+	}
+	if archiveOutputCount > int64(models.MaxArchivedImagesDatabase) {
+		return fmt.Errorf("CSV v3画像はDB全体の復元可能archive上限%d件を超えています", models.MaxArchivedImagesDatabase)
+	}
+	var account string
+	var accountBytes int64
+	err := tx.QueryRowContext(ctx, `SELECT account, SUM(bytes) FROM (
+		SELECT t.account AS account, length(i.data) AS bytes FROM transaction_images i JOIN transactions t ON t.id=i.transaction_id
+		UNION ALL
+		SELECT t.account AS account, length(i.data) AS bytes FROM transaction_image_archive i JOIN transactions t ON t.id=i.transaction_id
+	) GROUP BY account HAVING SUM(bytes) > ? ORDER BY account LIMIT 1`, models.MaxImageBytesPerAccount).Scan(&account, &accountBytes)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("CSV v3口座画像量検査エラー: %w", err)
+	}
+	if err == nil {
+		return fmt.Errorf("口座「%s」の画像量%d bytesは復元可能上限%d bytesを超えています", account, accountBytes, models.MaxImageBytesPerAccount)
+	}
+	return nil
+}
+
 func backupToCSVV3In(ctx context.Context, tx *sql.Tx, dst io.Writer) (string, error) {
+	if err := validateCSVV3ExportImageRestoreBounds(ctx, tx); err != nil {
+		return "", err
+	}
 	output := &csvLimitedStringWriter{dst: dst, limit: maxCSVExportBytes}
 	writer := csv.NewWriter(output)
 	if err := writer.Write(csvV3Headers); err != nil {
@@ -792,8 +836,10 @@ func backupToCSVV3In(ctx context.Context, tx *sql.Tx, dst io.Writer) (string, er
 	}
 
 	rows, err = tx.QueryContext(ctx, `SELECT id, transaction_id, filename, mime_type, data, created_at,
-		CASE WHEN (SELECT COUNT(*) FROM transaction_images peer WHERE peer.transaction_id = transaction_images.transaction_id) > ?
-			OR (SELECT COALESCE(SUM(length(data)), 0) FROM transaction_images peer WHERE peer.transaction_id = transaction_images.transaction_id) > ?
+		CASE WHEN ((SELECT COUNT(*) FROM transaction_images peer WHERE peer.transaction_id = transaction_images.transaction_id)
+			+ (SELECT COUNT(*) FROM transaction_image_archive peer WHERE peer.transaction_id = transaction_images.transaction_id)) > ?
+			OR ((SELECT COALESCE(SUM(length(data)), 0) FROM transaction_images peer WHERE peer.transaction_id = transaction_images.transaction_id)
+			+ (SELECT COALESCE(SUM(length(data)), 0) FROM transaction_image_archive peer WHERE peer.transaction_id = transaction_images.transaction_id)) > ?
 		THEN 1 ELSE 0 END
 		FROM transaction_images
 		UNION ALL
@@ -804,6 +850,8 @@ func backupToCSVV3In(ctx context.Context, tx *sql.Tx, dst io.Writer) (string, er
 		return "", fmt.Errorf("CSV v3画像取得エラー: %w", err)
 	}
 	var exportedImageBytes int64
+	var exportedArchiveImages, archiveImagesForTransaction int64
+	var archiveImageTransactionID int64
 	for rows.Next() {
 		if err := ctx.Err(); err != nil {
 			_ = rows.Close()
@@ -829,12 +877,12 @@ func backupToCSVV3In(ctx context.Context, tx *sql.Tx, dst io.Writer) (string, er
 		prepared, prepareErr := prepareDecodedTransactionImageContext(ctx, filename, mimeType, data)
 		recordType := "image"
 		if archiveImage || prepareErr != nil || prepared.filename != filename || prepared.mimeType != mimeType || !bytes.Equal(prepared.data, data) {
-			if err := validation.ValidateArchivedLedgerText("画像ファイル名", filename, maxCSVFieldBytes, true); err != nil {
+			if err := validation.ValidateArchivedLedgerText("画像ファイル名", filename, models.MaxArchivedImageMetadataBytes, false); err != nil {
 				scratchRelease()
 				_ = rows.Close()
 				return "", fmt.Errorf("CSV v3 legacy画像metadataが不正です (id %d): %w", id, err)
 			}
-			if err := validation.ValidateArchivedLedgerText("画像MIME", mimeType, maxCSVFieldBytes, true); err != nil {
+			if err := validation.ValidateArchivedLedgerText("画像MIME", mimeType, models.MaxArchivedImageMetadataBytes, false); err != nil {
 				scratchRelease()
 				_ = rows.Close()
 				return "", fmt.Errorf("CSV v3 legacy画像metadataが不正です (id %d): %w", id, err)
@@ -842,17 +890,43 @@ func backupToCSVV3In(ctx context.Context, tx *sql.Tx, dst io.Writer) (string, er
 			recordType = "image_legacy"
 			prepared = preparedTransactionImage{filename: filename, mimeType: mimeType, data: data}
 		}
-		if int64(len(prepared.data)) > models.MaxImageBytes || int64(len(prepared.data)) > models.MaxImageBytesDatabase-exportedImageBytes {
+		if recordType == "image_legacy" {
+			if archiveImageTransactionID != transactionID {
+				archiveImageTransactionID = transactionID
+				archiveImagesForTransaction = 0
+			}
+			exportedArchiveImages++
+			archiveImagesForTransaction++
+			if archiveImagesForTransaction > int64(models.MaxArchivedImagesPerTransaction) {
+				scratchRelease()
+				_ = rows.Close()
+				return "", fmt.Errorf("CSV v3画像は1取引の復元可能archive上限%d件を超えています", models.MaxArchivedImagesPerTransaction)
+			}
+			if exportedArchiveImages > int64(models.MaxArchivedImagesDatabase) {
+				scratchRelease()
+				_ = rows.Close()
+				return "", fmt.Errorf("CSV v3画像はDB全体の復元可能archive上限%d件を超えています", models.MaxArchivedImagesDatabase)
+			}
+		}
+		rowImageLimit := models.MaxImageBytes
+		if recordType == "image_legacy" {
+			rowImageLimit = models.MaxArchivedImageBytes
+		}
+		if int64(len(prepared.data)) > rowImageLimit || int64(len(prepared.data)) > models.MaxImageBytesDatabase-exportedImageBytes {
 			scratchRelease()
 			_ = rows.Close()
 			return "", fmt.Errorf("CSV v3画像の合計サイズが上限を超えました")
 		}
 		encodedLen := int64(base64.StdEncoding.EncodedLen(len(prepared.data)))
-		encodedRelease, encodedAvailable := TryAcquireCSVTempBudget(encodedLen)
-		if !encodedAvailable {
-			scratchRelease()
-			_ = rows.Close()
-			return "", fmt.Errorf("CSV画像エンコード用メモリ上限に達しました")
+		encodedRelease := func() {}
+		if encodedLen > 0 {
+			var encodedAvailable bool
+			encodedRelease, encodedAvailable = TryAcquireCSVTempBudget(encodedLen)
+			if !encodedAvailable {
+				scratchRelease()
+				_ = rows.Close()
+				return "", fmt.Errorf("CSV画像エンコード用メモリ上限に達しました")
+			}
 		}
 		encoded := base64.StdEncoding.EncodeToString(prepared.data)
 		exportedImageBytes += int64(len(prepared.data))
@@ -1264,6 +1338,13 @@ func (p *csvV3Import) addParsedText(values ...string) error {
 	for _, value := range values {
 		additional += int64(len([]byte(value)))
 	}
+	return p.addParsedTextBytes(additional)
+}
+
+func (p *csvV3Import) addParsedTextBytes(additional int64) error {
+	if additional < 0 {
+		return fmt.Errorf("CSV v3の解析済みテキスト課金が不正です")
+	}
 	if additional > maxCSVParsedTextBytes-p.parsedTextBytes {
 		return fmt.Errorf("CSV v3の解析済みテキスト合計が上限を超えました")
 	}
@@ -1636,6 +1717,12 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 			if err != nil {
 				return csvV3Import{}, fmt.Errorf("画像transaction_id (行%d): %w", rowNumber, err)
 			}
+			// Charge a fixed structural weight in addition to the actual text. This
+			// bounds slices/maps/row bookkeeping for archives containing many tiny
+			// or empty images without conflating heap metadata with spool capacity.
+			if err := parsed.addParsedTextBytes(1024); err != nil {
+				return csvV3Import{}, fmt.Errorf("CSV画像metadata一時領域が上限に達しました (行%d): %w", rowNumber, err)
+			}
 			filename, err := csvV3DecodedText(record, headerMap, "filename", true)
 			if err != nil {
 				return csvV3Import{}, fmt.Errorf("行%d: %w", rowNumber, err)
@@ -1648,39 +1735,51 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 			if err != nil {
 				return csvV3Import{}, fmt.Errorf("行%d: %w", rowNumber, err)
 			}
-			if encoded == "" || strings.ContainsFunc(encoded, unicode.IsSpace) {
+			if (!archiveImage && encoded == "") || strings.ContainsFunc(encoded, unicode.IsSpace) {
 				return csvV3Import{}, fmt.Errorf("画像Base64が不正です (行%d)", rowNumber)
 			}
-			if len(encoded) > base64.StdEncoding.EncodedLen(int(models.MaxImageBytes)) {
+			maxImageBytes := models.MaxImageBytes
+			if archiveImage {
+				maxImageBytes = models.MaxArchivedImageBytes
+			}
+			if len(encoded) > base64.StdEncoding.EncodedLen(int(maxImageBytes)) {
 				return csvV3Import{}, fmt.Errorf("画像Base64が大きすぎます (行%d)", rowNumber)
 			}
 			worstDecoded := int64(base64.StdEncoding.DecodedLen(len(encoded)))
 			// DecodedLen is a conservative upper bound. With valid padding it can
 			// exceed the exact output by up to two bytes, so do not reject a
 			// valid image merely because it lands exactly on the byte quota.
-			if worstDecoded <= 0 || worstDecoded > models.MaxImageBytes+2 {
+			if (!archiveImage && worstDecoded <= 0) || worstDecoded > maxImageBytes+2 {
 				return csvV3Import{}, fmt.Errorf("画像Base64のデコード後サイズが上限を超えます (行%d)", rowNumber)
 			}
 			// Admit the possible decoded bytes before DecodeString allocates them.
 			// The reservation remains for the parsed image (or its private spool)
 			// until import cleanup. Spooling takes a second, short-lived reservation
 			// while the decoded heap buffer and file copy coexist.
-			imageRelease, available := TryAcquireCSVTempBudget(worstDecoded)
-			if !available {
-				return csvV3Import{}, fmt.Errorf("CSV画像一時領域が上限に達しました (行%d)", rowNumber)
+			var imageRelease func()
+			if worstDecoded > 0 {
+				var available bool
+				imageRelease, available = TryAcquireCSVTempBudget(worstDecoded)
+				if !available {
+					return csvV3Import{}, fmt.Errorf("CSV画像一時領域が上限に達しました (行%d)", rowNumber)
+				}
 			}
 			data, err := base64.StdEncoding.Strict().DecodeString(encoded)
-			if err != nil || len(data) == 0 {
-				imageRelease()
+			if err != nil || (!archiveImage && len(data) == 0) {
+				if imageRelease != nil {
+					imageRelease()
+				}
 				return csvV3Import{}, fmt.Errorf("画像Base64が不正です (行%d)", rowNumber)
 			}
-			exactRelease, exactAvailable := ResizeCSVTempBudget(worstDecoded, int64(len(data)))
-			if !exactAvailable {
-				imageRelease()
-				return csvV3Import{}, fmt.Errorf("CSV画像一時領域が上限に達しました (行%d)", rowNumber)
+			if len(data) > 0 {
+				exactRelease, exactAvailable := ResizeCSVTempBudget(worstDecoded, int64(len(data)))
+				if !exactAvailable {
+					imageRelease()
+					return csvV3Import{}, fmt.Errorf("CSV画像一時領域が上限に達しました (行%d)", rowNumber)
+				}
+				parsed.tempReleases = append(parsed.tempReleases, exactRelease)
+				parseTempReleases = append(parseTempReleases, exactRelease)
 			}
-			parsed.tempReleases = append(parsed.tempReleases, exactRelease)
-			parseTempReleases = append(parseTempReleases, exactRelease)
 			if int64(len(data)) > models.MaxImageBytesDatabase-parsed.decodedImageBytes {
 				return csvV3Import{}, fmt.Errorf("CSV v3画像の合計サイズが上限を超えました (行%d)", rowNumber)
 			}
@@ -1693,10 +1792,10 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 			}
 			prepared := preparedTransactionImage{filename: filename, mimeType: mimeType, data: data}
 			if archiveImage {
-				if err := validation.ValidateArchivedLedgerText("画像ファイル名", filename, maxCSVFieldBytes, true); err != nil {
+				if err := validation.ValidateArchivedLedgerText("画像ファイル名", filename, models.MaxArchivedImageMetadataBytes, false); err != nil {
 					return csvV3Import{}, fmt.Errorf("画像 (行%d): %w", rowNumber, err)
 				}
-				if err := validation.ValidateArchivedLedgerText("画像MIME", mimeType, maxCSVFieldBytes, true); err != nil {
+				if err := validation.ValidateArchivedLedgerText("画像MIME", mimeType, models.MaxArchivedImageMetadataBytes, false); err != nil {
 					return csvV3Import{}, fmt.Errorf("画像 (行%d): %w", rowNumber, err)
 				}
 			} else {
@@ -1718,7 +1817,7 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 			}
 			parsed.decodedImageBytes += int64(len(prepared.data))
 			image := csvV3Image{id: id, transactionID: txID, filename: prepared.filename, mimeType: prepared.mimeType, createdAt: createdAt, data: prepared.data, archiveLegacy: archiveImage}
-			if spoolImages {
+			if spoolImages && len(prepared.data) > 0 {
 				if parsed.imageTempDir == "" {
 					dir, imageRoot, err := fileprivacy.CreatePrivateTempDir("omni-money-csv-images-")
 					if err != nil {
@@ -2174,6 +2273,8 @@ func openCSVTempRead(path string) (*os.File, *os.Root, error) {
 // image, which would become quadratic for a large valid archive.
 func validateCSVV3ImageQuota(ctx context.Context, tx *sql.Tx, parsed csvV3Import, transactionMap map[int64]int64) error {
 	perTransaction := make(map[int64]csvImageUsage)
+	archivePerTransaction := make(map[int64]int64)
+	allPerTransaction := make(map[int64]int64)
 	perAccount := make(map[string]csvImageUsage)
 	accounts := make(map[int64]string)
 	for _, row := range parsed.images {
@@ -2193,7 +2294,10 @@ func validateCSVV3ImageQuota(ctx context.Context, tx *sql.Tx, parsed csvV3Import
 			usage.count++
 			usage.bytes += bytes
 			perTransaction[newTxID] = usage
+		} else {
+			archivePerTransaction[newTxID]++
 		}
+		allPerTransaction[newTxID]++
 		account, exists := accounts[newTxID]
 		if !exists {
 			if err := tx.QueryRowContext(ctx, "SELECT account FROM transactions WHERE id = ?", newTxID).Scan(&account); err != nil {
@@ -2205,6 +2309,27 @@ func validateCSVV3ImageQuota(ctx context.Context, tx *sql.Tx, parsed csvV3Import
 		accountUsage.count++
 		accountUsage.bytes += bytes
 		perAccount[account] = accountUsage
+	}
+	var existingArchiveCount int64
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM transaction_image_archive").Scan(&existingArchiveCount); err != nil {
+		return err
+	}
+	var parsedArchiveCount int64
+	for transactionID, count := range archivePerTransaction {
+		parsedArchiveCount += count
+		var existing int64
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (
+			SELECT id FROM transaction_images WHERE transaction_id = ?
+			UNION ALL SELECT id FROM transaction_image_archive WHERE transaction_id = ?
+		)`, transactionID, transactionID).Scan(&existing); err != nil {
+			return err
+		}
+		if existing+allPerTransaction[transactionID] > int64(models.MaxArchivedImagesPerTransaction) {
+			return fmt.Errorf("legacy画像件数が1取引のarchive上限を超えました")
+		}
+	}
+	if existingArchiveCount+parsedArchiveCount > int64(models.MaxArchivedImagesDatabase) {
+		return fmt.Errorf("legacy画像件数がDB全体のarchive上限を超えました")
 	}
 	for transactionID, usage := range perTransaction {
 		var count, bytes int64
@@ -2413,13 +2538,14 @@ func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Rea
 			}
 			return record[idx], nil
 		}
+		rowVersion := ""
 		if versionedCSV {
 			if versionIndex >= len(record) {
 				return 0, fmt.Errorf("CSVバージョン列が不足しています (行%d)", rowNumber)
 			}
-			version := strings.TrimSpace(record[versionIndex])
-			if version != csvVersion2 {
-				return 0, fmt.Errorf("未対応のCSVバージョンです (行%d): %q", rowNumber, version)
+			rowVersion = strings.TrimSpace(record[versionIndex])
+			if rowVersion != csvVersion1 && rowVersion != csvVersion2 {
+				return 0, fmt.Errorf("未対応のCSVバージョンです (行%d): %q", rowNumber, rowVersion)
 			}
 		}
 		account, err := field("account")
@@ -2446,7 +2572,7 @@ func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Rea
 		if idx, ok := headerMap["memo"]; ok && idx < len(record) {
 			memo = record[idx]
 		}
-		if versionedCSV {
+		if rowVersion == csvVersion2 {
 			for name, value := range map[string]*string{
 				"account": &account, "date": &dateString, "item": &item,
 				"type": &txType, "memo": &memo,
@@ -2761,7 +2887,15 @@ func (s *Service) importCSVV3Parsed(ctx context.Context, parsed *csvV3Import, mo
 	if err := validateCSVV3ImageQuota(ctx, tx, *parsed, transactionMap); err != nil {
 		return 0, fmt.Errorf("CSV v3画像クォータ: %w", err)
 	}
-	for _, row := range parsed.images {
+	images := append([]csvV3Image(nil), parsed.images...)
+	// Ordinary rows must be inserted before archive-only rows. This makes a
+	// mixed grandfathered archive independent of CSV row order: current quota
+	// triggers see only the ordinary subset, while archive rows use their own
+	// bounded count/metadata/global-byte contract.
+	sort.SliceStable(images, func(i, j int) bool {
+		return !images[i].archiveLegacy && images[j].archiveLegacy
+	})
+	for _, row := range images {
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}

@@ -710,6 +710,15 @@ func (a *App) GetTransactionImages(transactionID int64) ([]models.TransactionIma
 	return service.GetTransactionImages(transactionID)
 }
 
+func (a *App) GetTransactionImagesPage(transactionID int64, cursor string, limit int) (*models.TransactionImagePage, error) {
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetTransactionImagesPage(transactionID, cursor, limit)
+}
+
 func (a *App) DeleteTransactionImage(imageID int64) error {
 	service, release, err := a.borrowService()
 	if err != nil {

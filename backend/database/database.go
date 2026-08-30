@@ -22,7 +22,7 @@ import (
 )
 
 const defaultSnapshotMaxTotalBytes int64 = 2 * 1024 * 1024 * 1024
-const ledgerSchemaVersion = 4
+const ledgerSchemaVersion = 5
 
 const writableSQLiteQuery = "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 const snapshotSQLiteQuery = "mode=rw&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
@@ -300,12 +300,41 @@ func createTablesOn(target *sql.DB) error {
 		return fmt.Errorf("スキーマtransaction開始エラー: %w", err)
 	}
 	defer tx.Rollback()
-	if version < 4 {
-		// v4 extends the quota accounting to archive sidecars. Recreate the named
-		// trigger in this same schema transaction so an older definition cannot be
-		// retained by CREATE TRIGGER IF NOT EXISTS.
-		if _, err := tx.Exec(`DROP TRIGGER IF EXISTS trg_transaction_images_quota_insert`); err != nil {
-			return fmt.Errorf("旧画像quota trigger削除エラー: %w", err)
+	archiveImageTableSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS transaction_image_archive (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		transaction_id INTEGER NOT NULL,
+		filename TEXT NOT NULL CHECK(length(CAST(filename AS BLOB)) <= %d),
+		data BLOB NOT NULL CHECK(length(data) BETWEEN 0 AND %d),
+		mime_type TEXT NOT NULL CHECK(length(CAST(mime_type AS BLOB)) <= %d),
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+	)`, models.MaxArchivedImageMetadataBytes, models.MaxArchivedImageBytes, models.MaxArchivedImageMetadataBytes)
+	if version < 5 {
+		// v5 tightens and extends archive accounting. Recreate both named triggers
+		// in this same schema transaction so v4 definitions cannot survive their
+		// CREATE TRIGGER IF NOT EXISTS declarations.
+		for _, name := range []string{"trg_transaction_images_quota_insert", "trg_transaction_image_archive_quota_insert"} {
+			if _, err := tx.Exec(`DROP TRIGGER IF EXISTS ` + name); err != nil {
+				return fmt.Errorf("旧画像quota trigger削除エラー: %w", err)
+			}
+		}
+		if version == 4 {
+			// SQLite cannot add CHECK constraints in place. Rebuild the v4 archive
+			// table atomically and copy every ID and byte exactly. Any row outside the
+			// new explicit bounds aborts and rolls back rather than being truncated.
+			if _, err := tx.Exec(`ALTER TABLE transaction_image_archive RENAME TO transaction_image_archive_v4`); err != nil {
+				return fmt.Errorf("v4 legacy画像table退避エラー: %w", err)
+			}
+			if _, err := tx.Exec(archiveImageTableSQL); err != nil {
+				return fmt.Errorf("v5 legacy画像table作成エラー: %w", err)
+			}
+			if _, err := tx.Exec(`INSERT INTO transaction_image_archive (id, transaction_id, filename, data, mime_type, created_at)
+				SELECT id, transaction_id, filename, data, mime_type, created_at FROM transaction_image_archive_v4`); err != nil {
+				return fmt.Errorf("v4 legacy画像lossless移行エラー: %w", err)
+			}
+			if _, err := tx.Exec(`DROP TABLE transaction_image_archive_v4`); err != nil {
+				return fmt.Errorf("v4 legacy画像table削除エラー: %w", err)
+			}
 		}
 	}
 
@@ -347,15 +376,7 @@ func createTablesOn(target *sql.DB) error {
 			amount INTEGER NOT NULL CHECK(amount > %d),
 			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
 		)`, validation.MaxTransactionAmount),
-		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS transaction_image_archive (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			transaction_id INTEGER NOT NULL,
-			filename TEXT NOT NULL,
-			data BLOB NOT NULL CHECK(length(data) BETWEEN 1 AND %d),
-			mime_type TEXT NOT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
-		)`, models.MaxImageBytes),
+		archiveImageTableSQL,
 		// タグテーブル（Agent.md §6.6: 3階層タグシステム）
 		`CREATE TABLE IF NOT EXISTS tags (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -458,8 +479,12 @@ func createTablesOn(target *sql.DB) error {
 			END`,
 		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS trg_transaction_image_archive_quota_insert
 			BEFORE INSERT ON transaction_image_archive
-			WHEN length(NEW.data) <= 0
-				OR length(NEW.data) > %d
+			WHEN length(NEW.data) > %d
+				OR length(CAST(NEW.filename AS BLOB)) > %d
+				OR length(CAST(NEW.mime_type AS BLOB)) > %d
+				OR ((SELECT COUNT(*) FROM transaction_images WHERE transaction_id = NEW.transaction_id)
+					+ (SELECT COUNT(*) FROM transaction_image_archive WHERE transaction_id = NEW.transaction_id)) >= %d
+				OR (SELECT COUNT(*) FROM transaction_image_archive) >= %d
 				OR COALESCE((
 					SELECT SUM(bytes) FROM (
 						SELECT length(ti.data) AS bytes FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id
@@ -475,7 +500,9 @@ func createTablesOn(target *sql.DB) error {
 				)), 0) + length(NEW.data) > %d
 			BEGIN
 				SELECT RAISE(ABORT, 'archive image storage quota exceeded');
-			END`, models.MaxImageBytes, models.MaxImageBytesPerAccount, models.MaxImageBytesDatabase),
+			END`, models.MaxArchivedImageBytes, models.MaxArchivedImageMetadataBytes, models.MaxArchivedImageMetadataBytes,
+			models.MaxArchivedImagesPerTransaction, models.MaxArchivedImagesDatabase,
+			models.MaxImageBytesPerAccount, models.MaxImageBytesDatabase),
 		`CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_txid ON transaction_tags(transaction_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_tagid ON transaction_tags(tag_id)`,
@@ -501,6 +528,19 @@ func createTablesOn(target *sql.DB) error {
 		for _, stmt := range statements {
 			if _, err := tx.Exec(stmt); err != nil {
 				return fmt.Errorf("SQL実行エラー (%s): %w", stmt[:50], err)
+			}
+		}
+		if version < 5 {
+			// Some pre-v5 databases were created before the shared amount trigger
+			// and may contain positive int64 amounts above the current write limit.
+			// Capture the exact value before replacing it with a constrained
+			// surrogate; all service reads use the sidecar as the effective amount.
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO transaction_archive_amounts (transaction_id, amount)
+				SELECT id, amount FROM transactions WHERE amount > ?`, validation.MaxTransactionAmount); err != nil {
+				return fmt.Errorf("legacy取引金額archive移行エラー: %w", err)
+			}
+			if _, err := tx.Exec(`UPDATE transactions SET amount = ? WHERE amount > ?`, validation.MaxTransactionAmount, validation.MaxTransactionAmount); err != nil {
+				return fmt.Errorf("legacy取引金額surrogate移行エラー: %w", err)
 			}
 		}
 		// v2 and earlier databases have no marker column. Add it atomically,
