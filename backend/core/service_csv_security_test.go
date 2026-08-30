@@ -78,7 +78,8 @@ func TestBackupAndImportCSVV2PreservesEscapedTextExactly(t *testing.T) {
 		}
 	}
 
-	if _, err := ImportCSV("\ufeff"+content, "replace"); err != nil {
+	setupCoreTestDB(t)
+	if _, err := ImportCSV("\ufeff"+content, "append"); err != nil {
 		t.Fatalf("ImportCSV v2: %v", err)
 	}
 	waitForSnapshotCount(t, 1)
@@ -106,7 +107,8 @@ func TestBackupAndImportCSVV2PreservesHistoricalTextOutsideNewWriteLimits(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ImportCSV(content, "replace"); err != nil {
+	setupCoreTestDB(t)
+	if _, err := ImportCSV(content, "append"); err != nil {
 		t.Fatalf("historical v2 restore: %v", err)
 	}
 	var gotAccount, gotItem, gotMemo string
@@ -123,7 +125,7 @@ func TestImportCSVV2RejectsUnsafeHistoricalText(t *testing.T) {
 		setupCoreTestDB(t)
 		content := "account,date,item,type,amount,memo,omni_money_csv_version\n" +
 			"cash,2026-01-01,item,expense,1," + unsafe + ",2\n"
-		if _, err := ImportCSV(content, "replace"); err == nil {
+		if _, err := ImportCSV(content, "append"); err == nil {
 			t.Fatalf("unsafe historical text was accepted: %q", unsafe)
 		}
 	}
@@ -135,7 +137,7 @@ func TestImportCSVV2RejectsUnknownVersionAndUnescapedFormula(t *testing.T) {
 		"account,date,item,type,amount,memo,omni_money_csv_version\n=cmd,2026-01-01,item,income,1,,2\n",
 	} {
 		setupCoreTestDB(t)
-		if _, err := ImportCSV(content, "replace"); err == nil {
+		if _, err := ImportCSV(content, "append"); err == nil {
 			t.Fatalf("unsafe v2 CSV was accepted: %q", content)
 		}
 	}
@@ -144,7 +146,7 @@ func TestImportCSVV2RejectsUnknownVersionAndUnescapedFormula(t *testing.T) {
 func TestLegacyCSVDoesNotDecodeLeadingApostrophe(t *testing.T) {
 	setupCoreTestDB(t)
 	content := "account,date,item,type,amount,memo\n'cash,2026-01-01,'item,income,1,'memo\n"
-	if _, err := ImportCSV(content, "replace"); err != nil {
+	if _, err := ImportCSV(content, "append"); err != nil {
 		t.Fatal(err)
 	}
 	waitForSnapshotCount(t, 1)

@@ -209,7 +209,39 @@ func TestCSVV3RoundTripPreservesExtendedLedgerDataAndRemapsIDs(t *testing.T) {
 	// Leave a row behind so SQLite's AUTOINCREMENT sequence differs from the
 	// source. Replace must remap every relationship instead of passing only
 	// because two empty databases happen to allocate identical IDs.
-	if _, err := target.DB().Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES ('old', '2020-01-01', 'preexisting', 'income', 1, 1, 'old memo')`); err != nil {
+	oldResult, err := target.DB().Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES ('old-card', '2020-01-01', 'preexisting', 'income', 1, 1, 'old memo')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldTransactionID, err := oldResult.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondOld, err := targetService.AddTransaction(models.TransactionRequest{
+		Account: "old-bank", Date: "2020-01-02", Item: "old-link", Type: "expense", Amount: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldTag, err := targetService.CreateTag("obsolete", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := targetService.AddTransactionTags(oldTransactionID, []int64{oldTag.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := targetService.SaveCreditCardSettings([]string{"old-card"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := targetService.SaveBankAccountSettings([]string{"old-bank"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := targetService.AddTransactionLink(oldTransactionID, secondOld.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := targetService.AddTransactionImage(oldTransactionID, models.TransactionImageRequest{
+		Filename: "obsolete.png", MimeType: "image/png", Data: base64.StdEncoding.EncodeToString(encodePNG(t)),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := targetService.ImportCSVReaderContext(context.Background(), strings.NewReader(content), "replace"); err != nil {

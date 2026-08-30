@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,8 +132,28 @@ func TestProductionServerCSVStaysInsideAuthenticatedVault(t *testing.T) {
 	assertServerCSVAccounts(t, serveServerCSVRequest(t, handler, sessionA, http.MethodGet, "/api/backup_csv", nil), "only-admin-a")
 	assertServerCSVAccounts(t, serveServerCSVRequest(t, handler, sessionB, http.MethodGet, "/api/backup_csv", nil), "only-user-b")
 
-	importDocument := "id,account,date,item,type,amount,balance,memo,omni_money_csv_version\n" +
-		"1,imported-only-admin-a,2026-08-28,boundary,income,700,700,isolated,2\n"
+	// Full-ledger replacement is intentionally exercised with v3. Legacy/v2
+	// replace is rejected because those formats cannot describe extension data.
+	importDocumentBuilder := &strings.Builder{}
+	importWriter := csv.NewWriter(importDocumentBuilder)
+	if err := importWriter.Write([]string{
+		"omni_money_csv_version", "record_type", "id", "transaction_id", "parent_id", "child_id", "tag_id",
+		"account", "date", "item", "type", "amount", "balance", "memo", "filename", "mime_type",
+		"data_base64", "tag_name", "tag_parent_id", "tag_level", "setting_key", "setting_value", "created_at",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := importWriter.Write([]string{
+		"3", "transaction", "1", "", "", "", "", "imported-only-admin-a", "2026-08-28", "boundary",
+		"income", "700", "700", "isolated", "", "", "", "", "", "", "", "", "",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	importWriter.Flush()
+	if err := importWriter.Error(); err != nil {
+		t.Fatal(err)
+	}
+	importDocument := importDocumentBuilder.String()
 	importBody, err := json.Marshal(map[string]string{"content": importDocument, "mode": "replace"})
 	if err != nil {
 		t.Fatal(err)

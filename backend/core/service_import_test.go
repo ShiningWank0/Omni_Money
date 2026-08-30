@@ -14,7 +14,7 @@ func TestImportCSVAcceptsLegacyBackupFormat(t *testing.T) {
 102,cash,2026-01-02,食費,expense,300,123456
 `
 
-	imported, err := ImportCSV(legacyCSV, "replace")
+	imported, err := ImportCSV(legacyCSV, "append")
 	if err != nil {
 		t.Fatalf("ImportCSV failed: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestImportCSVAcceptsLegacyDateOnlyAndDateTime(t *testing.T) {
 2,cash,2026-01-02 12:34:56,食費,expense,300,700
 `
 
-	imported, err := ImportCSV(legacyCSV, "replace")
+	imported, err := ImportCSV(legacyCSV, "append")
 	if err != nil {
 		t.Fatalf("ImportCSV failed: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestImportCSVRejectsInvalidRowsWithRowNumber(t *testing.T) {
 				"cash,2026-01-01,給与,income,1000\n" +
 				tt.invalidRecord + "\n"
 
-			imported, err := ImportCSV(content, "replace")
+			imported, err := ImportCSV(content, "append")
 			if err == nil {
 				t.Fatal("ImportCSV succeeded, want error")
 			}
@@ -111,5 +111,59 @@ func TestImportCSVRejectsInvalidRowsWithRowNumber(t *testing.T) {
 				t.Fatalf("original transaction count = %d, want 1 after rollback", count)
 			}
 		})
+	}
+}
+
+func TestImportCSVRejectsLegacyReplaceWithoutDatabaseChanges(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "v1",
+			content: "id,account,date,item,type,amount,balance\n101,cash,2026-01-01,給与,income,1000,1000\n",
+		},
+		{
+			name:    "v2",
+			content: "account,date,item,type,amount,balance,omni_money_csv_version\ncash,2026-01-01,給与,income,1000,1000,2\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupCoreTestDB(t)
+			originalID := insertTestTransaction(t, "bank", "2025-12-31", "繰越", "income", 500, 500)
+
+			imported, err := ImportCSV(tt.content, "replace")
+			if err == nil || !strings.Contains(err.Error(), "CSV v3") {
+				t.Fatalf("ImportCSV error = %v, want legacy replace rejection", err)
+			}
+			if imported != 0 {
+				t.Fatalf("imported = %d, want 0", imported)
+			}
+			var count int
+			if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transactions WHERE id = ?", originalID).Scan(&count); err != nil {
+				t.Fatalf("transaction count query failed: %v", err)
+			}
+			if count != 1 {
+				t.Fatalf("original transaction count = %d, want 1", count)
+			}
+		})
+	}
+}
+
+func TestImportCSVReaderRejectsLegacyReplaceWithoutDatabaseChanges(t *testing.T) {
+	setupCoreTestDB(t)
+	originalID := insertTestTransaction(t, "bank", "2025-12-31", "繰越", "income", 500, 500)
+	service := &Service{db: database.GetDB(), legacy: true}
+	legacyCSV := "account,date,item,type,amount\ncash,2026-01-01,給与,income,1000\n"
+	if imported, err := service.ImportCSVReaderContext(nil, strings.NewReader(legacyCSV), "replace"); err == nil || !strings.Contains(err.Error(), "CSV v3") {
+		t.Fatalf("ImportCSVReaderContext result = %d, %v; want legacy replace rejection", imported, err)
+	}
+	var count int
+	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transactions WHERE id = ?", originalID).Scan(&count); err != nil {
+		t.Fatalf("transaction count query failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("original transaction count = %d, want 1", count)
 	}
 }

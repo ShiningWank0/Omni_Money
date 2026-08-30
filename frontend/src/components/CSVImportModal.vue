@@ -27,14 +27,16 @@
           </label>
           <label class="radio-label">
             <input type="radio" v-model="csvImportMode" value="replace" :disabled="csvImporting" @change="onImportModeChanged">
-            <span>置換 (既存データを削除)</span>
+            <span>置換 (CSV v3のみ)</span>
           </label>
         </div>
       </div>
 
       <div v-if="csvImportMode === 'replace'" class="replace-warning" role="alert">
         <strong>破壊的操作です。</strong>
-        置換を実行すると、現在の取引・画像・タグ・取引タグ・取引リンクと、allowlist対象のledger設定
+        置換はCSV v3でのみ利用できます。v1/v2（旧形式）のreplaceは安全のため拒否されます。
+        旧形式はappendで追加するか、完全バックアップからCSV v3を使用してください。
+        CSV v3の置換を実行すると、現在の取引・画像・タグ・取引タグ・取引リンクと、allowlist対象のledger設定
         （credit_card_items / bank_account_items）を必ず削除します。CSVに設定行があればその値で置き換え、
         なければ未設定のままになります。AI連携の重複排除・日次利用量記録もリセットされます。
         その他の設定は保持され、CSVにない取引関連データは復元されません。
@@ -48,7 +50,7 @@
       <div class="format-info">
         <div style="font-weight: bold; margin-bottom: 8px; font-size: 0.95em; color: #333;">CSVファイル形式</div>
         <div>
-          <div style="margin-bottom: 4px;"><strong>旧形式:</strong> account, date, item, type, amount（v1/v2も読み込み可能）</div>
+          <div style="margin-bottom: 4px;"><strong>旧形式:</strong> account, date, item, type, amount（v1/v2はappendのみ。replaceはCSV v3のみ）</div>
           <div style="margin-bottom: 4px;"><strong>完全バックアップ:</strong> v3（取引・画像・タグ・タグ紐付け・取引リンク・ledger設定）</div>
           <div style="margin-left: 12px;">
             <div>• <strong>account:</strong> 資金項目名</div>

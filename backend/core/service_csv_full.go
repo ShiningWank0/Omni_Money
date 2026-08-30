@@ -77,6 +77,8 @@ const (
 	MaxCSVTempBudgetBytes int64 = 2 * MaxCSVImportWireBytes
 )
 
+const legacyCSVReplaceError = "legacy/v1/v2 CSVではreplaceを利用できません。完全置換にはCSV v3を使用してください"
+
 // Imports and exports share one process-wide heavy operation slot. Both can
 // hold large database/blob buffers and a read transaction at the same time.
 var csvHeavySlots = make(chan struct{}, 1)
@@ -1750,8 +1752,11 @@ func (s *Service) ImportCSVReaderContext(ctx context.Context, input io.Reader, m
 		defer parsed.cleanup()
 		return s.importCSVV3Parsed(ctx, parsed, mode)
 	}
-	// Legacy/v2 remains source-compatible but now parses from the bounded
-	// reader directly. Its validated rows are inserted in one DB transaction;
+	if mode == "replace" {
+		return 0, fmt.Errorf("%s", legacyCSVReplaceError)
+	}
+	// Legacy/v2 remains source-compatible for append imports. Full replace is
+	// intentionally v3-only because v1/v2 cannot describe extension data;
 	// the raw archive is never materialized as a second 64 MiB string.
 	return s.importCSVLegacyReaderContext(ctx, stream, mode)
 }
@@ -1765,13 +1770,16 @@ type csvLegacyImportRow struct {
 	memo    string
 }
 
-// importCSVLegacyReaderContext is the bounded compatibility path for native
-// files and HTTP uploads. It parses rows as they arrive and retains only the
-// validated columns needed for the DB transaction; the raw 64 MiB archive is
-// never copied into a second string.
+// importCSVLegacyReaderContext is the bounded append-only compatibility path
+// for native files and HTTP uploads. It parses rows as they arrive and
+// retains only the validated columns needed for the DB transaction; the raw
+// 64 MiB archive is never copied into a second string.
 func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Reader, mode string) (int, error) {
 	if mode != "append" && mode != "replace" {
 		return 0, fmt.Errorf("インポートモードはappendまたはreplaceで指定してください")
+	}
+	if mode == "replace" {
+		return 0, fmt.Errorf("%s", legacyCSVReplaceError)
 	}
 	guarded := &csvFieldLimitReader{ctx: ctx, input: input, maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
 	limited := &io.LimitedReader{R: guarded, N: MaxCSVStringImportBytes + 1}
@@ -1943,6 +1951,9 @@ func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Rea
 }
 
 func (s *Service) importCSVLegacyRowsContext(ctx context.Context, rows []csvLegacyImportRow, mode string) (int, error) {
+	if mode == "replace" {
+		return 0, fmt.Errorf("%s", legacyCSVReplaceError)
+	}
 	db, err := s.database()
 	if err != nil {
 		return 0, err
@@ -1952,11 +1963,6 @@ func (s *Service) importCSVLegacyRowsContext(ctx context.Context, rows []csvLega
 		return 0, fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
 	defer tx.Rollback()
-	if mode == "replace" {
-		if _, err := tx.ExecContext(ctx, "DELETE FROM transactions"); err != nil {
-			return 0, fmt.Errorf("既存データ削除エラー: %w", err)
-		}
-	}
 	stmt, err := tx.PrepareContext(ctx, "INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, ?)")
 	if err != nil {
 		return 0, fmt.Errorf("プリペアドステートメントエラー: %w", err)

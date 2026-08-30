@@ -1041,8 +1041,8 @@ func getDownloadsDir() (string, error) {
 }
 
 // ImportCSV はCSVコンテンツからデータをインポートする。
-// replaceモードでは既存データのDELETEとINSERTをトランザクションで包み、
-// 途中失敗時にデータが消失しないようにする。
+// 完全なreplaceは関連データを表現できるCSV v3のみで受け付ける。
+// v1/v2は既存クライアント互換のappend専用として扱う。
 func (s *Service) ImportCSV(content string, mode string) (int, error) {
 	return s.ImportCSVContext(context.Background(), content, mode)
 }
@@ -1069,6 +1069,9 @@ func (s *Service) importCSV(content string, mode string) (int, error) {
 func (s *Service) importCSVContext(ctx context.Context, content string, mode string) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if mode != "append" && mode != "replace" {
+		return 0, fmt.Errorf("インポートモードはappendまたはreplaceで指定してください")
 	}
 	if int64(len(content)) > MaxCSVStringImportBytes {
 		return 0, fmt.Errorf("文字列CSV入力が上限%d bytesを超えました", MaxCSVStringImportBytes)
@@ -1097,6 +1100,12 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 			defer parsed.cleanup()
 			return s.importCSVV3Parsed(ctx, parsed, mode)
 		}
+	}
+	// Legacy/v1/v2 files cannot describe the extension data that a full
+	// replacement must remove. Reject before opening the database so a caller
+	// cannot get a partial or transaction-only replacement by format accident.
+	if mode == "replace" {
+		return 0, fmt.Errorf("%s", legacyCSVReplaceError)
 	}
 	db, err := s.database()
 	if err != nil {
@@ -1289,12 +1298,6 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 		return 0, fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
 	defer tx.Rollback()
-
-	if mode == "replace" {
-		if _, err := tx.ExecContext(ctx, "DELETE FROM transactions"); err != nil {
-			return 0, fmt.Errorf("既存データ削除エラー: %w", err)
-		}
-	}
 
 	stmt, err := tx.PrepareContext(ctx,
 		"INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, ?)")
