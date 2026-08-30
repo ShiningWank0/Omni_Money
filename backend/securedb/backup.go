@@ -30,22 +30,48 @@ func (o *Opener) Backup(ctx context.Context, source *sql.DB, snapshotPath string
 	if err != nil {
 		return err
 	}
+	return o.backupToPlaceholder(ctx, source, snapshotPath, placeholder, true)
+}
+
+// BackupToPlaceholder populates an identity-bound, already-created private
+// placeholder. This lets callers create the destination with openat/os.Root
+// beneath a locked directory while SQLite continues to open it in mode=rw
+// (never create) through its pathname API.
+func (o *Opener) BackupToPlaceholder(ctx context.Context, source *sql.DB, snapshotPath string, placeholder *os.File) error {
+	if source == nil {
+		return fmt.Errorf("source database is not open")
+	}
+	if placeholder == nil {
+		return fmt.Errorf("snapshot placeholder is not open")
+	}
+	if err := o.CheckIntegrity(ctx, source); err != nil {
+		return err
+	}
+	return o.backupToPlaceholder(ctx, source, snapshotPath, placeholder, false)
+}
+
+func (o *Opener) backupToPlaceholder(ctx context.Context, source *sql.DB, snapshotPath string, placeholder *os.File, removePathOnFailure bool) (err error) {
+	removeFailedPath := func() {
+		if removePathOnFailure {
+			_ = os.Remove(snapshotPath)
+		}
+	}
 	if err := fileprivacy.Harden(placeholder); err != nil {
 		_ = placeholder.Close()
-		_ = os.Remove(snapshotPath)
+		removeFailedPath()
 		return err
 	}
 	placeholderInfo, err := placeholder.Stat()
 	if err != nil {
 		_ = placeholder.Close()
-		_ = os.Remove(snapshotPath)
+		removeFailedPath()
 		return err
 	}
 	succeeded := false
 	defer func() {
 		_ = placeholder.Close()
 		if !succeeded {
-			_ = os.Remove(snapshotPath)
+			removeFailedPath()
 		}
 	}()
 

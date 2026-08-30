@@ -4,6 +4,7 @@ package fileprivacy
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"unsafe"
 
@@ -36,7 +37,7 @@ func TestCreateExclusivePrivateFileDACL(t *testing.T) {
 	descriptor, err := windows.GetSecurityInfo(
 		windows.Handle(file.Fd()),
 		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -58,6 +59,13 @@ func TestCreateExclusivePrivateFileDACL(t *testing.T) {
 	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatal(err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner == nil || !owner.Equals(currentUser.User.Sid) {
+		t.Fatalf("private file owner = %v, want current account %s", owner, currentUser.User.Sid.String())
 	}
 	system, err := windows.StringToSid("S-1-5-18")
 	if err != nil {
@@ -91,5 +99,33 @@ func TestCreateExclusivePrivateFileDACL(t *testing.T) {
 		if !present {
 			t.Fatalf("private file DACL does not grant required principal %s", sid)
 		}
+	}
+}
+
+func TestWindowsHardenExistingFileAndDirectorySetsCurrentOwner(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "existing")
+	if err := os.Mkdir(directory, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := HardenDirectory(directory); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateDirectory(directory); err != nil {
+		t.Fatalf("hardened existing directory failed validation: %v", err)
+	}
+	path := filepath.Join(directory, "ledger.db")
+	if err := os.WriteFile(path, nil, 0666); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := Harden(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePrivateFile(file); err != nil {
+		t.Fatalf("hardened existing file failed validation: %v", err)
 	}
 }

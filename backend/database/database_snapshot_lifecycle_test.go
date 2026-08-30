@@ -406,22 +406,22 @@ func TestCreateSnapshotPruneManifestIsExclusiveAcrossConcurrentWriters(t *testin
 
 func TestSnapshotTransactionLockSerializesConcurrentOwners(t *testing.T) {
 	dir := t.TempDir()
-	firstRelease, err := acquireSnapshotTransactionLock(context.Background(), dir)
+	firstLock, err := acquireSnapshotTransactionLock(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	if _, err := acquireSnapshotTransactionLock(ctx, dir); !errors.Is(err, context.DeadlineExceeded) {
-		firstRelease()
+		firstLock.release()
 		t.Fatalf("second transaction lock error=%v, want deadline", err)
 	}
-	firstRelease()
-	secondRelease, err := acquireSnapshotTransactionLock(context.Background(), dir)
+	firstLock.release()
+	secondLock, err := acquireSnapshotTransactionLock(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("transaction lock was not released: %v", err)
 	}
-	secondRelease()
+	secondLock.release()
 }
 
 func TestSnapshotTransactionLockProcessHelper(t *testing.T) {
@@ -430,13 +430,41 @@ func TestSnapshotTransactionLockProcessHelper(t *testing.T) {
 	}
 	dir := os.Getenv("OMNI_TEST_SNAPSHOT_LOCK_DIR")
 	ready := os.Getenv("OMNI_TEST_SNAPSHOT_LOCK_READY")
-	release, err := acquireSnapshotTransactionLock(context.Background(), dir)
+	lock, err := acquireSnapshotTransactionLock(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer release()
+	defer lock.release()
 	if err := os.WriteFile(ready, []byte("ready"), 0600); err != nil {
 		t.Fatal(err)
+	}
+	continuePath := os.Getenv("OMNI_TEST_SNAPSHOT_LOCK_CONTINUE")
+	resultPath := os.Getenv("OMNI_TEST_SNAPSHOT_LOCK_RESULT")
+	if continuePath != "" {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(continuePath); err == nil {
+				break
+			} else if !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		boundFile, _, err := lock.createTemporary(".omni-money-boundary-probe-", ".tmp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := boundFile.Close(); err != nil {
+			t.Fatal(err)
+		}
+		result := "accepted"
+		if err := lock.verify(); err != nil {
+			result = "rejected"
+		}
+		if err := os.WriteFile(resultPath, []byte(result), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return
 	}
 	time.Sleep(time.Hour)
 }
@@ -478,9 +506,9 @@ func TestSnapshotTransactionLockSurvivesMarkerReplacementAcrossProcesses(t *test
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if release, err := acquireSnapshotTransactionLock(ctx, dir); !errors.Is(err, context.DeadlineExceeded) {
-		if release != nil {
-			release()
+	if lock, err := acquireSnapshotTransactionLock(ctx, dir); !errors.Is(err, context.DeadlineExceeded) {
+		if lock != nil {
+			lock.release()
 		}
 		t.Fatalf("replacement marker created a second lock domain: %v", err)
 	}
@@ -490,11 +518,85 @@ func TestSnapshotTransactionLockSurvivesMarkerReplacementAcrossProcesses(t *test
 	_ = command.Wait()
 	waited = true
 
-	release, err := acquireSnapshotTransactionLock(context.Background(), dir)
+	lock, err := acquireSnapshotTransactionLock(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("directory lock was not released after process death: %v", err)
 	}
-	release()
+	lock.release()
+}
+
+func TestSnapshotTransactionRejectsDirectorySubstitutionAcrossProcesses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix directory substitution regression")
+	}
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "snapshots")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	control := t.TempDir()
+	ready := filepath.Join(control, "ready")
+	continuePath := filepath.Join(control, "continue")
+	resultPath := filepath.Join(control, "result")
+	command := exec.Command(os.Args[0], "-test.run=^TestSnapshotTransactionLockProcessHelper$", "-test.count=1")
+	command.Env = append(os.Environ(),
+		"OMNI_TEST_SNAPSHOT_LOCK_HELPER=1",
+		"OMNI_TEST_SNAPSHOT_LOCK_DIR="+dir,
+		"OMNI_TEST_SNAPSHOT_LOCK_READY="+ready,
+		"OMNI_TEST_SNAPSHOT_LOCK_CONTINUE="+continuePath,
+		"OMNI_TEST_SNAPSHOT_LOCK_RESULT="+resultPath,
+	)
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if command.ProcessState == nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	}()
+	waitForSnapshotTestSignal(t, ready)
+	moved := filepath.Join(parent, "snapshots-moved")
+	if err := os.Rename(dir, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(continuePath, []byte("continue"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotTestSignal(t, resultPath)
+	if err := command.Wait(); err != nil {
+		t.Fatalf("substitution helper failed: %v", err)
+	}
+	result, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result) != "rejected" {
+		t.Fatalf("directory substitution result=%q, want rejected", result)
+	}
+	replacementEntries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range replacementEntries {
+		if strings.HasPrefix(entry.Name(), ".omni-money-boundary-probe-") {
+			t.Fatalf("substituted D2 received root-bound transaction write: %s", entry.Name())
+		}
+	}
+	movedEntries, err := os.ReadDir(moved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundBoundWrite := false
+	for _, entry := range movedEntries {
+		foundBoundWrite = foundBoundWrite || strings.HasPrefix(entry.Name(), ".omni-money-boundary-probe-")
+	}
+	if !foundBoundWrite {
+		t.Fatal("locked D1 inode did not receive the root-relative transaction write")
+	}
 }
 
 func waitForSnapshotTestSignal(t *testing.T, path string) {

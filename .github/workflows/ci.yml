@@ -254,8 +254,9 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: |
-          go test -count=1 -run '^TestCreateExclusivePrivateFileDACL$' ./backend/fileprivacy
+          go test -count=1 ./backend/fileprivacy
           go test -count=1 -run '^TestWindows' ./backend/desktopaccount/platform_shared.go ./backend/desktopaccount/platform_windows.go ./backend/desktopaccount/platform_windows_test.go
+          go test -count=1 -run '^TestWindowsPreparePrivateDatabaseFileSetsCurrentOwner$' ./backend/database/private_database_file.go ./backend/database/private_file_windows.go ./backend/database/private_database_file_windows_test.go
           go test -count=1 -run '^TestPrepareDesktopSQLCipherSelfTestStorageIsPrivateBeforeOpen$' ./desktop_sqlcipher_storage.go ./desktop_sqlcipher_selftest_test.go
 
   docker:
