@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"omni_money/backend/fileprivacy"
 	"omni_money/backend/models"
@@ -819,7 +821,63 @@ func validateLedgerSchemaAfterMigration(target schemaQueryer, strict bool) error
 }
 
 func canonicalSQL(value string) string {
-	return strings.Join(strings.Fields(strings.ToLower(value)), " ")
+	// SQLite preserves the contents of quoted literals in sqlite_master.sql.
+	// Normalize keywords and whitespace only outside quoted tokens; lowercasing
+	// a literal would make semantically different CHECK/default expressions
+	// share a fingerprint.
+	var out strings.Builder
+	spacePending := false
+	var quote byte
+	for index := 0; index < len(value); {
+		current := value[index]
+		if quote != 0 {
+			out.WriteByte(current)
+			index++
+			if quote == '[' {
+				if current == ']' {
+					if index < len(value) && value[index] == ']' {
+						out.WriteByte(value[index])
+						index++
+					} else {
+						quote = 0
+					}
+				}
+				continue
+			}
+			if current == quote {
+				if index < len(value) && value[index] == quote {
+					out.WriteByte(value[index])
+					index++
+				} else {
+					quote = 0
+				}
+			}
+			continue
+		}
+		if current == '\'' || current == '"' || current == '`' || current == '[' {
+			if spacePending && out.Len() > 0 {
+				out.WriteByte(' ')
+			}
+			spacePending = false
+			out.WriteByte(current)
+			quote = current
+			index++
+			continue
+		}
+		runeValue, width := utf8.DecodeRuneInString(value[index:])
+		if unicode.IsSpace(runeValue) {
+			spacePending = true
+			index += width
+			continue
+		}
+		if spacePending && out.Len() > 0 {
+			out.WriteByte(' ')
+		}
+		spacePending = false
+		out.WriteRune(unicode.ToLower(runeValue))
+		index += width
+	}
+	return strings.TrimSpace(out.String())
 }
 
 // canonicalDDL removes only formatting which SQLite itself is free to add
@@ -828,6 +886,45 @@ func canonicalSQL(value string) string {
 // harmless-looking token such as "WHEN 0" or "OR 1".
 func canonicalDDL(value string) string {
 	value = canonicalSQL(value)
+	// Apply SQLite's punctuation formatting normalization only to unquoted
+	// regions. In particular, a comma or parenthesis inside a string literal
+	// must remain byte-for-byte part of that literal.
+	var out strings.Builder
+	start := 0
+	for index := 0; index < len(value); {
+		quote := value[index]
+		if quote != '\'' && quote != '"' && quote != '`' && quote != '[' {
+			index++
+			continue
+		}
+		out.WriteString(canonicalDDLPunctuation(value[start:index]))
+		end := index + 1
+		for end < len(value) {
+			if quote == '[' {
+				if value[end] != ']' {
+					end++
+					continue
+				}
+			} else if value[end] != quote {
+				end++
+				continue
+			}
+			if end+1 < len(value) && value[end+1] == value[end] {
+				end += 2
+				continue
+			}
+			end++
+			break
+		}
+		out.WriteString(value[index:end])
+		index = end
+		start = end
+	}
+	out.WriteString(canonicalDDLPunctuation(value[start:]))
+	return out.String()
+}
+
+func canonicalDDLPunctuation(value string) string {
 	value = strings.ReplaceAll(value, "( ", "(")
 	value = strings.ReplaceAll(value, " )", ")")
 	value = strings.ReplaceAll(value, " ,", ",")
@@ -1055,6 +1152,34 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 		{"index", "idx_ai_daily_usage_credential_date"},
 		{"trigger", "trg_transaction_images_quota_insert"}, {"trigger", "trg_transaction_images_immutable_update"},
 		{"trigger", "validate_transactions_amount_insert"}, {"trigger", "validate_transactions_amount_update"},
+	}
+	allowedPersistentObjects := make(map[string]struct{}, len(objects))
+	for _, object := range objects {
+		allowedPersistentObjects[object.typ+"\x00"+object.name] = struct{}{}
+	}
+	// Required-object checks below are not sufficient: an attacker could add
+	// a persistent trigger, index, or view that changes ledger behavior while
+	// retaining every required object. The complete current schema has an exact
+	// object family, excluding only SQLite's internal autoindexes.
+	persistentRows, err := target.Query(`
+		SELECT type, name FROM sqlite_master
+		WHERE name NOT LIKE 'sqlite_%' AND type IN ('index', 'trigger', 'view')`)
+	if err != nil {
+		return err
+	}
+	for persistentRows.Next() {
+		var typ, name string
+		if err := persistentRows.Scan(&typ, &name); err != nil {
+			_ = persistentRows.Close()
+			return err
+		}
+		if _, ok := allowedPersistentObjects[typ+"\x00"+name]; !ok {
+			_ = persistentRows.Close()
+			return fmt.Errorf("unexpected ledger persistent object %s %s", typ, name)
+		}
+	}
+	if err := persistentRows.Close(); err != nil {
+		return err
 	}
 	for _, object := range objects {
 		var count int
@@ -1425,8 +1550,8 @@ func validateRootTagIndex(target schemaQueryer) error {
 	if objectType != "index" || tableName != "tags" || !definition.Valid {
 		return fmt.Errorf("rootタグ一意indexの対象が不正です")
 	}
-	canonicalSQL := strings.Join(strings.Fields(strings.ToLower(definition.String)), " ")
-	if canonicalSQL != "create unique index idx_tags_root_name_unique on tags(name) where parent_id is null and legacy_duplicate = 0" {
+	canonicalDefinition := canonicalDDL(definition.String)
+	if canonicalDefinition != canonicalDDL("create unique index idx_tags_root_name_unique on tags(name) where parent_id is null and legacy_duplicate = 0") {
 		return fmt.Errorf("rootタグ一意indexの定義が不正です: %q", definition.String)
 	}
 
@@ -2016,6 +2141,10 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if err := assertOpenFileAtPath(candidateFile, candidatePath); err != nil {
 		return fmt.Errorf("復元候補identity再検証エラー: %w", err)
 	}
+	candidateIdentity, err := candidateFile.Stat()
+	if err != nil {
+		return fmt.Errorf("復元候補identity取得エラー: %w", err)
+	}
 	if err := candidateFile.Close(); err != nil {
 		return fmt.Errorf("復元候補のクローズエラー: %w", err)
 	}
@@ -2052,13 +2181,18 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if err := syncFileAndDirectory(backupPath, dir); err != nil {
 		return fmt.Errorf("現行DB退避のfsyncエラー: %w", err)
 	}
-	oldDigest, err := digestDatabaseFile(backupPath)
+	backupIdentity, oldDigest, err := digestSnapshotPath(backupPath)
 	if err != nil {
 		return fmt.Errorf("現行DB退避digest検証エラー: %w", err)
 	}
-	newDigest, err := digestDatabaseFile(candidatePath)
-	if err != nil {
-		return fmt.Errorf("復元候補digest検証エラー: %w", err)
+	// Re-prove both generated names from stable descriptor identity/content
+	// immediately before publication. The manifest must never be built from a
+	// pathname that a same-account process could have replaced after validation.
+	if err := assertPathDigest(candidatePath, candidateIdentity, candidateDigest); err != nil {
+		return fmt.Errorf("復元候補digest再検証エラー: %w", err)
+	}
+	if err := assertPathDigest(backupPath, backupIdentity, oldDigest); err != nil {
+		return fmt.Errorf("現行DB退避digest再検証エラー: %w", err)
 	}
 	manifest := restoreManifest{
 		Version:   restoreManifestVersion,
@@ -2067,10 +2201,20 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 		Backup:    filepath.Base(backupPath),
 		Candidate: filepath.Base(candidatePath),
 		OldDigest: oldDigest,
-		NewDigest: newDigest,
+		NewDigest: candidateDigest,
 	}
 	if err := writeRestoreManifest(currentPath, manifest); err != nil {
 		return fmt.Errorf("restore intent journal作成エラー: %w", err)
+	}
+	// Keep the descriptor-derived identities bound through the final
+	// publication boundary as well as the manifest write. If either generated
+	// pathname was exchanged after the manifest was prepared, leave the old
+	// live file in place and let startup recovery handle the durable journal.
+	if err := assertPathDigest(candidatePath, candidateIdentity, candidateDigest); err != nil {
+		return fmt.Errorf("復元候補配置前のidentity/digest検証エラー: %w", err)
+	}
+	if err := assertPathDigest(backupPath, backupIdentity, oldDigest); err != nil {
+		return fmt.Errorf("現行DB退避配置前のidentity/digest検証エラー: %w", err)
 	}
 
 	// Replace the live pathname in one filesystem operation. POSIX rename is
@@ -2085,18 +2229,18 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	}
 	removeCandidate = false
 	if err := syncDirectory(dir); err != nil {
-		return errors.Join(fmt.Errorf("復元配置のfsyncエラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+		return errors.Join(fmt.Errorf("復元配置のfsyncエラー: %w", err), rollbackRestoreFilesExpected(currentPath, backupPath, candidatePath, i, oldDigest))
 	}
 	installedDigest, err := digestDatabaseFile(currentPath)
 	if err != nil || !strings.EqualFold(candidateDigest, installedDigest) {
 		if err == nil {
 			err = errors.New("復元配置DBが検証済み候補と一致しません")
 		}
-		return errors.Join(fmt.Errorf("復元配置identity/digest検証エラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+		return errors.Join(fmt.Errorf("復元配置identity/digest検証エラー: %w", err), rollbackRestoreFilesExpected(currentPath, backupPath, candidatePath, i, oldDigest))
 	}
 	manifest.Phase = "swapped"
 	if err := writeRestoreManifest(currentPath, manifest); err != nil {
-		return errors.Join(fmt.Errorf("restore intent journal更新エラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+		return errors.Join(fmt.Errorf("restore intent journal更新エラー: %w", err), rollbackRestoreFilesExpected(currentPath, backupPath, candidatePath, i, oldDigest))
 	}
 
 	newDB, err := i.opener.Open(context.Background(), currentPath, securedb.Writable)
@@ -2107,11 +2251,11 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 		if newDB != nil {
 			_ = newDB.Close()
 		}
-		return errors.Join(fmt.Errorf("復元後DB検証エラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+		return errors.Join(fmt.Errorf("復元後DB検証エラー: %w", err), rollbackRestoreFilesExpected(currentPath, backupPath, candidatePath, i, oldDigest))
 	}
 	if err := checkpointAndClose(newDB, currentPath); err != nil {
 		_ = newDB.Close()
-		return errors.Join(fmt.Errorf("復元後DB耐久化エラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+		return errors.Join(fmt.Errorf("復元後DB耐久化エラー: %w", err), rollbackRestoreFilesExpected(currentPath, backupPath, candidatePath, i, oldDigest))
 	}
 	// Reopen once more after checkpointing so i.db never references a handle
 	// whose pager state predates the final durable candidate.
@@ -2123,7 +2267,7 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 		if newDB != nil {
 			_ = newDB.Close()
 		}
-		return errors.Join(fmt.Errorf("復元後DB再検証エラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+		return errors.Join(fmt.Errorf("復元後DB再検証エラー: %w", err), rollbackRestoreFilesExpected(currentPath, backupPath, candidatePath, i, oldDigest))
 	}
 	i.db = newDB
 	if err := removeRestoreBackup(backupPath, dir); err != nil {
@@ -2897,6 +3041,44 @@ func digestDatabaseFile(path string) (string, error) {
 	return digestOpenFile(file)
 }
 
+// digestSnapshotPath returns the identity and digest observed from one
+// no-follow descriptor. Callers that publish or roll back the image retain the
+// identity and re-prove the pathname immediately before the atomic operation;
+// this avoids treating a pathname-only second read as the validated bytes.
+func digestSnapshotPath(path string) (os.FileInfo, string, error) {
+	file, err := openSnapshotFile(path)
+	if err != nil {
+		return nil, "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, "", err
+	}
+	if !validSnapshotFile(info) {
+		return nil, "", errors.New("snapshot path is not a private regular file")
+	}
+	digest, err := digestOpenFile(file)
+	if err != nil {
+		return nil, "", err
+	}
+	return info, digest, nil
+}
+
+func assertPathDigest(path string, expectedInfo os.FileInfo, expectedDigest string) error {
+	actualInfo, actualDigest, err := digestSnapshotPath(path)
+	if err != nil {
+		return err
+	}
+	if !sameSnapshotInfo(expectedInfo, actualInfo) {
+		return errors.New("snapshot pathname no longer names the validated descriptor")
+	}
+	if !strings.EqualFold(expectedDigest, actualDigest) {
+		return errors.New("snapshot pathname content no longer matches the validated descriptor")
+	}
+	return nil
+}
+
 func digestOpenFile(file *os.File) (string, error) {
 	if file == nil {
 		return "", errors.New("nil file for digest")
@@ -3328,6 +3510,16 @@ func syncFileAndDirectory(path, dir string) error {
 }
 
 func rollbackRestoreFiles(currentPath, backupPath, candidatePath string, instance *Instance) error {
+	return rollbackRestoreFilesExpected(currentPath, backupPath, candidatePath, instance, "")
+}
+
+// rollbackRestoreFilesExpected restores only the backup image whose digest was
+// captured before publication. A backup pathname is not trusted merely because
+// it still exists: a same-account writer may have exchanged it for another
+// valid database while the restore was validating the new image. If that
+// happens, fail closed and keep the instance detached instead of reopening the
+// wrong ledger.
+func rollbackRestoreFilesExpected(currentPath, backupPath, candidatePath string, instance *Instance, expectedBackupDigest string) error {
 	dir := filepath.Dir(currentPath)
 	var errs []error
 	// Never unlink currentPath: this rollback runs after the candidate has
@@ -3337,16 +3529,26 @@ func rollbackRestoreFiles(currentPath, backupPath, candidatePath string, instanc
 	if err := removeSQLiteSidecars(currentPath); err != nil {
 		errs = append(errs, fmt.Errorf("remove failed restore sidecars: %w", err))
 	}
-	if _, err := os.Lstat(backupPath); err == nil {
-		if err := replaceDatabaseFile(backupPath, currentPath, candidatePath); err != nil {
-			errs = append(errs, fmt.Errorf("restore backup atomic replace: %w", err))
+	if expectedBackupDigest != "" {
+		_, actualDigest, err := digestSnapshotPath(backupPath)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("verify restore backup identity: %w", err))
+		} else if !strings.EqualFold(expectedBackupDigest, actualDigest) {
+			errs = append(errs, errors.New("restore backup content no longer matches the prepared image"))
 		}
-	} else if os.IsNotExist(err) {
-		// Never turn a missing rollback image into a newly-created empty
-		// plaintext/SQLCipher database during recovery.
-		errs = append(errs, fmt.Errorf("restore backup is missing: %w", os.ErrNotExist))
-	} else {
-		errs = append(errs, fmt.Errorf("inspect restore backup: %w", err))
+	}
+	if len(errs) == 0 {
+		if _, err := os.Lstat(backupPath); err == nil {
+			if err := replaceDatabaseFile(backupPath, currentPath, candidatePath); err != nil {
+				errs = append(errs, fmt.Errorf("restore backup atomic replace: %w", err))
+			}
+		} else if os.IsNotExist(err) {
+			// Never turn a missing rollback image into a newly-created empty
+			// plaintext/SQLCipher database during recovery.
+			errs = append(errs, fmt.Errorf("restore backup is missing: %w", os.ErrNotExist))
+		} else {
+			errs = append(errs, fmt.Errorf("inspect restore backup: %w", err))
+		}
 	}
 	if err := syncDirectory(dir); err != nil {
 		errs = append(errs, fmt.Errorf("restore rollback directory sync: %w", err))
@@ -3359,6 +3561,19 @@ func rollbackRestoreFiles(currentPath, backupPath, candidatePath string, instanc
 	if instance != nil {
 		if err := instance.reopenAfterRestoreFailure(currentPath); err != nil {
 			errs = append(errs, fmt.Errorf("rollback reopen: %w", err))
+		} else if expectedBackupDigest != "" {
+			// The open itself is pathname-based. Re-check after opening and detach
+			// the instance if a concurrent exchange selected a different image.
+			if liveDigest, digestErr := digestDatabaseFile(currentPath); digestErr != nil || !strings.EqualFold(expectedBackupDigest, liveDigest) {
+				if instance.db != nil {
+					_ = instance.db.Close()
+				}
+				instance.db = nil
+				if digestErr == nil {
+					digestErr = errors.New("reopened rollback image does not match the prepared backup")
+				}
+				errs = append(errs, fmt.Errorf("rollback reopened image identity mismatch: %w", digestErr))
+			}
 		}
 	}
 	// On Windows ReplaceFileW stores the failed new live file at

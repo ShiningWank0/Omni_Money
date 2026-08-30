@@ -364,6 +364,43 @@ func TestCurrentSchemaRejectsForgeableTriggerTokens(t *testing.T) {
 	}
 }
 
+func TestCurrentSchemaRejectsExtraPersistentObjects(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup string
+	}{
+		{name: "index", setup: "CREATE INDEX extra_ledger_index ON transactions(account)"},
+		{name: "trigger", setup: "CREATE TRIGGER extra_ledger_trigger AFTER INSERT ON transactions BEGIN SELECT 1; END"},
+		{name: "view", setup: "CREATE VIEW extra_ledger_view AS SELECT id FROM transactions"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			instance, err := OpenPlainInstance(filepath.Join(t.TempDir(), "extra-object.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer instance.Close()
+			if _, err := instance.DB().Exec(test.setup); err != nil {
+				t.Fatal(err)
+			}
+			if err := validateLedgerSchema(instance.DB(), true); err == nil {
+				t.Fatalf("extra persistent %s was accepted", test.name)
+			}
+		})
+	}
+}
+
+func TestSchemaCanonicalizerPreservesQuotedLiteralContent(t *testing.T) {
+	upper := canonicalDDL("CREATE TABLE example (value TEXT CHECK(value = 'MiXeD, (literal)'))")
+	lower := canonicalDDL("CREATE TABLE example (value TEXT CHECK(value = 'mixed, (literal)'))")
+	if upper == lower {
+		t.Fatalf("quoted literal content was folded: %q", upper)
+	}
+	if got := canonicalDDL("CREATE TABLE example (value TEXT CHECK(value = 'MiXeD, (literal)'))"); got != upper {
+		t.Fatalf("canonicalization is not deterministic: got %q want %q", got, upper)
+	}
+}
+
 func TestBlankSQLiteFileIsNotAListableSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "blank.db")
 	db, err := sql.Open("sqlite3", path)

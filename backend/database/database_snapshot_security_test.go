@@ -342,6 +342,16 @@ func TestRestoreCandidateIdentityRejectsPathSwap(t *testing.T) {
 		candidate.Close()
 		t.Fatal(err)
 	}
+	validatedInfo, err := candidate.Stat()
+	if err != nil {
+		candidate.Close()
+		t.Fatal(err)
+	}
+	validatedDigest, err := digestOpenFile(candidate)
+	if err != nil {
+		candidate.Close()
+		t.Fatal(err)
+	}
 	replacement := filepath.Join(dir, "other-valid-snapshot.db")
 	if err := os.WriteFile(replacement, []byte("another valid same-key image"), 0o600); err != nil {
 		candidate.Close()
@@ -358,6 +368,9 @@ func TestRestoreCandidateIdentityRejectsPathSwap(t *testing.T) {
 	defer candidate.Close()
 	if err := assertOpenFileAtPath(candidate, candidatePath); err == nil {
 		t.Fatal("candidate path substitution was accepted")
+	}
+	if err := assertPathDigest(candidatePath, validatedInfo, validatedDigest); err == nil {
+		t.Fatal("candidate path digest substitution was accepted")
 	}
 }
 
