@@ -492,6 +492,15 @@ func (a *App) GetTags() ([]models.Tag, error) {
 	return service.GetTags()
 }
 
+func (a *App) GetTagDeleteImpact(id int64) (*models.TagDeleteImpact, error) {
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetTagDeleteImpact(id)
+}
+
 func (a *App) UpdateTag(id int64, name string) error {
 	service, release, err := a.borrowService()
 	if err != nil {

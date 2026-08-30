@@ -85,6 +85,7 @@
         <button class="menu-btn" @click="openBankAccountSettings">銀行口座設定</button>
         <button class="menu-btn menu-group-start" @click="showGraphModal">残高推移グラフ表示</button>
         <button class="menu-btn" @click="openTagChart">タグ別分析</button>
+        <button class="menu-btn" @click="openTagManager">タグ管理</button>
         <button v-if="serverFeatures.snapshots" class="menu-btn menu-group-start" @click="openSnapshotManager">スナップショット管理</button>
         <button v-if="!isWailsMode && serverFeatures.passkeys" class="menu-btn menu-group-start" @click="openPasskeySettings">パスキー設定</button>
         <button v-if="serverFeatures.admin" class="menu-btn menu-group-start" @click="openServerAccountAdmin">サーバーユーザー管理</button>
@@ -211,6 +212,13 @@
       @close="showTagChart = false"
     />
 
+    <TagManager
+      v-if="showTagManager"
+      :tags="tagManagerTags"
+      @changed="tagManagerTags = $event"
+      @close="showTagManager = false"
+    />
+
     <!-- スナップショット管理モーダル -->
     <SnapshotManager
       v-if="showSnapshotModal"
@@ -294,6 +302,7 @@ const CreditCardSettingsModal = defineAsyncComponent(() => import('./components/
 const BalanceChart = defineAsyncComponent(() => import('./components/BalanceChart.vue'))
 const SnapshotManager = defineAsyncComponent(() => import('./components/SnapshotManager.vue'))
 const TagPieChart = defineAsyncComponent(() => import('./components/TagPieChart.vue'))
+const TagManager = defineAsyncComponent(() => import('./components/TagManager.vue'))
 const AIAPIConsoleModal = defineAsyncComponent(() => import('./components/AIAPIConsoleModal.vue'))
 const ServerAccountAdminModal = defineAsyncComponent(() => import('./components/ServerAccountAdminModal.vue'))
 const PasskeySettingsModal = defineAsyncComponent(() => import('./components/PasskeySettingsModal.vue'))
@@ -312,7 +321,8 @@ import {
   lockDesktopVault,
   reauthenticate,
   reauthenticateWithPasskey,
-  keepAlive
+  keepAlive,
+  getTags
 } from './utils/api'
 
 const store = useAppStore()
@@ -327,6 +337,8 @@ const showBankAccountModal = ref(false)
 const showGraph = ref(false)
 const showSnapshotModal = ref(false)
 const showTagChart = ref(false)
+const showTagManager = ref(false)
+const tagManagerTags = ref([])
 const showAIAPIConsole = ref(false)
 const showServerAccountAdmin = ref(false)
 const showPasskeySettings = ref(false)
@@ -626,6 +638,16 @@ function openTagChart() {
   showTagChart.value = true
 }
 
+async function openTagManager() {
+  showMenu.value = false
+  try {
+    tagManagerTags.value = await getTags()
+    showTagManager.value = true
+  } catch (error) {
+    showToast(error?.message || 'タグ一覧の取得に失敗しました', 'error', 5000)
+  }
+}
+
 // スナップショット管理
 function openSnapshotManager() {
   showMenu.value = false
@@ -706,6 +728,8 @@ function clearSensitiveStateForIdle() {
   showGraph.value = false
   showSnapshotModal.value = false
   showTagChart.value = false
+  showTagManager.value = false
+  tagManagerTags.value = []
   showAIAPIConsole.value = false
   showServerAccountAdmin.value = false
   showPasskeySettings.value = false

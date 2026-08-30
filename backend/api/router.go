@@ -770,6 +770,28 @@ func handleCreateTagByPath(w http.ResponseWriter, r *http.Request) {
 func handleTagByID(w http.ResponseWriter, r *http.Request) {
 	// /api/tags/summary は別ハンドラーで処理
 	path := strings.TrimPrefix(r.URL.Path, "/api/tags/")
+	if strings.HasSuffix(path, "/impact") {
+		if r.Method != http.MethodGet {
+			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		service, ok := financialService(w, r)
+		if !ok {
+			return
+		}
+		id, err := strconv.ParseInt(strings.TrimSuffix(path, "/impact"), 10, 64)
+		if err != nil {
+			jsonError(w, "無効なタグIDです", http.StatusBadRequest)
+			return
+		}
+		impact, err := service.GetTagDeleteImpact(id)
+		if err != nil {
+			writeFinancialError(w, err, http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, impact, http.StatusOK)
+		return
+	}
 	if path == "summary" {
 		handleTagSummary(w, r)
 		return
@@ -799,14 +821,14 @@ func handleTagByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := service.UpdateTag(id, body.Name); err != nil {
-			writeFinancialError(w, err, http.StatusInternalServerError)
+			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "タグを更新しました"}, http.StatusOK)
 
 	case http.MethodDelete:
 		if err := service.DeleteTag(id); err != nil {
-			writeFinancialError(w, err, http.StatusInternalServerError)
+			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
 		jsonResponse(w, map[string]string{"message": "タグを削除しました"}, http.StatusOK)

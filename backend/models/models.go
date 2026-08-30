@@ -103,6 +103,16 @@ type Tag struct {
 	Children []Tag  `json:"children,omitempty"`
 }
 
+// TagDeleteImpact describes the rows that a cascading tag delete will affect.
+// Counts include the selected tag's transaction links and exclude the tag
+// itself from DescendantCount.
+type TagDeleteImpact struct {
+	TagID            int64  `json:"tag_id"`
+	TagName          string `json:"tag_name"`
+	DescendantCount  int64  `json:"descendant_count"`
+	TransactionCount int64  `json:"transaction_count"`
+}
+
 // TagSummary はタグ別集計データ（円グラフ用）
 type TagSummary struct {
 	TagID    int64        `json:"tag_id"`
