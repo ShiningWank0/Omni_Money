@@ -115,6 +115,8 @@ jobs:
           docker compose -f compose.yaml -f compose.bootstrap.yaml -f compose.local.yaml config --quiet
           test -x scripts/safe-update.sh
           bash -n scripts/safe-update.sh
+          test -x scripts/safe-update_test.sh
+          scripts/safe-update_test.sh
 
       - name: Assert Pangolin network isolation
         env:

@@ -253,7 +253,7 @@ docker compose -f compose.yaml -f compose.local.yaml up -d --force-recreate
 
 Composeはコンテナのroot filesystemをread-onlyにし、Linux capabilityをすべて削除して、権限昇格を禁止します。永続的に書き込めるアプリ領域は `/app/data` だけです。SQLiteの一時ファイルには再起動で消える `/tmp` tmpfsを使い、CPU・memory・PIDにも上限を設定します。既定値は `.env.example` の `OMNI_CPU_LIMIT`、`OMNI_MEMORY_LIMIT`、`OMNI_PIDS_LIMIT`、`OMNI_TMPFS_SIZE` で調整できます。上限を下げる場合は、最大サイズの画像処理やCSV取込を実データ量で検証してください。
 
-本番更新では固定version imageと[safe update手順](docs/safe-update.md)を使用してください。更新前のoffline checkpoint、ingressから隔離したhealthcheck、更新失敗時だけの旧data/image復元を自動化しています。`latest`を直接deployしたり、`down -v`を使ったりしないでください。
+本番更新では固定version imageと[safe update手順](docs/safe-update.md)を使用してください。更新前のoffline checkpoint、ingressから隔離したhealthcheck、更新失敗時だけの旧data/image復元を自動化しています。checkpoint rootはattested data mountから導出した固定pathへ限定し、Compose env fileも更新処理と完全に一致させます。`latest`を直接deployしたり、`down -v`を使ったりしないでください。
 
 TrueNAS Custom Appでは `compose.yaml` 相当の設定を使い、次を守ってください。
 

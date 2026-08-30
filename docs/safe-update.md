@@ -6,7 +6,7 @@ Pangolin/TrueNASのDocker構成では、同梱の`scripts/safe-update.sh`を使�
 
 ## 保証する流れ
 
-1. 現行containerがhealthyで、`/app/data`が実在するbind mountであることを確認します。
+1. 現行containerがhealthyで、`/app/data`が1つだけの実在するbind mountであることを確認します。Compose env fileに記録された`OMNI_DATA_DIR`、およびdata-at-rest attestationの`data_root=/app/data`も同じmountに一致しなければなりません。
 2. `latest`ではない固定tagまたはdigestを、稼働中のserviceを止める前にpullします。
 3. 現行imageへrollback専用tagを付け、data容量の約2倍＋100 MiBの空きを確認します。
 4. serviceを停止してからdata root全体をtar checkpointへ複写し、SHA-256を検証してdiskへ同期します。
@@ -21,12 +21,15 @@ Pangolin/TrueNASのDocker構成では、同梱の`scripts/safe-update.sh`を使�
 
 - host portをpublishしないbase `compose.yaml` のPangolin構成であること
 - Omni Money containerが1つの専用ingress networkだけに接続され、固定IPを使用していること
-- `.env`が通常fileでありsymlinkではないこと
-- checkpoint先が暗号化され、live data directoryの外側にあること
+- `OMNI_UPDATE_ENV_FILE`（未指定時は`.env`）がowner/root所有の通常fileでありsymlinkではないこと。scriptはこのfileをshell sourceせず、すべての`docker compose`呼び出しへ同じ`--env-file`を渡します
+- checkpoint rootがlive data directoryの親にある固定名`omni-money-update-checkpoints`であること。`OMNI_UPDATE_CHECKPOINT_DIR`を指定する場合も、この導出された絶対pathと完全一致しなければなりません。任意のbackup先、symlink、通常directory以外、group/other-writableなparent、rootや`/tmp`等の危険pathは拒否されます
+- checkpoint rootとlive data directoryが同じfilesystem（attested volume）にあり、rootと各checkpointがowner/root所有・mode `0700`であること
 - 実行userがDocker、data directory、`.env`へ必要な権限を持つこと
 - control DB key、保存時暗号化volumeのkey/attestation、recovery codeは別の暗号化backupでも保護されていること
 
-checkpointの既定位置はdata directoryの隣の`omni-money-update-checkpoints/`です。別Datasetを使う場合は`.env`で`OMNI_UPDATE_CHECKPOINT_DIR`を絶対pathに設定します。checkpointはSQLCipher DBを含みますが、保存先volume自体も暗号化してください。
+checkpointの位置は、実際に稼働しているbind mountの親directory直下にある`omni-money-update-checkpoints/`へ固定されています。`OMNI_UPDATE_CHECKPOINT_DIR`はComposeとの設定不一致を検出するためにのみ受け付け、固定path以外は拒否します。checkpointはSQLCipher DBを含みますが、保存先がattested encrypted volumeから外れないよう、data rootと同じfilesystemに置いてください。`jq`はattestationのdata root境界検証に使用します。
+
+env fileを差し替えてcandidateとrollbackのdata rootを別々にする攻撃を防ぐため、選択したenv fileは更新中ずっと固定されます。更新前のfileはcheckpointへowner-onlyで保存し、rollback時にもcheckpoint root、archive/checksum、env backup、live dataの実体・owner・mode・symlink・filesystem identityを再検証してから使用します。
 
 ## v1.1.0への更新例
 
