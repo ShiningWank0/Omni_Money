@@ -188,6 +188,7 @@ fmt="$2"; if [ "$#" -eq 3 ]; then path="$3"; else path="$4"; fi
 if [ "${MOCK_SCENARIO:-}" = secret_permissions_bad ] && [ "$path" = "${MOCK_CONTROL_KEY:-}" ] && [ "$fmt" = %a ]; then echo 444; exit 0; fi
 if [ "${MOCK_SCENARIO:-}" = full_toolchain_drift ] && [ -e "$MOCK_STATE_DIR/toolchain_trigger" ] && [[ "$path" == */mock-bin/tar ]] && [ "$fmt" = %i ]; then echo 999999; exit 0; fi
 if [ "${MOCK_SCENARIO:-}" = isolation_toolchain_drift ] && [ -e "$MOCK_STATE_DIR/toolchain_trigger" ] && [[ "$path" == */mock-bin/docker ]] && [ "$fmt" = %i ]; then echo 999999; exit 0; fi
+if [ "${MOCK_SCENARIO:-}" = jq_only_drift ] && [ -e "$MOCK_STATE_DIR/toolchain_trigger" ] && [[ "$path" == */mock-bin/jq ]] && [ "$fmt" = %i ]; then echo 999999; exit 0; fi
 if { [ "${MOCK_SCENARIO:-}" = cross_fs_stage ] || [ "${MOCK_SCENARIO:-}" = legacy_archive_failure ]; } && [[ "$path" == */.data.tar.tmp.* ]] && [ "$fmt" = %d ]; then echo 999; exit 0; fi
 if [[ "$path" == */.capacity.reserve ]] && [ "$fmt" = %s ]; then cat "$MOCK_STATE_DIR/capacity_size"; exit 0; fi
 case "$fmt:$path" in
@@ -337,7 +338,7 @@ case "$1" in
       *State.Health*)
         if [ "$id" = candidate ] && [ "$scenario" = rollback_journal_failure ] && [ "$(get net_candidate)" = connected ]; then
           : > "$state_dir/rollback_trigger"; echo missing
-        elif [ "$id" = candidate ] && { [ "$scenario" = full_toolchain_drift ] || [ "$scenario" = isolation_toolchain_drift ]; } && [ "$(get net_candidate)" = connected ]; then
+        elif [ "$id" = candidate ] && { [ "$scenario" = full_toolchain_drift ] || [ "$scenario" = isolation_toolchain_drift ] || [ "$scenario" = jq_only_drift ]; } && [ "$(get net_candidate)" = connected ]; then
           : > "$state_dir/toolchain_trigger"; echo missing
         elif [ "$id" = candidate ] && { [ "$scenario" = candidate_failure ] || [ "$scenario" = candidate_data_mutation ] || [ "$scenario" = rollback_failure ] || [ "$scenario" = rollback_tag_mutation ] || [ "$scenario" = recovery_bundle_corrupt ] || [ "$scenario" = unknown_removal ] || { [ "$scenario" = candidate_ingress_health_failure ] && [ "$(get net_candidate)" = connected ]; }; }; then
           echo missing
@@ -416,6 +417,12 @@ case "$1" in
 esac
 MOCK_DOCKER
 chmod 0700 "$mock_bin/docker"
+cat > "$mock_bin/jq" <<'MOCK_JQ'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+exec /usr/bin/jq "$@"
+MOCK_JQ
+chmod 0700 "$mock_bin/jq"
 cat > "$mock_bin/chown" <<'MOCK_CHOWN'
 #!/usr/bin/env bash
 exit 0
@@ -473,6 +480,7 @@ chmod 0700 "$mock_bin/du"
 MOCK_BIN="$mock_bin"
 export MOCK_BIN
 docker() { "$MOCK_BIN/docker" "$@"; }
+jq() { "$MOCK_BIN/jq" "$@"; }
 stat() { "$MOCK_BIN/stat" "$@"; }
 tar() { "$MOCK_BIN/tar" "$@"; }
 chown() { "$MOCK_BIN/chown" "$@"; }
@@ -482,7 +490,7 @@ sleep() { "$MOCK_BIN/sleep" "$@"; }
 sync() { "$MOCK_BIN/sync" "$@"; }
 fallocate() { "$MOCK_BIN/fallocate" "$@"; }
 findmnt() { return 0; }
-export -f docker stat tar chown df du sleep sync fallocate findmnt
+export -f docker jq stat tar chown df du sleep sync fallocate findmnt
 
 run_update() {
   local seconds="${SAFE_UPDATE_CASE_TIMEOUT_SECONDS:-90}"
@@ -520,6 +528,25 @@ assert_fixture_recovery_artifacts_retained() {
   retained_pins=("$fixture_root"/.omni-money-safe-update-pin.*)
   shopt -u nullglob
   [ "${#retained_pins[@]}" -eq 1 ] && [ -d "${retained_pins[0]}" ] && [ ! -L "${retained_pins[0]}" ]
+}
+
+dump_legacy_archive_failure_diagnostics() {
+  local key value
+  printf '%s\n' '--- legacy_archive_failure updater output ---' >&2
+  printf '%s\n' "$output" >&2
+  printf '%s\n' '--- legacy_archive_failure fixture state ---' >&2
+  for key in phase current_state candidate_state rollback_state net_current net_candidate net_rollback; do
+    if [ -f "$mock_state/$key" ]; then value="$(cat "$mock_state/$key")"; else value='<missing>'; fi
+    printf '%s=%s\n' "$key" "$value" >&2
+  done
+  printf '%s\n' '--- legacy_archive_failure ordered mock log ---' >&2
+  nl -ba "$mock_state/log" >&2
+}
+
+fail_legacy_archive_case() {
+  printf 'FAIL: %s\n' "$1" >&2
+  dump_legacy_archive_failure_diagnostics
+  exit 1
 }
 
 run_case() {
@@ -617,22 +644,32 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MO
     teardown_fixture_case_artifacts || { echo "FAIL: full_toolchain_drift fixture teardown failed" >&2; exit 1; }
     return 0
   fi
+  if [ "$scenario" = jq_only_drift ]; then
+    journal_path="$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
+    assert_fixture_recovery_artifacts_retained || { echo "FAIL: jq-only drift did not retain lock/journal/pins" >&2; exit 1; }
+    [ "$(cat "$mock_state/candidate_state")" = exited ] && [ "$(cat "$mock_state/current_state")" = absent ] && [ "$(cat "$mock_state/net_candidate")" = connected ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: jq-only drift did not stop containers while retaining the unverified network state" >&2; exit 1; }
+    grep -q 'containers are stopped.*network disconnect state is unverified' <<< "$output" || { echo "FAIL: jq-only drift was not reported as stopped with unverified network state" >&2; exit 1; }
+    jq -e '.phase == "network-connect"' "$journal_path" >/dev/null || { echo "FAIL: jq-only drift advanced the durable journal" >&2; exit 1; }
+    [ "$(sha256sum -- "$fixture_root/data/ledger.txt" | sed -E 's/[[:space:]].*$//')" = "$original_data_hash" ] || { echo "FAIL: jq-only drift touched live data" >&2; exit 1; }
+    teardown_fixture_case_artifacts || { echo "FAIL: jq_only_drift fixture teardown failed" >&2; exit 1; }
+    return 0
+  fi
   if [ "$scenario" = isolation_toolchain_drift ]; then
     journal_path="$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
     assert_fixture_recovery_artifacts_retained || { echo "FAIL: isolation toolchain drift did not retain lock/journal/pins" >&2; exit 1; }
     [ "$(cat "$mock_state/candidate_state")" = running ] && [ "$(cat "$mock_state/current_state")" = absent ] && [ "$(cat "$mock_state/net_candidate")" = connected ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: isolation toolchain drift did not preserve the honestly unverified runtime state" >&2; exit 1; }
-    grep -q 'stop/disconnect state is unverified' <<< "$output" || { echo "FAIL: isolation toolchain drift was not reported as unverified" >&2; exit 1; }
+    grep -q 'container stop and network disconnect states are unverified' <<< "$output" || { echo "FAIL: isolation toolchain drift was not reported as unverified" >&2; exit 1; }
     jq -e '.phase == "network-connect"' "$journal_path" >/dev/null || { echo "FAIL: isolation toolchain drift advanced the durable journal" >&2; exit 1; }
     [ "$(sha256sum -- "$fixture_root/data/ledger.txt" | sed -E 's/[[:space:]].*$//')" = "$original_data_hash" ] || { echo "FAIL: isolation toolchain drift touched live data" >&2; exit 1; }
     teardown_fixture_case_artifacts || { echo "FAIL: isolation_toolchain_drift fixture teardown failed" >&2; exit 1; }
     return 0
   fi
   if [ "$scenario" = legacy_archive_failure ]; then
-    [ "$(cat "$mock_state/current_state")" = running ] && [ "$(cat "$mock_state/net_current")" = connected ] || { echo "FAIL: legacy rollback did not recover healthy ingress" >&2; exit 1; }
+    [ "$(cat "$mock_state/current_state")" = running ] && [ "$(cat "$mock_state/net_current")" = connected ] || fail_legacy_archive_case "legacy rollback did not recover healthy ingress"
     disconnect_line="$(grep -n -F 'network disconnect omni-money-pangolin current' "$mock_state/log" | tail -1 | cut -d: -f1)"
     start_line="$(grep -n -F 'start current' "$mock_state/log" | tail -1 | cut -d: -f1)"
     connect_line="$(grep -n -F 'network connect --ip 172.30.240.2 omni-money-pangolin current' "$mock_state/log" | tail -1 | cut -d: -f1)"
-    [ -n "$disconnect_line" ] && [ -n "$start_line" ] && [ -n "$connect_line" ] && [ "$disconnect_line" -lt "$start_line" ] && [ "$start_line" -lt "$connect_line" ] || { echo "FAIL: legacy rollback was not disconnect -> start/health -> reconnect" >&2; exit 1; }
+    [ -n "$disconnect_line" ] && [ -n "$start_line" ] && [ -n "$connect_line" ] && [ "$disconnect_line" -lt "$start_line" ] && [ "$start_line" -lt "$connect_line" ] || fail_legacy_archive_case "legacy rollback was not disconnect -> start/health -> reconnect"
   elif [ "$scenario" = network_reconnect_failure ] || [ "$scenario" = candidate_ingress_health_failure ]; then
     [ "$(cat "$mock_state/phase")" = candidate ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: $scenario recreated rollback after candidate ingress became uncertain" >&2; exit 1; }
     shopt -s nullglob
@@ -654,7 +691,7 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MO
     return 0
   fi
   if [ "$scenario" = legacy_archive_failure ]; then
-    [ "$(cat "$mock_state/current_state")" = running ] || { echo "FAIL: legacy rollback did not restart current" >&2; exit 1; }
+    [ "$(cat "$mock_state/current_state")" = running ] || fail_legacy_archive_case "legacy rollback did not restart current"
   elif [ "$scenario" != partial_stop ] && [ "$scenario" != signal_int ] && [ "$scenario" != signal_term ] && [ "$scenario" != cross_fs_stage ]; then
     [ "$(cat "$mock_state/current_state")" = absent ] || { echo "FAIL: $scenario did not model Compose removal of the pinned current container (state=$(cat "$mock_state/current_state"))" >&2; printf '%s\n' "$output" >&2; sed -n '1,160p' "$mock_state/log" >&2; exit 1; }
   else
@@ -672,9 +709,9 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MO
       grep -Fq 'rm current' "$mock_state/log" || { echo "FAIL: legacy project was not explicitly migrated" >&2; exit 1; }
     fi
   elif [ "$scenario" = legacy_archive_failure ]; then
-    [ "$(cat "$mock_state/current_state")" = running ] && [ "$(cat "$mock_state/net_current")" = connected ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: legacy rollback final outcome is not the retained current container" >&2; exit 1; }
-    grep -Fq 'inspect --format {{json .}} current' "$mock_state/log" || { echo "FAIL: legacy rollback did not compare the retained runtime contract" >&2; exit 1; }
-    jq -e '.phase == "rolled-back" and .capacity_reservation_state == "1"' "$fixture_root/omni-money-update-checkpoints/.safe-update-journal" >/dev/null || { echo "FAIL: legacy rollback did not retain the final durable identity outcome" >&2; exit 1; }
+    [ "$(cat "$mock_state/current_state")" = running ] && [ "$(cat "$mock_state/net_current")" = connected ] && [ ! -e "$mock_state/rollback_state" ] || fail_legacy_archive_case "legacy rollback final outcome is not the retained current container"
+    grep -Fq 'inspect --format {{json .}} current' "$mock_state/log" || fail_legacy_archive_case "legacy rollback did not compare the retained runtime contract"
+    jq -e '.phase == "rolled-back" and .capacity_reservation_state == "1"' "$fixture_root/omni-money-update-checkpoints/.safe-update-journal" >/dev/null || fail_legacy_archive_case "legacy rollback did not retain the final durable identity outcome"
   elif [ "$scenario" = rollback_failure ] || [ "$scenario" = network_disconnect_failure ] || [ "$scenario" = rollback_tag_mutation ] || [ "$scenario" = network_contract_drift ]; then
     [ "$(cat "$mock_state/phase")" = rollback ] && [ "$(cat "$mock_state/rollback_state")" != running ] || { echo "FAIL: $scenario left rollback running (phase=$(cat "$mock_state/phase") state=$(cat "$mock_state/rollback_state"))" >&2; sed -n '1,120p' "$mock_state/log" >&2; exit 1; }
     [ "$scenario" = rollback_tag_mutation ] || grep -Fq 'inspect --format {{json .}} rollback' "$mock_state/log" || { echo "FAIL: $scenario did not compare the rollback runtime contract" >&2; exit 1; }
@@ -768,6 +805,7 @@ run_case rollback_tag_mutation 1
 run_case rollback_journal_failure 1
 run_case recovery_bundle_corrupt 1
 run_case full_toolchain_drift 1
+run_case jq_only_drift 1
 run_case isolation_toolchain_drift 1
 run_case env_swap 1
 run_case secret_inode_replacement 1

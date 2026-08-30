@@ -998,17 +998,25 @@ validate_pinned_tool_by_name() {
   return 1
 }
 
-validate_isolation_toolchain() {
+validate_docker_isolation_authority() {
   local command_name
-  # This is deliberately smaller than the archive/restore toolchain. It is
-  # sufficient to authenticate the local Docker authority, inspect JSON, and
-  # stop/disconnect pinned containers before a changed tar/find/etc. can block
-  # isolation. The complete toolchain is checked immediately afterwards and
-  # before any data or environment operation.
-  for command_name in docker jq stat sha256sum sed dirname; do
+  # Authenticate only the local Docker authority and the tools needed to
+  # verify its pinned executable/socket identity. Container stop/status uses
+  # Docker Go templates and must not be blocked by a changed JSON parser.
+  for command_name in docker stat sha256sum sed dirname; do
     validate_pinned_tool_by_name "$command_name" || return 1
   done
   validate_pinned_docker_socket
+}
+
+validate_network_isolation_parsers() {
+  local command_name
+  # Network attachment inspection is JSON and therefore requires jq. Keep it
+  # behind the stop boundary so parser drift cannot leave a running container
+  # merely because automatic network isolation is no longer trustworthy.
+  for command_name in stat sha256sum sed dirname jq; do
+    validate_pinned_tool_by_name "$command_name" || return 1
+  done
 }
 
 configure_compose_plugin_boundary() {
@@ -2001,24 +2009,32 @@ rollback_journal_or_stop() {
 }
 
 rollback_update() {
-  local original_status="$1" old_id="" old_image_id="${current_image_id:-}" legacy_state="" reuse_legacy=0 isolation_failed=0
+  local original_status="$1" old_id="" old_image_id="${current_image_id:-}" legacy_state="" reuse_legacy=0 isolation_failed=0 stop_failed=0
   rollback_original_status="$original_status"
   trap - EXIT INT TERM
   rollback_running=1
   state="rolling-back"
   set +e
   printf 'safe-update: candidate failed; restoring the pre-update checkpoint and previous image\n' >&2
-  if ! validate_isolation_toolchain; then
-    printf 'safe-update: Docker isolation authority could not be authenticated; container stop/disconnect state is unverified and recovery artifacts are preserved\n' >&2
+  if ! validate_docker_isolation_authority; then
+    printf 'safe-update: Docker isolation authority could not be authenticated; container stop and network disconnect states are unverified and recovery artifacts are preserved\n' >&2
     exit "$original_status"
   fi
   if [ -n "$candidate_id" ] && ! stop_container_safely "$candidate_id" candidate; then
     printf 'safe-update: candidate could not be safely stopped\n' >&2
-    isolation_failed=1
+    isolation_failed=1; stop_failed=1
   fi
   if [ -n "$current_id" ] && ! stop_container_safely "$current_id" current; then
     printf 'safe-update: current container could not be safely stopped\n' >&2
-    isolation_failed=1
+    isolation_failed=1; stop_failed=1
+  fi
+  if ! validate_network_isolation_parsers; then
+    if [ "$stop_failed" -eq 0 ]; then
+      printf 'safe-update: containers are stopped, but the pinned network parser changed; network disconnect state is unverified, data is untouched, and recovery artifacts are preserved\n' >&2
+    else
+      printf 'safe-update: the pinned network parser changed; one or more container stop states and the network disconnect state are unverified, data is untouched, and recovery artifacts are preserved\n' >&2
+    fi
+    exit "$original_status"
   fi
   if [ "$candidate_ingress_state" != never ] && { [ -z "$candidate_id" ] || ! disconnect_candidate_ingress "$candidate_id"; }; then
     printf 'safe-update: candidate could not be disconnected from the pinned ingress network\n' >&2
