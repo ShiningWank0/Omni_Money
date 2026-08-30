@@ -26,6 +26,10 @@ export function BackupToCSVFile() {
   return window['go']['main']['App']['BackupToCSVFile']();
 }
 
+export function BackupToCSVFull() {
+  return window['go']['main']['App']['BackupToCSVFull']();
+}
+
 export function ChangeDesktopVaultPassword(arg1, arg2) {
   return window['go']['main']['App']['ChangeDesktopVaultPassword'](arg1, arg2);
 }

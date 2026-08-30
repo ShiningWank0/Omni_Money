@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"omni_money/backend/core"
+	"omni_money/backend/fileprivacy"
 )
 
 func cleanupCSVSpoolFile(file *os.File, path string) {
@@ -115,7 +116,13 @@ func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 				cleanupCSVSpoolFile(tmp, path)
 			}
 			info, statErr := tmp.Stat()
-			if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+			if statErr != nil || !info.Mode().IsRegular() || fileprivacy.Harden(tmp) != nil {
+				cleanup()
+				http.Error(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage)
+				return
+			}
+			info, statErr = tmp.Stat()
+			if statErr != nil || !fileprivacy.IsPrivate(info) {
 				cleanup()
 				http.Error(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage)
 				return

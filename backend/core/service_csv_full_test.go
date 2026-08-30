@@ -2,6 +2,7 @@ package core
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/csv"
@@ -36,6 +37,22 @@ func TestCSVTempBudgetIsSharedAcrossUploadAndExportReservations(t *testing.T) {
 	}
 	third()
 	second()
+}
+
+func TestCSVTempBudgetAccountsForDecodedImageWorkingCopy(t *testing.T) {
+	rawRelease, ok := TryAcquireCSVTempBudget(MaxCSVImportWireBytes)
+	if !ok {
+		t.Fatal("raw CSV reservation failed")
+	}
+	defer rawRelease()
+	decodedRelease, ok := TryAcquireCSVTempBudget(models.MaxImageBytesDatabase * 2)
+	if !ok {
+		t.Fatal("raw plus decoded-image working reservation failed")
+	}
+	defer decodedRelease()
+	if _, ok := TryAcquireCSVTempBudget(MaxCSVTempBudgetBytes - MaxCSVImportWireBytes - models.MaxImageBytesDatabase*2 + 1); ok {
+		t.Fatal("CSV temp budget allowed bytes beyond raw plus decoded image peak")
+	}
 }
 
 func TestCSVV3RoundTripPreservesExtendedLedgerDataAndRemapsIDs(t *testing.T) {
@@ -92,6 +109,12 @@ func TestCSVV3RoundTripPreservesExtendedLedgerDataAndRemapsIDs(t *testing.T) {
 	// Import into an independent instance; IDs are allocated independently and
 	// all associations must be rebuilt through the source-ID maps.
 	target, targetService := openCoreTestService(t, "csv-v3-target")
+	// Leave a row behind so SQLite's AUTOINCREMENT sequence differs from the
+	// source. Replace must remap every relationship instead of passing only
+	// because two empty databases happen to allocate identical IDs.
+	if _, err := target.DB().Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES ('old', '2020-01-01', 'preexisting', 'income', 1, 1, 'old memo')`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := targetService.ImportCSVReaderContext(context.Background(), strings.NewReader(content), "replace"); err != nil {
 		t.Fatalf("ImportCSV v3: %v", err)
 	}
@@ -109,6 +132,71 @@ func TestCSVV3RoundTripPreservesExtendedLedgerDataAndRemapsIDs(t *testing.T) {
 	}
 	if transactionCount != 2 || imageCount != 1 || tagCount != 2 || tagLinkCount != 1 || linkCount != 1 {
 		t.Fatalf("counts transactions=%d images=%d tags=%d tag-links=%d links=%d", transactionCount, imageCount, tagCount, tagLinkCount, linkCount)
+	}
+	var sourceID, targetID int64
+	if err := instance.DB().QueryRow("SELECT id FROM transactions WHERE item = 'coffee'").Scan(&sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.DB().QueryRow("SELECT id FROM transactions WHERE item = 'coffee'").Scan(&targetID); err != nil {
+		t.Fatal(err)
+	}
+	if targetID == sourceID {
+		t.Fatalf("replace did not force an ID remap: source=%d target=%d", sourceID, targetID)
+	}
+	var sourceAccount, sourceDate, sourceItem, sourceType, sourceMemo string
+	var sourceAmount, sourceBalance int64
+	if err := instance.DB().QueryRow("SELECT account, date, item, type, amount, balance, memo FROM transactions WHERE id = ?", sourceID).Scan(&sourceAccount, &sourceDate, &sourceItem, &sourceType, &sourceAmount, &sourceBalance, &sourceMemo); err != nil {
+		t.Fatal(err)
+	}
+	var targetAccount, targetDate, targetItem, targetType, targetMemo string
+	var targetAmount, targetBalance int64
+	if err := target.DB().QueryRow("SELECT account, date, item, type, amount, balance, memo FROM transactions WHERE id = ?", targetID).Scan(&targetAccount, &targetDate, &targetItem, &targetType, &targetAmount, &targetBalance, &targetMemo); err != nil {
+		t.Fatal(err)
+	}
+	if sourceAccount != targetAccount || sourceDate != targetDate || sourceItem != targetItem || sourceType != targetType || sourceAmount != targetAmount || sourceBalance != targetBalance || sourceMemo != targetMemo {
+		t.Fatalf("transaction fields changed: source=%q/%q/%q/%q/%d/%d/%q target=%q/%q/%q/%q/%d/%d/%q", sourceAccount, sourceDate, sourceItem, sourceType, sourceAmount, sourceBalance, sourceMemo, targetAccount, targetDate, targetItem, targetType, targetAmount, targetBalance, targetMemo)
+	}
+	var sourceFilename, sourceMIME, sourceCreated string
+	var sourceData []byte
+	if err := instance.DB().QueryRow("SELECT filename, mime_type, data, created_at FROM transaction_images WHERE transaction_id = ?", sourceID).Scan(&sourceFilename, &sourceMIME, &sourceData, &sourceCreated); err != nil {
+		t.Fatal(err)
+	}
+	var targetFilename, targetMIME, targetCreated string
+	var targetData []byte
+	if err := target.DB().QueryRow("SELECT filename, mime_type, data, created_at FROM transaction_images WHERE transaction_id = ?", targetID).Scan(&targetFilename, &targetMIME, &targetData, &targetCreated); err != nil {
+		t.Fatal(err)
+	}
+	if sourceFilename != targetFilename || sourceMIME != targetMIME || sourceCreated != targetCreated || !bytes.Equal(sourceData, targetData) {
+		t.Fatalf("image fields changed: source=%q/%q/%q/%x target=%q/%q/%q/%x", sourceFilename, sourceMIME, sourceCreated, sourceData, targetFilename, targetMIME, targetCreated, targetData)
+	}
+	var sourceTagName, sourceParentName string
+	if err := instance.DB().QueryRow(`SELECT child.name, COALESCE(parent.name, '') FROM tags child LEFT JOIN tags parent ON parent.id = child.parent_id WHERE child.id = ?`, child.ID).Scan(&sourceTagName, &sourceParentName); err != nil {
+		t.Fatal(err)
+	}
+	var targetTagName, targetParentName string
+	if err := target.DB().QueryRow(`SELECT child.name, COALESCE(parent.name, '') FROM tags child LEFT JOIN tags parent ON parent.id = child.parent_id WHERE child.name = ?`, sourceTagName).Scan(&targetTagName, &targetParentName); err != nil {
+		t.Fatal(err)
+	}
+	if targetTagName != sourceTagName || targetParentName != sourceParentName {
+		t.Fatalf("tag hierarchy changed: source=%q/%q target=%q/%q", sourceTagName, sourceParentName, targetTagName, targetParentName)
+	}
+	var linkedTargetID int64
+	if err := target.DB().QueryRow(`SELECT CASE WHEN parent_id = ? THEN child_id ELSE parent_id END FROM transaction_links WHERE parent_id = ? OR child_id = ?`, targetID, targetID, targetID).Scan(&linkedTargetID); err != nil {
+		t.Fatal(err)
+	}
+	var linkedItem string
+	if err := target.DB().QueryRow("SELECT item FROM transactions WHERE id = ?", linkedTargetID).Scan(&linkedItem); err != nil {
+		t.Fatal(err)
+	}
+	if linkedItem != "card payment" {
+		t.Fatalf("transaction link target item = %q", linkedItem)
+	}
+	var linkedTagCount int
+	if err := target.DB().QueryRow("SELECT COUNT(*) FROM transaction_tags tt JOIN tags t ON t.id = tt.tag_id WHERE tt.transaction_id = ? AND t.name = ?", targetID, sourceTagName).Scan(&linkedTagCount); err != nil {
+		t.Fatal(err)
+	}
+	if linkedTagCount != 1 {
+		t.Fatalf("transaction tag association count = %d", linkedTagCount)
 	}
 	var credit, bankSetting string
 	if err := target.DB().QueryRow("SELECT value FROM settings WHERE key = 'credit_card_items'").Scan(&credit); err != nil {
@@ -233,6 +321,55 @@ func TestCSVV3LegacyTagRowPreservesPreValidatorName(t *testing.T) {
 	}
 	if name != " old/tag " {
 		t.Fatalf("legacy tag name = %q", name)
+	}
+}
+
+func TestCSVV3ArchivesAndRestoresDuplicateRootTagsWithoutMerging(t *testing.T) {
+	setupCoreTestDB(t)
+	if _, err := database.GetDB().Exec(`INSERT INTO tags (name, parent_id, level, legacy_duplicate) VALUES ('same', NULL, 1, 0), ('same', NULL, 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	content, err := BackupToCSV()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "tag_legacy") {
+		t.Fatalf("duplicate root was not archived explicitly: %q", content)
+	}
+	if _, err := ImportCSV(content, "replace"); err != nil {
+		t.Fatal(err)
+	}
+	var count, archived int
+	if err := database.GetDB().QueryRow("SELECT COUNT(*), COALESCE(SUM(legacy_duplicate), 0) FROM tags WHERE name = 'same' AND parent_id IS NULL").Scan(&count, &archived); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 || archived != 1 {
+		t.Fatalf("duplicate roots were merged or lost: count=%d archived=%d", count, archived)
+	}
+}
+
+func TestCSVV3ArchivesLegacySettingsAcceptedByPreviousAPI(t *testing.T) {
+	setupCoreTestDB(t)
+	legacy := `[` + `"` + strings.Repeat("x", 256) + `","", ""` + `,"x"]`
+	if _, err := database.GetDB().Exec("INSERT INTO settings (key, value) VALUES ('credit_card_items', ?)", legacy); err != nil {
+		t.Fatal(err)
+	}
+	content, err := BackupToCSV()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "setting_legacy") {
+		t.Fatalf("legacy setting was not archived explicitly: %q", content)
+	}
+	if _, err := ImportCSV(content, "replace"); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := database.GetDB().QueryRow("SELECT value FROM settings WHERE key = 'credit_card_items'").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != legacy {
+		t.Fatalf("legacy setting changed: got %q want %q", got, legacy)
 	}
 }
 

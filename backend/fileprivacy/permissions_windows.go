@@ -112,3 +112,10 @@ func Harden(file *os.File) error {
 	}
 	return nil
 }
+
+// Windows does not expose POSIX mode bits. Harden has already applied and
+// protected the current-user/System DACL; only regular-file identity is
+// meaningful for the common caller-side postcondition.
+func IsPrivate(info os.FileInfo) bool {
+	return info != nil && info.Mode().IsRegular()
+}

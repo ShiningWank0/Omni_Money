@@ -95,7 +95,7 @@ func TestBackupAndImportCSVV2PreservesHistoricalTextOutsideNewWriteLimits(t *tes
 	setupCoreTestDB(t)
 	wantAccount := strings.Repeat("a", 300)
 	wantItem := strings.Repeat("項", 300)
-	wantMemo := "legacy\u200b memo"
+	wantMemo := "legacy memo"
 	if _, err := database.GetDB().Exec(
 		`INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, '2026-01-01', ?, 'expense', 123, -123, ?)`,
 		wantAccount, wantItem, wantMemo,
@@ -115,6 +115,17 @@ func TestBackupAndImportCSVV2PreservesHistoricalTextOutsideNewWriteLimits(t *tes
 	}
 	if gotAccount != wantAccount || gotItem != wantItem || gotMemo != wantMemo {
 		t.Fatalf("historical text changed: account=%d/%d item=%d/%d memo=%q/%q", len([]byte(gotAccount)), len([]byte(wantAccount)), len([]byte(gotItem)), len([]byte(wantItem)), gotMemo, wantMemo)
+	}
+}
+
+func TestImportCSVV2RejectsUnsafeHistoricalText(t *testing.T) {
+	for _, unsafe := range []string{"legacy\x01memo", "legacy\u200bmemo", "legacy\u202Ememo", "legacy\u2028memo"} {
+		setupCoreTestDB(t)
+		content := "account,date,item,type,amount,memo,omni_money_csv_version\n" +
+			"cash,2026-01-01,item,expense,1," + unsafe + ",2\n"
+		if _, err := ImportCSV(content, "replace"); err == nil {
+			t.Fatalf("unsafe historical text was accepted: %q", unsafe)
+		}
 	}
 }
 

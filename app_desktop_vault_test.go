@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -117,6 +118,51 @@ func TestBackupToCSVFileRejectsLockBoundaryAcrossDialog(t *testing.T) {
 	defer coordinator.mu.Unlock()
 	if coordinator.serviceCalls != 0 {
 		t.Fatalf("Service called %d times after lock boundary, want 0", coordinator.serviceCalls)
+	}
+}
+
+func TestImportCSVFileRejectsLockBoundaryAcrossDialog(t *testing.T) {
+	coordinator := &fakeDesktopCoordinator{
+		status: desktopaccount.Status{Configured: true, Unlocked: true, Role: desktopaccount.RoleAdmin},
+	}
+	app := newAppWithCoordinator(coordinator)
+	app.startup(context.Background())
+	app.chooseCSVFile = func(context.Context) (string, error) {
+		if _, err := app.LockDesktopVault(); err != nil {
+			t.Fatalf("LockDesktopVault: %v", err)
+		}
+		return filepath.Join(t.TempDir(), "archive.csv"), nil
+	}
+
+	if _, err := app.ImportCSVFile("replace"); !errors.Is(err, ErrDesktopVaultChanged) {
+		t.Fatalf("got %v, want ErrDesktopVaultChanged", err)
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	if coordinator.serviceCalls != 0 {
+		t.Fatalf("Service called %d times after lock boundary, want 0", coordinator.serviceCalls)
+	}
+}
+
+func TestOpenDesktopCSVFileRejectsSymlinkAndNonRegularPath(t *testing.T) {
+	dir := t.TempDir()
+	regular := filepath.Join(dir, "archive.csv")
+	if err := os.WriteFile(regular, []byte("a,b\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := openDesktopCSVFile(regular)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(dir, "alias.csv")
+	if err := os.Symlink(regular, symlink); err == nil {
+		if file, err := openDesktopCSVFile(symlink); err == nil {
+			_ = file.Close()
+			t.Fatal("symlink was accepted as a Desktop CSV input")
+		}
 	}
 }
 

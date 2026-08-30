@@ -14,3 +14,8 @@ func CreateExclusive(root *os.Root, _ string, name string) (*os.File, error) {
 func Harden(file *os.File) error {
 	return file.Chmod(0600)
 }
+
+// IsPrivate reports the owner-only mode expected on Unix-like systems.
+func IsPrivate(info os.FileInfo) bool {
+	return info != nil && info.Mode().IsRegular() && info.Mode().Perm() == 0600
+}

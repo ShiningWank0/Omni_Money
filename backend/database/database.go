@@ -4,7 +4,6 @@ package database
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -23,7 +22,7 @@ import (
 )
 
 const defaultSnapshotMaxTotalBytes int64 = 2 * 1024 * 1024 * 1024
-const ledgerSchemaVersion = 2
+const ledgerSchemaVersion = 3
 
 const writableSQLiteQuery = "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 const snapshotSQLiteQuery = "mode=rw&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
@@ -338,6 +337,7 @@ func createTablesOn(target *sql.DB) error {
 			name TEXT NOT NULL,
 			parent_id INTEGER DEFAULT NULL,
 			level INTEGER NOT NULL DEFAULT 1 CHECK(level IN (1, 2, 3)),
+			legacy_duplicate INTEGER NOT NULL DEFAULT 0 CHECK(legacy_duplicate IN (0, 1)),
 			FOREIGN KEY (parent_id) REFERENCES tags(id) ON DELETE CASCADE,
 			UNIQUE(name, parent_id)
 		)`,
@@ -448,25 +448,29 @@ func createTablesOn(target *sql.DB) error {
 				return fmt.Errorf("SQL実行エラー (%s): %w", stmt[:50], err)
 			}
 		}
-		// SQLite considers NULL values distinct in a regular UNIQUE index, so
-		// the historical UNIQUE(name, parent_id) did not protect root tags.
-		// Never guess which duplicate a user intended: refuse the migration
-		// atomically and require an explicit, user-audited merge instead.
-		var duplicateRoot string
-		err := tx.QueryRow(`
-			SELECT name FROM tags
-			WHERE parent_id IS NULL
-			GROUP BY name
-			HAVING COUNT(*) > 1
-			ORDER BY name
-			LIMIT 1`).Scan(&duplicateRoot)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("rootタグ重複検査エラー: %w", err)
+		// v2 and earlier databases have no marker column. Add it atomically,
+		// preserve every pre-existing duplicate root, and mark all but the
+		// lowest-id row as archive-only. Normal writes remain unique through the
+		// partial index; CSV v3 tag_legacy rows can restore the historical rows
+		// without merging, renaming, or dropping them.
+		var hasLegacyDuplicate int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('tags') WHERE name = 'legacy_duplicate'`).Scan(&hasLegacyDuplicate); err != nil {
+			return fmt.Errorf("rootタグ互換列検査エラー: %w", err)
 		}
-		if err == nil {
-			return fmt.Errorf("rootタグ名が重複しているためschema migrationを中止しました: %q", duplicateRoot)
+		if hasLegacyDuplicate == 0 {
+			if _, err := tx.Exec(`ALTER TABLE tags ADD COLUMN legacy_duplicate INTEGER NOT NULL DEFAULT 0 CHECK(legacy_duplicate IN (0, 1))`); err != nil {
+				return fmt.Errorf("rootタグ互換列追加エラー: %w", err)
+			}
 		}
-		if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_root_name_unique ON tags(name) WHERE parent_id IS NULL`); err != nil {
+		if _, err := tx.Exec(`DROP INDEX IF EXISTS idx_tags_root_name_unique`); err != nil {
+			return fmt.Errorf("rootタグ一意index更新エラー: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE tags SET legacy_duplicate = CASE WHEN id IN (
+			SELECT MIN(id) FROM tags WHERE parent_id IS NULL GROUP BY name
+		) THEN 0 ELSE CASE WHEN parent_id IS NULL THEN 1 ELSE legacy_duplicate END END`); err != nil {
+			return fmt.Errorf("rootタグ互換marker更新エラー: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_root_name_unique ON tags(name) WHERE parent_id IS NULL AND legacy_duplicate = 0`); err != nil {
 			return fmt.Errorf("rootタグ一意index作成エラー: %w", err)
 		}
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", ledgerSchemaVersion)); err != nil {
@@ -495,6 +499,7 @@ func validateCriticalSchema(target schemaQueryer) error {
 	requiredColumns := map[string][]string{
 		"transactions":               {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
 		"transaction_images":         {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
+		"tags":                       {"id", "name", "parent_id", "level", "legacy_duplicate"},
 		"ai_transaction_idempotency": {"credential_id", "idempotency_key_sha256", "request_sha256", "transaction_id", "response_account", "response_date", "created_at"},
 		"ai_daily_transaction_usage": {"credential_id", "utc_date", "successful_creates"},
 	}
@@ -572,7 +577,7 @@ func validateRootTagIndex(target schemaQueryer) error {
 		return fmt.Errorf("rootタグ一意indexの対象が不正です")
 	}
 	canonicalSQL := strings.Join(strings.Fields(strings.ToLower(definition.String)), " ")
-	if canonicalSQL != "create unique index idx_tags_root_name_unique on tags(name) where parent_id is null" {
+	if canonicalSQL != "create unique index idx_tags_root_name_unique on tags(name) where parent_id is null and legacy_duplicate = 0" {
 		return fmt.Errorf("rootタグ一意indexの定義が不正です: %q", definition.String)
 	}
 

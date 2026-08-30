@@ -637,7 +637,15 @@ func (s *Service) getStringSliceSetting(key string) ([]string, error) {
 	var items []string
 	items, err = validation.ParseLedgerSettingItems(value)
 	if err != nil {
-		return nil, err
+		// Settings written by pre-v3 clients could contain duplicate/empty
+		// entries or a 256-byte item. Link validation intentionally treats an
+		// unparseable historical value as an empty set and prunes links in the
+		// same transaction; do not make a read of the ledger fail closed for
+		// that recoverable compatibility case.
+		if archived, archivedErr := validation.ParseArchivedLedgerSettingItems(value, maxCSVSettingValueBytes, validation.MaxSettingItems); archivedErr == nil {
+			return archived, nil
+		}
+		return []string{}, nil
 	}
 	return items, nil
 }
@@ -1895,6 +1903,15 @@ func (s *Service) CreateTag(name string, parentID *int64) (*models.Tag, error) {
 	} else if err := validation.ValidateTagHierarchy(level, nil); err != nil {
 		return nil, err
 	}
+	if parentID == nil {
+		var roots int
+		if err := db.QueryRow("SELECT COUNT(*) FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&roots); err != nil {
+			return nil, fmt.Errorf("rootタグ重複確認エラー: %w", err)
+		}
+		if roots != 0 {
+			return nil, fmt.Errorf("同名のrootタグは作成できません")
+		}
+	}
 
 	result, err := db.Exec(
 		"INSERT INTO tags (name, parent_id, level) VALUES (?, ?, ?)",
@@ -2024,6 +2041,22 @@ func (s *Service) UpdateTag(id int64, name string) error {
 	if err != nil {
 		return err
 	}
+	var parentID sql.NullInt64
+	if err := db.QueryRow("SELECT parent_id FROM tags WHERE id = ?", id).Scan(&parentID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("タグが見つかりません: %w", err)
+		}
+		return fmt.Errorf("タグ親取得エラー: %w", err)
+	}
+	if !parentID.Valid {
+		var roots int
+		if err := db.QueryRow("SELECT COUNT(*) FROM tags WHERE name = ? AND parent_id IS NULL AND id <> ?", name, id).Scan(&roots); err != nil {
+			return fmt.Errorf("rootタグ重複確認エラー: %w", err)
+		}
+		if roots != 0 {
+			return fmt.Errorf("同名のrootタグは作成できません")
+		}
+	}
 	result, err := db.Exec("UPDATE tags SET name = ? WHERE id = ?", name, id)
 	if err != nil {
 		return fmt.Errorf("タグ更新エラー: %w", err)
@@ -2098,7 +2131,14 @@ func createTagPathIn(db *sql.DB, segments []string) (*models.Tag, error) {
 		}
 		var existingID int64
 		if parentID == nil {
-			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&existingID)
+			var rootCount int
+			if countErr := tx.QueryRow("SELECT COUNT(*) FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&rootCount); countErr != nil {
+				return nil, fmt.Errorf("rootタグ重複確認エラー: %w", countErr)
+			}
+			if rootCount > 1 {
+				return nil, fmt.Errorf("同名のrootタグが複数存在するため通常のタグ操作を中止しました")
+			}
+			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id IS NULL AND legacy_duplicate = 0", name).Scan(&existingID)
 		} else {
 			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id = ?", name, *parentID).Scan(&existingID)
 		}
@@ -2117,7 +2157,7 @@ func createTagPathIn(db *sql.DB, segments []string) (*models.Tag, error) {
 		// The INSERT may have been ignored because another connection won the
 		// race; fetch the authoritative row from this transaction.
 		if parentID == nil {
-			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&existingID)
+			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id IS NULL AND legacy_duplicate = 0", name).Scan(&existingID)
 		} else {
 			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id = ?", name, *parentID).Scan(&existingID)
 		}

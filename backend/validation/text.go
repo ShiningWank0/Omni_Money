@@ -49,10 +49,11 @@ func ValidateLedgerText(label, value string, maxBytes int, required bool) error 
 
 // ValidateArchivedLedgerText is the compatibility policy for rows that were
 // already persisted before the strict ledger text policy was introduced. It
-// preserves bytes exactly (including historical control/format characters) and
-// only rejects invalid UTF-8, NUL, and values too large for the archive field.
-// New writes and ordinary v3 rows must use ValidateLedgerText instead. Export
-// marks such legacy rows explicitly, making this trust boundary auditable.
+// preserves bytes exactly and keeps historical length/required semantics, but
+// never permits bytes unsafe to put in a CSV archive: NUL, C0/C1 controls
+// (apart from memo-compatible whitespace), format/bidi controls, and Unicode
+// line separators remain rejected. New writes and ordinary v3 rows must use
+// ValidateLedgerText instead.
 func ValidateArchivedLedgerText(label, value string, maxBytes int, required bool) error {
 	if required && value == "" {
 		return fmt.Errorf("%sは必須です", label)
@@ -60,11 +61,16 @@ func ValidateArchivedLedgerText(label, value string, maxBytes int, required bool
 	if !utf8.ValidString(value) {
 		return fmt.Errorf("%sはUTF-8で指定してください", label)
 	}
-	if strings.IndexByte(value, '\x00') >= 0 {
-		return fmt.Errorf("%sにNUL文字を含めることはできません", label)
-	}
 	if maxBytes > 0 && len([]byte(value)) > maxBytes {
 		return fmt.Errorf("%sは%dバイト以内にしてください", label, maxBytes)
+	}
+	for _, r := range value {
+		if r == '\x00' || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
+			return fmt.Errorf("%sに使用できない文字が含まれています", label)
+		}
+		if unicode.IsControl(r) && r != '\t' && r != '\n' && r != '\r' {
+			return fmt.Errorf("%sに制御文字を含めることはできません", label)
+		}
 	}
 	return nil
 }
@@ -121,6 +127,35 @@ func ParseLedgerSettingItems(value string) ([]string, error) {
 	}
 	if err := ValidateLedgerSettingItems(items); err != nil {
 		return nil, err
+	}
+	return items, nil
+}
+
+// ParseArchivedLedgerSettingItems validates settings already persisted by an
+// older API. Older releases accepted duplicate and empty entries and did not
+// impose the current 255-byte item limit. Keep those values byte-for-byte for
+// an explicit archive row, while retaining a bounded JSON shape and rejecting
+// unsafe text. The caller supplies the archive field/item byte budget.
+func ParseArchivedLedgerSettingItems(value string, maxItemBytes, maxItems int) ([]string, error) {
+	if !utf8.ValidString(value) || value == "" || maxItemBytes <= 0 || maxItems <= 0 {
+		return nil, fmt.Errorf("設定値は文字列配列JSONで指定してください")
+	}
+	decoder := json.NewDecoder(strings.NewReader(value))
+	var items []string
+	if err := decoder.Decode(&items); err != nil || items == nil {
+		return nil, fmt.Errorf("設定値は文字列配列JSONで指定してください")
+	}
+	var extra interface{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("設定値JSONに余分なデータがあります")
+	}
+	if len(items) > maxItems {
+		return nil, fmt.Errorf("設定値の項目数が上限を超えています")
+	}
+	for _, item := range items {
+		if err := ValidateArchivedLedgerText("設定値の項目", item, maxItemBytes, false); err != nil {
+			return nil, err
+		}
 	}
 	return items, nil
 }

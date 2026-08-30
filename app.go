@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -442,6 +443,11 @@ func (a *App) ImportCSVFile(mode string) (int, error) {
 	a.mu.Lock()
 	ctx := a.ctx
 	chooser := a.chooseCSVFile
+	if a.coordinator == nil || !a.coordinator.Status().Unlocked {
+		a.mu.Unlock()
+		return 0, desktopaccount.ErrLocked
+	}
+	generation := a.generation
 	a.mu.Unlock()
 	if chooser == nil {
 		return 0, errors.New("CSV file chooser is unavailable")
@@ -453,17 +459,68 @@ func (a *App) ImportCSVFile(mode string) (int, error) {
 	if path == "" {
 		return 0, nil
 	}
-	service, release, err := a.borrowService()
+	a.mu.Lock()
+	if generation != a.generation || a.coordinator == nil || !a.coordinator.Status().Unlocked {
+		a.mu.Unlock()
+		return 0, ErrDesktopVaultChanged
+	}
+	lease, err := a.coordinator.Service()
+	a.mu.Unlock()
 	if err != nil {
 		return 0, err
 	}
-	defer release()
-	file, err := os.Open(path)
+	defer lease.Release()
+	service, err := lease.Core()
+	if err != nil {
+		return 0, err
+	}
+	file, err := openDesktopCSVFile(path)
 	if err != nil {
 		return 0, err
 	}
 	defer file.Close()
 	return service.ImportCSVReaderContext(ctx, file, mode)
+}
+
+// openDesktopCSVFile binds the import to a regular file handle. The native
+// picker returns a path, but opening that path directly would permit a later
+// symlink/reparse-point swap (and would trigger path-taint findings). A pinned
+// directory root plus an Lstat/handle identity comparison rejects symlinks,
+// FIFOs/devices, and replacement races before any CSV bytes are consumed.
+func openDesktopCSVFile(path string) (*os.File, error) {
+	clean, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return nil, fmt.Errorf("CSVファイルパスが不正です: %w", err)
+	}
+	directory, name := filepath.Split(clean)
+	if directory == "" || name == "" || filepath.Base(name) != name {
+		return nil, errors.New("CSVファイル名が不正です")
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		return nil, fmt.Errorf("CSVファイルの親ディレクトリを開けません: %w", err)
+	}
+	defer root.Close()
+	entry, err := root.Lstat(name)
+	if err != nil {
+		return nil, fmt.Errorf("CSVファイルを検査できません: %w", err)
+	}
+	if entry.Mode()&os.ModeSymlink != 0 || !entry.Mode().IsRegular() {
+		return nil, errors.New("CSVパスはsymlinkやデバイスではない通常ファイルで指定してください")
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, fmt.Errorf("CSVファイルを開けません: %w", err)
+	}
+	info, statErr := file.Stat()
+	if statErr != nil || !info.Mode().IsRegular() || !os.SameFile(entry, info) {
+		_ = file.Close()
+		if statErr != nil {
+			return nil, fmt.Errorf("CSVファイルのidentity検証に失敗しました: %w", statErr)
+		}
+		return nil, errors.New("CSVファイルが選択後に置き換えられました")
+	}
+	return file, nil
 }
 
 // --- Snapshots ---

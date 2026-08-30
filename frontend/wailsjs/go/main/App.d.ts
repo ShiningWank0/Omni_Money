@@ -15,6 +15,7 @@ export function AddTransactionLink(arg1:number,arg2:number):Promise<void>;
 export function AddTransactionTags(arg1:number,arg2:Array<number>):Promise<void>;
 
 export function BackupToCSVFile():Promise<string>;
+export function BackupToCSVFull():Promise<string>;
 
 export function ChangeDesktopVaultPassword(arg1:string,arg2:string):Promise<desktopaccount.Status>;
 

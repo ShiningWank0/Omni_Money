@@ -23,6 +23,7 @@ import (
 	"omni_money/backend/authn"
 	"omni_money/backend/core"
 	"omni_money/backend/database"
+	"omni_money/backend/fileprivacy"
 	"omni_money/backend/middleware"
 	"omni_money/backend/models"
 )
@@ -489,12 +490,12 @@ func handleBackupCSV(w http.ResponseWriter, r *http.Request) {
 		cleanupCSVExportFile(tmp, tmpPath)
 	}
 	defer cleanup()
-	if err := tmp.Chmod(0600); err != nil {
+	if err := fileprivacy.Harden(tmp); err != nil {
 		writeFinancialError(w, err, http.StatusInsufficientStorage)
 		return
 	}
 	fileInfo, err := tmp.Stat()
-	if err != nil || !fileInfo.Mode().IsRegular() || fileInfo.Mode().Perm() != 0600 {
+	if err != nil || !fileprivacy.IsPrivate(fileInfo) {
 		writeFinancialError(w, fmt.Errorf("CSV出力一時ファイルが不正です"), http.StatusInsufficientStorage)
 		return
 	}
