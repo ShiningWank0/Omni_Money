@@ -1004,9 +1004,12 @@ validate_docker_isolation_authority() {
   # verify its pinned executable/socket identity. Container stop/status uses
   # Docker Go templates and must not be blocked by a changed JSON parser.
   for command_name in docker stat sha256sum sed dirname; do
-    validate_pinned_tool_by_name "$command_name" || return 1
+    if ! validate_pinned_tool_by_name "$command_name"; then
+      fail "pinned Docker isolation authority dependency changed: $command_name"
+      return 1
+    fi
   done
-  validate_pinned_docker_socket
+  validate_pinned_docker_socket || { fail "pinned Docker isolation socket changed"; return 1; }
 }
 
 validate_network_isolation_parsers() {
@@ -1015,7 +1018,10 @@ validate_network_isolation_parsers() {
   # behind the stop boundary so parser drift cannot leave a running container
   # merely because automatic network isolation is no longer trustworthy.
   for command_name in stat sha256sum sed dirname jq; do
-    validate_pinned_tool_by_name "$command_name" || return 1
+    if ! validate_pinned_tool_by_name "$command_name"; then
+      fail "pinned network isolation parser dependency changed: $command_name"
+      return 1
+    fi
   done
 }
 

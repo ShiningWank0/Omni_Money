@@ -119,8 +119,12 @@ jobs:
           bash -n scripts/safe-update.sh
           test -x scripts/safe-update_test.sh
           # Production refuses non-root before touching Docker or data. Run
-          # the complete transaction matrix under the same root boundary;
-          # fixture-only mocks remain confined to its generated test path.
+          # the critical legacy and parser-drift paths in isolation first so
+          # their diagnostics stay focused, then run the complete transaction
+          # matrix under the same root boundary. Fixture-only mocks remain
+          # confined to each generated test path.
+          sudo env "PATH=$PATH" SAFE_UPDATE_ONLY=legacy_archive_failure SAFE_UPDATE_EXPECTED=1 scripts/safe-update_test.sh
+          sudo env "PATH=$PATH" SAFE_UPDATE_ONLY=jq_only_drift SAFE_UPDATE_EXPECTED=1 scripts/safe-update_test.sh
           sudo env "PATH=$PATH" scripts/safe-update_test.sh
 
       - name: Assert Pangolin network isolation
