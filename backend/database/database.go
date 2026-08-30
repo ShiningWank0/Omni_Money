@@ -354,6 +354,21 @@ func createTablesOn(target *sql.DB) error {
 	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&userTables); err != nil {
 		return fmt.Errorf("schema table count取得エラー: %w", err)
 	}
+	legacyMigration := version == 0 && identity == 0 && userTables > 0
+	if legacyMigration {
+		// Version 0 is ambiguous: it is either a fresh SQLite file or a
+		// historical ledger. Once user tables exist, never let CREATE TABLE IF
+		// NOT EXISTS upgrade a same-name impostor. The only supported pre-marker
+		// family is checked against its complete immutable DDL before anything
+		// is changed.
+		legacy, err := isSupportedLegacyPreMigrationLayout(target)
+		if err != nil {
+			return fmt.Errorf("legacy schema fingerprint検査エラー: %w", err)
+		}
+		if !legacy {
+			return errors.New("unsupported version-0 ledger layout")
+		}
+	}
 
 	tx, err := target.Begin()
 	if err != nil {
@@ -647,7 +662,7 @@ func createTablesOn(target *sql.DB) error {
 	// Validate the complete post-migration schema while the transaction is
 	// still open. A crafted extra table/index/constraint must not leave a
 	// partially upgraded database committed after validation reports failure.
-	if err := validateLedgerSchemaAfterMigration(tx, version == ledgerSchemaVersion || identity == ledgerSchemaIdentity); err != nil {
+	if err := validateLedgerSchemaAfterMigration(tx, !legacyMigration); err != nil {
 		return fmt.Errorf("完全なschema validation failed: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -890,9 +905,9 @@ func expectedLedgerTableDefinitions() map[string]string {
 
 // isSupportedLegacyCurrentLayout recognizes the one historical layout that
 // can be migrated without pretending its old tables had today's constraints.
-// Recognition is based on immutable DDL fingerprints, not a mutable marker
-// row/table inside the database. The migrated current objects are validated
-// separately by validateFullLedgerSchema.
+// Recognition is based on the complete immutable DDL/object family, not a
+// mutable marker row/table inside the database. The migrated current objects
+// are validated separately by validateFullLedgerSchema.
 func isSupportedLegacyCurrentLayout(target schemaQueryer) (bool, error) {
 	var markerCount int
 	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE name='omni_legacy_schema_compat'").Scan(&markerCount); err != nil {
@@ -904,20 +919,38 @@ func isSupportedLegacyCurrentLayout(target schemaQueryer) (bool, error) {
 		return false, nil
 	}
 	legacyDefinitions := map[string]string{
-		"transactions":       "create table transactions ( id integer primary key autoincrement, account text not null, date datetime not null, item text not null, type text not null, amount integer not null, balance integer not null default 0, memo text default '' )",
-		"transaction_images": "create table transaction_images ( id integer primary key autoincrement, transaction_id integer not null, filename text not null, data blob not null, mime_type text not null default 'image/jpeg', created_at datetime default current_timestamp )",
+		"transactions": canonicalDDL(`CREATE TABLE transactions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account TEXT NOT NULL,
+			date DATETIME NOT NULL,
+			item TEXT NOT NULL,
+			type TEXT NOT NULL,
+			amount INTEGER NOT NULL,
+			balance INTEGER NOT NULL DEFAULT 0,
+			memo TEXT DEFAULT ''
+		)`),
+		"transaction_images": canonicalDDL(`CREATE TABLE transaction_images (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			transaction_id INTEGER NOT NULL,
+			filename TEXT NOT NULL,
+			data BLOB NOT NULL,
+			mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`),
 	}
 	for table, expected := range legacyDefinitions {
 		var definition sql.NullString
 		if err := target.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&definition); err != nil || !definition.Valid {
 			return false, nil
 		}
-		if canonicalSQL(definition.String) != expected {
+		if canonicalDDL(definition.String) != expected {
 			return false, nil
 		}
 	}
-	// The old image table must not have foreign keys or hidden extra columns;
-	// those would be a different migration family.
+	// The legacy family contains exactly these two user tables. Indexes/triggers
+	// created by the normal migration are checked by validateFullLedgerSchema;
+	// allowing them here is necessary when reopening a successfully migrated
+	// version-2 image whose old transaction tables remain unchanged.
 	for _, table := range []string{"transactions", "transaction_images"} {
 		var count int
 		if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 1 {
@@ -925,6 +958,21 @@ func isSupportedLegacyCurrentLayout(target schemaQueryer) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+func isSupportedLegacyPreMigrationLayout(target schemaQueryer) (bool, error) {
+	legacy, err := isSupportedLegacyCurrentLayout(target)
+	if err != nil || !legacy {
+		return legacy, err
+	}
+	var extraTables, extraObjects int
+	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('transactions', 'transaction_images')").Scan(&extraTables); err != nil {
+		return false, err
+	}
+	if err := target.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type IN ('index', 'trigger') AND name NOT LIKE 'sqlite_%'").Scan(&extraObjects); err != nil {
+		return false, err
+	}
+	return extraTables == 0 && extraObjects == 0, nil
 }
 
 func requireColumns(target schemaQueryer, table string, required []string) error {
@@ -1765,6 +1813,33 @@ func sameSnapshotInfo(a, b os.FileInfo) bool {
 	return a != nil && b != nil && os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime()) && a.Mode().Perm() == b.Mode().Perm()
 }
 
+// assertOpenFileAtPath proves that path still names the exact object held by
+// file. It uses the same no-follow opener as snapshot sources, so a reparse or
+// symlink substitution cannot pass the check merely by preserving pathname
+// metadata.
+func assertOpenFileAtPath(file *os.File, path string) error {
+	if file == nil {
+		return errors.New("candidate descriptor is nil")
+	}
+	pathFile, err := openSnapshotFile(path)
+	if err != nil {
+		return err
+	}
+	defer pathFile.Close()
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	pathInfo, err := pathFile.Stat()
+	if err != nil {
+		return err
+	}
+	if !validSnapshotFile(fileInfo) || !validSnapshotFile(pathInfo) || !sameSnapshotInfo(fileInfo, pathInfo) {
+		return errors.New("candidate pathname no longer names the validated descriptor")
+	}
+	return nil
+}
+
 // validateSnapshotDatabase is deliberately read-only. Legacy snapshots may
 // be migrated only during restore; listing must not mutate an off-host file.
 func (i *Instance) validateSnapshotDatabase(target *sql.DB, path string) error {
@@ -1904,17 +1979,19 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 		}
 		return fmt.Errorf("スナップショットdigest再検証エラー: %w", err)
 	}
-	candidateDigest, err := digestDatabaseFile(candidatePath)
+	// Keep the original candidate descriptor as the identity anchor. Digesting
+	// by pathname here would let a same-account writer substitute another
+	// valid database between validation and the eventual replace.
+	candidateDigest, err := digestOpenFile(candidateFile)
 	if err != nil || !strings.EqualFold(sourceDigest, candidateDigest) {
 		if err == nil {
 			err = errors.New("復元候補digestがスナップショットと一致しません")
 		}
 		return fmt.Errorf("復元候補digest検証エラー: %w", err)
 	}
-	if err := candidateFile.Close(); err != nil {
-		return fmt.Errorf("復元候補のクローズエラー: %w", err)
+	if err := assertOpenFileAtPath(candidateFile, candidatePath); err != nil {
+		return fmt.Errorf("復元候補identity検証エラー: %w", err)
 	}
-	candidateFile = nil
 	candidateDB, err := i.opener.Open(context.Background(), candidatePath, securedb.Writable)
 	if err != nil {
 		return fmt.Errorf("復元候補のDB接続エラー: %w", err)
@@ -1929,6 +2006,20 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	if err := syncFileAndDirectory(candidatePath, dir); err != nil {
 		return fmt.Errorf("復元候補のfsyncエラー: %w", err)
 	}
+	// Migration/checkpoint may rewrite the candidate in place. Re-digest the
+	// same open descriptor and bind the final pathname to that descriptor again
+	// before closing it for the platform-specific atomic replace.
+	candidateDigest, err = digestOpenFile(candidateFile)
+	if err != nil {
+		return fmt.Errorf("復元候補descriptor digestエラー: %w", err)
+	}
+	if err := assertOpenFileAtPath(candidateFile, candidatePath); err != nil {
+		return fmt.Errorf("復元候補identity再検証エラー: %w", err)
+	}
+	if err := candidateFile.Close(); err != nil {
+		return fmt.Errorf("復元候補のクローズエラー: %w", err)
+	}
+	candidateFile = nil
 
 	// Close the live handle only after candidate validation. Its WAL is
 	// checkpointed first so the live file is a complete database. The original
@@ -1995,6 +2086,13 @@ func (i *Instance) RestoreSnapshot(snapshotDir, snapshotName string) error {
 	removeCandidate = false
 	if err := syncDirectory(dir); err != nil {
 		return errors.Join(fmt.Errorf("復元配置のfsyncエラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
+	}
+	installedDigest, err := digestDatabaseFile(currentPath)
+	if err != nil || !strings.EqualFold(candidateDigest, installedDigest) {
+		if err == nil {
+			err = errors.New("復元配置DBが検証済み候補と一致しません")
+		}
+		return errors.Join(fmt.Errorf("復元配置identity/digest検証エラー: %w", err), rollbackRestoreFiles(currentPath, backupPath, candidatePath, i))
 	}
 	manifest.Phase = "swapped"
 	if err := writeRestoreManifest(currentPath, manifest); err != nil {
@@ -2256,7 +2354,7 @@ type snapshotUsageEntry struct {
 }
 
 func pruneSnapshots(snapshotDir string, maxKeep int, maxBytes int64, protectedPath string) error {
-	if maxKeep <= 0 || maxBytes <= 0 {
+	if maxKeep <= 0 || maxBytes < 0 {
 		return fmt.Errorf("スナップショット保持境界が無効です")
 	}
 	entries, err := os.ReadDir(snapshotDir)

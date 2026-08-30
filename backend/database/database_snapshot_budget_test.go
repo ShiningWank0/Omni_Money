@@ -78,3 +78,16 @@ func TestListSnapshotsContextHonorsCancellationBeforeValidation(t *testing.T) {
 		t.Fatalf("canceled snapshot listing error = %v, want context.Canceled", err)
 	}
 }
+
+func TestCreateSnapshotAllowsExactRemainingBudget(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	insertSnapshotTestTransaction(t, instance, "exact-budget")
+	required, err := sqliteDatabaseSize(instance.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SNAPSHOT_MAX_TOTAL_BYTES", fmt.Sprintf("%d", required))
+	if _, err := instance.CreateSnapshot(snapshotDir); err != nil {
+		t.Fatalf("snapshot using exactly the configured budget failed: %v", err)
+	}
+}

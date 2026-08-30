@@ -183,6 +183,40 @@ func TestLedgerSchemaMigrationFailureRollsBackAtomically(t *testing.T) {
 	}
 }
 
+func TestLedgerSchemaRejectsForgedVersionZeroLayout(t *testing.T) {
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "forged-v0.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// The names satisfy the old minimum-column probe, but nullable/wrong-type
+	// fields and an extra column make this an impostor rather than the one
+	// allowlisted pre-marker family.
+	if _, err := db.Exec(`CREATE TABLE transactions (
+		id INTEGER PRIMARY KEY, account TEXT, date TEXT, item TEXT,
+		type TEXT, amount TEXT, balance TEXT, memo TEXT, forged_extra TEXT
+	);
+	CREATE TABLE transaction_images (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, transaction_id INTEGER NOT NULL,
+		filename TEXT NOT NULL, data BLOB NOT NULL,
+		mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	INSERT INTO transactions(id, amount) VALUES (1, NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := createTablesOn(db); err == nil {
+		t.Fatal("forged version-0 layout was migrated")
+	}
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 0 {
+		t.Fatalf("forged migration changed schema version to %d", version)
+	}
+}
+
 func TestLedgerSchemaRejectsFutureVersion(t *testing.T) {
 	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "future.db"))
 	if err != nil {

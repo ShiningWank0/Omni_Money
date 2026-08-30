@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -320,6 +321,43 @@ func TestRestoreBackupDestinationSupportsAtomicRename(t *testing.T) {
 	}
 	if _, err := os.Stat(backup); err != nil {
 		t.Fatalf("backup path missing after rename: %v", err)
+	}
+}
+
+func TestRestoreCandidateIdentityRejectsPathSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("candidate rename fixture requires POSIX open-file semantics")
+	}
+	dir := t.TempDir()
+	candidatePath := filepath.Join(dir, ".omni-money-restore-candidate-test.db")
+	candidate, err := os.OpenFile(candidatePath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := candidate.WriteString("validated candidate"); err != nil {
+		candidate.Close()
+		t.Fatal(err)
+	}
+	if err := candidate.Sync(); err != nil {
+		candidate.Close()
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(dir, "other-valid-snapshot.db")
+	if err := os.WriteFile(replacement, []byte("another valid same-key image"), 0o600); err != nil {
+		candidate.Close()
+		t.Fatal(err)
+	}
+	if err := os.Rename(candidatePath, candidatePath+".detached"); err != nil {
+		candidate.Close()
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, candidatePath); err != nil {
+		candidate.Close()
+		t.Fatal(err)
+	}
+	defer candidate.Close()
+	if err := assertOpenFileAtPath(candidate, candidatePath); err == nil {
+		t.Fatal("candidate path substitution was accepted")
 	}
 }
 

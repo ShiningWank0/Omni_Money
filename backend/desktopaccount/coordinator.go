@@ -645,17 +645,26 @@ func (c *Coordinator) RestoreSnapshot(name string) error {
 
 	err := instance.RestoreSnapshot("", name)
 	c.mu.Lock()
+	if err != nil {
+		// Keep draining true while detaching the instance. Status/Service and
+		// concurrent snapshot calls therefore cannot observe an unlocked
+		// coordinator in the gap before cleanup. Close outside c.mu, then
+		// publish the locked state and wake waiters together.
+		if c.instance == instance {
+			c.instance = nil
+			c.generation++
+		}
+		c.mu.Unlock()
+		closeErr := instance.Close()
+		c.mu.Lock()
+		c.draining = false
+		c.cond.Broadcast()
+		c.mu.Unlock()
+		return errors.Join(err, closeErr)
+	}
 	c.draining = false
 	c.cond.Broadcast()
 	c.mu.Unlock()
-	if err != nil {
-		// Restore closes the live database before the filesystem swap.  Any
-		// failure after that point leaves the opener/DEK and coordinator
-		// state unsafe to keep published, even when rollback was attempted.
-		// Lock unconditionally on failure so Desktop always destroys the
-		// instance and requires a fresh password before another operation.
-		return errors.Join(err, c.Lock())
-	}
 	return err
 }
 
