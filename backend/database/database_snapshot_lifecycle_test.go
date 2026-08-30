@@ -2,7 +2,9 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -96,6 +98,7 @@ func TestSnapshotStagingArtifactsAreNotPublicSnapshots(t *testing.T) {
 	for _, name := range []string{
 		".omni-money-snapshot-staging-crashed.db",
 		".omni-money-list-validation-crashed.db",
+		".omni-money-snapshot-prune-manifest-crashed.tmp",
 	} {
 		if err := os.WriteFile(filepath.Join(snapshotDir, name), []byte("partial"), 0600); err != nil {
 			t.Fatal(err)
@@ -111,6 +114,7 @@ func TestSnapshotStagingArtifactsAreNotPublicSnapshots(t *testing.T) {
 	for _, name := range []string{
 		".omni-money-snapshot-staging-crashed.db",
 		".omni-money-list-validation-crashed.db",
+		".omni-money-snapshot-prune-manifest-crashed.tmp",
 	} {
 		if _, err := os.Stat(filepath.Join(snapshotDir, name)); !os.IsNotExist(err) {
 			t.Fatalf("stale staging artifact %s remains: %v", name, err)
@@ -127,6 +131,10 @@ func TestStartupRemovesStaleSnapshotStagingArtifacts(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("partial"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	staleManifest := filepath.Join(snapshotDir, ".omni-money-snapshot-prune-manifest-crashed.tmp")
+	if err := os.WriteFile(staleManifest, []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	reopened, err := OpenPlainInstance(databasePath)
 	if err != nil {
 		t.Fatal(err)
@@ -134,6 +142,9 @@ func TestStartupRemovesStaleSnapshotStagingArtifacts(t *testing.T) {
 	defer reopened.Close()
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatalf("startup left stale validation artifact: %v", err)
+	}
+	if _, err := os.Stat(staleManifest); !os.IsNotExist(err) {
+		t.Fatalf("startup left stale prune manifest temporary: %v", err)
 	}
 }
 
@@ -561,6 +572,244 @@ func TestPublishedPruneRecoveryRequiresRecordedTarget(t *testing.T) {
 	}
 	if _, err := os.Stat(snapshotPruneManifestPath(dir)); err != nil {
 		t.Fatalf("journal was removed after missing-target recovery: %v", err)
+	}
+}
+
+func TestSnapshotPruneManifestSizeIsValidatedBeforeQuarantine(t *testing.T) {
+	dir := t.TempDir()
+	const victims = 160
+	originals := make([]string, 0, victims)
+	for index := 0; index < victims; index++ {
+		name := fmt.Sprintf("omni_money_%03d_%s.db", index, strings.Repeat("x", 145))
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte{byte(index)}, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := hardenPrivateFile(path); err != nil {
+			t.Fatal(err)
+		}
+		originals = append(originals, path)
+	}
+	planned, err := planSnapshotQuarantineContext(context.Background(), dir, 1, 10_000, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(planned) != victims {
+		t.Fatalf("planned victims=%d, want %d", len(planned), victims)
+	}
+	if _, err := newSnapshotPruneManifest(dir, "omni_money_20260101_000000_000000001.db", strings.Repeat("a", 64), planned); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized manifest error=%v", err)
+	}
+	for _, path := range originals {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("public victim changed before oversized manifest rejection: %v", err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), snapshotPruneArtifactPrefix) {
+			t.Fatalf("quarantine artifact %q appeared before manifest size validation", entry.Name())
+		}
+	}
+}
+
+func TestCreateSnapshotOversizedPruneManifestLeavesPublicSetUnchanged(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	const generations = 160
+	originals := make(map[string]bool, generations)
+	for index := 0; index < generations; index++ {
+		name := fmt.Sprintf("omni_money_%03d_%s.db", index, strings.Repeat("z", 170))
+		path := filepath.Join(snapshotDir, name)
+		if err := os.WriteFile(path, []byte{byte(index)}, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := hardenPrivateFile(path); err != nil {
+			t.Fatal(err)
+		}
+		originals[name] = true
+	}
+	if _, err := instance.CreateSnapshot(snapshotDir); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized create error=%v", err)
+	}
+	entries, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicCount := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".db") && !strings.HasPrefix(entry.Name(), ".") {
+			publicCount++
+			if !originals[entry.Name()] {
+				t.Fatalf("oversized transaction published unexpected snapshot %q", entry.Name())
+			}
+		}
+		if strings.HasPrefix(entry.Name(), snapshotPruneArtifactPrefix) || entry.Name() == snapshotPruneManifestName {
+			t.Fatalf("oversized transaction left prune state %q", entry.Name())
+		}
+	}
+	if publicCount != generations {
+		t.Fatalf("public generation count=%d, want %d", publicCount, generations)
+	}
+}
+
+func TestSnapshotPruneManifestEncodedSizeBoundary(t *testing.T) {
+	dir := t.TempDir()
+	var entries []snapshotQuarantineEntry
+	var lastGood snapshotPruneManifest
+	boundaryFound := false
+	for index := 0; index < maxSnapshotDirectoryEntries; index++ {
+		original := fmt.Sprintf("omni_money_%03d_%s.db", index, strings.Repeat("b", 145))
+		quarantined := snapshotPruneArtifactPrefix + fmt.Sprintf("%032x", index+1) + "-" + original
+		entries = append(entries, snapshotQuarantineEntry{
+			original: filepath.Join(dir, original), quarantined: filepath.Join(dir, quarantined), digest: strings.Repeat("c", 64),
+		})
+		manifest, err := newSnapshotPruneManifest(dir, "omni_money_20260101_000000_000000001.db", strings.Repeat("a", 64), entries)
+		if err != nil {
+			if !strings.Contains(err.Error(), "exceeds") {
+				t.Fatalf("unexpected boundary error at %d victims: %v", len(entries), err)
+			}
+			boundaryFound = true
+			break
+		}
+		lastGood = manifest
+	}
+	if !boundaryFound || len(lastGood.Victims) == 0 {
+		t.Fatal("manifest byte boundary was not exercised")
+	}
+	encoded, err := json.Marshal(lastGood)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(encoded))+1 > maxSnapshotPruneManifestBytes {
+		t.Fatalf("accepted manifest size=%d exceeds reader limit=%d", len(encoded)+1, maxSnapshotPruneManifestBytes)
+	}
+}
+
+func TestSnapshotPruneManifestCreateFailureRemovesExactJournal(t *testing.T) {
+	for _, step := range []string{"harden", "write", "sync", "close"} {
+		t.Run(step, func(t *testing.T) {
+			dir := t.TempDir()
+			original := "omni_money_20260101_000000_000000001.db"
+			quarantined := snapshotPruneArtifactPrefix + strings.Repeat("1", 32) + "-" + original
+			manifest, err := newSnapshotPruneManifest(dir, "omni_money_20260102_000000_000000001.db", strings.Repeat("a", 64), []snapshotQuarantineEntry{{
+				original: filepath.Join(dir, original), quarantined: filepath.Join(dir, quarantined), digest: strings.Repeat("b", 64),
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			injected := errors.New("injected " + step + " failure")
+			err = createSnapshotPruneManifestWithCheckpoint(dir, manifest, func(name string) error {
+				if name == step {
+					return injected
+				}
+				return nil
+			})
+			if !errors.Is(err, injected) {
+				t.Fatalf("create error=%v, want injected failure", err)
+			}
+			if _, err := os.Lstat(snapshotPruneManifestPath(dir)); !os.IsNotExist(err) {
+				t.Fatalf("failed initial manifest remains: %v", err)
+			}
+			if err := createSnapshotPruneManifest(dir, manifest); err != nil {
+				t.Fatalf("next manifest creation did not recover: %v", err)
+			}
+		})
+	}
+}
+
+func TestSnapshotPruneManifestTempCleanupAndTamperBoundary(t *testing.T) {
+	t.Run("valid orphan", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".omni-money-snapshot-prune-manifest-orphan.tmp")
+		if err := os.WriteFile(path, []byte("partial"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := cleanupSnapshotPruneManifestTemps(context.Background(), dir); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("valid orphan remains: %v", err)
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "target")
+		if err := os.WriteFile(target, []byte("do not remove"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, ".omni-money-snapshot-prune-manifest-link.tmp")
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if err := cleanupSnapshotPruneManifestTemps(context.Background(), dir); err == nil {
+			t.Fatal("cleanup followed a symlinked manifest temporary")
+		}
+		if content, err := os.ReadFile(target); err != nil || string(content) != "do not remove" {
+			t.Fatalf("symlink target changed: content=%q err=%v", content, err)
+		}
+	})
+
+	t.Run("hardlink", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".omni-money-snapshot-prune-manifest-hardlink.tmp")
+		if err := os.WriteFile(path, []byte("partial"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(path, filepath.Join(dir, "second-link")); err != nil {
+			t.Skipf("hard links unavailable: %v", err)
+		}
+		if err := cleanupSnapshotPruneManifestTemps(context.Background(), dir); err == nil {
+			t.Fatal("cleanup accepted a multiply-linked manifest temporary")
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("hard-linked temporary was removed: %v", err)
+		}
+	})
+
+	t.Run("permissions", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Unix mode bits are not authoritative on Windows")
+		}
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".omni-money-snapshot-prune-manifest-readable.tmp")
+		if err := os.WriteFile(path, []byte("partial"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := cleanupSnapshotPruneManifestTemps(context.Background(), dir); err == nil {
+			t.Fatal("cleanup accepted a non-private manifest temporary")
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("non-private temporary was removed: %v", err)
+		}
+	})
+}
+
+func TestCreateSnapshotRecoversManifestTempEntryCapExhaustion(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	for index := 0; index < maxSnapshotDirectoryEntries+32; index++ {
+		name := fmt.Sprintf(".omni-money-snapshot-prune-manifest-%03d.tmp", index)
+		if err := os.WriteFile(filepath.Join(snapshotDir, name), []byte("partial"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := instance.CreateSnapshot(snapshotDir); err != nil {
+		t.Fatalf("create did not recover manifest temp entry exhaustion: %v", err)
+	}
+	entries, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".omni-money-snapshot-prune-manifest-") && strings.HasSuffix(entry.Name(), ".tmp") {
+			t.Fatalf("orphan manifest temporary remains: %s", entry.Name())
+		}
 	}
 }
 

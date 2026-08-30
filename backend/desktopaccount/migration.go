@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 
+	"omni_money/backend/database"
 	"omni_money/backend/keyenvelope"
 	"omni_money/backend/securedb"
 )
@@ -1236,6 +1237,7 @@ func (j *migrationJournal) validateFilesystem(root string, manifestPublished boo
 
 func validateKnownMigrationTree(root string, journal *migrationJournal, manifestPublished bool) error {
 	allowedFiles := map[string]bool{migrationFileName: true, migrationLockFileName: true}
+	trustedSnapshotLocks := map[string]bool{}
 	if manifestPublished {
 		allowedFiles[manifestFileName] = true
 	}
@@ -1256,6 +1258,12 @@ func validateKnownMigrationTree(root string, journal *migrationJournal, manifest
 	for artifactIndex := range journal.Artifacts {
 		artifact := &journal.Artifacts[artifactIndex]
 		allowFile(artifact.Destination)
+		destinationParent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(artifact.Destination)))
+		if filepath.Base(filepath.FromSlash(destinationParent)) == "snapshots" {
+			lockRelative := filepath.ToSlash(filepath.Join(filepath.FromSlash(destinationParent), database.SnapshotTransactionLockFileName))
+			trustedSnapshotLocks[lockRelative] = true
+			allowParents(lockRelative)
+		}
 		if artifactIndex == 0 {
 			for _, suffix := range sqliteSidecarSuffixes() {
 				allowFile(artifact.Destination + suffix)
@@ -1305,6 +1313,12 @@ func validateKnownMigrationTree(root string, journal *migrationJournal, manifest
 		if entry.IsDir() {
 			if !allowedDirectories[relative] {
 				return fmt.Errorf("%w: unknown directory %q exists in migration tree", ErrMigrationState, relative)
+			}
+			return nil
+		}
+		if trustedSnapshotLocks[relative] {
+			if err := database.ValidateSnapshotTransactionLock(path); err != nil {
+				return fmt.Errorf("%w: destination snapshot coordination file %q is unsafe: %v", ErrMigrationState, relative, err)
 			}
 			return nil
 		}
