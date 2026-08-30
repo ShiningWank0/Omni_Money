@@ -107,6 +107,10 @@ healthcheck、env 更新、network connect のどれかが失敗した場合、E
    pinned network IDからdisconnectしてnetwork 0を確認する。このisolation完了後だけ
    `rollback-stopped`をdurable journalへ記録する。journal更新が失敗した場合はdataへ触れず、
    lock/journal/recovery bundleを残してmanual recoveryへ移行する。
+   rollback入口ではまずDocker CLI/socketとstop/disconnectに必要な最小parserだけを
+   pinned identityで確認します。これによりtar/find等の復旧toolが途中で変わっていてもcontainer
+   isolationを先に完了できます。isolation後、全toolchainを再検証し、失敗時はdata/envへ触れず
+   last known-good pinを含む全artifactを保持します。
 2. checkpoint の archive/checksum と data root の device/inode/link count、owner/mode
    を再検証する。tar の絶対 path、..、control-character/escape 名、symlink、hardlink、
    device、FIFO は作成時・復元前に拒否する。

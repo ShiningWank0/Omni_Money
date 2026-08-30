@@ -186,6 +186,8 @@ cat > "$mock_bin/stat" <<'MOCK_STAT'
 set -Eeuo pipefail
 fmt="$2"; if [ "$#" -eq 3 ]; then path="$3"; else path="$4"; fi
 if [ "${MOCK_SCENARIO:-}" = secret_permissions_bad ] && [ "$path" = "${MOCK_CONTROL_KEY:-}" ] && [ "$fmt" = %a ]; then echo 444; exit 0; fi
+if [ "${MOCK_SCENARIO:-}" = full_toolchain_drift ] && [ -e "$MOCK_STATE_DIR/toolchain_trigger" ] && [[ "$path" == */mock-bin/tar ]] && [ "$fmt" = %i ]; then echo 999999; exit 0; fi
+if [ "${MOCK_SCENARIO:-}" = isolation_toolchain_drift ] && [ -e "$MOCK_STATE_DIR/toolchain_trigger" ] && [[ "$path" == */mock-bin/docker ]] && [ "$fmt" = %i ]; then echo 999999; exit 0; fi
 if { [ "${MOCK_SCENARIO:-}" = cross_fs_stage ] || [ "${MOCK_SCENARIO:-}" = legacy_archive_failure ]; } && [[ "$path" == */.data.tar.tmp.* ]] && [ "$fmt" = %d ]; then echo 999; exit 0; fi
 if [[ "$path" == */.capacity.reserve ]] && [ "$fmt" = %s ]; then cat "$MOCK_STATE_DIR/capacity_size"; exit 0; fi
 case "$fmt:$path" in
@@ -296,7 +298,14 @@ if [ "$1" = compose ]; then
 fi
 case "$1" in
   ps)
-    { [ "$scenario" = legacy_project ] || [ "$scenario" = legacy_archive_failure ]; } && echo current
+    if [[ " $* " == *" label=com.docker.compose.project="* ]]; then
+      case "$(get phase)" in
+        candidate) [ "$scenario" = unknown_removal ] && echo unexpected || echo candidate ;;
+        rollback) echo rollback ;;
+      esac
+    else
+      { [ "$scenario" = legacy_project ] || [ "$scenario" = legacy_archive_failure ]; } && echo current
+    fi
     ;;
   context)
     case "$2" in
@@ -328,7 +337,9 @@ case "$1" in
       *State.Health*)
         if [ "$id" = candidate ] && [ "$scenario" = rollback_journal_failure ] && [ "$(get net_candidate)" = connected ]; then
           : > "$state_dir/rollback_trigger"; echo missing
-        elif [ "$id" = candidate ] && { [ "$scenario" = candidate_failure ] || [ "$scenario" = candidate_data_mutation ] || [ "$scenario" = rollback_failure ] || [ "$scenario" = rollback_tag_mutation ] || [ "$scenario" = unknown_removal ] || { [ "$scenario" = candidate_ingress_health_failure ] && [ "$(get net_candidate)" = connected ]; }; }; then
+        elif [ "$id" = candidate ] && { [ "$scenario" = full_toolchain_drift ] || [ "$scenario" = isolation_toolchain_drift ]; } && [ "$(get net_candidate)" = connected ]; then
+          : > "$state_dir/toolchain_trigger"; echo missing
+        elif [ "$id" = candidate ] && { [ "$scenario" = candidate_failure ] || [ "$scenario" = candidate_data_mutation ] || [ "$scenario" = rollback_failure ] || [ "$scenario" = rollback_tag_mutation ] || [ "$scenario" = recovery_bundle_corrupt ] || [ "$scenario" = unknown_removal ] || { [ "$scenario" = candidate_ingress_health_failure ] && [ "$(get net_candidate)" = connected ]; }; }; then
           echo missing
         else
           echo healthy
@@ -383,6 +394,11 @@ case "$1" in
   start)
     id="$2"
     if [ "$id" = candidate ] && [ "$scenario" = candidate_data_mutation ]; then printf 'tampered ledger\n' > "$MOCK_DATA/ledger.txt"; put candidate_state exited
+    elif [ "$id" = candidate ] && [ "$scenario" = recovery_bundle_corrupt ]; then
+      shopt -s nullglob; recovery_members=("$MOCK_FIXTURE/omni-money-update-checkpoints"/*/recovery/network-contract.json); shopt -u nullglob
+      [ "${#recovery_members[@]}" -eq 1 ] || exit 30
+      printf 'corrupt recovery member\n' > "${recovery_members[0]}"
+      put candidate_state exited
     elif [ "$id" = candidate ] && { [ "$scenario" = candidate_failure ] || [ "$scenario" = rollback_failure ] || [ "$scenario" = rollback_tag_mutation ] || [ "$scenario" = unknown_removal ]; }; then put candidate_state exited
     else state_file="$id""_state"; put "$state_file" running; fi;;
   network)
@@ -479,6 +495,33 @@ run_update() {
   fi
 }
 
+teardown_fixture_case_artifacts() {
+  local path
+  if [ -d "$fixture_root/.omni-money-safe-update.lock" ] && [ ! -L "$fixture_root/.omni-money-safe-update.lock" ]; then
+    rmdir -- "$fixture_root/.omni-money-safe-update.lock" || return 1
+  fi
+  shopt -s nullglob
+  for path in "$fixture_root"/.omni-money-safe-update-pin.*; do
+    [ -d "$path" ] && [ ! -L "$path" ] || { shopt -u nullglob; return 1; }
+    rm -rf -- "$path" || { shopt -u nullglob; return 1; }
+  done
+  shopt -u nullglob
+  if [ -d "$fixture_root/omni-money-update-checkpoints" ] && [ ! -L "$fixture_root/omni-money-update-checkpoints" ]; then
+    rm -rf -- "$fixture_root/omni-money-update-checkpoints" || return 1
+  fi
+}
+
+assert_fixture_recovery_artifacts_retained() {
+  local -a retained_pins=()
+  [ -d "$fixture_root/.omni-money-safe-update.lock" ] &&
+    [ ! -L "$fixture_root/.omni-money-safe-update.lock" ] &&
+    [ -f "$fixture_root/omni-money-update-checkpoints/.safe-update-journal" ] || return 1
+  shopt -s nullglob
+  retained_pins=("$fixture_root"/.omni-money-safe-update-pin.*)
+  shopt -u nullglob
+  [ "${#retained_pins[@]}" -eq 1 ] && [ -d "${retained_pins[0]}" ] && [ ! -L "${retained_pins[0]}" ]
+}
+
 run_case() {
   local scenario="$1" expected="$2" output status=0 original_env_hash original_data_hash journal_path stale_status pin_path reserve_path
   printf 'safe-update state-machine scenario: %s\n' "$scenario" >&2
@@ -551,6 +594,39 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MO
     rm -rf -- "${pin_paths[0]}" "$fixture_root/omni-money-update-checkpoints"
     return 0
   fi
+  if [ "$scenario" = recovery_bundle_corrupt ]; then
+    journal_path="$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
+    [ -d "$fixture_root/.omni-money-safe-update.lock" ] && [ -f "$journal_path" ] || { echo "FAIL: corrupt recovery member did not preserve lock/journal" >&2; exit 1; }
+    shopt -s nullglob
+    recovery_paths=("$fixture_root/omni-money-update-checkpoints"/*/recovery)
+    pin_paths=("$fixture_root"/.omni-money-safe-update-pin.*)
+    shopt -u nullglob
+    [ "${#recovery_paths[@]}" -eq 1 ] && [ -f "${recovery_paths[0]}/network-contract.json" ] && [ "${#pin_paths[@]}" -eq 1 ] || { echo "FAIL: corrupt recovery member removed recovery/pin evidence" >&2; exit 1; }
+    [ "$(cat "$mock_state/candidate_state")" = exited ] && [ "$(cat "$mock_state/current_state")" = absent ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: corrupt recovery member did not leave containers stopped" >&2; exit 1; }
+    jq -e '.phase == "rollback-stopped"' "$journal_path" >/dev/null || { echo "FAIL: corrupt recovery member did not retain the durable isolated phase" >&2; exit 1; }
+    [ "$(sha256sum -- "$fixture_root/data/ledger.txt" | sed -E 's/[[:space:]].*$//')" = "$original_data_hash" ] || { echo "FAIL: corrupt recovery member touched live data" >&2; exit 1; }
+    teardown_fixture_case_artifacts || { echo "FAIL: recovery_bundle_corrupt fixture teardown failed" >&2; exit 1; }
+    return 0
+  fi
+  if [ "$scenario" = full_toolchain_drift ]; then
+    journal_path="$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
+    [ -d "$fixture_root/.omni-money-safe-update.lock" ] && [ -f "$journal_path" ] || { echo "FAIL: full toolchain drift did not preserve lock/journal" >&2; exit 1; }
+    [ "$(cat "$mock_state/candidate_state")" = exited ] && [ "$(cat "$mock_state/current_state")" = absent ] && [ "$(cat "$mock_state/net_candidate")" = none ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: full toolchain drift blocked Docker isolation" >&2; exit 1; }
+    jq -e '.phase == "network-connect"' "$journal_path" >/dev/null || { echo "FAIL: full toolchain drift advanced the journal before recovery tools were trusted" >&2; exit 1; }
+    [ "$(sha256sum -- "$fixture_root/data/ledger.txt" | sed -E 's/[[:space:]].*$//')" = "$original_data_hash" ] || { echo "FAIL: full toolchain drift touched live data" >&2; exit 1; }
+    teardown_fixture_case_artifacts || { echo "FAIL: full_toolchain_drift fixture teardown failed" >&2; exit 1; }
+    return 0
+  fi
+  if [ "$scenario" = isolation_toolchain_drift ]; then
+    journal_path="$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
+    assert_fixture_recovery_artifacts_retained || { echo "FAIL: isolation toolchain drift did not retain lock/journal/pins" >&2; exit 1; }
+    [ "$(cat "$mock_state/candidate_state")" = running ] && [ "$(cat "$mock_state/current_state")" = absent ] && [ "$(cat "$mock_state/net_candidate")" = connected ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: isolation toolchain drift did not preserve the honestly unverified runtime state" >&2; exit 1; }
+    grep -q 'stop/disconnect state is unverified' <<< "$output" || { echo "FAIL: isolation toolchain drift was not reported as unverified" >&2; exit 1; }
+    jq -e '.phase == "network-connect"' "$journal_path" >/dev/null || { echo "FAIL: isolation toolchain drift advanced the durable journal" >&2; exit 1; }
+    [ "$(sha256sum -- "$fixture_root/data/ledger.txt" | sed -E 's/[[:space:]].*$//')" = "$original_data_hash" ] || { echo "FAIL: isolation toolchain drift touched live data" >&2; exit 1; }
+    teardown_fixture_case_artifacts || { echo "FAIL: isolation_toolchain_drift fixture teardown failed" >&2; exit 1; }
+    return 0
+  fi
   if [ "$scenario" = legacy_archive_failure ]; then
     [ "$(cat "$mock_state/current_state")" = running ] && [ "$(cat "$mock_state/net_current")" = connected ] || { echo "FAIL: legacy rollback did not recover healthy ingress" >&2; exit 1; }
     disconnect_line="$(grep -n -F 'network disconnect omni-money-pangolin current' "$mock_state/log" | tail -1 | cut -d: -f1)"
@@ -567,10 +643,14 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MO
     jq -e '.phase == "manual-reconciliation-required" and (.candidate_ingress_state == "uncertain" or .candidate_ingress_state == "connected") and (.failed_candidate_data_identity.inode != "") and (.active_data_location == "")' "$journal_path" >/dev/null || { echo "FAIL: $scenario did not durably record manual reconciliation identities" >&2; exit 1; }
   elif [ "$scenario" = unknown_removal ]; then
     [ "$(cat "$mock_state/current_state")" = absent ] && [ "$(cat "$mock_state/phase")" = candidate ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: unknown current disappearance was not kept stopped" >&2; exit 1; }
+    assert_fixture_recovery_artifacts_retained || { echo "FAIL: unknown_removal did not retain lock/journal/pins" >&2; exit 1; }
+    teardown_fixture_case_artifacts || { echo "FAIL: unknown_removal fixture teardown failed" >&2; exit 1; }
     return 0
   fi
   if [ "$scenario" = paused_after_stop ] || [ "$scenario" = restarting_after_stop ] || [ "$scenario" = removing_after_stop ]; then
     [ "$(cat "$mock_state/current_state")" = "${scenario%_after_stop}" ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: $scenario was not rejected while fail-closed" >&2; exit 1; }
+    assert_fixture_recovery_artifacts_retained || { echo "FAIL: $scenario did not retain lock/journal/pins" >&2; exit 1; }
+    teardown_fixture_case_artifacts || { echo "FAIL: $scenario fixture teardown failed" >&2; exit 1; }
     return 0
   fi
   if [ "$scenario" = legacy_archive_failure ]; then
@@ -686,6 +766,9 @@ run_case network_disconnect_failure 1
 run_case rollback_failure 1
 run_case rollback_tag_mutation 1
 run_case rollback_journal_failure 1
+run_case recovery_bundle_corrupt 1
+run_case full_toolchain_drift 1
+run_case isolation_toolchain_drift 1
 run_case env_swap 1
 run_case secret_inode_replacement 1
 run_case secret_inode_only_swap 1

@@ -986,6 +986,31 @@ validate_pinned_toolchain() {
   done
 }
 
+validate_pinned_tool_by_name() {
+  local expected="$1" i
+  for i in "${!tool_names[@]}"; do
+    [ "${tool_names[$i]}" = "$expected" ] || continue
+    validate_pinned_file "${tool_paths[$i]}" "trusted ${tool_names[$i]} executable" \
+      "${tool_devices[$i]}" "${tool_inodes[$i]}" "${tool_nlinks[$i]}" "${tool_hashes[$i]}" root
+    return
+  done
+  fail "pinned isolation tool is missing: $expected"
+  return 1
+}
+
+validate_isolation_toolchain() {
+  local command_name
+  # This is deliberately smaller than the archive/restore toolchain. It is
+  # sufficient to authenticate the local Docker authority, inspect JSON, and
+  # stop/disconnect pinned containers before a changed tar/find/etc. can block
+  # isolation. The complete toolchain is checked immediately afterwards and
+  # before any data or environment operation.
+  for command_name in docker jq stat sha256sum sed dirname; do
+    validate_pinned_tool_by_name "$command_name" || return 1
+  done
+  validate_pinned_docker_socket
+}
+
 configure_compose_plugin_boundary() {
   local candidate canonical
   docker_config_dir="$pin_dir/docker-config"
@@ -1573,18 +1598,21 @@ create_disconnected_container() {
   [ "$(container_state "$candidate_id")" = "created" ] || { fail "$label was not left stopped after network isolation"; return 1; }
 }
 
-replacement_compose_state_is_safe() {
-  local output_file="$pin_dir/replacement-ps.$$.txt" id count=0 only=""
-  create_exclusive_file "$output_file" || return 1
-  if ! OMNI_IMAGE="$target_image" compose ps --all -q "$service_name" > "$output_file"; then
-    rm -f -- "$output_file"
+replacement_docker_state_is_safe() {
+  local output id count=0 only=""
+  # Do not depend on Compose or its plugin during emergency isolation. Query
+  # the already-pinned local Docker authority directly, and accept only the
+  # exact candidate identity previously returned and validated by Compose (or
+  # no replacement when Compose failed before returning an identity).
+  if ! output="$(docker_cli ps --all --quiet --no-trunc \
+    --filter "label=com.docker.compose.project=$project_name" \
+    --filter "label=com.docker.compose.service=$service_name")"; then
     return 1
   fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     count=$((count + 1)); only="$id"
-  done < "$output_file"
-  rm -f -- "$output_file"
+  done <<< "$output"
   if [ "$count" -eq 0 ] && [ -z "$candidate_id" ]; then return 0; fi
   [ "$count" -eq 1 ] && [ -n "$candidate_id" ] && [ "$only" = "$candidate_id" ]
 }
@@ -1599,7 +1627,7 @@ stop_container_safely() {
   docker_cli stop --time 30 "$id" >/dev/null 2>&1 || true
   if ! state_value="$(container_state "$id" 2>/dev/null)"; then
     if [ "$label" = current ] && [ "$current_removed_expected" -eq 1 ]; then
-      replacement_compose_state_is_safe || {
+      replacement_docker_state_is_safe || {
         fail "the expected replaced current container could not be verified"
         return 1
       }
@@ -1980,8 +2008,8 @@ rollback_update() {
   state="rolling-back"
   set +e
   printf 'safe-update: candidate failed; restoring the pre-update checkpoint and previous image\n' >&2
-  if ! validate_pinned_toolchain || ! validate_pinned_docker_socket; then
-    printf 'safe-update: trusted toolchain or Docker socket changed; service remains stopped and recovery artifacts are preserved\n' >&2
+  if ! validate_isolation_toolchain; then
+    printf 'safe-update: Docker isolation authority could not be authenticated; container stop/disconnect state is unverified and recovery artifacts are preserved\n' >&2
     exit "$original_status"
   fi
   if [ -n "$candidate_id" ] && ! stop_container_safely "$candidate_id" candidate; then
@@ -1997,17 +2025,24 @@ rollback_update() {
     isolation_failed=1
   fi
   if [ "$isolation_failed" -ne 0 ]; then
-    printf 'safe-update: rollback isolation could not be proven; data is untouched and lock/journal/recovery artifacts are preserved for manual recovery\n' >&2
+    printf 'safe-update: rollback isolation could not be proven; one or more container stop/disconnect states are unverified, data is untouched, and recovery artifacts are preserved\n' >&2
+    exit "$original_status"
+  fi
+  if ! validate_pinned_toolchain || ! validate_pinned_docker_socket || ! validate_compose_plugin_boundary; then
+    printf 'safe-update: containers are stopped and ingress-isolated, but the complete recovery toolchain changed; data is untouched and recovery artifacts are preserved\n' >&2
     exit "$original_status"
   fi
   state="rollback-stopped"
   rollback_journal_or_stop rollback-stopped
+  if ! validate_recovery_bundle; then
+    printf 'safe-update: durable recovery bundle is incomplete or changed; lock, journal, recovery bundle, and last known-good pins are preserved\n' >&2
+    exit "$original_status"
+  fi
   if ! validate_pinned_directory "$project_dir" "Compose project directory" "$project_dir_device" "$project_dir_inode" "$project_dir_nlink" ||
      ! validate_pinned_file "$attestation_file" "update attestation" "$attestation_device" "$attestation_inode" "$attestation_nlink" "$attestation_hash" root ||
      ! validate_pinned_file "$attestation_pin" "pinned update attestation" "$attestation_pin_device" "$attestation_pin_inode" "$attestation_pin_nlink" "$attestation_pin_hash" ||
      ! validate_pinned_file "$env_file_pin" "pinned update env file" "$env_pin_device" "$env_pin_inode" "$env_pin_nlink" "$env_pin_hash" ||
      ! validate_pinned_file "$compose_snapshot" "Compose config snapshot" "$compose_snapshot_device" "$compose_snapshot_inode" "$compose_snapshot_nlink" "$compose_snapshot_hash" ||
-     ! validate_recovery_bundle ||
      ! validate_secret_sources; then
     printf 'safe-update: trusted Compose/attestation inputs changed; service remains stopped\n' >&2
     cleanup_private_state; exit "$original_status"
@@ -2068,8 +2103,8 @@ rollback_update() {
     rollback_journal_or_stop rollback-isolated
   fi
   if ! prepare_rollback_definition; then
-    printf 'safe-update: rollback Compose snapshot could not be prepared. Service remains stopped\n' >&2
-    cleanup_private_state; exit "$original_status"
+    printf 'safe-update: rollback Compose snapshot/recovery bundle could not be prepared; recovery artifacts and last known-good pins are preserved\n' >&2
+    exit "$original_status"
   fi
   compose_definition="$rollback_definition"
   if [ "$reuse_legacy" -eq 0 ]; then
