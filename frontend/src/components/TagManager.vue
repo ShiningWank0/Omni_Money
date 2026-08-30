@@ -29,7 +29,8 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { deleteTag, getTags, updateTag } from '../utils/api'
+import { deleteTag, getTagDeleteImpact, getTags, updateTag } from '../utils/api'
+import { formatTagDeleteImpact, syncTagDrafts } from '../utils/tagManagerSafety.js'
 
 const props = defineProps({ tags: { type: Array, default: () => [] } })
 const emit = defineEmits(['close', 'changed'])
@@ -55,6 +56,7 @@ const rows = computed(() => {
 
 async function reload() {
   const fresh = await getTags()
+  drafts.value = syncTagDrafts(fresh)
   emit('changed', fresh)
 }
 
@@ -74,10 +76,12 @@ async function save(row) {
 }
 
 async function remove(row) {
-  if (!window.confirm(`「${row.name}」と子タグを削除しますか？`)) return
   busy.value = true
   errorMessage.value = ''
   try {
+    const impact = await getTagDeleteImpact(row.id)
+    const confirmation = `${formatTagDeleteImpact(impact, row.name)}\nこの操作は元に戻せません。続行しますか？`
+    if (!window.confirm(confirmation)) return
     await deleteTag(row.id)
     await reload()
   } catch (error) {

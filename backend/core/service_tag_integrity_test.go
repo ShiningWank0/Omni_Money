@@ -3,9 +3,11 @@ package core
 import (
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"omni_money/backend/database"
 )
@@ -77,6 +79,42 @@ func TestCreateTagByPathConcurrentCallsDoNotDuplicateRoots(t *testing.T) {
 	}
 }
 
+func TestTagMutationsOnIndependentInstancesDoNotBlockEachOther(t *testing.T) {
+	first, err := database.OpenPlainInstance(filepath.Join(t.TempDir(), "first.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := database.OpenPlainInstance(filepath.Join(t.TempDir(), "second.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	firstService, err := NewService(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondService, err := NewService(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	var wg sync.WaitGroup
+	for _, service := range []*Service{firstService, secondService} {
+		wg.Add(1)
+		go func(svc *Service) {
+			defer wg.Done()
+			if _, err := svc.CreateTagByPath("独立"); err != nil {
+				t.Errorf("independent tag mutation failed: %v", err)
+			}
+		}(service)
+	}
+	wg.Wait()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("independent instances were unexpectedly serialized: %v", elapsed)
+	}
+}
+
 func TestTagNameValidationIsSharedByCreateAndUpdate(t *testing.T) {
 	setupCoreTestDB(t)
 	tag, err := CreateTag("  root  ", nil)
@@ -119,5 +157,28 @@ func TestAddTransactionTagsIsAtomicOnUnknownTag(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("deduplicated tag links = %d", count)
+	}
+}
+
+func TestGetTagDeleteImpactCountsCascadeAndTransactions(t *testing.T) {
+	setupCoreTestDB(t)
+	root, err := CreateTag("root", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := CreateTag("child", &root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transactionID := insertTestTransaction(t, "cash", "2026-01-01", "item", "expense", 10, -10)
+	if err := AddTransactionTags(transactionID, []int64{root.ID, child.ID}); err != nil {
+		t.Fatal(err)
+	}
+	impact, err := (&Service{db: database.GetDB(), legacy: true}).GetTagDeleteImpact(root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.TagName != "root" || impact.DescendantCount != 1 || impact.TransactionCount != 1 {
+		t.Fatalf("delete impact = %#v", impact)
 	}
 }

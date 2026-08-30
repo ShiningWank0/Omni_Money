@@ -924,6 +924,20 @@ export async function deleteTag(id) {
 }
 
 /**
+ * タグ削除で影響する子タグ・取引件数を確認
+ * @param {number} id
+ * @returns {Promise<object>}
+ */
+export async function getTagDeleteImpact(id) {
+  if (isWails) {
+    return await window.go.main.App.GetTagDeleteImpact(id)
+  }
+  const res = await apiFetch(`/api/tags/${id}/impact`)
+  await throwIfNotOk(res, 'タグ削除の影響確認に失敗しました')
+  return await res.json()
+}
+
+/**
  * 取引に紐付いたタグを取得
  * @param {number} transactionId
  * @returns {Promise<object[]>}

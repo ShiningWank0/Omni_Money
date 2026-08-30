@@ -550,6 +550,83 @@ func validateCriticalSchema(target schemaQueryer) error {
 			return fmt.Errorf("必須DBオブジェクトが不足しています: %s", object.name)
 		}
 	}
+	if err := validateRootTagIndex(target); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateRootTagIndex verifies the definition, not just the object name.
+// CREATE UNIQUE INDEX IF NOT EXISTS is intentionally not sufficient here:
+// SQLite silently leaves an existing non-unique index untouched when the
+// names collide.
+func validateRootTagIndex(target schemaQueryer) error {
+	var objectType, tableName string
+	var definition sql.NullString
+	if err := target.QueryRow(`
+		SELECT type, tbl_name, sql FROM sqlite_master
+		WHERE type = 'index' AND name = 'idx_tags_root_name_unique'`).Scan(&objectType, &tableName, &definition); err != nil {
+		return fmt.Errorf("rootタグ一意index定義の検査に失敗しました: %w", err)
+	}
+	if objectType != "index" || tableName != "tags" || !definition.Valid {
+		return fmt.Errorf("rootタグ一意indexの対象が不正です")
+	}
+	canonicalSQL := strings.Join(strings.Fields(strings.ToLower(definition.String)), " ")
+	if canonicalSQL != "create unique index idx_tags_root_name_unique on tags(name) where parent_id is null" {
+		return fmt.Errorf("rootタグ一意indexの定義が不正です: %q", definition.String)
+	}
+
+	rows, err := target.Query("PRAGMA index_list(tags)")
+	if err != nil {
+		return fmt.Errorf("rootタグ一意index属性の検査に失敗しました: %w", err)
+	}
+	found := false
+	for rows.Next() {
+		var seq, unique, partial int
+		var name, origin string
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("rootタグ一意index属性の読み取りに失敗しました: %w", err)
+		}
+		if name == "idx_tags_root_name_unique" {
+			if unique != 1 || partial != 1 {
+				_ = rows.Close()
+				return fmt.Errorf("rootタグ一意indexはunique partialでなければなりません")
+			}
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("rootタグ一意index属性の終了に失敗しました: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("rootタグ一意indexがindex_listにありません")
+	}
+
+	rows, err = target.Query(`PRAGMA index_info("idx_tags_root_name_unique")`)
+	if err != nil {
+		return fmt.Errorf("rootタグ一意index列の検査に失敗しました: %w", err)
+	}
+	columns := 0
+	for rows.Next() {
+		var seq, cid int
+		var column string
+		if err := rows.Scan(&seq, &cid, &column); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("rootタグ一意index列の読み取りに失敗しました: %w", err)
+		}
+		columns++
+		if columns != 1 || column != "name" {
+			_ = rows.Close()
+			return fmt.Errorf("rootタグ一意indexの列がnameではありません")
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("rootタグ一意index列の終了に失敗しました: %w", err)
+	}
+	if columns != 1 {
+		return fmt.Errorf("rootタグ一意indexの列数が不正です: %d", columns)
+	}
 	return nil
 }
 

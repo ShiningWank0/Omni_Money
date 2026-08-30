@@ -32,6 +32,12 @@ func ValidateTagName(name string) (string, error) {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return "", fmt.Errorf("タグ名に使用できない文字が含まれています")
 		}
+		// U+2028/U+2029 are Unicode line separators. They are not always
+		// classified as controls, but can split rendered/API text like a
+		// newline and must not be accepted in a tag name.
+		if r == '\u2028' || r == '\u2029' {
+			return "", fmt.Errorf("タグ名に使用できない改行区切り文字が含まれています")
+		}
 		// Slash is the path separator used by CreateTagByPath. Backslash is
 		// rejected too so a value has the same meaning across platforms.
 		if r == '/' || r == '\\' {

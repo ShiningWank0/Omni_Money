@@ -65,3 +65,28 @@ func TestTagRootPartialUniqueIndexExistsOnNewLedger(t *testing.T) {
 		t.Fatal("unexpected no rows error")
 	}
 }
+
+func TestTagMigrationRejectsSameNamedNonUniqueIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wrong-index.db")
+	instance, err := OpenPlainInstance(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	if _, err := instance.DB().Exec("DROP INDEX idx_tags_root_name_unique; CREATE INDEX idx_tags_root_name_unique ON tags(name)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := instance.DB().Exec("PRAGMA user_version = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := createTablesOn(instance.DB()); err == nil || !strings.Contains(err.Error(), "定義が不正") {
+		t.Fatalf("wrong index migration error = %v", err)
+	}
+	var version int
+	if err := instance.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 1 {
+		t.Fatalf("wrong index migration changed version to %d", version)
+	}
+}

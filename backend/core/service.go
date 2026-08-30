@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -31,11 +30,6 @@ const (
 	csvVersionHeader = "omni_money_csv_version"
 	csvVersion2      = "2"
 )
-
-// Tag path creation is serialized within the process so the read-then-create
-// sequence remains deterministic for multiple Wails/API requests sharing one
-// SQLite file. The partial unique index remains the final cross-process guard.
-var tagMutationMu sync.Mutex
 
 func encodeCSVTextCell(value string) string {
 	if needsCSVFormulaEscape(value) {
@@ -1645,6 +1639,36 @@ func (s *Service) GetTags() ([]models.Tag, error) {
 	return rootTags, nil
 }
 
+// GetTagDeleteImpact reports the cascade boundary before a destructive tag
+// operation. The recursive query includes the selected tag when counting
+// affected transactions, while DescendantCount reports child tags only.
+func (s *Service) GetTagDeleteImpact(id int64) (*models.TagDeleteImpact, error) {
+	db, err := s.database()
+	if err != nil {
+		return nil, err
+	}
+	impact := &models.TagDeleteImpact{TagID: id}
+	err = db.QueryRow(`
+		WITH RECURSIVE descendants(id) AS (
+			SELECT id FROM tags WHERE id = ?
+			UNION ALL
+			SELECT child.id FROM tags child JOIN descendants parent ON child.parent_id = parent.id
+		)
+		SELECT root.name,
+		       (SELECT COUNT(*) FROM descendants) - 1,
+		       (SELECT COUNT(DISTINCT tt.transaction_id)
+		          FROM transaction_tags tt JOIN descendants d ON d.id = tt.tag_id)
+		FROM tags root WHERE root.id = ?`, id, id,
+	).Scan(&impact.TagName, &impact.DescendantCount, &impact.TransactionCount)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("タグが見つかりません: %w", err)
+		}
+		return nil, fmt.Errorf("タグ削除影響の取得エラー: %w", err)
+	}
+	return impact, nil
+}
+
 // populateChildren は再帰的に子タグを設定する
 func populateChildren(tag *models.Tag, tagMap map[int64]*models.Tag, allTags []models.Tag) {
 	var children []models.Tag
@@ -1686,9 +1710,6 @@ func (s *Service) UpdateTag(id int64, name string) error {
 // CreateTagByPath は「/」区切りのパスからタグを階層的に作成する
 // 例: "推し活/超かぐや姫！" → 「推し活」(L1) → 「超かぐや姫！」(L2) を作成
 func (s *Service) CreateTagByPath(path string) (*models.Tag, error) {
-	tagMutationMu.Lock()
-	defer tagMutationMu.Unlock()
-
 	db, err := s.database()
 	if err != nil {
 		return nil, err
@@ -1711,55 +1732,74 @@ func (s *Service) CreateTagByPath(path string) (*models.Tag, error) {
 		return nil, fmt.Errorf("タグは3階層までです")
 	}
 
+	for attempt := 0; attempt < 5; attempt++ {
+		tag, txErr := createTagPathIn(db, segments)
+		if txErr == nil {
+			s.autoSnapshot()
+			return tag, nil
+		}
+		if !isSQLiteBusyError(txErr) || attempt == 4 {
+			return nil, txErr
+		}
+		time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("タグ作成を完了できませんでした")
+}
+
+func createTagPathIn(db *sql.DB, segments []string) (*models.Tag, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("タグtransaction開始エラー: %w", err)
 	}
 	defer tx.Rollback()
-
 	var parentID *int64
 	var tag *models.Tag
-
 	for i, name := range segments {
 		level := i + 1
 		var existingID int64
-		var err error
-
 		if parentID == nil {
 			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&existingID)
 		} else {
 			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id = ?", name, *parentID).Scan(&existingID)
 		}
-
 		if err == nil {
 			tag = &models.Tag{ID: existingID, Name: name, ParentID: parentID, Level: level}
 			pid := existingID
 			parentID = &pid
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("タグ検索エラー: %w", err)
-		} else {
-			result, insertErr := tx.Exec(
-				"INSERT INTO tags (name, parent_id, level) VALUES (?, ?, ?)",
-				name, parentID, level,
-			)
-			if insertErr != nil {
-				return nil, fmt.Errorf("タグ作成エラー: %w", insertErr)
-			}
-			id, idErr := result.LastInsertId()
-			if idErr != nil {
-				return nil, fmt.Errorf("タグID取得エラー: %w", idErr)
-			}
-			tag = &models.Tag{ID: id, Name: name, ParentID: parentID, Level: level}
-			pid := id
-			parentID = &pid
+			continue
 		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("タグ検索エラー: %w", err)
+		}
+		if _, err := tx.Exec("INSERT OR IGNORE INTO tags (name, parent_id, level) VALUES (?, ?, ?)", name, parentID, level); err != nil {
+			return nil, fmt.Errorf("タグ作成エラー: %w", err)
+		}
+		// The INSERT may have been ignored because another connection won the
+		// race; fetch the authoritative row from this transaction.
+		if parentID == nil {
+			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id IS NULL", name).Scan(&existingID)
+		} else {
+			err = tx.QueryRow("SELECT id FROM tags WHERE name = ? AND parent_id = ?", name, *parentID).Scan(&existingID)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("タグ作成後の検索エラー: %w", err)
+		}
+		tag = &models.Tag{ID: existingID, Name: name, ParentID: parentID, Level: level}
+		pid := existingID
+		parentID = &pid
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("タグtransaction確定エラー: %w", err)
 	}
-
-	s.autoSnapshot()
 	return tag, nil
+}
+
+func isSQLiteBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database is locked") || strings.Contains(message, "database table is locked") || strings.Contains(message, "busy")
 }
 
 // DeleteTag はタグを削除する（子タグも連鎖削除）

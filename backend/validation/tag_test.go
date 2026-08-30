@@ -10,7 +10,7 @@ func TestValidateTagNameCanonicalizesAndRejectsUnsafeValues(t *testing.T) {
 	if err != nil || valid != "食費" {
 		t.Fatalf("canonical tag = %q, err = %v", valid, err)
 	}
-	for _, value := range []string{"", "   ", "a/b", "a\\b", "line\nbreak", "hidden\u200btext", strings.Repeat("a", MaxTagNameBytes+1)} {
+	for _, value := range []string{"", "   ", "a/b", "a\\b", "line\nbreak", "hidden\u200btext", "line\u2028separator", "line\u2029separator", strings.Repeat("a", MaxTagNameBytes+1)} {
 		if _, err := ValidateTagName(value); err == nil {
 			t.Errorf("ValidateTagName(%q) accepted unsafe value", value)
 		}
