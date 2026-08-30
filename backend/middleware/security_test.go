@@ -129,6 +129,25 @@ func TestMaxBodySizeMiddlewareOnlyUsesLargeCSVPathForRegisteredPost(t *testing.T
 	}
 }
 
+func TestMaxBodySizeMiddlewareDoesNotAdmitUnsupportedContentTypeAsCSV(t *testing.T) {
+	// An import-looking path is not sufficient. Unsupported media types must
+	// stay on the ordinary 10 MiB body limit and must not reserve a large CSV
+	// spool while an unregistered handler reads them.
+	body := strings.NewReader(strings.Repeat("x", maxRequestBodySize+1))
+	req := httptest.NewRequest(http.MethodPost, "/api/import_csv", body)
+	req.Header.Set("Content-Type", "text/plain")
+	recorder := httptest.NewRecorder()
+	MaxBodySizeMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.ReadAll(r.Body); err == nil {
+			t.Error("ordinary body limit did not reject oversized unsupported content")
+		}
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+	})).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
 func TestCSVBodyIsNotReadBeforeAuthenticationAndCSRFChecks(t *testing.T) {
 	manager := NewSessionManager(time.Hour)
 	t.Cleanup(manager.Close)

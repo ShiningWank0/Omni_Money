@@ -67,6 +67,20 @@ func TestCSVReaderLegacyAppendAllowsExtraRecordTypeColumn(t *testing.T) {
 	}
 }
 
+func TestCSVReaderDoesNotRouteLegacyExtraRecordTypeByFirstRowVersion(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	// A legacy/v2 producer may add an application column called record_type.
+	// Even when a crafted first row contains "3", the non-official header must
+	// stay on the legacy schema instead of entering the v3 parser with missing
+	// columns and (in replace mode) a destructive interpretation.
+	content := "id,account,date,item,type,amount,balance,memo,omni_money_csv_version,record_type,filename\n" +
+		"101,cash,2026-01-01,給与,income,1000,1000,,3,transaction,receipt.csv\n"
+	if imported, err := service.ImportCSVReaderContext(context.Background(), strings.NewReader(content), "append"); err == nil || !strings.Contains(err.Error(), "未対応のCSVバージョン") {
+		t.Fatalf("legacy-shaped version-3 CSV result = %d, %v; want legacy version error", imported, err)
+	}
+}
+
 func TestBackupToCSVDefaultAlwaysEmitsV3AndV2IsExplicit(t *testing.T) {
 	setupCoreTestDB(t)
 	insertTestTransaction(t, "cash", "2026-08-01", "salary", "income", 100, 100)
@@ -156,6 +170,14 @@ func TestCSVV3ParseErrorCleansImageSpoolWhenResultIsZero(t *testing.T) {
 			t.Fatalf("image spool directory leaked after parse error: %s", name)
 		}
 	}
+	// The zero-value error result must not lose the reservations owned by the
+	// parser. A full-budget reservation is a simple observable proof that the
+	// image admission was released on every cleanup path.
+	release, ok := TryAcquireCSVTempBudget(MaxCSVTempBudgetBytes)
+	if !ok {
+		t.Fatal("CSV temp budget leaked after parse error")
+	}
+	release()
 }
 
 func csvImageSpoolDirectories(t *testing.T) map[string]struct{} {

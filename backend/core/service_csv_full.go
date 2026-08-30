@@ -8,7 +8,6 @@ package core
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -887,8 +886,8 @@ func csvV3HeaderMap(headers []string) (map[string]int, error) {
 // isCSVV3Header recognizes only the official full v3 header emitted by this
 // package. A legacy/v2 export may contain application-specific columns such as
 // record_type or filename; those are not enough to route it through the strict
-// typed parser. Ambiguous subsets are classified by isCSVV3Record using the
-// first non-empty data row's version and record type.
+// typed parser. Requiring this exact schema prevents a subset from entering
+// replace mode and deleting data that the archive cannot represent.
 func isCSVV3Header(headers []string) bool {
 	if len(headers) != len(csvV3Headers) {
 		return false
@@ -914,10 +913,9 @@ func hasCSVV3Markers(headers []string) (versionIndex, recordTypeIndex int, ok bo
 	return versionIndex, recordTypeIndex, versionIndex >= 0 && recordTypeIndex >= 0
 }
 
-// isCSVV3Record handles the small, valid v3 subset containing only a
-// transaction row. It uses the row's version and typed record value so a
-// legacy/v2 file that merely adds an application column named record_type is
-// still parsed by the compatibility path.
+// isCSVV3Record is retained for callers that need to inspect a record, but it
+// is deliberately not used for import routing: only the official full header
+// is sufficient to select the strict v3 parser.
 func isCSVV3Record(headers, record []string) bool {
 	if isCSVV3Header(headers) {
 		return true
@@ -1404,15 +1402,20 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 					parsed.cleanup()
 					return csvV3Import{}, fmt.Errorf("画像一時ファイルの作成に失敗しました: %w", err)
 				}
+				// Register the descriptor before any inspection or hardening can
+				// fail.  A newly-created but not-yet-statted file must still be
+				// removed through the retained root on every early return; a
+				// pathname-only fallback would leak plaintext or remove a
+				// replacement.
+				tempFileIndex := len(parsed.imageTempFiles)
+				parsed.imageTempFiles = append(parsed.imageTempFiles, csvV3TempFile{name: name, file: file})
+				parseTempFiles = parsed.imageTempFiles
 				createdInfo, statErr := file.Stat()
 				if statErr != nil {
-					_ = file.Close()
 					parsed.cleanup()
 					return csvV3Import{}, fmt.Errorf("画像一時ファイルのidentity取得に失敗しました: %w", statErr)
 				}
-				tempFileIndex := len(parsed.imageTempFiles)
-				parsed.imageTempFiles = append(parsed.imageTempFiles, csvV3TempFile{name: name, info: createdInfo, file: file})
-				parseTempFiles = parsed.imageTempFiles
+				parsed.imageTempFiles[tempFileIndex].info = createdInfo
 				if err := fileprivacy.Harden(file); err != nil {
 					_ = file.Close()
 					parsed.cleanup()
@@ -1911,10 +1914,13 @@ func (s *Service) ImportCSVReaderContext(ctx context.Context, input io.Reader, m
 		return 0, err
 	}
 	source := io.MultiReader(strings.NewReader(firstLine), buffered)
-	var probeBytes bytes.Buffer
-	probeSource := &csvTotalLimitReader{input: source, remaining: MaxCSVImportBytes}
-	probeInput := &csvFieldLimitReader{ctx: ctx, input: io.TeeReader(probeSource, &probeBytes), maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
-	headerReader := csv.NewReader(probeInput)
+	// The header is already bounded by readCSVHeaderLine. Parse only that
+	// record for format selection; replaying a first data record into a
+	// bytes.Buffer would duplicate an attacker-controlled field before the
+	// bounded parser enforces its record budget. Only the official full v3
+	// header selects the typed parser; legacy/v2 files with an application
+	// column named record_type remain on the compatibility path.
+	headerReader := csv.NewReader(strings.NewReader(firstLine))
 	headerReader.FieldsPerRecord = -1
 	header, headerErr := headerReader.Read()
 	hasV3RecordType := false
@@ -1923,20 +1929,12 @@ func (s *Service) ImportCSVReaderContext(ctx context.Context, input io.Reader, m
 			header[0] = strings.TrimPrefix(header[0], "\ufeff")
 		}
 		hasV3RecordType = isCSVV3Header(header)
-		if !hasV3RecordType {
-			if firstRecord, firstErr := headerReader.Read(); firstErr == nil {
-				hasV3RecordType = isCSVV3Record(header, firstRecord)
-			}
-		}
 	}
-	// The probe consumed the header and, for an ambiguous minimal schema, one
-	// data record. Replay those exact bytes before the unread remainder so the
-	// selected parser sees the original CSV, including quoted newlines.
-	// The probe consumed bytes from source. Replay exactly those bytes and the
-	// unread remainder through a fresh total limiter, so the parser observes the
-	// same bounded archive rather than resetting the limit after the probe.
+	// The first physical line is replayed exactly once. The total limiter covers
+	// this line and the unread stream, so format selection cannot reset the
+	// archive limit or create a second full input copy.
 	stream := &csvTotalLimitReader{
-		input:     io.MultiReader(bytes.NewReader(probeBytes.Bytes()), source),
+		input:     source,
 		remaining: MaxCSVImportBytes,
 	}
 	if hasV3RecordType {
