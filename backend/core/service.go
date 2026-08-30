@@ -634,20 +634,17 @@ func (s *Service) getStringSliceSetting(key string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var items []string
-	items, err = validation.ParseLedgerSettingItems(value)
-	if err != nil {
-		// Settings written by pre-v3 clients could contain duplicate/empty
-		// entries or a 256-byte item. Link validation intentionally treats an
-		// unparseable historical value as an empty set and prunes links in the
-		// same transaction; do not make a read of the ledger fail closed for
-		// that recoverable compatibility case.
-		if archived, archivedErr := validation.ParseArchivedLedgerSettingItems(value, maxCSVSettingValueBytes, validation.MaxSettingItems); archivedErr == nil {
-			return archived, nil
-		}
+	// Reads must understand both the current canonical form and values written
+	// by the pre-v3 API. The archive mode is deliberately lossless (including
+	// duplicate/empty entries) so restoring an old ledger cannot silently
+	// delete its transaction links.
+	parsed, parseErr := validation.ParseLedgerSettingItemsWithMode(value, validation.LedgerSettingArchive, maxCSVSettingValueBytes, validation.MaxSettingItems)
+	if parseErr != nil {
+		// A malformed historical setting is not trusted for link validation; the
+		// normal write path rejects it and callers treat it as an empty set.
 		return []string{}, nil
 	}
-	return items, nil
+	return parsed.Items, nil
 }
 
 func (s *Service) saveStringSliceSetting(key string, items []string) error {
@@ -1078,7 +1075,8 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 	}
 	// v3 is a normalized, typed row format. Detect it from the header while
 	// retaining the historical parser for legacy/v2 transaction-only files.
-	probe := csv.NewReader(strings.NewReader(content))
+	probeInput := &csvFieldLimitReader{ctx: ctx, input: strings.NewReader(content), maxFieldBytes: maxCSVFieldBytes, fieldStart: true}
+	probe := csv.NewReader(probeInput)
 	probe.FieldsPerRecord = -1
 	if headers, probeErr := probe.Read(); probeErr == nil {
 		if len(headers) > 0 {
@@ -1096,6 +1094,7 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 			if parseErr != nil {
 				return 0, parseErr
 			}
+			defer parsed.cleanup()
 			return s.importCSVV3Parsed(ctx, parsed, mode)
 		}
 	}
@@ -1103,7 +1102,8 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 	if err != nil {
 		return 0, err
 	}
-	reader := csv.NewReader(strings.NewReader(content))
+	readerInput := &csvFieldLimitReader{ctx: ctx, input: strings.NewReader(content), maxFieldBytes: maxCSVFieldBytes, fieldStart: true}
+	reader := csv.NewReader(readerInput)
 	headers, err := reader.Read()
 	if err != nil {
 		return 0, fmt.Errorf("CSVヘッダー読み取りエラー: %w", err)
@@ -3167,11 +3167,11 @@ func isCardWithdrawalLinkAccountsWithSettings(accountA, accountB string, creditC
 }
 
 func stringSetFromSetting(value string) map[string]bool {
-	items, err := validation.ParseLedgerSettingItems(value)
+	parsed, err := validation.ParseLedgerSettingItemsWithMode(value, validation.LedgerSettingArchive, maxCSVSettingValueBytes, validation.MaxSettingItems)
 	if err != nil {
 		return map[string]bool{}
 	}
-	return stringSet(items)
+	return stringSet(parsed.Items)
 }
 
 func stringSet(items []string) map[string]bool {

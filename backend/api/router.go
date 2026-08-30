@@ -33,14 +33,13 @@ import (
 // independently below rather than treating this as a worst-case overhead.
 const maxCSVImportWireBytes int64 = core.MaxCSVImportWireBytes
 
-func cleanupCSVExportFile(file *os.File, path string) {
-	if file != nil {
-		if err := file.Close(); err != nil {
-			log.Printf("security_event=csv_export_close_failed path=%q error=%v", path, err)
-		}
+func cleanupCSVExportFile(temp *fileprivacy.PrivateTempFile) {
+	if temp == nil {
+		return
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		log.Printf("security_event=csv_export_remove_failed path=%q error=%v", path, err)
+	path := temp.Path
+	if err := temp.Cleanup(); err != nil {
+		log.Printf("security_event=csv_export_cleanup_failed path=%q error=%v", path, err)
 	}
 }
 
@@ -480,22 +479,18 @@ func handleBackupCSV(w http.ResponseWriter, r *http.Request) {
 	// sending any response headers. The same open descriptor is checked,
 	// rewound, and streamed after generation; no path-based reopen/TOCTOU is
 	// used. The vault lease is released before the client stream starts.
-	tmp, err := os.CreateTemp("", "omni-money-csv-export-")
+	temp, err := fileprivacy.CreatePrivateTempFile("omni-money-csv-export-")
 	if err != nil {
 		writeFinancialError(w, err, http.StatusInsufficientStorage)
 		return
 	}
-	tmpPath := tmp.Name()
+	tmp := temp.File
 	cleanup := func() {
-		cleanupCSVExportFile(tmp, tmpPath)
+		cleanupCSVExportFile(temp)
 	}
 	defer cleanup()
-	if err := fileprivacy.Harden(tmp); err != nil {
-		writeFinancialError(w, err, http.StatusInsufficientStorage)
-		return
-	}
 	fileInfo, err := tmp.Stat()
-	if err != nil || !fileprivacy.IsPrivate(fileInfo) {
+	if err != nil || !fileprivacy.IsPrivate(tmp, fileInfo) {
 		writeFinancialError(w, fmt.Errorf("CSV出力一時ファイルが不正です"), http.StatusInsufficientStorage)
 		return
 	}

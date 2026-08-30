@@ -684,11 +684,7 @@ export async function backupToCSV() {
   }
   const res = await apiFetch('/api/backup_csv')
   await validateCSVResponse(res)
-  const contentLength = Number(res.headers.get('Content-Length') || 0)
-  if (contentLength > 64 * 1024 * 1024) {
-    throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
-  }
-  return await res.text()
+  return await readBoundedCSVText(res, 64 * 1024 * 1024)
 }
 
 async function validateCSVResponse(response) {
@@ -697,6 +693,47 @@ async function validateCSVResponse(response) {
   const contentType = response.headers.get('Content-Type') || ''
   if (!/^text\/csv(?:\s*;|$)/i.test(contentType)) {
     throw new Error('CSVではない応答を受信したため、バックアップを中止しました')
+  }
+}
+
+async function readBoundedCSVText(response, maxBytes) {
+  const contentLengthHeader = response.headers.get('Content-Length')
+  const contentLength = contentLengthHeader == null ? NaN : Number(contentLengthHeader)
+  if (Number.isFinite(contentLength) && (contentLength < 0 || contentLength > maxBytes)) {
+    throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+  }
+  if (response.body && typeof response.body.getReader === 'function') {
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder('utf-8', { fatal: true })
+    const chunks = []
+    let total = 0
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (!value) continue
+        total += value.byteLength
+        if (total > maxBytes) {
+          await reader.cancel()
+          throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+        }
+        chunks.push(decoder.decode(value, { stream: true }))
+      }
+      chunks.push(decoder.decode())
+      return chunks.join('')
+    } catch (error) {
+      try { await reader.cancel() } catch (_) { /* best effort */ }
+      throw error
+    }
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  if (bytes.byteLength > maxBytes) {
+    throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch (_) {
+    throw new Error('CSVバックアップは有効なUTF-8ではありません')
   }
 }
 
@@ -728,13 +765,50 @@ export async function backupToCSVFile() {
 			throw error
 		}
 	}
+	// Without a writable file stream, a Blob download necessarily keeps the
+	// response chunks and the final Blob live together. Keep this compatibility
+	// path deliberately small and reject a large response before any body
+	// allocation when the server provided Content-Length. Full-size exports
+	// require showSaveFilePicker or the Desktop file API.
+	const browserBlobCap = 64 * 1024 * 1024
+	const contentLengthHeader = res.headers.get('Content-Length')
+	const contentLength = contentLengthHeader == null ? NaN : Number(contentLengthHeader)
+	if (Number.isFinite(contentLength) && (contentLength < 0 || contentLength + 3 > browserBlobCap)) {
+		throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+	}
   let objectURL = null
   let anchor = null
   try {
-    // Older browsers have no writable file stream; keep this as a bounded
-    // compatibility fallback and avoid an additional UTF-8 string copy.
-    const csvContent = await res.blob()
-    const blob = new Blob(['\uFEFF', csvContent], { type: 'text/csv;charset=utf-8;' })
+    const chunks = []
+    let total = 3
+    if (res.body && typeof res.body.getReader === 'function') {
+      const reader = res.body.getReader()
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (value) {
+            total += value.byteLength
+            if (total > browserBlobCap) {
+              await reader.cancel()
+              throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+            }
+            chunks.push(value)
+          }
+        }
+      } catch (error) {
+        try { await reader.cancel() } catch (_) { /* best effort */ }
+        throw error
+      }
+    } else {
+      const bytes = new Uint8Array(await res.arrayBuffer())
+      total += bytes.byteLength
+      if (total > browserBlobCap) {
+        throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+      }
+      chunks.push(bytes)
+    }
+    const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), ...chunks], { type: 'text/csv;charset=utf-8;' })
     objectURL = URL.createObjectURL(blob)
     anchor = document.createElement('a')
     anchor.href = objectURL

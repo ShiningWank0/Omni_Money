@@ -59,6 +59,7 @@
             <div>• <strong>balance:</strong> 残高 (オプション、自動計算されます)</div>
             <div>• v3の画像はファイル名・MIMEタイプ・Base64バイナリを含みます</div>
             <div>• v3の関連付けはインポート時に安全な新しいIDへ再採番されます</div>
+            <div>• appendは既存の取引・画像・タグ・リンク・ledger設定を保持します。CSVのledger設定が既存値と異なる場合は全体を中止します</div>
           </div>
           <div class="csv-plaintext-note" role="note">CSVは暗号化されない平文です。出力・保存前に、FileVault・BitLocker・LUKS等で保護された保存先であることを確認してください。</div>
         </div>

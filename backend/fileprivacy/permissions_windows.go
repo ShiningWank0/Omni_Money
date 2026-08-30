@@ -13,6 +13,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// FILE_ALL_ACCESS is the standard file object access mask. x/sys/windows does
+// not expose this aggregate constant on all supported versions.
+const fileAllAccess uint32 = 0x1F01FF
+
 func privateSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -113,9 +117,56 @@ func Harden(file *os.File) error {
 	return nil
 }
 
-// Windows does not expose POSIX mode bits. Harden has already applied and
-// protected the current-user/System DACL; only regular-file identity is
-// meaningful for the common caller-side postcondition.
-func IsPrivate(info os.FileInfo) bool {
-	return info != nil && info.Mode().IsRegular()
+// IsPrivate proves the actual DACL on the open handle rather than trusting
+// Windows' emulated FileInfo mode bits. Only the current user and LocalSystem
+// may have full access, and inheritance must be disabled.
+func IsPrivate(file *os.File, info os.FileInfo) bool {
+	if file == nil || info == nil || !info.Mode().IsRegular() {
+		return false
+	}
+	descriptor, err := windows.GetSecurityInfo(
+		windows.Handle(file.Fd()),
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return false
+	}
+	control, _, err := descriptor.Control()
+	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
+		return false
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil || dacl.AceCount != 2 {
+		return false
+	}
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return false
+	}
+	system, err := windows.StringToSid("S-1-5-18")
+	if err != nil {
+		return false
+	}
+	want := map[string]bool{current.User.Sid.String(): false, system.String(): false}
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask != windows.ACCESS_MASK(fileAllAccess) {
+			return false
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if _, ok := want[sid.String()]; !ok {
+			return false
+		}
+		if want[sid.String()] {
+			return false
+		}
+		want[sid.String()] = true
+	}
+	for _, present := range want {
+		if !present {
+			return false
+		}
+	}
+	return true
 }

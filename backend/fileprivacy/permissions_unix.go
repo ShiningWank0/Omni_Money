@@ -15,7 +15,9 @@ func Harden(file *os.File) error {
 	return file.Chmod(0600)
 }
 
-// IsPrivate reports the owner-only mode expected on Unix-like systems.
-func IsPrivate(info os.FileInfo) bool {
+// IsPrivate reports the owner-only mode expected on Unix-like systems. The
+// open descriptor is accepted so callers can use one identity throughout the
+// create/stat/check sequence; Unix permission checks use the supplied info.
+func IsPrivate(_ *os.File, info os.FileInfo) bool {
 	return info != nil && info.Mode().IsRegular() && info.Mode().Perm() == 0600
 }

@@ -55,6 +55,52 @@ func TestCSVTempBudgetAccountsForDecodedImageWorkingCopy(t *testing.T) {
 	}
 }
 
+func TestCSVFieldLimitReaderHandlesQuotedRecordsBeforeCSVAllocation(t *testing.T) {
+	input := "account,detail\n" + "cash,\"line one\nline two with \"\"quotes\"\"\"\n"
+	guarded := &csvFieldLimitReader{ctx: context.Background(), input: strings.NewReader(input), maxFieldBytes: 64, fieldStart: true}
+	records, err := csv.NewReader(guarded).ReadAll()
+	if err != nil {
+		t.Fatalf("quoted multiline CSV rejected: %v", err)
+	}
+	if len(records) != 2 || records[1][1] != "line one\nline two with \"quotes\"" {
+		t.Fatalf("quoted CSV records = %#v", records)
+	}
+
+	giant := "account,detail\n,\"" + strings.Repeat("x", maxCSVFieldBytes+1) + "\"\n"
+	guarded = &csvFieldLimitReader{ctx: context.Background(), input: strings.NewReader(giant), maxFieldBytes: maxCSVFieldBytes, fieldStart: true}
+	if _, err := csv.NewReader(guarded).ReadAll(); err == nil || !strings.Contains(err.Error(), "列が大きすぎます") {
+		t.Fatalf("giant quoted field result = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	guarded = &csvFieldLimitReader{ctx: ctx, input: strings.NewReader("a,b\n"), maxFieldBytes: 16, fieldStart: true}
+	if _, err := guarded.Read(make([]byte, 32)); err == nil {
+		t.Fatal("canceled CSV reader unexpectedly read input")
+	}
+}
+
+func TestCSVV3ImageAdmissionHappensBeforeBase64Decode(t *testing.T) {
+	reserved, ok := TryAcquireCSVTempBudget(MaxCSVTempBudgetBytes)
+	if !ok {
+		t.Fatal("could not reserve CSV budget for admission test")
+	}
+	content := csvV3TestContent(t,
+		map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash", "date": "2026-08-01", "item": "item", "type": "income", "amount": "1"},
+		map[string]string{csvVersionHeader: "3", "record_type": "image", "id": "1", "transaction_id": "1", "filename": "receipt.png", "mime_type": "image/png", "data_base64": base64.StdEncoding.EncodeToString(encodePNG(t))},
+	)
+	if _, err := (&Service{}).parseCSVV3(content); err == nil || !strings.Contains(err.Error(), "一時領域") {
+		reserved()
+		t.Fatalf("image was decoded without an admission reservation: %v", err)
+	}
+	reserved()
+	parsed, err := (&Service{}).parseCSVV3(content)
+	if err != nil {
+		t.Fatalf("image parse after reservation release failed: %v", err)
+	}
+	parsed.cleanup()
+}
+
 func TestCSVV3RoundTripPreservesExtendedLedgerDataAndRemapsIDs(t *testing.T) {
 	instance, service := openCoreTestService(t, "csv-v3-source")
 	_ = instance
@@ -300,6 +346,73 @@ func TestCSVV3ReplacePreservesOtherSettingsAndRenormalizesRemappedLinks(t *testi
 	}
 }
 
+func TestCSVV3AppendPreservesExistingLinksAndRejectsSettingConflictsAtomically(t *testing.T) {
+	instance, service := openCoreTestService(t, "csv-v3-append")
+	card, err := service.AddTransaction(models.TransactionRequest{Account: "card", Date: "2026-08-01", Item: "card-side", Type: "expense", Amount: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bank, err := service.AddTransaction(models.TransactionRequest{Account: "bank", Date: "2026-08-02", Item: "bank-side", Type: "expense", Amount: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SaveCreditCardSettings([]string{"card"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SaveBankAccountSettings([]string{"bank"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AddTransactionLink(card.ID, bank.ID); err != nil {
+		t.Fatal(err)
+	}
+	appendOnly := csvV3TestContent(t, map[string]string{
+		csvVersionHeader: "3", "record_type": "transaction", "id": "9",
+		"account": "card", "date": "2026-08-03", "item": "new", "type": "expense", "amount": "10",
+	})
+	if count, err := service.ImportCSVReaderContext(context.Background(), strings.NewReader(appendOnly), "append"); err != nil || count != 1 {
+		t.Fatalf("append result count=%d err=%v", count, err)
+	}
+	var links int
+	if err := instance.DB().QueryRow("SELECT COUNT(*) FROM transaction_links").Scan(&links); err != nil {
+		t.Fatal(err)
+	}
+	if links != 1 {
+		t.Fatalf("append pruned existing links: count=%d", links)
+	}
+
+	conflict := csvV3TestContent(t, map[string]string{
+		csvVersionHeader: "3", "record_type": "setting", "setting_key": "credit_card_items", "setting_value": `["other"]`,
+	})
+	if _, err := service.ImportCSVReaderContext(context.Background(), strings.NewReader(conflict), "append"); err == nil || !strings.Contains(err.Error(), "上書き") {
+		t.Fatalf("append setting conflict result = %v", err)
+	}
+	if err := instance.DB().QueryRow("SELECT COUNT(*) FROM transaction_links").Scan(&links); err != nil {
+		t.Fatal(err)
+	}
+	if links != 1 {
+		t.Fatalf("failed append removed existing links: count=%d", links)
+	}
+	var setting string
+	if err := instance.DB().QueryRow("SELECT value FROM settings WHERE key = 'credit_card_items'").Scan(&setting); err != nil {
+		t.Fatal(err)
+	}
+	if setting != `["card"]` {
+		t.Fatalf("failed append changed existing setting: %q", setting)
+	}
+	if _, err := instance.DB().Exec("UPDATE settings SET value = '{not-json}' WHERE key = 'credit_card_items'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ImportCSVReaderContext(context.Background(), strings.NewReader(appendOnly), "append"); err == nil || !strings.Contains(err.Error(), "既存のledger設定") {
+		t.Fatalf("malformed existing setting append result = %v", err)
+	}
+	if err := instance.DB().QueryRow("SELECT COUNT(*) FROM transaction_links").Scan(&links); err != nil {
+		t.Fatal(err)
+	}
+	if links != 1 {
+		t.Fatalf("malformed setting append removed existing links: count=%d", links)
+	}
+}
+
 func TestCSVV3LegacyTagRowPreservesPreValidatorName(t *testing.T) {
 	setupCoreTestDB(t)
 	if _, err := database.GetDB().Exec("INSERT INTO tags (name, parent_id, level) VALUES (' old/tag ', NULL, 1)"); err != nil {
@@ -351,7 +464,12 @@ func TestCSVV3ArchivesAndRestoresDuplicateRootTagsWithoutMerging(t *testing.T) {
 func TestCSVV3ArchivesLegacySettingsAcceptedByPreviousAPI(t *testing.T) {
 	setupCoreTestDB(t)
 	legacy := `[` + `"` + strings.Repeat("x", 256) + `","", ""` + `,"x"]`
-	if _, err := database.GetDB().Exec("INSERT INTO settings (key, value) VALUES ('credit_card_items', ?)", legacy); err != nil {
+	cardID := insertTestTransaction(t, "x", "2026-08-01", "card-side", "expense", 10, -10)
+	bankID := insertTestTransaction(t, "bank", "2026-08-02", "bank-side", "expense", 10, -10)
+	if _, err := database.GetDB().Exec("INSERT INTO settings (key, value) VALUES ('credit_card_items', ?), ('bank_account_items', '[\"bank\"]')", legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.GetDB().Exec("INSERT INTO transaction_links (parent_id, child_id) VALUES (?, ?)", cardID, bankID); err != nil {
 		t.Fatal(err)
 	}
 	content, err := BackupToCSV()
@@ -370,6 +488,13 @@ func TestCSVV3ArchivesLegacySettingsAcceptedByPreviousAPI(t *testing.T) {
 	}
 	if got != legacy {
 		t.Fatalf("legacy setting changed: got %q want %q", got, legacy)
+	}
+	var links int
+	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transaction_links").Scan(&links); err != nil {
+		t.Fatal(err)
+	}
+	if links != 1 {
+		t.Fatalf("legacy settings restore pruned existing link: %d", links)
 	}
 }
 

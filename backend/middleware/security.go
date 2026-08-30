@@ -15,14 +15,13 @@ import (
 	"omni_money/backend/fileprivacy"
 )
 
-func cleanupCSVSpoolFile(file *os.File, path string) {
-	if file != nil {
-		if err := file.Close(); err != nil {
-			log.Printf("security_event=csv_spool_close_failed path=%q error=%v", path, err)
-		}
+func cleanupCSVSpoolFile(temp *fileprivacy.PrivateTempFile) {
+	if temp == nil {
+		return
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		log.Printf("security_event=csv_spool_remove_failed path=%q error=%v", path, err)
+	path := temp.Path
+	if err := temp.Cleanup(); err != nil {
+		log.Printf("security_event=csv_spool_cleanup_failed path=%q error=%v", path, err)
 	}
 }
 
@@ -106,23 +105,17 @@ func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 			// Authentication middleware wraps this middleware in the production
 			// chain. Spool only after authentication, so a slow client consumes
 			// bounded private disk space but cannot hold the processing slot.
-			tmp, err := os.CreateTemp("", "omni-money-csv-upload-")
+			temp, err := fileprivacy.CreatePrivateTempFile("omni-money-csv-upload-")
 			if err != nil {
 				http.Error(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage)
 				return
 			}
-			path := tmp.Name()
+			tmp := temp.File
 			cleanup := func() {
-				cleanupCSVSpoolFile(tmp, path)
+				cleanupCSVSpoolFile(temp)
 			}
 			info, statErr := tmp.Stat()
-			if statErr != nil || !info.Mode().IsRegular() || fileprivacy.Harden(tmp) != nil {
-				cleanup()
-				http.Error(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage)
-				return
-			}
-			info, statErr = tmp.Stat()
-			if statErr != nil || !fileprivacy.IsPrivate(info) {
+			if statErr != nil || !fileprivacy.IsPrivate(tmp, info) {
 				cleanup()
 				http.Error(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage)
 				return

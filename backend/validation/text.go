@@ -20,6 +20,21 @@ const (
 	MaxSettingItems     = 4096
 )
 
+// LedgerSettingParseMode makes the compatibility boundary explicit to every
+// caller. Legacy mode relaxes only the historical duplicate/empty/length
+// semantics; JSON shape and unsafe-text checks remain identical.
+type LedgerSettingParseMode uint8
+
+const (
+	LedgerSettingStrict LedgerSettingParseMode = iota
+	LedgerSettingArchive
+)
+
+type ParsedLedgerSettingItems struct {
+	Items   []string
+	Archive bool
+}
+
 // ValidateLedgerText validates text that is persisted in a ledger row.  It
 // intentionally never trims or otherwise canonicalizes the value: export and
 // import must preserve the exact value accepted by normal writes.  Newlines,
@@ -158,4 +173,13 @@ func ParseArchivedLedgerSettingItems(value string, maxItemBytes, maxItems int) (
 		}
 	}
 	return items, nil
+}
+
+func ParseLedgerSettingItemsWithMode(value string, mode LedgerSettingParseMode, maxItemBytes, maxItems int) (ParsedLedgerSettingItems, error) {
+	if mode == LedgerSettingArchive {
+		items, err := ParseArchivedLedgerSettingItems(value, maxItemBytes, maxItems)
+		return ParsedLedgerSettingItems{Items: items, Archive: true}, err
+	}
+	items, err := ParseLedgerSettingItems(value)
+	return ParsedLedgerSettingItems{Items: items}, err
 }

@@ -106,6 +106,35 @@ test('CSV export always removes its anchor and revokes its Object URL', async ()
   assert.deepEqual(domState.revoked, ['blob:test-1', 'blob:test-2'])
 })
 
+test('CSV export refuses oversized legacy-browser fallback before reading the body', async () => {
+  globalThis.fetch = async () => new Response('small body', {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Length': String(64 * 1024 * 1024)
+    }
+  })
+  await assert.rejects(backupToCSVFile(), /大きすぎます/)
+  assert.equal(domState.anchors.length, 0)
+  assert.equal(domState.blobs.length, 0)
+})
+
+test('CSV export supports a response without a reader using the bounded arrayBuffer fallback', async () => {
+  const bytes = new TextEncoder().encode('account,amount\ncash,100\n')
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: new Headers({ 'Content-Type': 'text/csv; charset=utf-8' }),
+    body: null,
+    arrayBuffer: async () => bytes.buffer
+  })
+  const name = await backupToCSVFile()
+  assert.match(name, /^transactions_backup_\d{4}-\d{2}-\d{2}\.csv$/)
+  const downloaded = new Uint8Array(await domState.blobs[0].arrayBuffer())
+  assert.deepEqual([...downloaded.slice(0, 3)], [0xEF, 0xBB, 0xBF])
+  assert.match(new TextDecoder().decode(downloaded.slice(3)), /^account,amount/)
+})
+
 test('CSV import rejects error and malformed success responses', async () => {
   globalThis.fetch = async () => new Response(JSON.stringify({ error: 'invalid CSV' }), {
     status: 400,
