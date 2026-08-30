@@ -288,7 +288,7 @@ func TestCSVV3ImageSpoolRejectsReplacementAfterValidation(t *testing.T) {
 	}
 	_, _ = f.Write([]byte("substituted"))
 	_ = f.Close()
-	if _, err := service.importCSVV3Parsed(context.Background(), parsed, "replace"); err == nil {
+	if _, err := service.importCSVV3Parsed(context.Background(), &parsed, "replace"); err == nil {
 		t.Fatal("replacement image was accepted")
 	}
 	if _, err := os.Stat(replacement); err != nil {
@@ -333,7 +333,7 @@ func TestCSVV3ImageSpoolRejectsSameInodeMutationAfterValidation(t *testing.T) {
 		_ = parsed.cleanup()
 		t.Fatal(err)
 	}
-	if _, err := service.importCSVV3Parsed(context.Background(), parsed, "replace"); err == nil || !strings.Contains(err.Error(), "内容") {
+	if _, err := service.importCSVV3Parsed(context.Background(), &parsed, "replace"); err == nil || !strings.Contains(err.Error(), "内容") {
 		_ = parsed.cleanup()
 		t.Fatalf("same-inode image mutation result = %v", err)
 	}
@@ -422,6 +422,56 @@ func TestCSVV3ImageSpoolCleanupDoesNotRemoveReplacementDirectory(t *testing.T) {
 	}
 	if err := os.Remove(replacement); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCSVV3ImportRollsBackWhenImageSpoolCleanupFails(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	content := csvV3TestContent(t,
+		map[string]string{csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash", "date": "2026-08-01", "item": "item", "type": "income", "amount": "1"},
+		map[string]string{csvVersionHeader: "3", "record_type": "image", "id": "1", "transaction_id": "1", "filename": "receipt.png", "mime_type": "image/png", "data_base64": base64.StdEncoding.EncodeToString(encodePNG(t))},
+	)
+	parsed, err := service.parseCSVV3Reader(context.Background(), strings.NewReader(content), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := parsed.imageTempDir
+	replacement := dir + ".replacement"
+	if err := os.Rename(dir, replacement); err != nil {
+		_ = parsed.cleanup()
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
+		_ = os.Rename(replacement, dir)
+		_ = parsed.cleanup()
+		t.Fatal(err)
+	}
+	if _, err := service.importCSVV3Parsed(context.Background(), &parsed, "replace"); err == nil || !strings.Contains(err.Error(), "cleanup") {
+		// Restore the original directory identity before the normal cleanup path.
+		_ = os.Remove(dir)
+		_ = os.Rename(replacement, dir)
+		_ = parsed.cleanup()
+		t.Fatalf("cleanup failure was not propagated: %v", err)
+	}
+	var count int
+	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transactions").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("transaction count=%d after image cleanup failure; want rollback", count)
+	}
+	// The replacement pathname must not be removed as part of the failed
+	// cleanup. Restore the retained directory identity, then let the same
+	// identity-safe owner remove it without a recursive pathname operation.
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := parsed.cleanup(); err != nil {
+		t.Fatalf("restored spool cleanup failed: %v", err)
 	}
 }
 
@@ -714,39 +764,29 @@ func TestCSVV3ReplaceRequiresValidFinalManifestBeforeMutation(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			setupCoreTestDB(t)
-			originalID := insertTestTransaction(t, "keep", "2026-01-01", "original", "income", 100, 100)
-			valid := csvV3TestContent(t, map[string]string{
-				csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash",
-				"date": "2026-08-01", "item": "imported", "type": "income", "amount": "1",
-			})
-			records, headers := readCSVRecordsForTest(t, valid)
-			invalid := writeCSVRecordsForTest(t, tc.mutate(t, records, headers))
-			if _, err := ImportCSV(invalid, "replace"); err == nil {
-				t.Fatal("invalid manifest was accepted")
-			}
-			var count int
-			if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transactions WHERE id = ?", originalID).Scan(&count); err != nil {
-				t.Fatal(err)
-			}
-			if count != 1 {
-				t.Fatalf("replace mutated the database after manifest failure: count=%d", count)
+			for _, mode := range []string{"append", "replace"} {
+				t.Run(mode, func(t *testing.T) {
+					setupCoreTestDB(t)
+					originalID := insertTestTransaction(t, "keep", "2026-01-01", "original", "income", 100, 100)
+					valid := csvV3TestContent(t, map[string]string{
+						csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash",
+						"date": "2026-08-01", "item": "imported", "type": "income", "amount": "1",
+					})
+					records, headers := readCSVRecordsForTest(t, valid)
+					invalid := writeCSVRecordsForTest(t, tc.mutate(t, records, headers))
+					if _, err := ImportCSV(invalid, mode); err == nil {
+						t.Fatal("invalid manifest was accepted")
+					}
+					var count int
+					if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transactions WHERE id = ?", originalID).Scan(&count); err != nil {
+						t.Fatal(err)
+					}
+					if count != 1 {
+						t.Fatalf("%s mutated the database after manifest failure: count=%d", mode, count)
+					}
+				})
 			}
 		})
-	}
-}
-
-func TestCSVV3AppendRetainsCompatibilityWithoutManifest(t *testing.T) {
-	setupCoreTestDB(t)
-	service := &Service{db: database.GetDB(), legacy: true}
-	valid := csvV3TestContent(t, map[string]string{
-		csvVersionHeader: "3", "record_type": "transaction", "id": "1", "account": "cash",
-		"date": "2026-08-01", "item": "imported", "type": "income", "amount": "1",
-	})
-	records, _ := readCSVRecordsForTest(t, valid)
-	withoutManifest := writeCSVRecordsForTest(t, records[:len(records)-1])
-	if imported, err := service.ImportCSVReaderContext(context.Background(), strings.NewReader(withoutManifest), "append"); err != nil || imported != 1 {
-		t.Fatalf("manifest-less v3 append result=%d err=%v", imported, err)
 	}
 }
 

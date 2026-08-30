@@ -1238,6 +1238,13 @@ func (p *csvV3Import) cleanup() error {
 			p.imageTempDirInfo = nil
 		}
 	}
+	// Drop decoded in-memory image aliases before releasing their admission
+	// reservations. Spool-backed rows already clear data during spooling, but
+	// the bounded Wails/string compatibility path keeps them here until the DB
+	// consumer has completed.
+	for index := range p.images {
+		p.images[index].data = nil
+	}
 	for _, release := range p.tempReleases {
 		release()
 	}
@@ -1321,8 +1328,12 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 				tempReleases:     parseTempReleases,
 			}
 			// cleanup is identity-safe and nonrecursive. It also has once-guarded
-			// reservations, so an earlier explicit cleanup remains harmless.
-			_ = owner.cleanup()
+			// reservations, so an earlier explicit cleanup remains harmless. Do not
+			// discard a cleanup failure: a parse error must report both the malformed
+			// input and any plaintext spool that could not be safely removed.
+			if cleanupErr := owner.cleanup(); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("CSV画像一時領域のcleanupに失敗しました: %w", cleanupErr))
+			}
 		}
 	}()
 	transactionIDs := make(map[int64]struct{})
@@ -2104,8 +2115,11 @@ func (s *Service) importCSVV3(content, mode string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer parsed.cleanup()
-	return s.importCSVV3Parsed(context.Background(), parsed, mode)
+	count, importErr := s.importCSVV3Parsed(context.Background(), &parsed, mode)
+	if cleanupErr := parsed.cleanup(); cleanupErr != nil {
+		return 0, errors.Join(importErr, fmt.Errorf("CSV画像一時領域のcleanupに失敗しました: %w", cleanupErr))
+	}
+	return count, importErr
 }
 
 // ImportCSVReaderContext is the file/HTTP streaming entrypoint. v3 is parsed
@@ -2161,8 +2175,11 @@ func (s *Service) ImportCSVReaderContext(ctx context.Context, input io.Reader, m
 		if parseErr != nil {
 			return 0, parseErr
 		}
-		defer parsed.cleanup()
-		return s.importCSVV3Parsed(ctx, parsed, mode)
+		count, importErr := s.importCSVV3Parsed(ctx, &parsed, mode)
+		if cleanupErr := parsed.cleanup(); cleanupErr != nil {
+			return 0, errors.Join(importErr, fmt.Errorf("CSV画像一時領域のcleanupに失敗しました: %w", cleanupErr))
+		}
+		return count, importErr
 	}
 	if mode == "replace" {
 		return 0, fmt.Errorf("%s", legacyCSVReplaceError)
@@ -2462,15 +2479,18 @@ func (s *Service) ImportCSVFileContext(ctx context.Context, path, mode string) (
 	return s.ImportCSVReaderContext(ctx, file, mode)
 }
 
-func (s *Service) importCSVV3Parsed(ctx context.Context, parsed csvV3Import, mode string) (int, error) {
+func (s *Service) importCSVV3Parsed(ctx context.Context, parsed *csvV3Import, mode string) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if mode != "append" && mode != "replace" {
 		return 0, fmt.Errorf("インポートモードはappendまたはreplaceで指定してください")
 	}
-	if mode == "replace" && !parsed.hasManifest {
-		return 0, fmt.Errorf("CSV v3 replaceには完全性manifestが必要です")
+	if parsed == nil {
+		return 0, fmt.Errorf("CSV v3解析結果がありません")
+	}
+	if !parsed.hasManifest {
+		return 0, fmt.Errorf("CSV v3 importには完全性manifestが必要です")
 	}
 	db, err := s.database()
 	if err != nil {
@@ -2589,7 +2609,7 @@ func (s *Service) importCSVV3Parsed(ctx context.Context, parsed csvV3Import, mod
 			tagMap[row.id] = newID
 		}
 	}
-	if err := validateCSVV3ImageQuota(ctx, tx, parsed, transactionMap); err != nil {
+	if err := validateCSVV3ImageQuota(ctx, tx, *parsed, transactionMap); err != nil {
 		return 0, fmt.Errorf("CSV v3画像クォータ: %w", err)
 	}
 	for _, row := range parsed.images {
@@ -2689,6 +2709,13 @@ func (s *Service) importCSVV3Parsed(ctx context.Context, parsed csvV3Import, mod
 	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
+	}
+	// All image descriptors and heap aliases have been consumed by the INSERTs
+	// above. Finalize the private spool while the SQL transaction is still
+	// pending; if identity-safe cleanup cannot prove removal, rollback instead
+	// of returning a successful import while plaintext remains on disk.
+	if err := parsed.cleanup(); err != nil {
+		return 0, fmt.Errorf("CSV v3画像一時領域のcleanupに失敗しました: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("CSV v3コミットエラー: %w", err)

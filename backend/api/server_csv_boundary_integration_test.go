@@ -3,16 +3,17 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -132,28 +133,14 @@ func TestProductionServerCSVStaysInsideAuthenticatedVault(t *testing.T) {
 	assertServerCSVAccounts(t, serveServerCSVRequest(t, handler, sessionA, http.MethodGet, "/api/backup_csv", nil), "only-admin-a")
 	assertServerCSVAccounts(t, serveServerCSVRequest(t, handler, sessionB, http.MethodGet, "/api/backup_csv", nil), "only-user-b")
 
-	// Full-ledger replacement is intentionally exercised with v3. Legacy/v2
-	// replace is rejected because those formats cannot describe extension data.
-	importDocumentBuilder := &strings.Builder{}
-	importWriter := csv.NewWriter(importDocumentBuilder)
-	if err := importWriter.Write([]string{
-		"omni_money_csv_version", "record_type", "id", "transaction_id", "parent_id", "child_id", "tag_id",
-		"account", "date", "item", "type", "amount", "balance", "memo", "filename", "mime_type",
-		"data_base64", "tag_name", "tag_parent_id", "tag_level", "setting_key", "setting_value", "created_at",
-	}); err != nil {
+	// Full-ledger replacement is intentionally exercised with the canonical v3
+	// exporter. Legacy/v2 replace is rejected because those formats cannot
+	// describe extension data; a hand-written subset must not be accepted here.
+	importDocument, err := serviceA.BackupToCSV()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := importWriter.Write([]string{
-		"3", "transaction", "1", "", "", "", "", "imported-only-admin-a", "2026-08-28", "boundary",
-		"income", "700", "700", "isolated", "", "", "", "", "", "", "", "", "",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	importWriter.Flush()
-	if err := importWriter.Error(); err != nil {
-		t.Fatal(err)
-	}
-	importDocument := importDocumentBuilder.String()
+	importDocument = rewriteServerCSVTransactionAccount(t, importDocument, "imported-only-admin-a")
 	importBody, err := json.Marshal(map[string]string{"content": importDocument, "mode": "replace"})
 	if err != nil {
 		t.Fatal(err)
@@ -323,21 +310,138 @@ func assertServerCSVAccounts(t *testing.T, response *httptest.ResponseRecorder, 
 	if accountColumn < 0 {
 		t.Fatal("CSV response has no account column")
 	}
-	var accounts []string
-	for {
-		record, err := reader.Read()
-		if err == io.EOF {
-			break
+	records, err := reader.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) < 2 {
+		t.Fatal("CSV response has no records")
+	}
+	manifestIndex := len(records) - 1
+	manifestRecord := records[manifestIndex]
+	if len(manifestRecord) != len(header) || manifestRecord[1] != "manifest" || manifestRecord[20] != "omni_money_csv_v3_manifest" || manifestRecord[21] == "" {
+		t.Fatalf("CSV response does not end with a manifest: %#v", manifestRecord)
+	}
+	for _, record := range records[:manifestIndex] {
+		if len(record) != len(header) {
+			t.Fatal("CSV response row has a different field count")
 		}
-		if err != nil {
-			t.Fatal(err)
+		if record[1] == "manifest" {
+			t.Fatal("CSV response contains a non-final manifest")
+		}
+	}
+	if records[manifestIndex][1] != "manifest" {
+		t.Fatal("CSV response has no final manifest")
+	}
+	var manifest struct {
+		Format  string           `json:"format"`
+		Version int              `json:"version"`
+		Counts  map[string]int64 `json:"counts"`
+		Digest  string           `json:"digest"`
+	}
+	if err := json.Unmarshal([]byte(manifestRecord[21]), &manifest); err != nil {
+		t.Fatalf("CSV manifest JSON: %v", err)
+	}
+	if manifest.Format != "omni-money-csv-v3" || manifest.Version != 3 || len(manifest.Digest) != sha256.Size*2 {
+		t.Fatalf("CSV manifest metadata = %+v", manifest)
+	}
+	counts := make(map[string]int64)
+	digest := sha256.New()
+	for _, record := range records[:manifestIndex] {
+		counts[record[1]]++
+		var length [8]byte
+		for _, field := range record {
+			binary.BigEndian.PutUint64(length[:], uint64(len(field)))
+			_, _ = digest.Write(length[:])
+			_, _ = digest.Write([]byte(field))
+		}
+	}
+	if manifest.Counts["manifest"] != 1 || hex.EncodeToString(digest.Sum(nil)) != manifest.Digest {
+		t.Fatalf("CSV manifest digest/count invalid: %+v", manifest)
+	}
+	for _, recordType := range []string{"transaction", "transaction_legacy", "image", "tag", "tag_legacy", "transaction_tag", "transaction_link", "setting", "setting_legacy"} {
+		if manifest.Counts[recordType] != counts[recordType] {
+			t.Fatalf("CSV manifest count for %s = %d, want %d", recordType, manifest.Counts[recordType], counts[recordType])
+		}
+	}
+	var accounts []string
+	for _, record := range records[:manifestIndex] {
+		if record[1] != "transaction" && record[1] != "transaction_legacy" {
+			continue
 		}
 		if accountColumn >= len(record) {
-			t.Fatal("CSV response row has no account value")
+			t.Fatal("CSV response transaction has no account value")
 		}
 		accounts = append(accounts, record[accountColumn])
 	}
 	if len(accounts) != 1 || accounts[0] != want {
 		t.Fatalf("CSV account boundary mismatch: got %d rows", len(accounts))
 	}
+}
+
+// rewriteServerCSVTransactionAccount starts from the production export, then
+// changes only a transaction value while rebuilding its canonical manifest.
+// This keeps the integration fixture a complete, self-verifiable v3 archive
+// rather than a handcrafted subset that replace must reject.
+func rewriteServerCSVTransactionAccount(t *testing.T, content, account string) string {
+	t.Helper()
+	records, err := csv.NewReader(bytes.NewBufferString(content)).ReadAll()
+	if err != nil || len(records) < 2 {
+		t.Fatalf("canonical CSV fixture parse: %v", err)
+	}
+	header := records[0]
+	accountColumn, manifestIndex := -1, len(records)-1
+	for index, name := range header {
+		if name == "account" {
+			accountColumn = index
+		}
+	}
+	if accountColumn < 0 || records[manifestIndex][1] != "manifest" {
+		t.Fatal("canonical CSV fixture lacks complete v3 fields")
+	}
+	changed := false
+	for _, record := range records[1:manifestIndex] {
+		if record[1] == "transaction" || record[1] == "transaction_legacy" {
+			record[accountColumn] = account
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		t.Fatal("canonical CSV fixture has no transaction")
+	}
+	var manifest struct {
+		Format  string           `json:"format"`
+		Version int              `json:"version"`
+		Counts  map[string]int64 `json:"counts"`
+		Digest  string           `json:"digest"`
+	}
+	if err := json.Unmarshal([]byte(records[manifestIndex][21]), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.New()
+	for _, record := range records[:manifestIndex] {
+		var length [8]byte
+		for _, field := range record {
+			binary.BigEndian.PutUint64(length[:], uint64(len(field)))
+			_, _ = digest.Write(length[:])
+			_, _ = digest.Write([]byte(field))
+		}
+	}
+	manifest.Digest = hex.EncodeToString(digest.Sum(nil))
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records[manifestIndex][21] = string(encoded)
+	var output bytes.Buffer
+	writer := csv.NewWriter(&output)
+	if err := writer.WriteAll(records); err != nil {
+		t.Fatal(err)
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		t.Fatal(err)
+	}
+	return output.String()
 }

@@ -1128,8 +1128,11 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 			if parseErr != nil {
 				return 0, parseErr
 			}
-			defer parsed.cleanup()
-			return s.importCSVV3Parsed(ctx, parsed, mode)
+			count, importErr := s.importCSVV3Parsed(ctx, &parsed, mode)
+			if cleanupErr := parsed.cleanup(); cleanupErr != nil {
+				return 0, errors.Join(importErr, fmt.Errorf("CSV画像一時領域のcleanupに失敗しました: %w", cleanupErr))
+			}
+			return count, importErr
 		}
 	}
 	// Legacy/v1/v2 files cannot describe the extension data that a full

@@ -192,6 +192,57 @@ test('CSV export streams the response into the handle acquired by the click', as
   else window.showSaveFilePicker = previousPicker
 })
 
+test('CSV export bounds file-handle streams by declared and actual bytes', async () => {
+  const maxCSVBytes = 512 * 1024 * 1024
+  let fetchCalls = 0
+  let canceled = 0
+  let writableCreated = 0
+  const previousPicker = window.showSaveFilePicker
+  window.showSaveFilePicker = async () => ({
+    createWritable: async () => {
+      writableCreated++
+      return new WritableStream({ abort: () => {} })
+    }
+  })
+  globalThis.fetch = async () => {
+    fetchCalls++
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Length': String(maxCSVBytes + 1) }),
+      body: {
+        pipeTo: async () => {},
+        cancel: async () => { canceled++ }
+      }
+    }
+  }
+  await assert.rejects(backupToCSVFile(), /大きすぎます/)
+  assert.equal(fetchCalls, 1)
+  assert.equal(writableCreated, 0)
+  assert.equal(canceled, 1)
+
+  let sourceCanceled = 0
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue({ byteLength: maxCSVBytes + 1 })
+    },
+    cancel() {
+      sourceCanceled++
+    }
+  })
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: new Headers({ 'Content-Type': 'text/csv; charset=utf-8' }),
+    body
+  })
+  await assert.rejects(backupToCSVFile(), /大きすぎます/)
+  assert.equal(sourceCanceled, 1)
+  assert.equal(writableCreated, 1)
+  if (previousPicker === undefined) delete window.showSaveFilePicker
+  else window.showSaveFilePicker = previousPicker
+})
+
 test('CSV export supports a response without a reader using the bounded arrayBuffer fallback', async () => {
   const bytes = new TextEncoder().encode('account,amount\ncash,100\n')
   globalThis.fetch = async () => ({

@@ -771,8 +771,60 @@ export async function backupToCSVFile() {
 			if (!res.body || typeof res.body.pipeTo !== 'function') {
 				throw new Error('CSVストリームが利用できません')
 			}
+			const maxCSVBytes = 512 * 1024 * 1024
+			const contentLengthHeader = res.headers.get('Content-Length')
+			const contentLength = contentLengthHeader == null ? NaN : Number(contentLengthHeader)
+			if (Number.isFinite(contentLength) && (contentLength < 0 || contentLength > maxCSVBytes)) {
+				throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+			}
 			writable = await saveHandle.createWritable()
-			await res.body.pipeTo(writable)
+			let totalBytes = 0
+			const checkChunk = chunk => {
+				// Fetch body chunks are byte-oriented Uint8Arrays. Do not fall back to
+				// string.length, which counts UTF-16 code units rather than wire bytes.
+				const chunkBytes = chunk?.byteLength
+				if (!Number.isSafeInteger(chunkBytes) || chunkBytes < 0 || totalBytes > maxCSVBytes - chunkBytes) {
+					throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+				}
+				totalBytes += chunkBytes
+			}
+			if (typeof res.body.getReader === 'function' &&
+				(typeof writable.getWriter === 'function' || typeof writable.write === 'function')) {
+				// Read explicitly so an over-limit response can cancel the locked
+				// reader. Calling response.body.cancel() after pipeThrough has locked
+				// the stream is not reliable in all browsers.
+				const reader = res.body.getReader()
+				const writer = typeof writable.getWriter === 'function'
+					? writable.getWriter()
+					: { write: chunk => writable.write(chunk), close: () => writable.close?.(), abort: reason => writable.abort?.(reason) }
+				try {
+					for (;;) {
+						const { done, value } = await reader.read()
+						if (done) break
+						checkChunk(value)
+						await writer.write(value)
+					}
+					await writer.close()
+				} catch (error) {
+					try { await reader.cancel(error) } catch (_) { /* best effort */ }
+					try { await writer.abort?.(error) } catch (_) { /* best effort */ }
+					throw error
+				}
+			} else {
+				// Keep compatibility with older/mock stream implementations that only
+				// expose pipeTo. Native ReadableStreams use WritableStream here, while
+				// simple Wails/test shims can consume the equivalent sink object.
+				const sink = {
+					write(chunk) {
+						checkChunk(chunk)
+						return writable.write?.(chunk)
+					},
+					close() { return writable.close?.() },
+					abort(reason) { return writable.abort?.(reason) }
+				}
+				const pipeSink = typeof WritableStream === 'function' ? new WritableStream(sink) : sink
+				await res.body.pipeTo(pipeSink)
+			}
 			return downloadName
 		} catch (error) {
 			try { await writable?.abort() } catch (_) { /* best effort */ }
