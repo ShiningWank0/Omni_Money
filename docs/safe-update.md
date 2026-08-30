@@ -13,6 +13,11 @@ Linux + Bash 3.2以降 + GNU tar の host contract を要求し、条件を満�
   明示します。環境中の COMPOSE_* は除去します。
 - OMNI_UPDATE_ENV_FILE（既定 .env）は shell source せず owner-only の private copy
   へ pin します。device、inode、link count、SHA-256を保持し、途中の差替えを拒否します。
+  Composeのshell変数優先順位による差替えも避けるため、repositoryの`OMNI_*`補間変数は
+  呼び出し前に除去し、選択したprivate env fileを唯一のCompose環境入力にします。
+- image 引数は最後の path component に明示的な immutable version tag を持つか、完全な
+  `@sha256:<64 hex>` digest でなければなりません。`registry:5000/image` は port を
+  tag と誤認しないよう拒否し、`latest` も拒否します。
 - source Compose file と attestation も owner/mode、device、inode、link count、digest
   を検証します。Compose 自身が生成した resolved JSON を一度だけ private snapshot に
   保存し、以後の ps --all、up --no-start、candidate/rollback 作成はその snapshot
@@ -26,6 +31,14 @@ Linux + Bash 3.2以降 + GNU tar の host contract を要求し、条件を満�
 - up --no-start の直後は必ず compose ps --all -q を読み、IDがちょうど1つで state が
   created（停止）であることを確認します。candidate と rollback のどちらも、network
   を全て disconnect してから start します。
+- runtime contract は current の operator environment（値ではなくdigest）、entrypoint/cmd、
+  healthcheck、mount/network/labelに加えて capability、device、PID/IPC namespace、resource
+  limit、log設定まで pinします。`CapAdd`、device、共有namespace、危険なresource/log設定は
+  candidate/rollbackとも拒否し、imageが更新してよい `VERSION` 等のimage-owned defaultだけを
+  operator contractから除外します。
+- Docker操作とlocal filesystemのattestationは同じhostでなければなりません。`DOCKER_HOST`、
+  TLS/cert override、remote `DOCKER_CONTEXT`、Unix socketでないdefault context、及び
+  `TAR_OPTIONS` は拒否します。
 
 ## encrypted volume と checkpoint
 
@@ -36,7 +49,8 @@ rollback root に昇格できないよう、checkpoint は実際の host data bi
 update 専用の host attestation は root-owned private/read-only file とし、既存の server
 at-rest attestation（container の data_root=/app/data）とは別の schema です。Compose の
 `x-omni-update-attestation-file` extension で resolved snapshot にだけ path を残し、
-service secret/mount として app container へ渡しません。
+相対pathはCompose project directory（このrepositoryのcompose.yamlの親）を基準に解決し、
+`.env`の値だけで別rootへ向けることはできません。
 
     {
       "version": 1,
@@ -61,6 +75,12 @@ project/env/attestation owner contract と、container/data の UID/GID contract
 暗号化 key はこの file や repository と別の secret manager/recovery 媒体で管理します。
 attestation は暗号学的証明ではないため、LUKS/ZFS 等の unlock、backup、restore 試験も
 運用で行います。
+
+archive/checksumの一時fileはpin directoryやrepositoryではなく、attestation済みcheckpoint
+filesystem内のgeneration directoryへ0600で作成し、同じdirectoryからchecksum/archiveへ
+exclusive renameします。checkpoint filesystemにはarchive、extract、failed-dataを保持できる
+保守的な容量をrollback reservationとしてfallocateし、reservation自体もowner/mode、
+device/inode/link count/digestでjournalへ固定します。
 
 ## 状態機械と rollback
 
@@ -93,7 +113,8 @@ safe-update は root operator として実行します。Compose file、選択�
 attestation、2つの Compose secret source は、root または root が管理する親ディレクトリ
 に置き、symlink ではない通常 file、指定された owner/mode、書込み不可の状態にします。
 control keyは固定service GIDが読むため `root:10001`・`0440`、attestationは
-`root:root`・`0444`を標準とします。
+`root:root`・`0444`を標準とします。control keyとattestationは同じpermissive matrixに
+せず、sourceごとにこのowner/modeを厳密に要求します。
 live data は固定 UID/GID `10001:10001`・mode `0700`、checkpoint root は root-owned
 mode `0700` で、いずれも同じ暗号化 filesystem 上に置きます。例えば配置を変更した
 場合は、先に `sudo chown`/`sudo chmod` と attestation の3 pathを更新し、dry-run相当の
@@ -103,8 +124,10 @@ preflight（安全更新テスト）を通してから実行します。実行�
 
 停止前に checkpoint directory の `recovery/` と `.safe-update-journal` へ、Compose
 snapshot、env/attestationのprivate copy、secret source contract、current runtime
-contract、device/inode/link count/digestを atomic write し、各fileと親directoryを
-fsyncします。journal phaseが `stopping` 以降で更新途中にSIGKILL・電源断が起きた場合も、
+contract、rollback Compose snapshot、各copyのdevice/inode/link count/digest manifestを
+atomic write し、各fileと親directoryを fsyncします。archive/checksum/reservationのidentity
+もphase更新前に記録します。envの更新・復元は元envと同じ親directory上のprivate stagingから
+fsync後にatomic renameします。journal phaseが `stopping` 以降で更新途中にSIGKILL・電源断が起きた場合も、
 lockやjournalは自動削除しません。次回実行は `lock` または journal を検出して fail
 closed します。これは古いlockを消して二重復旧する事故を防ぐためです。
 
@@ -130,10 +153,14 @@ lock/journal/recovery bundleを削除せず、serviceを停止したまま管理
 ## CI / mock state machine
 
 scripts/safe-update_test.sh は Docker daemon を使わず、Linux では mock Docker/Compose
-state machine で main transaction を実行します。success、candidate failure、pull/config
+state machine で main transaction を実行します。success、candidate failure、partial
+Compose recreate（旧ID消失）、pull/config
 の停止前失敗、partial stop、INT/TERM、network disconnect/reconnect failure、rollback
 failure、env/Compose swap、candidateのdata改変、secret inode差替え、rollback tag改変、
 追加 port/network/mount/secret、旧container IDのforce-recreate削除、stale lock/journalを
-検証します。archive の newline 名、symlink、hardlink、FIFOも fail-closeを確認します。
+検証します。registry port/tag、relative attestation、remote Docker context/host、
+TAR_OPTIONS、secret permissions、容量reservation、cross-filesystem staging、nested
+directoryとhard-linked regular fileも確認します。archive の newline 名、symlink、hardlink、
+FIFO、deviceも fail-closeを確認します。
 macOS 等では portable preflight だけを実行し、production 更新は Linux CI/host で行って
 ください。
