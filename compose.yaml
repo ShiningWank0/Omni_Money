@@ -80,6 +80,9 @@ services:
       pangolin_target:
         ipv4_address: "${OMNI_MONEY_IP:-172.30.240.2}"
 
+# Compose resolves this host-only extension into the updater's config snapshot;
+# it is deliberately not a service secret or container mount.
+x-omni-update-attestation-file: "${OMNI_UPDATE_ATTESTATION_FILE:?OMNI_UPDATE_ATTESTATION_FILE is required}"
 secrets:
   omni_data_at_rest_attestation:
     file: "${OMNI_AT_REST_ATTESTATION_FILE:?OMNI_AT_REST_ATTESTATION_FILE is required}"

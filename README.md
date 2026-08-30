@@ -222,7 +222,7 @@ Colima、LAN 公開、TrueNAS Custom App の手順は[利用ガイド](docs/how-
 
 ```bash
 cp .env.example .env
-# .env の ALLOWED_HOSTS、TRUSTED_PROXIES、OMNI_DATA_DIR、attestation、
+# .env の ALLOWED_HOSTS、TRUSTED_PROXIES、OMNI_DATA_DIR、at-rest/update attestation、
 # control key、initial-admin setup tokenのpathを編集
 umask 077
 mkdir -p ./data ./secrets

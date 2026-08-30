@@ -59,6 +59,7 @@ chmod 600 secrets/control-database.key secrets/initial-admin-setup.token
 
 - `OMNI_DATA_DIR`
 - `OMNI_AT_REST_ATTESTATION_FILE`
+- `OMNI_UPDATE_ATTESTATION_FILE`（safe-updateを使う場合のroot-owned host attestation）
 - `OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE`
 - `OMNI_INITIAL_ADMIN_SETUP_TOKEN_FILE`
 - `ALLOWED_HOSTS`
