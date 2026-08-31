@@ -29,6 +29,9 @@ assert_rejected_with() {
 source "$script_dir/safe-update.sh"
 pin_dir="$test_root/pin"; mkdir -m 0700 -- "$pin_dir"
 
+if grep -Eq 'safe_update_test_mode|MOCK_BIN|SAFE_UPDATE_INSTRUMENTED_MOCK_BIN|\.omni-safe-update-test' "$script_dir/safe-update.sh"; then
+  echo "FAIL: production safe-update contains a test-mode activation surface" >&2; exit 1
+fi
 if grep -Eq '^[[:space:]]*source[[:space:]]+' "$script_dir/safe-update.sh"; then
   echo "FAIL: safe-update contains a shell env-file source" >&2; exit 1
 fi
@@ -138,14 +141,50 @@ grep -Fq 'sha256_file "$capacity_reservation"' "$script_dir/safe-update.sh" && {
 printf 'not a tar archive\n' > "$pin_dir/corrupt.tar"
 assert_rejected "corrupt archive" validate_tar_members "$pin_dir/corrupt.tar"
 
+# A production copy or symlink under the historical magic pathname must keep
+# the fixed production PATH and erase exported command functions. Ambient
+# MOCK_BIN must never turn the production artifact into a mock executor.
+production_probe_root="$test_root/.omni-safe-update-test.attacker"
+production_probe_bin="$production_probe_root/mock-bin"
+production_probe_marker="$production_probe_root/marker"
+mkdir -m 0700 -p -- "$production_probe_root/copy/scripts" "$production_probe_root/link/scripts" "$production_probe_bin"
+cp -- "$script_dir/safe-update.sh" "$production_probe_root/copy/scripts/safe-update.sh"
+chmod 0700 "$production_probe_root/copy/scripts/safe-update.sh"
+ln -s -- "$script_dir/safe-update.sh" "$production_probe_root/link/scripts/safe-update.sh"
+for probe_command in dirname readlink stat docker; do
+  printf '#!/bin/sh\nprintf marker >> "$SAFE_UPDATE_PROBE_MARKER"\nexit 97\n' > "$production_probe_bin/$probe_command"
+  chmod 0700 "$production_probe_bin/$probe_command"
+done
+for production_probe in "$production_probe_root/copy/scripts/safe-update.sh" "$production_probe_root/link/scripts/safe-update.sh"; do
+  probe_status=0
+  probe_output="$(env MOCK_BIN="$production_probe_bin" SAFE_UPDATE_PROBE_MARKER="$production_probe_marker" OMNI_UPDATE_CHECKPOINT_DIR=/tmp/forbidden \
+    bash -c '
+      dirname() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
+      readlink() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
+      stat() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
+      docker() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
+      export -f dirname readlink stat docker
+      exec "$1" registry.example/omni-money:1.2.3
+    ' _ "$production_probe" 2>&1)" || probe_status=$?
+  [ "$probe_status" -ne 0 ] || { echo "FAIL: production pathname probe unexpectedly succeeded" >&2; exit 1; }
+  [ ! -e "$production_probe_marker" ] || { echo "FAIL: production pathname probe executed an ambient mock/function" >&2; exit 1; }
+  grep -Eq 'safe-update must be run as root|OMNI_UPDATE_CHECKPOINT_DIR is not supported' <<< "$probe_output" || { echo "FAIL: production pathname probe did not retain production preflight checks" >&2; exit 1; }
+done
+
 if [ "$(uname -s)" != "Linux" ]; then
   echo "safe-update portable preflight tests passed (Linux state-machine tests skipped)"; exit 0
 fi
 
 fixture_root="$test_root/fixture"
-mkdir -m 0700 -- "$fixture_root" "$fixture_root/scripts"
-cp -- "$script_dir/safe-update.sh" "$fixture_root/scripts/safe-update.sh"
+mock_bin="$test_root/mock-bin"; mock_state="$test_root/mock-state"
+mkdir -m 0700 -- "$fixture_root" "$fixture_root/scripts" "$mock_bin" "$mock_state"
+production_hash_before="$(sha256_file "$script_dir/safe-update.sh")"
+SAFE_UPDATE_INSTRUMENTED_MOCK_BIN="$mock_bin" awk -f "$script_dir/safe-update_test_instrument.awk" \
+  "$script_dir/safe-update.sh" > "$fixture_root/scripts/safe-update.sh"
 chmod 0700 "$fixture_root/scripts/safe-update.sh"
+[ "$(sha256_file "$script_dir/safe-update.sh")" = "$production_hash_before" ] || { echo "FAIL: instrumentation modified the production safe-update artifact" >&2; exit 1; }
+grep -Fq 'instrumented_mock_bin="${SAFE_UPDATE_INSTRUMENTED_MOCK_BIN:?}"' "$fixture_root/scripts/safe-update.sh" || { echo "FAIL: test updater was not explicitly instrumented" >&2; exit 1; }
+grep -Eq 'safe_update_test_mode|MOCK_BIN|SAFE_UPDATE_INSTRUMENTED_MOCK_BIN|\.omni-safe-update-test' "$script_dir/safe-update.sh" && { echo "FAIL: test instrumentation leaked into the production safe-update artifact" >&2; exit 1; }
 mkdir -m 0700 -- "$fixture_root/data"
 printf 'fixture ledger\n' > "$fixture_root/data/ledger.txt"
 touch "$fixture_root/compose.yaml"
@@ -158,9 +197,6 @@ chmod 0444 "$fixture_root/attestation.json"
 printf 'at-rest-secret-value\n' > "$fixture_root/at-rest.json"
 printf 'control-key\n' > "$fixture_root/control.key"
 chmod 0444 "$fixture_root/at-rest.json"; chmod 0440 "$fixture_root/control.key"
-
-mock_bin="$test_root/mock-bin"; mock_state="$test_root/mock-state"
-mkdir -m 0700 -- "$mock_bin" "$mock_state"
 
 # Keep the Linux state-machine independent of the host's /usr/bin/tar symlink
 # (macOS commonly points it at BSD tar). The updater still sees an absolute,
@@ -474,23 +510,9 @@ fi
 MOCK_DU
 chmod 0700 "$mock_bin/du"
 
-# The updater pins its production PATH to canonical system directories. Linux
-# state-machine tests use exported Bash shims instead of placing attacker-like
-# directories on that PATH; the shims are accepted only for this fixture path.
-MOCK_BIN="$mock_bin"
-export MOCK_BIN
-docker() { "$MOCK_BIN/docker" "$@"; }
-jq() { "$MOCK_BIN/jq" "$@"; }
-stat() { "$MOCK_BIN/stat" "$@"; }
-tar() { "$MOCK_BIN/tar" "$@"; }
-chown() { "$MOCK_BIN/chown" "$@"; }
-df() { "$MOCK_BIN/df" "$@"; }
-du() { "$MOCK_BIN/du" "$@"; }
-sleep() { "$MOCK_BIN/sleep" "$@"; }
-sync() { "$MOCK_BIN/sync" "$@"; }
-fallocate() { "$MOCK_BIN/fallocate" "$@"; }
-findmnt() { return 0; }
-export -f docker jq stat tar chown df du sleep sync fallocate findmnt
+# The production updater never accepts an alternate PATH or exported command
+# functions. Only the separately generated instrumented copy prepends this
+# root-owned fixture directory.
 
 run_update() {
   local seconds="${SAFE_UPDATE_CASE_TIMEOUT_SECONDS:-90}"
@@ -579,7 +601,7 @@ run_case() {
   rm -f -- "$fixture_root/at-rest.json.replaced"
   original_env_hash="$(sha256_file "$fixture_root/.env")"
   original_data_hash="$(sha256sum -- "$fixture_root/data/ledger.txt" | sed -E 's/[[:space:]].*$//')"
-  output="$(run_update env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT -u DOCKER_CONFIG -u DOCKER_CLI_PLUGIN_EXTRA_DIRS -u DOCKER_CLI_EXPERIMENTAL MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO="$scenario" MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" OMNI_UPDATE_HEALTH_TIMEOUT_SECONDS=30 "${scenario_env[@]}" "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 2>&1)" || status=$?
+  output="$(run_update env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT -u DOCKER_CONFIG -u DOCKER_CLI_PLUGIN_EXTRA_DIRS -u DOCKER_CLI_EXPERIMENTAL SAFE_UPDATE_INSTRUMENTED_MOCK_BIN="$mock_bin" MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO="$scenario" MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" OMNI_UPDATE_HEALTH_TIMEOUT_SECONDS=30 "${scenario_env[@]}" "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 2>&1)" || status=$?
   if [ "$status" -ne "$expected" ]; then printf 'FAIL: scenario %s returned %s (expected %s)\n%s\nmock log:\n' "$scenario" "$status" "$expected" "$output" >&2; sed -n '1,120p' "$mock_state/log" >&2; exit 1; fi
   if grep -Eq 'control-key|at-rest-secret-value' <<< "$output" || grep -Eq 'control-key|at-rest-secret-value' "$mock_state/log"; then
     echo "FAIL: $scenario exposed secret content in output or mock log" >&2
@@ -595,7 +617,7 @@ run_case() {
     journal_path="$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
     [ -f "$journal_path" ] && [ -d "$fixture_root/.omni-money-safe-update.lock" ] || { echo "FAIL: SIGKILL did not leave durable recovery state" >&2; exit 1; }
     stale_status=0
-env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO=stale_lock MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 >/dev/null 2>&1 || stale_status=$?
+env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT SAFE_UPDATE_INSTRUMENTED_MOCK_BIN="$mock_bin" MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO=stale_lock MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 >/dev/null 2>&1 || stale_status=$?
     [ "$stale_status" -ne 0 ] && [ -d "$fixture_root/.omni-money-safe-update.lock" ] || { echo "FAIL: stale SIGKILL lock was not fail-closed" >&2; exit 1; }
     rmdir -- "$fixture_root/.omni-money-safe-update.lock"
     for pin_path in "$fixture_root"/.omni-money-safe-update-pin.*; do [ -d "$pin_path" ] && [ ! -L "$pin_path" ] && rm -rf -- "$pin_path"; done
@@ -843,7 +865,7 @@ mkdir -m 0700 -- "$fixture_root/omni-money-update-checkpoints"
 printf '%s\n' '{"version":1,"phase":"stopping"}' > "$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
 chmod 0600 "$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
 stale_status=0
-env MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO=stale_journal MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" OMNI_UPDATE_HEALTH_TIMEOUT_SECONDS=30 "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 >/dev/null 2>&1 || stale_status=$?
+env SAFE_UPDATE_INSTRUMENTED_MOCK_BIN="$mock_bin" MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO=stale_journal MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" OMNI_UPDATE_HEALTH_TIMEOUT_SECONDS=30 "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 >/dev/null 2>&1 || stale_status=$?
 [ "$stale_status" -ne 0 ] && [ -f "$fixture_root/omni-money-update-checkpoints/.safe-update-journal" ] || { echo "FAIL: stale durable journal was not fail-closed" >&2; exit 1; }
 rm -rf -- "$fixture_root/omni-money-update-checkpoints"
 echo "safe-update state-machine tests passed"

@@ -182,7 +182,12 @@ lock/journal/recovery bundleを削除せず、serviceを停止したまま管理
 ## CI / mock state machine
 
 scripts/safe-update_test.sh は Docker daemon を使わず、Linux では mock Docker/Compose
-state machine で main transaction を実行します。success、candidate failure、partial
+state machine で main transaction を実行します。production `safe-update.sh` 自体には
+pathnameや環境変数で有効化できるtest modeを含めず、CIがexact-cardinality検証付きの
+test専用transformで生成した一時copyだけにmock境界をinstrumentします。production copy/
+symlinkへ`MOCK_BIN`やexported command functionを与えても固定PATHとproduction preflightが
+維持されること、およびinstrumentationがproduction artifactへ混入しないことも検証します。
+success、candidate failure、partial
 Compose recreate（旧ID消失）、pull/config
 の停止前失敗、partial stop、INT/TERM、network disconnect/reconnect failure、rollback
 failure、env/Compose swap、candidateのdata改変、secret inode差替え、rollback tag改変、

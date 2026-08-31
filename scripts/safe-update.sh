@@ -14,33 +14,15 @@ builtin set -Eeuo pipefail
 # stat compatibility layer also keeps preflight tests useful on macOS.
 
 script_source="${BASH_SOURCE[0]:-$0}"
-safe_update_test_mode=0
-case "$script_source" in
-  */.omni-safe-update-test.*/*) safe_update_test_mode=1 ;;
-esac
 trusted_path="/usr/sbin:/usr/bin:/sbin:/bin"
-case "$safe_update_test_mode:${MOCK_BIN:+set}" in
-1:set)
-  # The fixture supplies exported shims and a regular mock tar executable.
-  # This branch is reachable only from the generated test fixture path; the
-  # production entry point always uses the fixed system path below.
-  PATH="$MOCK_BIN:$trusted_path"
-  ;;
-*)
-  PATH="$trusted_path"
-  ;;
-esac
+PATH="$trusted_path"
 builtin export PATH
-case "$safe_update_test_mode" in
-0)
-  # Exported Bash functions otherwise take precedence over the fixed PATH.
-  # Remove every external command name before dirname/id are first used; the
-  # later toolchain attestation then pins their canonical root-owned files.
-  builtin unset -f bash docker jq sha256sum tar stat awk sed grep mktemp du df chown find findmnt \
-    uname id dirname pwd printf type cp chmod mkdir rmdir rm mv date sleep sync fallocate readlink tr 2>/dev/null || true
-  builtin hash -r
-  ;;
-esac
+# Exported Bash functions otherwise take precedence over the fixed PATH.
+# Remove every external command name before dirname/id are first used; the
+# later toolchain attestation then pins their canonical root-owned files.
+builtin unset -f bash docker jq sha256sum tar stat awk sed grep mktemp du df chown find findmnt \
+  uname id dirname pwd printf type cp chmod mkdir rmdir rm mv date sleep sync fallocate readlink tr 2>/dev/null || true
+builtin hash -r
 
 service_name="omni-money"
 project_name="omni-money"
@@ -888,8 +870,9 @@ validate_local_docker() {
     return 1
   }
   # The socket is the authority boundary for Docker and must be on this host.
-  # The mock suite supplies a local context but not a real daemon socket.
-  if [ "$safe_update_test_mode" -eq 0 ] && [ "$(uname -s)" = Linux ]; then
+  # Non-Linux hosts receive placeholders only until the mandatory Linux
+  # production-host check rejects them later in preflight.
+  if [ "$(uname -s)" = Linux ]; then
     canonical_socket="$(readlink -f -- /var/run/docker.sock)" || {
       fail "canonical Docker socket could not be resolved"
       return 1
@@ -918,7 +901,6 @@ validate_local_docker() {
 
 validate_pinned_docker_socket() {
   [ "$docker_socket_ready" -eq 1 ] || return 0
-  [ "$safe_update_test_mode" -eq 1 ] && return 0
   [ "$docker_socket_path" = /run/docker.sock ] && [ -S "$docker_socket_path" ] && [ ! -L "$docker_socket_path" ] || return 1
   [ "$(stat_owner "$docker_socket_path")" = "$docker_socket_owner" ] || return 1
   [ "$(stat_group "$docker_socket_path")" = "$docker_socket_group" ] || return 1
@@ -929,10 +911,8 @@ validate_pinned_docker_socket() {
 }
 
 docker_cli() {
-  if [ "$safe_update_test_mode" -eq 0 ]; then
-    validate_pinned_docker_socket || { fail "pinned Docker socket identity changed"; return 1; }
-    validate_pinned_file "$docker_path" "Docker CLI executable" "$docker_device" "$docker_inode" "$docker_nlink" "$docker_hash" root || return 1
-  fi
+  validate_pinned_docker_socket || { fail "pinned Docker socket identity changed"; return 1; }
+  validate_pinned_file "$docker_path" "Docker CLI executable" "$docker_device" "$docker_inode" "$docker_nlink" "$docker_hash" root || return 1
   "$docker_path" "$@"
 }
 
@@ -941,20 +921,13 @@ validate_trusted_toolchain() {
   tool_names=(); tool_paths=(); tool_devices=(); tool_inodes=(); tool_nlinks=(); tool_hashes=()
   for command_name in bash docker jq sha256sum tar stat awk sed grep mktemp du df chown find findmnt uname id dirname pwd cp chmod mkdir rmdir rm mv date sleep sync fallocate readlink tr; do
     if declare -F "$command_name" >/dev/null 2>&1; then
-      if [ "$safe_update_test_mode" -eq 1 ] && [ -x "$MOCK_BIN/$command_name" ]; then
-        path="$MOCK_BIN/$command_name"
-      elif [ "$safe_update_test_mode" -eq 1 ]; then
-        path="$(type -P "$command_name" 2>/dev/null)" || return 1
-      else
-        fail "shell function shadows trusted command: $command_name"
-        return 1
-      fi
-    else
-      path="$(type -P "$command_name" 2>/dev/null)" || {
-        fail "required command is missing: $command_name"
-        return 1
-      }
+      fail "shell function shadows trusted command: $command_name"
+      return 1
     fi
+    path="$(type -P "$command_name" 2>/dev/null)" || {
+      fail "required command is missing: $command_name"
+      return 1
+    }
     canonical="$(readlink -f -- "$path" 2>/dev/null || printf '%s' "$path")"
     path="$canonical"
     [ -n "$path" ] || {
@@ -963,7 +936,6 @@ validate_trusted_toolchain() {
     }
     case "$path" in
       /bin/*|/sbin/*|/usr/bin/*|/usr/sbin/*) ;;
-      "$MOCK_BIN"/*) [ "$safe_update_test_mode" -eq 1 ] || return 1 ;;
       *) fail "command is outside the trusted system path: $command_name ($path)"; return 1 ;;
     esac
     validate_existing_file "$path" "trusted $command_name executable" root || return 1
@@ -987,22 +959,12 @@ validate_pinned_toolchain() {
 }
 
 validate_pinned_tool_by_name() {
-  local expected="$1" i actual_device actual_inode actual_nlink actual_hash
+  local expected="$1" i
   for i in "${!tool_names[@]}"; do
     [ "${tool_names[$i]}" = "$expected" ] || continue
     if validate_pinned_file "${tool_paths[$i]}" "trusted ${tool_names[$i]} executable" \
       "${tool_devices[$i]}" "${tool_inodes[$i]}" "${tool_nlinks[$i]}" "${tool_hashes[$i]}" root; then
       return 0
-    fi
-    if [ "$safe_update_test_mode" -eq 1 ]; then
-      actual_device="$(stat_device "${tool_paths[$i]}" 2>/dev/null || printf '<unavailable>')"
-      actual_inode="$(stat_inode "${tool_paths[$i]}" 2>/dev/null || printf '<unavailable>')"
-      actual_nlink="$(stat_nlink "${tool_paths[$i]}" 2>/dev/null || printf '<unavailable>')"
-      actual_hash="$(sha256_file "${tool_paths[$i]}" 2>/dev/null || printf '<unavailable>')"
-      printf 'safe-update test diagnostic: pinned %s path=%s device=%s/%s inode=%s/%s nlink=%s/%s sha256=%s/%s\n' \
-        "$expected" "${tool_paths[$i]}" \
-        "${tool_devices[$i]}" "$actual_device" "${tool_inodes[$i]}" "$actual_inode" \
-        "${tool_nlinks[$i]}" "$actual_nlink" "${tool_hashes[$i]}" "$actual_hash" >&2
     fi
     return 1
   done
@@ -1046,22 +1008,18 @@ configure_compose_plugin_boundary() {
   docker_config_device="$(stat_device "$docker_config_dir")"
   docker_config_inode="$(stat_inode "$docker_config_dir")"
   docker_config_nlink="$(stat_nlink "$docker_config_dir")"
-  if [ "$safe_update_test_mode" -eq 1 ]; then
-    compose_plugin_path="$MOCK_BIN/docker"
-  else
-    for candidate in \
-      /usr/local/lib/docker/cli-plugins/docker-compose \
-      /usr/local/libexec/docker/cli-plugins/docker-compose \
-      /usr/lib/docker/cli-plugins/docker-compose \
-      /usr/libexec/docker/cli-plugins/docker-compose; do
-      [ -x "$candidate" ] || continue
-      canonical="$(readlink -f -- "$candidate")" || return 1
-      case "$canonical" in /usr/lib/*|/usr/libexec/*|/usr/local/lib/*|/usr/local/libexec/*) ;; *) continue ;; esac
-      compose_plugin_path="$canonical"
-      break
-    done
-    [ -n "$compose_plugin_path" ] || { fail "Docker Compose plugin is not installed in a trusted system directory"; return 1; }
-  fi
+  for candidate in \
+    /usr/local/lib/docker/cli-plugins/docker-compose \
+    /usr/local/libexec/docker/cli-plugins/docker-compose \
+    /usr/lib/docker/cli-plugins/docker-compose \
+    /usr/libexec/docker/cli-plugins/docker-compose; do
+    [ -x "$candidate" ] || continue
+    canonical="$(readlink -f -- "$candidate")" || return 1
+    case "$canonical" in /usr/lib/*|/usr/libexec/*|/usr/local/lib/*|/usr/local/libexec/*) ;; *) continue ;; esac
+    compose_plugin_path="$canonical"
+    break
+  done
+  [ -n "$compose_plugin_path" ] || { fail "Docker Compose plugin is not installed in a trusted system directory"; return 1; }
   validate_existing_file "$compose_plugin_path" "Docker Compose plugin" root || return 1
   compose_plugin_device="$(stat_device "$compose_plugin_path")"; compose_plugin_inode="$(stat_inode "$compose_plugin_path")"
   compose_plugin_nlink="$(stat_nlink "$compose_plugin_path")"; compose_plugin_hash="$(sha256_file "$compose_plugin_path")"
@@ -1071,7 +1029,6 @@ configure_compose_plugin_boundary() {
 }
 
 validate_compose_plugin_boundary() {
-  [ "$safe_update_test_mode" -eq 1 ] && return 0
   validate_pinned_directory "$docker_config_dir" "private Docker configuration directory" \
     "$docker_config_device" "$docker_config_inode" "$docker_config_nlink" root || return 1
   validate_pinned_file "$compose_plugin_path" "Docker Compose plugin" "$compose_plugin_device" \
@@ -1801,7 +1758,7 @@ validate_data_tree_devices() {
   # find -xdev is not sufficient by itself (a mount can share a device number
   # with its parent), so use findmnt's mount table to reject every nested
   # mount explicitly on production Linux hosts.
-  if [ "$safe_update_test_mode" -eq 0 ] && [ "$(uname -s)" = Linux ]; then
+  if [ "$(uname -s)" = Linux ]; then
     mounts="$pin_dir/source-mounts.$$.json"
     create_exclusive_file "$mounts" || return 1
     if ! findmnt --json --list --output TARGET > "$mounts"; then
