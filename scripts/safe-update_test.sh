@@ -671,13 +671,27 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT MO
     connect_line="$(grep -n -F 'network connect --ip 172.30.240.2 omni-money-pangolin current' "$mock_state/log" | tail -1 | cut -d: -f1)"
     [ -n "$disconnect_line" ] && [ -n "$start_line" ] && [ -n "$connect_line" ] && [ "$disconnect_line" -lt "$start_line" ] && [ "$start_line" -lt "$connect_line" ] || fail_legacy_archive_case "legacy rollback was not disconnect -> start/health -> reconnect"
   elif [ "$scenario" = network_reconnect_failure ] || [ "$scenario" = candidate_ingress_health_failure ]; then
-    [ "$(cat "$mock_state/phase")" = candidate ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: $scenario recreated rollback after candidate ingress became uncertain" >&2; exit 1; }
+    [ "$(cat "$mock_state/phase")" = candidate ] && [ "$(cat "$mock_state/candidate_state")" = exited ] && [ "$(cat "$mock_state/current_state")" = absent ] && [ "$(cat "$mock_state/net_candidate")" = none ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: $scenario did not stop and ingress-isolate the uncertain candidate" >&2; exit 1; }
     shopt -s nullglob
     failed_paths=("$fixture_root/omni-money-update-checkpoints"/*/failed-candidate-data)
     shopt -u nullglob
     [ "${#failed_paths[@]}" -eq 1 ] && [ -d "${failed_paths[0]}" ] && [ -f "${failed_paths[0]}/ledger.txt" ] && [ ! -e "$fixture_root/data" ] || { echo "FAIL: $scenario did not quarantine candidate data for manual reconciliation" >&2; exit 1; }
     journal_path="$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
-    jq -e '.phase == "manual-reconciliation-required" and (.candidate_ingress_state == "uncertain" or .candidate_ingress_state == "connected") and (.failed_candidate_data_identity.inode != "") and (.active_data_location == "")' "$journal_path" >/dev/null || { echo "FAIL: $scenario did not durably record manual reconciliation identities" >&2; exit 1; }
+    jq -e '
+      .phase == "manual-reconciliation-required" and
+      (.candidate_ingress_state == "uncertain" or .candidate_ingress_state == "connected") and
+      (.failed_candidate_data_identity.inode != "") and (.active_data_location == "") and
+      (.checkpoint_root != .checkpoint_dir) and
+      (.checkpoint_root_identity.inode != "") and (.checkpoint_dir_identity.inode != "") and
+      (.env_file != .env_pin_file) and (.env_pin_file != .recovery_env_file) and
+      (.original_env_identity.inode != "") and (.active_env_identity.inode != "") and
+      (.env_pin_identity.inode != "") and (.recovery_env_identity.inode != "") and
+      (.original_data_identity.inode != "") and
+      (.network_identity.id != "") and (.network_contract_identity.inode != "") and
+      (.docker_socket_identity.type == "socket")
+    ' "$journal_path" >/dev/null || { echo "FAIL: $scenario did not durably record manual reconciliation identities" >&2; exit 1; }
+    [ "$(sha256_file "$fixture_root/.env")" = "$original_env_hash" ] || { echo "FAIL: $scenario did not restore the exact original env" >&2; exit 1; }
+    return 0
   elif [ "$scenario" = unknown_removal ]; then
     [ "$(cat "$mock_state/current_state")" = absent ] && [ "$(cat "$mock_state/phase")" = candidate ] && [ ! -e "$mock_state/rollback_state" ] || { echo "FAIL: unknown current disappearance was not kept stopped" >&2; exit 1; }
     assert_fixture_recovery_artifacts_retained || { echo "FAIL: unknown_removal did not retain lock/journal/pins" >&2; exit 1; }
