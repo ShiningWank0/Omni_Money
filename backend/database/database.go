@@ -2241,7 +2241,7 @@ func (i *Instance) createSnapshot(ctx context.Context, snapshotDir string) (stri
 	// The locked os.Root created and hardened the placeholder before Backup.
 	// Pin that resulting inode before any further pathname-based opener call;
 	// the descriptor is retained through publication below.
-	stagingFile, err := openSnapshotFile(stagingPath)
+	stagingFile, err := transactionLock.openArtifactWritable(stagingPath)
 	if err != nil {
 		return "", fmt.Errorf("検証済みスナップショットdescriptorを開けません: %w", err)
 	}
@@ -2579,22 +2579,37 @@ func (i *Instance) validateSnapshotEntry(ctx context.Context, path string, inspe
 	if err := candidateFile.Sync(); err != nil {
 		return false, used, fmt.Errorf("snapshot validation candidate sync: %w", err)
 	}
+	candidateInfo, err := candidateFile.Stat()
+	if err != nil {
+		return false, used, fmt.Errorf("snapshot validation candidate stat: %w", err)
+	}
+	candidateDigest, err := digestOpenFileContext(ctx, candidateFile)
+	if err != nil {
+		return false, used, fmt.Errorf("snapshot validation candidate digest: %w", err)
+	}
 	if err := candidateFile.Close(); err != nil {
 		return false, used, fmt.Errorf("snapshot validation candidate close: %w", err)
 	}
 	candidateClosed = true
-	reopened, err := transactionLock.openArtifact(candidatePath)
+	reopened, validationPath, err := openSnapshotValidationAnchor(transactionLock, candidatePath)
 	if err != nil {
 		return false, used, fmt.Errorf("snapshot validation candidate reopen: %w", err)
 	}
-	candidateInfo, err := reopened.Stat()
+	reopenedInfo, err := reopened.Stat()
 	if err != nil {
 		_ = reopened.Close()
 		return false, used, fmt.Errorf("snapshot validation candidate reopen stat: %w", err)
 	}
-	if err := reopened.Close(); err != nil {
-		return false, used, fmt.Errorf("snapshot validation candidate reopen close: %w", err)
+	if !sameSnapshotInfo(candidateInfo, reopenedInfo) {
+		_ = reopened.Close()
+		return false, used, errors.New("snapshot validation candidate changed before rooted reopen")
 	}
+	reopenedDigest, err := digestOpenFileContext(ctx, reopened)
+	if err != nil || !strings.EqualFold(candidateDigest, reopenedDigest) {
+		_ = reopened.Close()
+		return false, used, errors.Join(errors.New("snapshot validation candidate digest changed before rooted reopen"), err)
+	}
+	defer reopened.Close()
 	if err := transactionLock.verify(); err != nil {
 		return false, used, fmt.Errorf("snapshot validation transaction boundary: %w", err)
 	}
@@ -2608,19 +2623,23 @@ func (i *Instance) validateSnapshotEntry(ctx context.Context, path string, inspe
 	if err := ctx.Err(); err != nil {
 		return false, used, err
 	}
-	db, err := i.opener.Open(ctx, candidatePath, securedb.ReadOnly)
+	db, err := i.opener.Open(ctx, validationPath, securedb.ReadOnly)
 	if err != nil {
-		if boundaryErr := validateListSnapshotCandidateBoundary(transactionLock, candidatePath, candidateInfo); boundaryErr != nil {
+		if boundaryErr := validateListSnapshotCandidateBoundary(transactionLock, candidatePath, reopened, candidateInfo, candidateDigest); boundaryErr != nil {
 			return false, used, errors.Join(fmt.Errorf("snapshot validation candidate open: %w", err), boundaryErr)
 		}
 		return false, used, errIfContextDone(ctx, err)
 	}
-	validErr := i.validateSnapshotDatabaseContext(ctx, db, candidatePath)
+	if boundaryErr := validateListSnapshotCandidateBoundary(transactionLock, candidatePath, reopened, candidateInfo, candidateDigest); boundaryErr != nil {
+		_ = db.Close()
+		return false, used, boundaryErr
+	}
+	validErr := i.validateSnapshotDatabaseContext(ctx, db, validationPath)
 	closeErr := db.Close()
 	if closeErr != nil {
 		return false, used, fmt.Errorf("snapshot validation database close: %w", closeErr)
 	}
-	if boundaryErr := validateListSnapshotCandidateBoundary(transactionLock, candidatePath, candidateInfo); boundaryErr != nil {
+	if boundaryErr := validateListSnapshotCandidateBoundary(transactionLock, candidatePath, reopened, candidateInfo, candidateDigest); boundaryErr != nil {
 		return false, used, errors.Join(validErr, boundaryErr)
 	}
 	if validErr != nil {
@@ -2636,16 +2655,30 @@ func (i *Instance) validateSnapshotEntry(ctx context.Context, path string, inspe
 	return true, used, nil
 }
 
-func validateListSnapshotCandidateBoundary(transactionLock *snapshotTransactionLock, candidatePath string, expected os.FileInfo) error {
+func validateListSnapshotCandidateBoundary(transactionLock *snapshotTransactionLock, candidatePath string, anchor *os.File, expected os.FileInfo, expectedDigest string) error {
 	if err := transactionLock.verify(); err != nil {
 		return fmt.Errorf("snapshot validation transaction boundary: %w", err)
 	}
-	actual, err := transactionLock.lstat(candidatePath)
+	anchorInfo, err := anchor.Stat()
+	if err != nil || !sameSnapshotInfo(expected, anchorInfo) {
+		return errors.Join(errors.New("snapshot validation candidate anchor identity changed"), err)
+	}
+	anchorDigest, err := digestOpenFile(anchor)
+	if err != nil || !strings.EqualFold(expectedDigest, anchorDigest) {
+		return errors.Join(errors.New("snapshot validation candidate anchor digest changed"), err)
+	}
+	actualFile, err := transactionLock.openArtifact(candidatePath)
 	if err != nil {
 		return fmt.Errorf("snapshot validation candidate path: %w", err)
 	}
-	if !sameSnapshotInfo(expected, actual) {
+	defer actualFile.Close()
+	actual, err := actualFile.Stat()
+	if err != nil || !sameSnapshotInfo(expected, actual) {
 		return errors.New("snapshot validation candidate identity changed")
+	}
+	actualDigest, err := digestOpenFile(actualFile)
+	if err != nil || !strings.EqualFold(expectedDigest, actualDigest) {
+		return errors.Join(errors.New("snapshot validation candidate path digest changed"), err)
 	}
 	return nil
 }

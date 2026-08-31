@@ -15,8 +15,10 @@ import (
 )
 
 // Windows share-mode exclusion provides the same crash-released ownership as
-// flock: while this handle is alive no second process can open the transaction
-// lock, and the kernel releases ownership when the process exits.
+// flock: while this handle is alive no second process can acquire an exclusive
+// transaction owner handle, and the kernel releases ownership when the process
+// exits. Metadata readers remain allowed so the held marker can be bound to the
+// pinned os.Root after acquisition.
 type snapshotTransactionLock struct {
 	file         *os.File
 	root         *os.Root
@@ -40,8 +42,8 @@ func acquireSnapshotTransactionLock(ctx context.Context, snapshotDir string) (*s
 	for {
 		handle, openErr := windows.CreateFile(
 			pointer,
-			windows.GENERIC_READ|windows.READ_CONTROL,
-			0,
+			windows.GENERIC_READ|windows.GENERIC_WRITE|windows.READ_CONTROL,
+			windows.FILE_SHARE_READ,
 			nil,
 			windows.OPEN_EXISTING,
 			windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
@@ -74,6 +76,11 @@ func acquireSnapshotTransactionLock(ctx context.Context, snapshotDir string) (*s
 				_ = file.Close()
 				return nil, err
 			}
+			lockInfo, err := file.Stat()
+			if err != nil {
+				_ = file.Close()
+				return nil, err
+			}
 			directoryInfo, err := os.Lstat(snapshotDir)
 			if err != nil || directoryInfo.Mode()&os.ModeSymlink != 0 || !directoryInfo.IsDir() {
 				_ = file.Close()
@@ -89,6 +96,25 @@ func acquireSnapshotTransactionLock(ctx context.Context, snapshotDir string) (*s
 				_ = root.Close()
 				_ = file.Close()
 				return nil, errors.Join(errors.New("snapshot transaction root changed while acquiring lock"), err)
+			}
+			rootDirectory, err := root.Open(".")
+			if err != nil {
+				_ = root.Close()
+				_ = file.Close()
+				return nil, err
+			}
+			rootPrivacyErr := fileprivacy.ValidatePrivateDirectory(rootDirectory)
+			rootCloseErr := rootDirectory.Close()
+			if rootPrivacyErr != nil || rootCloseErr != nil {
+				_ = root.Close()
+				_ = file.Close()
+				return nil, errors.Join(errors.New("snapshot transaction root is not private"), rootPrivacyErr, rootCloseErr)
+			}
+			rootMarkerInfo, err := root.Lstat(snapshotTransactionLockName)
+			if err != nil || !sameSnapshotInfo(lockInfo, rootMarkerInfo) {
+				_ = root.Close()
+				_ = file.Close()
+				return nil, errors.Join(errors.New("snapshot transaction marker is outside the acquired root"), err)
 			}
 			return &snapshotTransactionLock{file: file, root: root, originalPath: snapshotDir, originalInfo: directoryInfo}, nil
 		}
@@ -149,6 +175,23 @@ func (lock *snapshotTransactionLock) verify() error {
 	rootInfo, err := lock.root.Stat(".")
 	if err != nil || !os.SameFile(lock.originalInfo, rootInfo) {
 		return errors.Join(errors.New("snapshot transaction root changed"), err)
+	}
+	rootDirectory, err := lock.root.Open(".")
+	if err != nil {
+		return errors.Join(errors.New("snapshot transaction root privacy unavailable"), err)
+	}
+	rootPrivacyErr := fileprivacy.ValidatePrivateDirectory(rootDirectory)
+	rootCloseErr := rootDirectory.Close()
+	if rootPrivacyErr != nil || rootCloseErr != nil {
+		return errors.Join(errors.New("snapshot transaction root privacy changed"), rootPrivacyErr, rootCloseErr)
+	}
+	lockInfo, err := lock.file.Stat()
+	if err != nil {
+		return errors.Join(errors.New("snapshot transaction marker handle changed"), err)
+	}
+	rootMarkerInfo, err := lock.root.Lstat(snapshotTransactionLockName)
+	if err != nil || !sameSnapshotInfo(lockInfo, rootMarkerInfo) {
+		return errors.Join(errors.New("snapshot transaction marker changed under acquired root"), err)
 	}
 	return nil
 }

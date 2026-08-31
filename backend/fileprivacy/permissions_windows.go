@@ -442,6 +442,23 @@ func ValidateDirectory(path string) error {
 		return err
 	}
 	defer file.Close()
+	return ValidatePrivateDirectory(file)
+}
+
+// ValidatePrivateDirectory validates the exact acquired directory handle,
+// including its protected owner+SYSTEM DACL. Callers that pin a transaction
+// root must not fall back to a pathname-only privacy check after acquisition.
+func ValidatePrivateDirectory(file *os.File) error {
+	if file == nil {
+		return errors.New("nil private directory handle")
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return errors.New("private handle is not a directory")
+	}
 	return validatePrivateDACL(file)
 }
 

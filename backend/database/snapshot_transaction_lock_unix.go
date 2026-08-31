@@ -54,6 +54,9 @@ func acquireSnapshotTransactionLock(ctx context.Context, snapshotDir string) (*s
 	if err != nil {
 		return fail(err)
 	}
+	if err := fileprivacy.ValidatePrivateDirectory(directory); err != nil {
+		return fail(errors.Join(errors.New("snapshot transaction directory is not private"), err))
+	}
 	pathInfo, err := os.Lstat(snapshotDir)
 	if err != nil {
 		return fail(err)
@@ -69,6 +72,17 @@ func acquireSnapshotTransactionLock(ctx context.Context, snapshotDir string) (*s
 	if err != nil || !os.SameFile(directoryInfo, rootInfo) {
 		_ = root.Close()
 		return fail(errors.Join(errors.New("snapshot transaction root changed while acquiring lock"), err))
+	}
+	rootDirectory, err := root.Open(".")
+	if err != nil {
+		_ = root.Close()
+		return fail(err)
+	}
+	rootPrivacyErr := fileprivacy.ValidatePrivateDirectory(rootDirectory)
+	rootCloseErr := rootDirectory.Close()
+	if rootPrivacyErr != nil || rootCloseErr != nil {
+		_ = root.Close()
+		return fail(errors.Join(errors.New("snapshot transaction root is not private"), rootPrivacyErr, rootCloseErr))
 	}
 	failRoot := func(err error) (*snapshotTransactionLock, error) {
 		_ = root.Close()
@@ -109,9 +123,21 @@ func (lock *snapshotTransactionLock) verify() error {
 	if err != nil || !os.SameFile(lock.originalInfo, heldInfo) {
 		return errors.Join(errors.New("snapshot transaction directory handle changed"), err)
 	}
+	if err := fileprivacy.ValidatePrivateDirectory(lock.directory); err != nil {
+		return errors.Join(errors.New("snapshot transaction directory privacy changed"), err)
+	}
 	rootInfo, err := lock.root.Stat(".")
 	if err != nil || !os.SameFile(lock.originalInfo, rootInfo) {
 		return errors.Join(errors.New("snapshot transaction root changed"), err)
+	}
+	rootDirectory, err := lock.root.Open(".")
+	if err != nil {
+		return errors.Join(errors.New("snapshot transaction root privacy unavailable"), err)
+	}
+	rootPrivacyErr := fileprivacy.ValidatePrivateDirectory(rootDirectory)
+	rootCloseErr := rootDirectory.Close()
+	if rootPrivacyErr != nil || rootCloseErr != nil {
+		return errors.Join(errors.New("snapshot transaction root privacy changed"), rootPrivacyErr, rootCloseErr)
 	}
 	pathInfo, err := os.Lstat(lock.originalPath)
 	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(lock.originalInfo, pathInfo) {

@@ -171,6 +171,14 @@ func (lock *snapshotTransactionLock) readDir(ctx context.Context, maxEntries int
 }
 
 func (lock *snapshotTransactionLock) openArtifact(path string) (*os.File, error) {
+	return lock.openArtifactWithFlags(path, os.O_RDONLY)
+}
+
+func (lock *snapshotTransactionLock) openArtifactWritable(path string) (*os.File, error) {
+	return lock.openArtifactWithFlags(path, os.O_RDWR)
+}
+
+func (lock *snapshotTransactionLock) openArtifactWithFlags(path string, flags int) (*os.File, error) {
 	name, err := lock.directName(path)
 	if err != nil {
 		return nil, err
@@ -182,7 +190,7 @@ func (lock *snapshotTransactionLock) openArtifact(path string) (*os.File, error)
 	if pathInfo.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("snapshot transaction artifact is a symlink")
 	}
-	file, err := lock.root.Open(name)
+	file, err := lock.root.OpenFile(name, flags, 0)
 	if err != nil {
 		return nil, err
 	}

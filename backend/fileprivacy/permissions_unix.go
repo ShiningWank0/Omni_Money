@@ -61,15 +61,47 @@ func HardenDirectory(path string) error {
 }
 
 func ValidateDirectory(path string) error {
-	info, err := os.Lstat(path)
+	file, err := os.Open(path) // #nosec G304 -- the caller supplies the private directory to validate.
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+	defer file.Close()
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, fileInfo) {
+		return errors.New("private path is not a real directory")
+	}
+	return ValidatePrivateDirectory(file)
+}
+
+// ValidatePrivateDirectory validates the already-open directory object. This
+// is stronger than re-resolving a pathname after a transaction root has been
+// acquired: a same-account writer cannot make the check describe a different
+// directory by swapping the pathname.
+func ValidatePrivateDirectory(file *os.File) error {
+	if file == nil {
+		return errors.New("private directory handle is nil")
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
 		return errors.New("private path is not a real directory")
 	}
 	if info.Mode().Perm() != 0700 {
 		return fmt.Errorf("private directory permissions must be 0700, got %04o", info.Mode().Perm())
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	uid := os.Getuid()
+	if !ok || uid < 0 || strconv.FormatUint(uint64(stat.Uid), 10) != strconv.Itoa(uid) {
+		return errors.New("private directory owner is not the current user")
 	}
 	return nil
 }
