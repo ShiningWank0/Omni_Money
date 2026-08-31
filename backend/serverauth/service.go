@@ -1,6 +1,7 @@
 package serverauth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -61,6 +62,21 @@ type PasskeyControlStore interface {
 	GetPasskeyCredential(context.Context, string, []byte) (control.PasskeyCredential, error)
 	RecordSuccessfulPasskeyUse(context.Context, control.PasskeyCredential, webauthn.Credential, time.Time, bool) error
 	DeletePasskeyCredential(context.Context, string, []byte) error
+	DeleteAllPasskeyCredentials(context.Context, string) (int, error)
+}
+
+type CredentialLifecycleStore interface {
+	ReplacePasswordCredentialWithPasskeyPolicy(context.Context, string, control.PasswordCredential, control.PasswordCredentialInput, bool, time.Time) (int, error)
+	RotateRecoveryEnvelope(context.Context, string, control.RecoveryEnvelope, control.RecoveryEnvelopeInput, time.Time) (control.RecoveryEnvelope, error)
+}
+
+type AdminLifecycleStore interface {
+	ListInvitations(context.Context) ([]control.Invitation, error)
+	RevokeInvitation(context.Context, string, string, time.Time) error
+	ListPasswordResetTickets(context.Context) ([]control.PasswordResetTicket, error)
+	RevokePasswordResetTicket(context.Context, string, string, time.Time) error
+	EnableUser(context.Context, string, string, time.Time) error
+	SetUserRole(context.Context, string, string, control.Role, time.Time) error
 }
 
 type SessionInvalidator interface {
@@ -110,6 +126,15 @@ type Service struct {
 type accountLock struct {
 	gate chan struct{}
 	refs int
+}
+
+// CredentialInventory is a secret-free projection for a user's own security
+// settings. It never carries verifiers, salts, WebAuthn public keys, or any
+// vault-key envelope.
+type CredentialInventory struct {
+	PasswordUpdatedAt time.Time                `json:"password_updated_at"`
+	RecoveryCreatedAt time.Time                `json:"recovery_created_at"`
+	Passkeys          []control.PasskeySummary `json:"passkeys"`
 }
 
 func NewService(dependencies Dependencies) (*Service, error) {
@@ -561,8 +586,8 @@ func (s *Service) completePasswordResetLocked(
 	if err != nil {
 		return control.PasswordResetTicket{}, nil, err
 	}
-	waitForDrain, _ := s.vaults.BeginUserDrain(ticket.UserID)
 	s.sessions.DeleteAllSessionsForUser(ticket.UserID)
+	waitForDrain, _ := s.vaults.BeginUserDrain(ticket.UserID)
 	return result, waitForDrain, nil
 }
 
@@ -609,11 +634,244 @@ func (s *Service) DisableUser(ctx context.Context, actorID, targetUserID string,
 		unlock()
 		return err
 	}
-	waitForDrain, _ := s.vaults.BeginUserDrain(targetUserID)
 	s.sessions.DeleteAllSessionsForUser(targetUserID)
+	waitForDrain, _ := s.vaults.BeginUserDrain(targetUserID)
 	unlock()
 	s.finishDrain(ctx, waitForDrain)
 	return nil
+}
+
+// ChangePassword proves possession of the current password, rewraps the same
+// vault DEK with a new Argon2id envelope, and optionally revokes all passkeys
+// atomically with that credential mutation. Existing sessions are invalidated
+// before the user's open vault is drained.
+func (s *Service) ChangePassword(ctx context.Context, userID string, currentPassword, newPassword []byte, revokePasskeys bool, now time.Time) (int, error) {
+	if !s.ready() {
+		return 0, ErrServiceUnavailable
+	}
+	store, ok := s.store.(CredentialLifecycleStore)
+	if !ok {
+		return 0, ErrServiceUnavailable
+	}
+	if err := validateNewPassword(newPassword); err != nil {
+		return 0, err
+	}
+	if bytes.Equal(currentPassword, newPassword) {
+		return 0, ErrInvalidPassword
+	}
+	unlock, err := s.lockAccount("user:" + userID)
+	if err != nil {
+		return 0, err
+	}
+	revoked, waitForDrain, err := s.changePasswordLocked(ctx, store, userID, currentPassword, newPassword, revokePasskeys, now)
+	unlock()
+	if err != nil {
+		return 0, err
+	}
+	s.finishDrain(ctx, waitForDrain)
+	return revoked, nil
+}
+
+func (s *Service) changePasswordLocked(ctx context.Context, store CredentialLifecycleStore, userID string, currentPassword, newPassword []byte, revokePasskeys bool, now time.Time) (int, func(context.Context) error, error) {
+	user, err := s.store.GetUser(ctx, userID)
+	if err != nil || user.State != control.UserActive {
+		if dummyErr := s.runDummyPassword(ctx, currentPassword); dummyErr != nil {
+			return 0, nil, dummyErr
+		}
+		return 0, nil, ErrInvalidCredentials
+	}
+	credential, err := s.store.GetPasswordCredential(ctx, userID)
+	if err != nil {
+		return 0, nil, err
+	}
+	vaultID, err := s.store.LookupVaultID(ctx, userID)
+	if err != nil {
+		return 0, nil, err
+	}
+	binding := keyenvelope.Context{UserID: userID, VaultID: vaultID}
+	release, err := s.reserveKDF(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	dek, unwrapErr := keyenvelope.UnwrapWithPassword(&credential.Envelope, currentPassword, binding)
+	release()
+	if unwrapErr != nil {
+		clear(dek)
+		if errors.Is(unwrapErr, keyenvelope.ErrAuthentication) {
+			return 0, nil, ErrInvalidCredentials
+		}
+		return 0, nil, unwrapErr
+	}
+	defer clear(dek)
+	release, err = s.reserveKDF(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	replacement, wrapErr := keyenvelope.WrapWithPassword(dek, newPassword, binding)
+	release()
+	if wrapErr != nil {
+		return 0, nil, wrapErr
+	}
+	revoked, err := store.ReplacePasswordCredentialWithPasskeyPolicy(ctx, userID, credential, control.PasswordCredentialInput{Envelope: *replacement}, revokePasskeys, now)
+	if err != nil {
+		return 0, nil, err
+	}
+	s.sessions.DeleteAllSessionsForUser(userID)
+	waitForDrain, _ := s.vaults.BeginUserDrain(userID)
+	return revoked, waitForDrain, nil
+}
+
+// RotateRecoveryCode verifies the current password and replaces only the
+// recovery envelope around the unchanged DEK. The new secret is supplied by
+// the client so a lost response cannot make the committed code unknowable.
+func (s *Service) RotateRecoveryCode(ctx context.Context, userID string, currentPassword, newRecoverySecret []byte, now time.Time) error {
+	if !s.ready() {
+		return ErrServiceUnavailable
+	}
+	store, ok := s.store.(CredentialLifecycleStore)
+	if !ok {
+		return ErrServiceUnavailable
+	}
+	if err := validateRecoverySecret(newRecoverySecret); err != nil {
+		return err
+	}
+	unlock, err := s.lockAccount("user:" + userID)
+	if err != nil {
+		return err
+	}
+	waitForDrain, err := s.rotateRecoveryLocked(ctx, store, userID, currentPassword, newRecoverySecret, now)
+	unlock()
+	if err != nil {
+		return err
+	}
+	s.finishDrain(ctx, waitForDrain)
+	return nil
+}
+
+func (s *Service) ListCredentials(ctx context.Context, userID string) (CredentialInventory, error) {
+	if !s.ready() {
+		return CredentialInventory{}, ErrServiceUnavailable
+	}
+	user, err := s.store.GetUser(ctx, userID)
+	if err != nil || user.State != control.UserActive {
+		return CredentialInventory{}, control.ErrForbidden
+	}
+	password, err := s.store.GetPasswordCredential(ctx, userID)
+	if err != nil {
+		return CredentialInventory{}, err
+	}
+	recovery, err := s.store.GetActiveRecoveryEnvelope(ctx, userID)
+	if err != nil {
+		return CredentialInventory{}, err
+	}
+	passkeys := make([]control.PasskeySummary, 0)
+	if s.passkeyStore != nil {
+		records, err := s.passkeyStore.ListPasskeyCredentials(ctx, userID)
+		if err != nil {
+			return CredentialInventory{}, err
+		}
+		for _, record := range records {
+			passkeys = append(passkeys, record.Summary())
+		}
+	}
+	return CredentialInventory{PasswordUpdatedAt: password.UpdatedAt, RecoveryCreatedAt: recovery.CreatedAt, Passkeys: passkeys}, nil
+}
+
+func (s *Service) rotateRecoveryLocked(ctx context.Context, store CredentialLifecycleStore, userID string, currentPassword, newRecoverySecret []byte, now time.Time) (func(context.Context) error, error) {
+	dek, vaultID, err := s.unwrapVaultWithPassword(ctx, userID, currentPassword)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(dek)
+	expected, err := s.store.GetActiveRecoveryEnvelope(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	binding := keyenvelope.Context{UserID: userID, VaultID: vaultID}
+	duplicateDEK, duplicateErr := keyenvelope.UnwrapWithRecovery(&expected.Envelope, newRecoverySecret, binding)
+	if duplicateErr == nil {
+		clear(duplicateDEK)
+		return nil, ErrInvalidAccountData
+	}
+	clear(duplicateDEK)
+	if !errors.Is(duplicateErr, keyenvelope.ErrAuthentication) {
+		return nil, duplicateErr
+	}
+	replacement, err := keyenvelope.WrapWithRecovery(dek, newRecoverySecret, binding)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := store.RotateRecoveryEnvelope(ctx, userID, expected, control.RecoveryEnvelopeInput{Envelope: *replacement}, now); err != nil {
+		return nil, err
+	}
+	s.sessions.DeleteAllSessionsForUser(userID)
+	waitForDrain, _ := s.vaults.BeginUserDrain(userID)
+	return waitForDrain, nil
+}
+
+func (s *Service) EnableUser(ctx context.Context, actorID, targetUserID string, now time.Time) error {
+	store, ok := s.store.(AdminLifecycleStore)
+	if !s.ready() || !ok {
+		return ErrServiceUnavailable
+	}
+	unlock, err := s.lockAccount("user:" + targetUserID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return store.EnableUser(ctx, actorID, targetUserID, now)
+}
+
+func (s *Service) SetUserRole(ctx context.Context, actorID, targetUserID string, role control.Role, now time.Time) error {
+	store, ok := s.store.(AdminLifecycleStore)
+	if !s.ready() || !ok {
+		return ErrServiceUnavailable
+	}
+	unlock, err := s.lockAccount("user:" + targetUserID)
+	if err != nil {
+		return err
+	}
+	if err := store.SetUserRole(ctx, actorID, targetUserID, role, now); err != nil {
+		unlock()
+		return err
+	}
+	s.sessions.DeleteAllSessionsForUser(targetUserID)
+	waitForDrain, _ := s.vaults.BeginUserDrain(targetUserID)
+	unlock()
+	s.finishDrain(ctx, waitForDrain)
+	return nil
+}
+
+func (s *Service) ListInvitations(ctx context.Context) ([]control.Invitation, error) {
+	store, ok := s.store.(AdminLifecycleStore)
+	if !s.ready() || !ok {
+		return nil, ErrServiceUnavailable
+	}
+	return store.ListInvitations(ctx)
+}
+
+func (s *Service) RevokeInvitation(ctx context.Context, actorID, invitationID string, now time.Time) error {
+	store, ok := s.store.(AdminLifecycleStore)
+	if !s.ready() || !ok {
+		return ErrServiceUnavailable
+	}
+	return store.RevokeInvitation(ctx, actorID, invitationID, now)
+}
+
+func (s *Service) ListPasswordResets(ctx context.Context) ([]control.PasswordResetTicket, error) {
+	store, ok := s.store.(AdminLifecycleStore)
+	if !s.ready() || !ok {
+		return nil, ErrServiceUnavailable
+	}
+	return store.ListPasswordResetTickets(ctx)
+}
+
+func (s *Service) RevokePasswordReset(ctx context.Context, actorID, ticketID string, now time.Time) error {
+	store, ok := s.store.(AdminLifecycleStore)
+	if !s.ready() || !ok {
+		return ErrServiceUnavailable
+	}
+	return store.RevokePasswordResetTicket(ctx, actorID, ticketID, now)
 }
 
 // finishDrain waits only after the account lock has been released. If the

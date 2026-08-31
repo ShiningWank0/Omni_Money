@@ -77,6 +77,27 @@ type serverReauthenticationRequest struct {
 
 func (request *serverReauthenticationRequest) clear() { clear(request.Password) }
 
+type serverPasswordChangeRequest struct {
+	CurrentPassword []byte `json:"current_password_b64"`
+	NewPassword     []byte `json:"new_password_b64"`
+	RevokePasskeys  bool   `json:"revoke_passkeys"`
+}
+
+func (request *serverPasswordChangeRequest) clear() {
+	clear(request.CurrentPassword)
+	clear(request.NewPassword)
+}
+
+type serverRecoveryRotationRequest struct {
+	CurrentPassword   []byte `json:"current_password_b64"`
+	NewRecoverySecret []byte `json:"new_recovery_secret_b64"`
+}
+
+func (request *serverRecoveryRotationRequest) clear() {
+	clear(request.CurrentPassword)
+	clear(request.NewRecoverySecret)
+}
+
 func handleServerBootstrap(dependencies ServerDependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -182,6 +203,93 @@ func handleServerReauthentication(dependencies ServerDependencies) http.HandlerF
 	}
 }
 
+func handleServerPasswordChange(dependencies ServerDependencies, lifecycle ServerCredentialLifecycleService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		session, ok := middleware.SessionFromContext(r.Context())
+		if !ok || session.UserID == "" {
+			writeAuthRequired(w)
+			return
+		}
+		middleware.ReleaseRequestVaultLease(r.Context())
+		var request serverPasswordChangeRequest
+		if !decodeStrictServerJSON(w, r, &request) {
+			return
+		}
+		defer request.clear()
+		if !revalidateServerRecentAuth(w, r) {
+			return
+		}
+		revoked, err := lifecycle.ChangePassword(r.Context(), session.UserID, request.CurrentPassword, request.NewPassword, request.RevokePasskeys, dependencies.now())
+		if err != nil {
+			writeServerAccountError(w, err, serverOperationCredential)
+			return
+		}
+		dependencies.Sessions.ClearSessionCookie(w, r)
+		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		auditAuth("server_password_changed", middleware.ClientIPFromRequest(r), "")
+		jsonResponse(w, map[string]interface{}{"success": true, "revoked_passkeys": revoked, "reauthentication_required": true}, http.StatusOK)
+	}
+}
+
+func handleServerRecoveryRotation(dependencies ServerDependencies, lifecycle ServerCredentialLifecycleService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		session, ok := middleware.SessionFromContext(r.Context())
+		if !ok || session.UserID == "" {
+			writeAuthRequired(w)
+			return
+		}
+		middleware.ReleaseRequestVaultLease(r.Context())
+		var request serverRecoveryRotationRequest
+		if !decodeStrictServerJSON(w, r, &request) {
+			return
+		}
+		defer request.clear()
+		if !revalidateServerRecentAuth(w, r) {
+			return
+		}
+		if err := lifecycle.RotateRecoveryCode(r.Context(), session.UserID, request.CurrentPassword, request.NewRecoverySecret, dependencies.now()); err != nil {
+			writeServerAccountError(w, err, serverOperationCredential)
+			return
+		}
+		dependencies.Sessions.ClearSessionCookie(w, r)
+		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		auditAuth("server_recovery_code_rotated", middleware.ClientIPFromRequest(r), "")
+		jsonResponse(w, map[string]interface{}{"success": true, "reauthentication_required": true}, http.StatusOK)
+	}
+}
+
+func handleServerCredentialInventory(lifecycle ServerCredentialLifecycleService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		session, ok := middleware.SessionFromContext(r.Context())
+		if !ok || session.UserID == "" {
+			writeAuthRequired(w)
+			return
+		}
+		inventory, err := lifecycle.ListCredentials(r.Context(), session.UserID)
+		if err != nil {
+			writeServerAccountError(w, err, serverOperationStatus)
+			return
+		}
+		jsonResponse(w, map[string]interface{}{
+			"password": map[string]string{"updated_at": inventory.PasswordUpdatedAt.Format(time.RFC3339)},
+			"recovery": map[string]string{"created_at": inventory.RecoveryCreatedAt.Format(time.RFC3339)},
+			"passkeys": inventory.Passkeys,
+		}, http.StatusOK)
+	}
+}
+
 func handleServerLogout(dependencies ServerDependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -271,6 +379,31 @@ type serverInvitationCreationRequest struct {
 
 func handleServerInvitationCreation(dependencies ServerDependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			if _, ok := requireServerAdmin(w, r); !ok {
+				return
+			}
+			lifecycle, ok := dependencies.Accounts.(ServerAdminLifecycleService)
+			if !ok {
+				writeServerAccountError(w, serverauth.ErrServiceUnavailable, serverOperationAdmin)
+				return
+			}
+			items, err := lifecycle.ListInvitations(r.Context())
+			if err != nil {
+				writeServerAccountError(w, err, serverOperationAdmin)
+				return
+			}
+			result := make([]map[string]interface{}, 0, len(items))
+			now := dependencies.now()
+			for _, item := range items {
+				if item.State == control.InvitationPending && !item.ExpiresAt.After(now) {
+					item.State = control.InvitationExpired
+				}
+				result = append(result, serverInvitationResponse(item))
+			}
+			jsonResponse(w, map[string]interface{}{"invitations": result}, http.StatusOK)
+			return
+		}
 		if r.Method != http.MethodPost {
 			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
@@ -288,6 +421,9 @@ func handleServerInvitationCreation(dependencies ServerDependencies) http.Handle
 			return
 		}
 		now := dependencies.now()
+		if !revalidateServerRecentAuth(w, r) {
+			return
+		}
 		invitation, token, err := dependencies.Accounts.CreateInvitation(r.Context(), actor.ID, request.Email, request.Role, now.Add(age), now)
 		if err != nil {
 			writeServerAccountError(w, err, serverOperationAdmin)
@@ -296,6 +432,7 @@ func handleServerInvitationCreation(dependencies ServerDependencies) http.Handle
 		jsonResponse(w, map[string]interface{}{
 			"invitation": serverInvitationResponse(invitation), "token": token,
 		}, http.StatusCreated)
+		auditAuth("server_invitation_created", middleware.ClientIPFromRequest(r), "")
 	}
 }
 
@@ -306,6 +443,31 @@ type serverPasswordResetCreationRequest struct {
 
 func handleServerPasswordResetCreation(dependencies ServerDependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			if _, ok := requireServerAdmin(w, r); !ok {
+				return
+			}
+			lifecycle, ok := dependencies.Accounts.(ServerAdminLifecycleService)
+			if !ok {
+				writeServerAccountError(w, serverauth.ErrServiceUnavailable, serverOperationAdmin)
+				return
+			}
+			items, err := lifecycle.ListPasswordResets(r.Context())
+			if err != nil {
+				writeServerAccountError(w, err, serverOperationAdmin)
+				return
+			}
+			result := make([]map[string]interface{}, 0, len(items))
+			now := dependencies.now()
+			for _, item := range items {
+				if item.State == control.PasswordResetPending && !item.ExpiresAt.After(now) {
+					item.State = control.PasswordResetExpired
+				}
+				result = append(result, serverPasswordResetResponse(item))
+			}
+			jsonResponse(w, map[string]interface{}{"password_resets": result}, http.StatusOK)
+			return
+		}
 		if r.Method != http.MethodPost {
 			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
@@ -323,6 +485,9 @@ func handleServerPasswordResetCreation(dependencies ServerDependencies) http.Han
 			return
 		}
 		now := dependencies.now()
+		if !revalidateServerRecentAuth(w, r) {
+			return
+		}
 		ticket, token, err := dependencies.Accounts.CreatePasswordReset(r.Context(), actor.ID, request.TargetUserID, now.Add(age), now)
 		if err != nil {
 			writeServerAccountError(w, err, serverOperationAdmin)
@@ -331,6 +496,7 @@ func handleServerPasswordResetCreation(dependencies ServerDependencies) http.Han
 		jsonResponse(w, map[string]interface{}{
 			"password_reset": serverPasswordResetResponse(ticket), "token": token,
 		}, http.StatusCreated)
+		auditAuth("server_password_reset_created", middleware.ClientIPFromRequest(r), "")
 	}
 }
 
@@ -389,18 +555,128 @@ func handleServerUserAction(dependencies ServerDependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		middleware.ReleaseRequestVaultLease(r.Context())
 		path := strings.TrimPrefix(r.URL.Path, "/api/admin/users/")
 		parts := strings.Split(path, "/")
-		if len(parts) != 2 || parts[0] == "" || parts[1] != "disable" {
+		if len(parts) != 2 || parts[0] == "" {
 			http.NotFound(w, r)
 			return
 		}
-		if err := dependencies.Accounts.DisableUser(r.Context(), actor.ID, parts[0], dependencies.now()); err != nil {
+		lifecycle, _ := dependencies.Accounts.(ServerAdminLifecycleService)
+		var requestedRole control.Role
+		switch parts[1] {
+		case "disable", "enable":
+		case "role":
+			var request struct {
+				Role control.Role `json:"role"`
+			}
+			if !decodeStrictServerJSON(w, r, &request) {
+				return
+			}
+			requestedRole = request.Role
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		if !revalidateServerRecentAuth(w, r) {
+			return
+		}
+		var err error
+		switch parts[1] {
+		case "disable":
+			err = dependencies.Accounts.DisableUser(r.Context(), actor.ID, parts[0], dependencies.now())
+		case "enable":
+			if lifecycle == nil {
+				err = serverauth.ErrServiceUnavailable
+			} else {
+				err = lifecycle.EnableUser(r.Context(), actor.ID, parts[0], dependencies.now())
+			}
+		case "role":
+			if lifecycle == nil {
+				err = serverauth.ErrServiceUnavailable
+			} else {
+				err = lifecycle.SetUserRole(r.Context(), actor.ID, parts[0], requestedRole, dependencies.now())
+			}
+		}
+		if err != nil {
 			writeServerAccountError(w, err, serverOperationAdmin)
 			return
 		}
+		auditAuth("server_user_lifecycle_changed", middleware.ClientIPFromRequest(r), parts[1])
 		jsonResponse(w, map[string]bool{"success": true}, http.StatusOK)
 	}
+}
+
+func handleServerInvitationAction(dependencies ServerDependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		actor, ok := requireServerAdmin(w, r)
+		if !ok {
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/admin/invitations/")
+		if id == "" || strings.Contains(id, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		lifecycle, ok := dependencies.Accounts.(ServerAdminLifecycleService)
+		if !ok {
+			writeServerAccountError(w, serverauth.ErrServiceUnavailable, serverOperationAdmin)
+			return
+		}
+		if !revalidateServerRecentAuth(w, r) {
+			return
+		}
+		if err := lifecycle.RevokeInvitation(r.Context(), actor.ID, id, dependencies.now()); err != nil {
+			writeServerAccountError(w, err, serverOperationAdmin)
+			return
+		}
+		auditAuth("server_invitation_revoked", middleware.ClientIPFromRequest(r), "")
+		jsonResponse(w, map[string]bool{"success": true}, http.StatusOK)
+	}
+}
+
+func handleServerPasswordResetAction(dependencies ServerDependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		actor, ok := requireServerAdmin(w, r)
+		if !ok {
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/admin/password-resets/")
+		if id == "" || strings.Contains(id, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		lifecycle, ok := dependencies.Accounts.(ServerAdminLifecycleService)
+		if !ok {
+			writeServerAccountError(w, serverauth.ErrServiceUnavailable, serverOperationAdmin)
+			return
+		}
+		if !revalidateServerRecentAuth(w, r) {
+			return
+		}
+		if err := lifecycle.RevokePasswordReset(r.Context(), actor.ID, id, dependencies.now()); err != nil {
+			writeServerAccountError(w, err, serverOperationAdmin)
+			return
+		}
+		auditAuth("server_password_reset_revoked", middleware.ClientIPFromRequest(r), "")
+		jsonResponse(w, map[string]bool{"success": true}, http.StatusOK)
+	}
+}
+
+func revalidateServerRecentAuth(w http.ResponseWriter, r *http.Request) bool {
+	if checked, recent := middleware.RevalidateRecentAuthentication(r.Context()); checked && !recent {
+		jsonResponse(w, map[string]interface{}{"error": "この操作には再認証が必要です", "recent_auth_required": true}, http.StatusPreconditionRequired)
+		return false
+	}
+	return true
 }
 
 func requireServerAdmin(w http.ResponseWriter, r *http.Request) (control.UserSummary, bool) {
@@ -512,6 +788,7 @@ const (
 	serverOperationPublicToken
 	serverOperationAdmin
 	serverOperationStatus
+	serverOperationCredential
 )
 
 func writeServerAccountError(w http.ResponseWriter, err error, operation serverOperation) {
@@ -521,6 +798,8 @@ func writeServerAccountError(w http.ResponseWriter, err error, operation serverO
 		jsonError(w, "認証処理が混み合っています。少し待って再試行してください", http.StatusTooManyRequests)
 	case operation == serverOperationLogin && (errors.Is(err, serverauth.ErrInvalidCredentials) ||
 		errors.Is(err, control.ErrCredentialConflict) || errors.Is(err, control.ErrForbidden)):
+		writeInvalidCredentials(w)
+	case operation == serverOperationCredential && errors.Is(err, serverauth.ErrInvalidCredentials):
 		writeInvalidCredentials(w)
 	case operation == serverOperationSetup && errors.Is(err, serverauth.ErrSetupUnauthorized):
 		jsonError(w, "初期設定を実行できません", http.StatusForbidden)

@@ -217,6 +217,16 @@ export async function lockDesktopVault() {
   return await window.go.main.App.LockDesktopVault()
 }
 
+export async function changeDesktopVaultPassword(currentPassword, newPassword) {
+  if (!isWails) throw new Error('この操作はDesktopモード専用です')
+  return await window.go.main.App.ChangeDesktopVaultPassword(currentPassword, newPassword)
+}
+
+export async function rotateDesktopVaultRecovery(currentPassword) {
+  if (!isWails) throw new Error('この操作はDesktopモード専用です')
+  return await window.go.main.App.RotateDesktopVaultRecovery(currentPassword)
+}
+
 /**
  * ログイン
  * @param {string} email
@@ -308,6 +318,64 @@ export async function deletePasskey(id) {
   if (isWails) throw new Error('パスキー削除はサーバーモード専用です')
   const response = await apiFetch(`/api/auth/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' })
   if (!response.ok) throw new Error(await parseError(response, 'パスキーを削除できませんでした'))
+  csrfToken = null
+}
+
+export async function deleteAllPasskeys() {
+  if (isWails) throw new Error('パスキー認証はサーバーモード専用です')
+  const response = await apiFetch('/api/auth/passkeys/all', { method: 'DELETE' })
+  await throwIfNotOk(response, 'パスキーを一括失効できませんでした')
+  const data = await response.json()
+  csrfToken = null
+  return data
+}
+
+export async function changeServerPassword({ currentPassword, newPassword, revokePasskeys }) {
+  if (isWails) throw new Error('この操作はサーバーモード専用です')
+  const response = await apiFetch('/api/auth/password', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      current_password_b64: textToBase64(currentPassword),
+      new_password_b64: textToBase64(newPassword),
+      revoke_passkeys: Boolean(revokePasskeys)
+    })
+  }, { skipAuthRedirect: true })
+  if (!response.ok) {
+    const error = new Error(await parseError(response, 'パスワードを変更できませんでした'))
+	    error.definitiveResponse = response.status < 500
+    throw error
+  }
+  const data = await response.json()
+  csrfToken = null
+  return data
+}
+
+export async function listServerCredentials() {
+  if (isWails) return null
+  const response = await apiFetch('/api/auth/credentials')
+  await throwIfNotOk(response, '認証情報の一覧を取得できませんでした')
+  return await response.json()
+}
+
+export async function rotateServerRecoveryCode({ currentPassword, newRecoverySecret }) {
+  if (isWails) throw new Error('この操作はサーバーモード専用です')
+  const response = await apiFetch('/api/auth/recovery-code', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      current_password_b64: textToBase64(currentPassword),
+      new_recovery_secret_b64: bytesToBase64(newRecoverySecret)
+    })
+  }, { skipAuthRedirect: true })
+  if (!response.ok) {
+    const error = new Error(await parseError(response, '回復コードを更新できませんでした'))
+	    // A proxy-generated 5xx can arrive after the server committed the
+	    // rotation. Treat only non-5xx application responses as definitive.
+	    error.definitiveResponse = response.status < 500
+    throw error
+  }
+  const data = await response.json()
+  csrfToken = null
+  return data
 }
 
 /**
@@ -506,6 +574,48 @@ export async function listServerUsers() {
   await throwIfNotOk(res, 'ユーザー一覧を取得できませんでした')
   const data = await res.json()
   return Array.isArray(data?.users) ? data.users : []
+}
+
+export async function enableServerUser(userID) {
+  if (isWails) throw new Error('この操作はサーバーモード専用です')
+  const res = await apiFetch(`/api/admin/users/${encodeURIComponent(userID)}/enable`, { method: 'POST' })
+  await throwIfNotOk(res, 'ユーザーを再有効化できませんでした')
+}
+
+export async function setServerUserRole(userID, role) {
+  if (isWails) throw new Error('この操作はサーバーモード専用です')
+  const res = await apiFetch(`/api/admin/users/${encodeURIComponent(userID)}/role`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role })
+  })
+  await throwIfNotOk(res, 'ユーザー権限を変更できませんでした')
+}
+
+export async function listServerInvitations() {
+  if (isWails) return []
+  const res = await apiFetch('/api/admin/invitations')
+  await throwIfNotOk(res, '招待一覧を取得できませんでした')
+  const data = await res.json()
+  return Array.isArray(data?.invitations) ? data.invitations : []
+}
+
+export async function revokeServerInvitation(id) {
+  if (isWails) throw new Error('この操作はサーバーモード専用です')
+  const res = await apiFetch(`/api/admin/invitations/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  await throwIfNotOk(res, '招待を取り消せませんでした')
+}
+
+export async function listServerPasswordResets() {
+  if (isWails) return []
+  const res = await apiFetch('/api/admin/password-resets')
+  await throwIfNotOk(res, '再設定token一覧を取得できませんでした')
+  const data = await res.json()
+  return Array.isArray(data?.password_resets) ? data.password_resets : []
+}
+
+export async function revokeServerPasswordReset(id) {
+  if (isWails) throw new Error('この操作はサーバーモード専用です')
+  const res = await apiFetch(`/api/admin/password-resets/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  await throwIfNotOk(res, '再設定tokenを取り消せませんでした')
 }
 
 export async function createServerInvitation({ email, role = 'user', expiresInSeconds = 86400 }) {

@@ -191,6 +191,36 @@ func TestAppShutdownAndLockRaceDrainsBorrowedService(t *testing.T) {
 	}
 }
 
+func TestDesktopCredentialBindingsClearTemporarySecrets(t *testing.T) {
+	coordinator := &fakeDesktopCoordinator{status: desktopaccount.Status{Configured: true, Unlocked: true, Role: desktopaccount.RoleAdmin}}
+	app := newAppWithCoordinator(coordinator)
+	if _, err := app.ChangeDesktopVaultPassword("current-password", "replacement-password"); err != nil {
+		t.Fatal(err)
+	}
+	if !allZero(coordinator.changedCurrent) || !allZero(coordinator.changedNew) {
+		t.Fatal("Desktop password binding retained password bytes")
+	}
+	response, err := app.RotateDesktopVaultRecovery("current-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.RecoveryCode != base64.RawURLEncoding.EncodeToString(bytesOf(2, keyenvelope.RecoverySecretSize)) {
+		t.Fatalf("recovery code = %q", response.RecoveryCode)
+	}
+	if !allZero(coordinator.rotatedPassword) {
+		t.Fatal("Desktop recovery binding retained password bytes")
+	}
+}
+
+func allZero(value []byte) bool {
+	for _, item := range value {
+		if item != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func TestBackupToCSVFileRejectsLockBoundaryAcrossDialog(t *testing.T) {
 	coordinator := &fakeDesktopCoordinator{
 		status: desktopaccount.Status{Configured: true, Unlocked: true, Role: desktopaccount.RoleAdmin},
@@ -452,6 +482,9 @@ type fakeDesktopCoordinator struct {
 	lockStarted        chan struct{}
 	leaseRelease       <-chan struct{}
 	closeCalls         int
+	changedCurrent     []byte
+	changedNew         []byte
+	rotatedPassword    []byte
 }
 
 func (c *fakeDesktopCoordinator) Status() desktopaccount.Status {
@@ -499,9 +532,14 @@ func (c *fakeDesktopCoordinator) Recover(secret, _ []byte) ([]byte, error) {
 	return append([]byte(nil), c.nextRecoverySecret...), nil
 }
 
-func (c *fakeDesktopCoordinator) ChangePassword([]byte, []byte) error { return nil }
+func (c *fakeDesktopCoordinator) ChangePassword(current, replacement []byte) error {
+	c.changedCurrent = current
+	c.changedNew = replacement
+	return nil
+}
 
-func (c *fakeDesktopCoordinator) RotateRecovery([]byte) ([]byte, error) {
+func (c *fakeDesktopCoordinator) RotateRecovery(password []byte) ([]byte, error) {
+	c.rotatedPassword = password
 	return bytesOf(2, keyenvelope.RecoverySecretSize), nil
 }
 

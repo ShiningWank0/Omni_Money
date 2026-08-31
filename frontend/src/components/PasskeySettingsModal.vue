@@ -50,6 +50,10 @@
           </li>
         </ul>
         <p v-else class="empty-state">登録済みのパスキーはありません。パスワードでのログインは引き続き利用できます。</p>
+		<div v-if="passkeys.length" class="bulk-revoke">
+		  <p>一括失効すると、この端末を含む全端末からログアウトします。パスワードでのログインは残ります。</p>
+		  <button type="button" class="danger" :disabled="busy" @click="removeAll">すべてのパスキーを失効</button>
+		</div>
       </section>
     </section>
   </div>
@@ -57,7 +61,7 @@
 
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { deletePasskey, listPasskeys, registerPasskey } from '../utils/api'
+import { deleteAllPasskeys, deletePasskey, listPasskeys, registerPasskey } from '../utils/api'
 import { passkeysSupported } from '../utils/passkeys'
 
 const emit = defineEmits(['close'])
@@ -119,21 +123,28 @@ async function register() {
 }
 
 async function remove(passkey) {
-  if (!window.confirm(`「${passkey.name}」を削除しますか？ パスワードでのログインは引き続き利用できます。`)) return
+	  if (!window.confirm(`「${passkey.name}」を失効しますか？ 全端末からログアウトしますが、パスワードでのログインは引き続き利用できます。`)) return
   deleting.value = true
   busy.value = true
   errorMessage.value = ''
   infoMessage.value = ''
   try {
     await deletePasskey(passkey.id)
-    passkeys.value = passkeys.value.filter(item => item.id !== passkey.id)
-    infoMessage.value = 'パスキーを削除しました'
+	    window.location.replace('/login')
   } catch (error) {
     errorMessage.value = error?.message || 'パスキーを削除できませんでした'
   } finally {
     deleting.value = false
     busy.value = registering.value
   }
+}
+
+async function removeAll() {
+  if (!window.confirm('登録済みパスキーをすべて失効し、全端末からログアウトしますか？ パスワードは変更されません。')) return
+  deleting.value = true; busy.value = true; errorMessage.value = ''; infoMessage.value = ''
+  try { await deleteAllPasskeys(); window.location.replace('/login') }
+  catch (error) { errorMessage.value = error?.message || 'パスキーを一括失効できませんでした' }
+  finally { deleting.value = false; busy.value = registering.value }
 }
 
 function formatDate(value) {
@@ -166,5 +177,6 @@ button.danger { border-color: #c63232; background: #c63232; }
 .message.info { color: #176b2c; background: #edfff1; }
 .message.warning { color: #694d00; background: #fff8e8; }
 .loading, .empty-state { margin: 0.9rem 0 0; color: #555; }
+.bulk-revoke { margin-top:1rem; padding-top:1rem; border-top:1px solid #e5e7f2; }.bulk-revoke p { color:#555; line-height:1.45; }
 @media (max-width: 560px) { .passkey-card { padding: 1rem; } .passkey-list li { align-items: flex-start; flex-direction: column; } }
 </style>

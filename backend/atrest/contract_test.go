@@ -260,11 +260,12 @@ func rewriteTestAttestation(t *testing.T, path string, mutate func(*attestationD
 
 func writeTestAttestation(t *testing.T, now time.Time, mutate func(*attestationDocument)) (string, string, string) {
 	t.Helper()
-	parent, err := os.MkdirTemp(".", ".atrest-test-")
+	// Keep the security fixture independent of a linked worktree's shared
+	// parent (for example /tmp), while preserving owner-only permissions.
+	parent, err := os.MkdirTemp(t.TempDir(), "atrest-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(parent) })
 	parent, err = filepath.Abs(parent)
 	if err != nil {
 		t.Fatal(err)

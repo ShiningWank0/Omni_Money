@@ -162,7 +162,10 @@ func TestTrustedSetupTokenUID(t *testing.T) {
 
 func safeSetupTestDir(t *testing.T) string {
 	t.Helper()
-	directory, err := os.MkdirTemp(".", ".setup-token-test-")
+	// A linked worktree may intentionally live below a shared /tmp directory.
+	// Nest under Go's owner-private test directory so this security test checks
+	// the fixture rather than the checkout parent's unrelated permissions.
+	directory, err := os.MkdirTemp(t.TempDir(), "setup-token-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +176,6 @@ func safeSetupTestDir(t *testing.T) string {
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	return directory
 }
 

@@ -13,6 +13,34 @@ import (
 const passwordResetColumns = `id, user_id, state, created_by,
 	created_at_ms, expires_at_ms, resolved_at_ms` // #nosec G101 -- static SQL column projection, not a credential.
 
+// ListPasswordResetTickets returns only administrative metadata. Bearer-token
+// hashes and every credential envelope are deliberately excluded by the
+// explicit projection above.
+func (s *Store) ListPasswordResetTickets(ctx context.Context) ([]PasswordResetTicket, error) {
+	db, err := s.database()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT `+passwordResetColumns+`
+		FROM password_reset_tickets ORDER BY created_at_ms DESC, id LIMIT 500`)
+	if err != nil {
+		return nil, fmt.Errorf("list password reset tickets: %w", err)
+	}
+	defer rows.Close()
+	result := make([]PasswordResetTicket, 0)
+	for rows.Next() {
+		ticket, err := scanPasswordResetTicket(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan password reset ticket: %w", err)
+		}
+		result = append(result, ticket)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate password reset tickets: %w", err)
+	}
+	return result, nil
+}
+
 func (s *Store) CreatePasswordResetTicket(
 	ctx context.Context,
 	actorID, targetUserID string,

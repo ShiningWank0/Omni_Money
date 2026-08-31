@@ -102,6 +102,8 @@ docker compose -f compose.yaml -f compose.local.yaml up -d --force-recreate
 - userのemailとroleを指定して、24時間有効の一度だけ表示されるinvite tokenを作る
 - active userへ15分有効のpassword reset tokenを作る
 - 自分以外のactive userを無効化し、そのuserのsessionと開いているvaultを失効させる
+- disabled userを再有効化する、または最後のactive Adminを残す制約の下でroleを変更する
+- invite/reset tokenの非secret metadataを一覧し、未使用tokenを取り消す
 
 invite/reset tokenはURLへ入れず、安全な別経路で本人へ渡してください。本人は `/login?mode=invite` または
 `/login?mode=reset` を開いてtokenを手動で貼り付けます。招待されたuserは自分のpasswordとrecovery codeを作り、
@@ -109,6 +111,8 @@ password resetにはAdminのtokenに加えて本人だけが保持する既存re
 他userの取引、vault path、password、recovery code、暗号鍵を表示または復号する機能はありません。
 
 各userはログイン後の「パスキー設定」で、現在のpasswordを確認してPRF対応パスキーを登録できます。登録後もpassword認証は無効にならず、login画面と重要操作の再認証でpasswordまたはpasskeyを選べます。passkeyはPangolin経由のHTTPS originに紐付くため、`PASSKEY_RP_ID`や公開FQDNを変更すると既存passkeyは使えなくなります。passwordとrecovery codeは引き続き安全に保管してください。
+
+「認証情報の管理」では、現在のpasswordを確認してpasswordまたはrecovery codeを更新できます。どちらもVaultのDEKは変えず、新しいenvelopeへatomicに置き換えます。serverでの更新後は全sessionと開いているVaultを失効させるため、再ログインが必要です。password変更時は既存passkeyを残すか全失効するかを明示的に選びます。「パスキー設定」で個別または一括失効した場合も全端末からログアウトします。「全端末からログアウト」はpasswordとpasskeyを変更せずsessionだけを終了します。
 
 ### 停止、再開、安全な更新
 

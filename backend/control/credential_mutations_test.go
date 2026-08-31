@@ -285,6 +285,50 @@ func TestReplacePasswordCredentialUsesEnvelopeAndRevisionCAS(t *testing.T) {
 	}
 }
 
+func TestReplacePasswordCredentialAppliesPasskeyPolicyAtomically(t *testing.T) {
+	store := openTestStore(t)
+	admin := bootstrapTestAdmin(t, store)
+	ctx := context.Background()
+
+	for index, input := range []PasskeyCredentialInput{
+		testPasskeyInput(admin.ID, "MacBook Touch ID", 110),
+		testPasskeyInput(admin.ID, "Security key", 120),
+	} {
+		if _, err := store.CreatePasskeyCredential(ctx, input, testNow.Add(time.Duration(index+1)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	expected, err := store.GetPasswordCredential(ctx, admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := testCredential(130)
+	revoked, err := store.ReplacePasswordCredentialWithPasskeyPolicy(
+		ctx, admin.ID, expected, replacement, true, testNow.Add(3*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked != 2 {
+		t.Fatalf("revoked passkeys = %d, want 2", revoked)
+	}
+	passkeys, err := store.ListPasskeyCredentials(ctx, admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(passkeys) != 0 {
+		t.Fatalf("passkeys survived password policy: %#v", passkeys)
+	}
+	stored, err := store.GetPasswordCredential(ctx, admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(stored.Envelope, replacement.Envelope) {
+		t.Fatalf("stored replacement = %#v", stored)
+	}
+}
+
 func TestRotateRecoveryEnvelopeIsAtomicCAS(t *testing.T) {
 	store := openTestStore(t)
 	admin := bootstrapTestAdmin(t, store)

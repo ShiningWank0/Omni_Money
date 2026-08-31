@@ -88,6 +88,7 @@
         <button class="menu-btn" @click="openTagManager">タグ管理</button>
         <button v-if="serverFeatures.snapshots" class="menu-btn menu-group-start" @click="openSnapshotManager">スナップショット管理</button>
         <button v-if="isWailsMode" class="menu-btn menu-group-start" @click="openDesktopIdleSettings">自動ロック設定</button>
+		<button class="menu-btn menu-group-start" @click="openCredentialSettings">認証情報の管理</button>
         <button v-if="!isWailsMode && serverFeatures.passkeys" class="menu-btn menu-group-start" @click="openPasskeySettings">パスキー設定</button>
         <button v-if="serverFeatures.admin" class="menu-btn menu-group-start" @click="openServerAccountAdmin">サーバーユーザー管理</button>
         <button v-if="isWailsMode" class="menu-btn logout-btn" @click="lockDesktopVaultNow">保管庫をロック</button>
@@ -231,6 +232,7 @@
       v-if="showServerAccountAdmin"
       :current-user-id="currentServerUserId"
       @close="showServerAccountAdmin = false"
+	  @signed-out="handleCredentialSignedOut"
     />
 
     <PasskeySettingsModal
@@ -260,6 +262,13 @@
         </div>
       </form>
     </div>
+
+    <CredentialSettingsModal
+      v-if="showCredentialSettings"
+      @close="showCredentialSettings = false"
+	  @session-invalidated="clearSensitiveStateForIdle(true)"
+      @signed-out="handleCredentialSignedOut"
+    />
 
     <!-- 最近の認証が必要な操作用の再認証ダイアログ -->
     <div v-if="showReauthModal" class="reauth-overlay" @click.self="cancelReauthentication">
@@ -338,6 +347,7 @@ const TagManager = defineAsyncComponent(() => import('./components/TagManager.vu
 const AIAPIConsoleModal = defineAsyncComponent(() => import('./components/AIAPIConsoleModal.vue'))
 const ServerAccountAdminModal = defineAsyncComponent(() => import('./components/ServerAccountAdminModal.vue'))
 const PasskeySettingsModal = defineAsyncComponent(() => import('./components/PasskeySettingsModal.vue'))
+const CredentialSettingsModal = defineAsyncComponent(() => import('./components/CredentialSettingsModal.vue'))
 import {
   addTransaction,
   updateTransaction,
@@ -380,6 +390,7 @@ const showDesktopIdleSettings = ref(false)
 const desktopIdleMinutes = ref(loadDesktopIdleMinutes())
 const desktopIdleDraftMinutes = ref(desktopIdleMinutes.value)
 const desktopIdleSettingsError = ref('')
+const showCredentialSettings = ref(false)
 const showReauthModal = ref(false)
 const reauthLoading = ref(false)
 const reauthPassword = ref('')
@@ -735,6 +746,17 @@ function saveDesktopIdleSettings() {
   showToast(`自動ロックを${minutes}分に設定しました`)
 }
 
+function openCredentialSettings() {
+  showMenu.value = false
+  showCredentialSettings.value = true
+}
+
+function handleCredentialSignedOut() {
+  showCredentialSettings.value = false
+  clearSensitiveStateForIdle()
+  window.location.replace('/login')
+}
+
 async function logout() {
   showMenu.value = false
   try {
@@ -787,7 +809,7 @@ function stopIdleLock() {
 // Drop every in-memory value that could reveal household financial data before
 // navigating away. The v-if guards also unmount open modals and clear their
 // component-local form state.
-function clearSensitiveStateForIdle() {
+function clearSensitiveStateForIdle(preserveCredentialSettings = false) {
   stopIdleLock()
   desktopIdleController?.stop()
   store.resetState()
@@ -807,6 +829,7 @@ function clearSensitiveStateForIdle() {
   showPasskeySettings.value = false
   showDesktopIdleSettings.value = false
   desktopIdleSettingsError.value = ''
+	  if (!preserveCredentialSettings) showCredentialSettings.value = false
   showReauthModal.value = false
   reauthLoading.value = false
   reauthPassword.value = ''

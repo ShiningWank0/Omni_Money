@@ -42,6 +42,8 @@ type fakeControlStore struct {
 	getPasswordResetTicketByTokenHashFn func(context.Context, []byte) (control.PasswordResetTicket, error)
 	completePasswordResetFn             func(context.Context, control.CompletePasswordResetInput, time.Time) (control.PasswordResetTicket, error)
 	disableUserFn                       func(context.Context, string, string, time.Time) error
+	replacePasswordCredentialFn         func(context.Context, string, control.PasswordCredential, control.PasswordCredentialInput, bool, time.Time) (int, error)
+	rotateRecoveryEnvelopeFn            func(context.Context, string, control.RecoveryEnvelope, control.RecoveryEnvelopeInput, time.Time) (control.RecoveryEnvelope, error)
 }
 
 func (f *fakeControlStore) IsBootstrapped(ctx context.Context) (bool, error) {
@@ -147,6 +149,20 @@ func (f *fakeControlStore) DisableUser(ctx context.Context, actorID, targetUserI
 		panic("unexpected DisableUser call")
 	}
 	return f.disableUserFn(ctx, actorID, targetUserID, now)
+}
+
+func (f *fakeControlStore) ReplacePasswordCredentialWithPasskeyPolicy(ctx context.Context, userID string, expected control.PasswordCredential, replacement control.PasswordCredentialInput, revoke bool, now time.Time) (int, error) {
+	if f.replacePasswordCredentialFn == nil {
+		panic("unexpected ReplacePasswordCredentialWithPasskeyPolicy call")
+	}
+	return f.replacePasswordCredentialFn(ctx, userID, expected, replacement, revoke, now)
+}
+
+func (f *fakeControlStore) RotateRecoveryEnvelope(ctx context.Context, userID string, expected control.RecoveryEnvelope, replacement control.RecoveryEnvelopeInput, now time.Time) (control.RecoveryEnvelope, error) {
+	if f.rotateRecoveryEnvelopeFn == nil {
+		panic("unexpected RotateRecoveryEnvelope call")
+	}
+	return f.rotateRecoveryEnvelopeFn(ctx, userID, expected, replacement, now)
 }
 
 type fakeSessionInvalidator struct {
@@ -499,7 +515,7 @@ func TestServiceCompletePasswordResetInvalidatesSessionsThenClosesVault(t *testi
 	if !reflect.DeepEqual(got, resolved) {
 		t.Fatalf("reset result = %#v, want %#v", got, resolved)
 	}
-	if !reflect.DeepEqual(events, []string{"complete", "drain", "invalidate", "close"}) {
+	if !reflect.DeepEqual(events, []string{"complete", "invalidate", "drain", "close"}) {
 		t.Fatalf("reset side-effect order = %v", events)
 	}
 	if !reflect.DeepEqual(sessions.users, []string{user.ID}) || !reflect.DeepEqual(vaults.users, []string{user.ID}) {
@@ -573,7 +589,7 @@ func TestServiceDisableUserCommitsBeforeInvalidationAndVaultClose(t *testing.T) 
 	if err := service.DisableUser(context.Background(), actorID, targetID, serverAuthTestNow); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(events, []string{"disable", "drain", "invalidate", "close"}) {
+	if !reflect.DeepEqual(events, []string{"disable", "invalidate", "drain", "close"}) {
 		t.Fatalf("disable side-effect order = %v", events)
 	}
 	if !reflect.DeepEqual(sessions.users, []string{targetID}) || !reflect.DeepEqual(vaults.users, []string{targetID}) {
@@ -588,8 +604,111 @@ func TestServiceDisableUserCommitsBeforeInvalidationAndVaultClose(t *testing.T) 
 	if err := service.DisableUser(context.Background(), actorID, targetID, serverAuthTestNow); err != nil {
 		t.Fatalf("committed disable reported cleanup failure: %v", err)
 	}
-	if !reflect.DeepEqual(events, []string{"disable", "drain", "invalidate", "close"}) || !reflect.DeepEqual(sessions.users, []string{targetID}) {
+	if !reflect.DeepEqual(events, []string{"disable", "invalidate", "drain", "close"}) || !reflect.DeepEqual(sessions.users, []string{targetID}) {
 		t.Fatalf("vault-close failure lost invalidation: events=%v sessions=%v", events, sessions.users)
+	}
+}
+
+func TestChangePasswordKeepsDEKAndInvalidatesBeforeDrain(t *testing.T) {
+	oldPassword := []byte("old-password-value")
+	newPassword := []byte("new-password-value")
+	dek := bytes.Repeat([]byte{0x71}, keyenvelope.DEKSize)
+	binding := keyenvelope.Context{UserID: serverAuthTestUserID, VaultID: serverAuthTestVaultID}
+	envelope, err := keyenvelope.WrapWithPassword(dek, oldPassword, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential := control.PasswordCredential{UserID: serverAuthTestUserID, Envelope: *envelope, CreatedAt: serverAuthTestNow.Add(-time.Hour), UpdatedAt: serverAuthTestNow.Add(-time.Minute)}
+	events := []string{}
+	store := &fakeControlStore{
+		getUserFn: func(context.Context, string) (control.UserSummary, error) {
+			return control.UserSummary{ID: serverAuthTestUserID, State: control.UserActive}, nil
+		},
+		getPasswordCredentialFn: func(context.Context, string) (control.PasswordCredential, error) { return credential, nil },
+		lookupVaultIDFn:         func(context.Context, string) (string, error) { return serverAuthTestVaultID, nil },
+		replacePasswordCredentialFn: func(_ context.Context, userID string, expected control.PasswordCredential, replacement control.PasswordCredentialInput, revoke bool, now time.Time) (int, error) {
+			events = append(events, "replace")
+			if userID != serverAuthTestUserID || !reflect.DeepEqual(expected, credential) || !revoke || now != serverAuthTestNow {
+				t.Fatal("password mutation inputs changed")
+			}
+			unwrapped, err := keyenvelope.UnwrapWithPassword(&replacement.Envelope, newPassword, binding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer clear(unwrapped)
+			if !bytes.Equal(unwrapped, dek) {
+				t.Fatal("password change replaced the vault DEK")
+			}
+			return 2, nil
+		},
+	}
+	sessions := &fakeSessionInvalidator{onDelete: func(string) { events = append(events, "invalidate") }}
+	vaults := &fakeVaultDrainer{onBegin: func(string) { events = append(events, "drain") }, onWait: func(string) { events = append(events, "close") }}
+	service := newServerAuthTestService(t, store, nil, nil, sessions, vaults)
+	revoked, err := service.ChangePassword(context.Background(), serverAuthTestUserID, oldPassword, newPassword, true, serverAuthTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked != 2 || !reflect.DeepEqual(events, []string{"replace", "invalidate", "drain", "close"}) {
+		t.Fatalf("change result=%d events=%v", revoked, events)
+	}
+}
+
+func TestRotateRecoveryCodeKeepsDEKAndInvalidatesBeforeDrain(t *testing.T) {
+	password := []byte("current-password-value")
+	oldSecret := bytes.Repeat([]byte{0x11}, keyenvelope.RecoverySecretSize)
+	newSecret := bytes.Repeat([]byte{0x22}, keyenvelope.RecoverySecretSize)
+	dek := bytes.Repeat([]byte{0x72}, keyenvelope.DEKSize)
+	binding := keyenvelope.Context{UserID: serverAuthTestUserID, VaultID: serverAuthTestVaultID}
+	passwordEnvelope, err := keyenvelope.WrapWithPassword(dek, password, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRecoveryEnvelope, err := keyenvelope.WrapWithRecovery(dek, oldSecret, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := control.RecoveryEnvelope{ID: "recovery-envelope-12345", UserID: serverAuthTestUserID, Envelope: *oldRecoveryEnvelope, State: control.RecoveryEnvelopeActive, CreatedAt: serverAuthTestNow.Add(-time.Hour)}
+	events := []string{}
+	store := &fakeControlStore{
+		getUserFn: func(context.Context, string) (control.UserSummary, error) {
+			return control.UserSummary{ID: serverAuthTestUserID, State: control.UserActive}, nil
+		},
+		getPasswordCredentialFn: func(context.Context, string) (control.PasswordCredential, error) {
+			return control.PasswordCredential{UserID: serverAuthTestUserID, Envelope: *passwordEnvelope, UpdatedAt: serverAuthTestNow.Add(-time.Hour)}, nil
+		},
+		lookupVaultIDFn:             func(context.Context, string) (string, error) { return serverAuthTestVaultID, nil },
+		getActiveRecoveryEnvelopeFn: func(context.Context, string) (control.RecoveryEnvelope, error) { return expected, nil },
+		rotateRecoveryEnvelopeFn: func(_ context.Context, _ string, got control.RecoveryEnvelope, replacement control.RecoveryEnvelopeInput, _ time.Time) (control.RecoveryEnvelope, error) {
+			events = append(events, "rotate")
+			if !reflect.DeepEqual(got, expected) {
+				t.Fatal("recovery CAS input changed")
+			}
+			unwrapped, err := keyenvelope.UnwrapWithRecovery(&replacement.Envelope, newSecret, binding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer clear(unwrapped)
+			if !bytes.Equal(unwrapped, dek) {
+				t.Fatal("recovery rotation replaced the vault DEK")
+			}
+			return control.RecoveryEnvelope{}, nil
+		},
+	}
+	sessions := &fakeSessionInvalidator{onDelete: func(string) { events = append(events, "invalidate") }}
+	vaults := &fakeVaultDrainer{onBegin: func(string) { events = append(events, "drain") }, onWait: func(string) { events = append(events, "close") }}
+	service := newServerAuthTestService(t, store, nil, nil, sessions, vaults)
+	if err := service.RotateRecoveryCode(context.Background(), serverAuthTestUserID, password, oldSecret, serverAuthTestNow); !errors.Is(err, ErrInvalidAccountData) {
+		t.Fatalf("reused recovery secret error=%v", err)
+	}
+	if len(events) != 0 || len(sessions.users) != 0 || len(vaults.users) != 0 {
+		t.Fatalf("rejected recovery reuse changed lifecycle: events=%v", events)
+	}
+	if err := service.RotateRecoveryCode(context.Background(), serverAuthTestUserID, password, newSecret, serverAuthTestNow); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(events, []string{"rotate", "invalidate", "drain", "close"}) {
+		t.Fatalf("rotation events=%v", events)
 	}
 }
 
