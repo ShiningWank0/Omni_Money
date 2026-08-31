@@ -157,7 +157,8 @@ shell functionのimportを無効化します。`sudo bash scripts/safe-update.sh
 `bash scripts/safe-update.sh ...`、`source scripts/safe-update.sh` は使用できず、script側も
 fail closedで拒否します。特にrootでnon-privileged Bashを明示起動すると、scriptが制御を
 得る前に`BASH_ENV`が実行され得るため、直接実行以外を運用手順やautomationへ登録しないで
-ください。
+ください。直接実行時も、呼出し元の`CDPATH`、`POSIXLY_CORRECT`、`BASH_COMPAT`、
+`GLOBIGNORE`は起動境界直後に破棄し、script path解決と以後のBash動作を固定します。
 
 停止前に checkpoint directory の `recovery/` と `.safe-update-journal` へ、Compose
 snapshot、env/attestationのprivate copy、secret source contract、current runtime
@@ -194,7 +195,7 @@ state machine で main transaction を実行します。production `safe-update.
 pathnameや環境変数で有効化できるtest modeを含めず、CIがexact-cardinality検証付きの
 test専用transformで生成した一時copyだけにmock境界をinstrumentします。production copy/
 symlinkへ`MOCK_BIN`、悪意ある`BASH_ENV`、exported external/builtin-name functionを与えても
-privileged Bash startup、固定PATH、production preflightが維持されること、および
+privileged Bash startup、固定PATH/Bash mode、relative path、production preflightが維持されること、および
 instrumentationがproduction artifactへ混入しないことも検証します。
 success、candidate failure、partial
 Compose recreate（旧ID消失）、pull/config

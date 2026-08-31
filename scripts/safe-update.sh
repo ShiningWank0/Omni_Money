@@ -23,6 +23,12 @@ case "$-" in
   *) builtin printf 'safe-update: execute the script directly; privileged Bash startup is required\n' >&2; builtin exit 77 ;;
 esac
 # Direct-execution boundary ends.
+
+# Privileged Bash blocks startup files and imported functions, but these
+# behavior-changing environment variables are still inherited. Normalize them
+# with builtins before resolving a relative script path or enabling strict mode.
+builtin unset -v CDPATH POSIXLY_CORRECT BASH_COMPAT GLOBIGNORE 2>/dev/null || :
+builtin set +o posix
 builtin set -Eeuo pipefail
 
 # Deploy one pinned Omni Money image with an offline checkpoint. This entry
@@ -1265,12 +1271,13 @@ write_runtime_contract() {
     return 1
   fi
   jq -e 'type == "object"' "$raw" >/dev/null || { rm -f -- "$raw"; return 1; }
-  env_json="$(while IFS= read -r -d '' item; do
+  env_json="$(jq -j '.Config.Env[]? | (. + "\u0000")' "$raw" |
+  while IFS= read -r -d '' item; do
     name="${item%%=*}"
     value="${item#*=}"
     digest="$(printf '%s' "$value" | sha256sum | sed -E 's/[[:space:]].*$//')"
     jq -cn --arg name "$name" --arg digest "$digest" '{name:$name,sha256:$digest}'
-  done < <(jq -j '.Config.Env[]? | (. + "\u0000")' "$raw") | jq -s 'sort_by(.name)')" || return 1
+  done | jq -s 'sort_by(.name)')" || return 1
   operator_environment="$(jq -c '
     .services["omni-money"].environment // {} |
     if type == "object" then keys
@@ -1521,13 +1528,14 @@ validate_single_network_ip() {
 disconnect_all_networks() {
   local id="$1" networks network
   networks="$(container_networks "$id")"
-  while IFS= read -r network; do
-    [ -n "$network" ] || continue
-    if ! docker_cli network disconnect "$network" "$id" >/dev/null; then
-      fail "could not disconnect $id from network $network"
-      return 1
-    fi
-  done < <(jq -r 'keys[]' <<< "$networks")
+  jq -r 'keys[]' <<< "$networks" |
+    while IFS= read -r network; do
+      [ -n "$network" ] || continue
+      if ! docker_cli network disconnect "$network" "$id" >/dev/null; then
+        fail "could not disconnect $id from network $network"
+        return 1
+      fi
+    done || return 1
   networks="$(container_networks "$id")"
   jq -e 'length == 0' <<< "$networks" >/dev/null || { fail "container retained a network after isolation"; return 1; }
 }

@@ -168,7 +168,8 @@ production_probe_root="$test_root/.omni-safe-update-test.attacker"
 production_probe_bin="$production_probe_root/mock-bin"
 production_probe_marker="$production_probe_root/marker"
 production_probe_bash_env="$production_probe_root/bash-env"
-mkdir -m 0700 -p -- "$production_probe_root/copy/scripts" "$production_probe_root/link/scripts" "$production_probe_bin"
+production_probe_cdpath="$production_probe_root/poisoned-cdpath"
+mkdir -m 0700 -p -- "$production_probe_root/copy/scripts" "$production_probe_root/link/scripts" "$production_probe_bin" "$production_probe_cdpath/scripts"
 cp -- "$script_dir/safe-update.sh" "$production_probe_root/copy/scripts/safe-update.sh"
 chmod 0700 "$production_probe_root/copy/scripts/safe-update.sh"
 ln -s -- "$script_dir/safe-update.sh" "$production_probe_root/link/scripts/safe-update.sh"
@@ -177,10 +178,12 @@ for probe_command in dirname readlink stat docker; do
   chmod 0700 "$production_probe_bin/$probe_command"
 done
 printf 'builtin printf bash-env-marker >> "$SAFE_UPDATE_PROBE_MARKER"\n' > "$production_probe_bash_env"
-for production_probe in "$production_probe_root/copy/scripts/safe-update.sh" "$production_probe_root/link/scripts/safe-update.sh"; do
+for production_probe_location in copy link; do
+  production_probe="$production_probe_root/$production_probe_location/scripts/safe-update.sh"
   rm -f -- "$production_probe_marker"
   probe_status=0
-  probe_output="$(env MOCK_BIN="$production_probe_bin" SAFE_UPDATE_PROBE_MARKER="$production_probe_marker" OMNI_UPDATE_CHECKPOINT_DIR=/tmp/forbidden \
+  probe_output="$(builtin cd -- "$production_probe_root/$production_probe_location" && \
+    env MOCK_BIN="$production_probe_bin" SAFE_UPDATE_PROBE_MARKER="$production_probe_marker" OMNI_UPDATE_CHECKPOINT_DIR=/tmp/forbidden \
     bash -c '
       dirname() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
       readlink() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
@@ -191,12 +194,12 @@ for production_probe in "$production_probe_root/copy/scripts/safe-update.sh" "$p
       trap() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
       read() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
       export -f dirname readlink stat docker "[" umask trap read
-      BASH_ENV="$2"
-      export BASH_ENV
+      export BASH_ENV="$2" CDPATH="$3" POSIXLY_CORRECT=1 BASH_COMPAT=32 GLOBIGNORE="*"
       exec "$1" registry.example/omni-money:1.2.3
-    ' _ "$production_probe" "$production_probe_bash_env" 2>&1)" || probe_status=$?
+    ' _ "scripts/safe-update.sh" "$production_probe_bash_env" "$production_probe_cdpath" 2>&1)" || probe_status=$?
   [ "$probe_status" -ne 0 ] || { echo "FAIL: production pathname probe unexpectedly succeeded" >&2; exit 1; }
   [ ! -e "$production_probe_marker" ] || { echo "FAIL: production pathname probe executed an ambient mock/function" >&2; exit 1; }
+  ! grep -Fq "$production_probe_cdpath" <<< "$probe_output" || { echo "FAIL: production pathname probe honored ambient CDPATH" >&2; exit 1; }
   grep -Eq 'safe-update must be run as root|OMNI_UPDATE_CHECKPOINT_DIR is not supported' <<< "$probe_output" || { echo "FAIL: production pathname probe did not retain production preflight checks" >&2; exit 1; }
 done
 
