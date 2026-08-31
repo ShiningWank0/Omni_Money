@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 
 # This must be the first executable statement.  An inherited xtrace shell can
 # otherwise print the target image or raw runtime environment before the
@@ -6,6 +6,23 @@
 case "$-" in
   *x*) builtin set +x; builtin printf 'safe-update: inherited xtrace is not allowed\n' >&2; builtin exit 77 ;;
 esac
+
+# This root entry point is supported only through its privileged Bash shebang.
+# Privileged mode is established by the kernel before Bash startup, so BASH_ENV
+# and exported shell functions cannot execute before this file's first line.
+# A non-privileged `bash safe-update.sh` has already crossed that unsafe startup
+# boundary, while sourcing would inherit the caller's shell state. Fail closed
+# in both cases without invoking any external command.
+# Direct-execution boundary begins.
+if [[ "${BASH_SOURCE[0]:-$0}" != "$0" ]]; then
+  builtin printf 'safe-update: sourcing is not supported; execute the script directly\n' >&2
+  return 77 2>/dev/null || builtin exit 77
+fi
+case "$-" in
+  *p*) ;;
+  *) builtin printf 'safe-update: execute the script directly; privileged Bash startup is required\n' >&2; builtin exit 77 ;;
+esac
+# Direct-execution boundary ends.
 builtin set -Eeuo pipefail
 
 # Deploy one pinned Omni Money image with an offline checkpoint. This entry

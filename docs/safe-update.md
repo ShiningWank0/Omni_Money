@@ -151,6 +151,14 @@ preflight（安全更新テスト）を通してから実行します。実行�
 
     sudo ./scripts/safe-update.sh ghcr.io/shiningwank0/omni_money:1.1.0
 
+`safe-update.sh` は executable bit を付けたまま、上記のようにpathを直接指定して実行します。
+entry pointは `#!/bin/bash -p` により、script本文より前の `BASH_ENV` 読込みとexport済み
+shell functionのimportを無効化します。`sudo bash scripts/safe-update.sh ...`、
+`bash scripts/safe-update.sh ...`、`source scripts/safe-update.sh` は使用できず、script側も
+fail closedで拒否します。特にrootでnon-privileged Bashを明示起動すると、scriptが制御を
+得る前に`BASH_ENV`が実行され得るため、直接実行以外を運用手順やautomationへ登録しないで
+ください。
+
 停止前に checkpoint directory の `recovery/` と `.safe-update-journal` へ、Compose
 snapshot、env/attestationのprivate copy、secret source contract、current runtime
 contract、rollback Compose snapshot、各copyのdevice/inode/link count/digest manifestを
@@ -185,8 +193,9 @@ scripts/safe-update_test.sh は Docker daemon を使わず、Linux では mock D
 state machine で main transaction を実行します。production `safe-update.sh` 自体には
 pathnameや環境変数で有効化できるtest modeを含めず、CIがexact-cardinality検証付きの
 test専用transformで生成した一時copyだけにmock境界をinstrumentします。production copy/
-symlinkへ`MOCK_BIN`やexported command functionを与えても固定PATHとproduction preflightが
-維持されること、およびinstrumentationがproduction artifactへ混入しないことも検証します。
+symlinkへ`MOCK_BIN`、悪意ある`BASH_ENV`、exported external/builtin-name functionを与えても
+privileged Bash startup、固定PATH、production preflightが維持されること、および
+instrumentationがproduction artifactへ混入しないことも検証します。
 success、candidate failure、partial
 Compose recreate（旧ID消失）、pull/config
 の停止前失敗、partial stop、INT/TERM、network disconnect/reconnect failure、rollback

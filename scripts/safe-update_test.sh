@@ -10,6 +10,8 @@ set -Eeuo pipefail
 
 script_dir="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 project_dir="$(cd -- "$script_dir/.." && pwd -P)"
+test_script_dir="$script_dir"
+test_project_dir="$project_dir"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/.omni-safe-update-test.XXXXXX")"
 trap 'rm -rf -- "$test_root"' EXIT
 
@@ -25,8 +27,16 @@ assert_rejected_with() {
   grep -Eq "$pattern" <<< "$output" || { printf 'FAIL: %s failed for the wrong reason: %s\n' "$label" "$output" >&2; exit 1; }
 }
 
-# shellcheck disable=SC1091
-source "$script_dir/safe-update.sh"
+# Production is deliberately not sourceable. Generate a test-only library copy
+# with the direct-execution guard removed by an exact-cardinality transformer.
+source_test_copy="$test_root/safe-update-source-test.sh"
+awk -f "$script_dir/safe-update_test_source.awk" "$script_dir/safe-update.sh" > "$source_test_copy"
+# shellcheck disable=SC1090
+source "$source_test_copy"
+# The sourced updater intentionally defines its own location globals. Restore
+# the harness locations; function-level tests historically target this checkout.
+script_dir="$test_script_dir"
+project_dir="$test_project_dir"
 pin_dir="$test_root/pin"; mkdir -m 0700 -- "$pin_dir"
 
 if grep -Eq 'safe_update_test_mode|MOCK_BIN|SAFE_UPDATE_INSTRUMENTED_MOCK_BIN|\.omni-safe-update-test' "$script_dir/safe-update.sh"; then
@@ -138,6 +148,16 @@ grep -q 'inherited xtrace is not allowed' <<< "$xtrace_output" || { echo "FAIL: 
 grep -q 'do-not-log-this' <<< "$xtrace_output" && { echo "FAIL: inherited xtrace logged the target image" >&2; exit 1; }
 grep -Fq 'sha256_file "$capacity_reservation"' "$script_dir/safe-update.sh" && { echo "FAIL: capacity reserve is still fully hashed" >&2; exit 1; }
 
+nonprivileged_status=0
+nonprivileged_output="$(bash "$script_dir/safe-update.sh" registry.example/omni-money:1.2.3 2>&1)" || nonprivileged_status=$?
+[ "$nonprivileged_status" -eq 77 ] || { echo "FAIL: non-privileged Bash invocation returned $nonprivileged_status instead of 77" >&2; exit 1; }
+grep -q 'execute the script directly' <<< "$nonprivileged_output" || { echo "FAIL: non-privileged Bash invocation was not rejected at the execution boundary" >&2; exit 1; }
+
+sourced_status=0
+sourced_output="$(bash -p -c 'source "$1"' _ "$script_dir/safe-update.sh" 2>&1)" || sourced_status=$?
+[ "$sourced_status" -eq 77 ] || { echo "FAIL: sourced production updater returned $sourced_status instead of 77" >&2; exit 1; }
+grep -q 'sourcing is not supported' <<< "$sourced_output" || { echo "FAIL: sourced production updater was not rejected at the execution boundary" >&2; exit 1; }
+
 printf 'not a tar archive\n' > "$pin_dir/corrupt.tar"
 assert_rejected "corrupt archive" validate_tar_members "$pin_dir/corrupt.tar"
 
@@ -147,6 +167,7 @@ assert_rejected "corrupt archive" validate_tar_members "$pin_dir/corrupt.tar"
 production_probe_root="$test_root/.omni-safe-update-test.attacker"
 production_probe_bin="$production_probe_root/mock-bin"
 production_probe_marker="$production_probe_root/marker"
+production_probe_bash_env="$production_probe_root/bash-env"
 mkdir -m 0700 -p -- "$production_probe_root/copy/scripts" "$production_probe_root/link/scripts" "$production_probe_bin"
 cp -- "$script_dir/safe-update.sh" "$production_probe_root/copy/scripts/safe-update.sh"
 chmod 0700 "$production_probe_root/copy/scripts/safe-update.sh"
@@ -155,7 +176,9 @@ for probe_command in dirname readlink stat docker; do
   printf '#!/bin/sh\nprintf marker >> "$SAFE_UPDATE_PROBE_MARKER"\nexit 97\n' > "$production_probe_bin/$probe_command"
   chmod 0700 "$production_probe_bin/$probe_command"
 done
+printf 'builtin printf bash-env-marker >> "$SAFE_UPDATE_PROBE_MARKER"\n' > "$production_probe_bash_env"
 for production_probe in "$production_probe_root/copy/scripts/safe-update.sh" "$production_probe_root/link/scripts/safe-update.sh"; do
+  rm -f -- "$production_probe_marker"
   probe_status=0
   probe_output="$(env MOCK_BIN="$production_probe_bin" SAFE_UPDATE_PROBE_MARKER="$production_probe_marker" OMNI_UPDATE_CHECKPOINT_DIR=/tmp/forbidden \
     bash -c '
@@ -163,9 +186,15 @@ for production_probe in "$production_probe_root/copy/scripts/safe-update.sh" "$p
       readlink() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
       stat() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
       docker() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
-      export -f dirname readlink stat docker
+      function "[" { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
+      umask() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
+      trap() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
+      read() { printf marker >> "$SAFE_UPDATE_PROBE_MARKER"; return 97; }
+      export -f dirname readlink stat docker "[" umask trap read
+      BASH_ENV="$2"
+      export BASH_ENV
       exec "$1" registry.example/omni-money:1.2.3
-    ' _ "$production_probe" 2>&1)" || probe_status=$?
+    ' _ "$production_probe" "$production_probe_bash_env" 2>&1)" || probe_status=$?
   [ "$probe_status" -ne 0 ] || { echo "FAIL: production pathname probe unexpectedly succeeded" >&2; exit 1; }
   [ ! -e "$production_probe_marker" ] || { echo "FAIL: production pathname probe executed an ambient mock/function" >&2; exit 1; }
   grep -Eq 'safe-update must be run as root|OMNI_UPDATE_CHECKPOINT_DIR is not supported' <<< "$probe_output" || { echo "FAIL: production pathname probe did not retain production preflight checks" >&2; exit 1; }
