@@ -87,6 +87,18 @@ func TestRestoreSnapshotRejectsCorruptionAndPreservesLiveDatabase(t *testing.T) 
 	}
 }
 
+func TestListSnapshotsReportsValidationInfrastructureFailure(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	insertSnapshotTestTransaction(t, instance, "before-opener-failure")
+	if _, err := instance.CreateSnapshot(snapshotDir); err != nil {
+		t.Fatal(err)
+	}
+	instance.opener.Destroy()
+	if _, err := instance.ListSnapshots(snapshotDir); !errors.Is(err, securedb.ErrDestroyed) {
+		t.Fatalf("ListSnapshots error=%v, want ErrDestroyed", err)
+	}
+}
+
 func TestRestoreSnapshotPostCloseFilesystemFailureLeavesInstanceUnpublished(t *testing.T) {
 	instance, dbPath, snapshotDir := newPlainSnapshotTestInstance(t)
 	insertSnapshotTestTransaction(t, instance, "before")

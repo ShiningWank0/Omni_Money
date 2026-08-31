@@ -5,12 +5,29 @@ package database
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"golang.org/x/sys/windows"
 	"omni_money/backend/fileprivacy"
 	"omni_money/backend/securedb"
 )
+
+func TestSyncOpenRestoreCandidateSupportsWindowsFlush(t *testing.T) {
+	dir := t.TempDir()
+	candidatePath, candidate, err := temporaryDatabaseFile(dir, ".omni-money-restore-candidate-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.Close()
+	defer os.Remove(candidatePath)
+	if _, err := candidate.WriteString("restore candidate"); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncOpenFileAndDirectory(candidate, filepath.Dir(candidatePath)); err != nil {
+		t.Fatalf("sync writable restore candidate descriptor: %v", err)
+	}
+}
 
 func TestListValidationAnchorBlocksWindowsCandidateReplacement(t *testing.T) {
 	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
@@ -54,7 +71,7 @@ func TestListValidationAnchorBlocksWindowsCandidateReplacement(t *testing.T) {
 	if err := os.Rename(candidatePath, candidatePath+".detached"); err == nil {
 		t.Fatal("Windows validation anchor allowed candidate pathname replacement")
 	}
-	validated, err := instance.opener.Open(t.Context(), validationPath, securedb.ReadOnly)
+	validated, err := instance.opener.Open(t.Context(), validationPath, securedb.ImmutableReadOnly)
 	if err != nil {
 		t.Fatalf("anchored candidate did not open while replacement was denied: %v", err)
 	}

@@ -23,6 +23,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	sqlite3 "github.com/mattn/go-sqlite3"
 	"omni_money/backend/fileprivacy"
 	"omni_money/backend/models"
 	"omni_money/backend/securedb"
@@ -2707,12 +2708,21 @@ func (i *Instance) validateSnapshotEntry(ctx context.Context, path string, inspe
 	if err := ctx.Err(); err != nil {
 		return false, used, err
 	}
-	db, err := i.opener.Open(ctx, validationPath, securedb.ReadOnly)
+	// The validation copy is already pinned and digest-bound. Immutable mode
+	// prevents SQLite/SQLCipher from attempting locks or sidecars beside a
+	// Unix descriptor path while preserving the same-object binding.
+	db, err := i.opener.Open(ctx, validationPath, securedb.ImmutableReadOnly)
 	if err != nil {
 		if boundaryErr := validateListSnapshotCandidateBoundary(transactionLock, candidatePath, reopened, candidateInfo, candidateDigest); boundaryErr != nil {
 			return false, used, errors.Join(fmt.Errorf("snapshot validation candidate open: %w", err), boundaryErr)
 		}
-		return false, used, errIfContextDone(ctx, err)
+		if err := ctx.Err(); err != nil {
+			return false, used, err
+		}
+		if invalidSnapshotContentError(err) {
+			return false, used, nil
+		}
+		return false, used, fmt.Errorf("snapshot validation candidate open: %w", err)
 	}
 	if boundaryErr := validateListSnapshotCandidateBoundary(transactionLock, candidatePath, reopened, candidateInfo, candidateDigest); boundaryErr != nil {
 		_ = db.Close()
@@ -2765,6 +2775,14 @@ func validateListSnapshotCandidateBoundary(transactionLock *snapshotTransactionL
 		return errors.Join(errors.New("snapshot validation candidate path digest changed"), err)
 	}
 	return nil
+}
+
+func invalidSnapshotContentError(err error) bool {
+	var sqliteErr sqlite3.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	return sqliteErr.Code == sqlite3.ErrNotADB || sqliteErr.Code == sqlite3.ErrCorrupt
 }
 
 func errIfContextDone(ctx context.Context, err error) error {
@@ -2996,7 +3014,12 @@ func (i *Instance) RestoreSnapshotContext(ctx context.Context, snapshotDir, snap
 	if err := checkpointAndCloseContext(ctx, candidateDB, candidatePath); err != nil {
 		return fmt.Errorf("復元候補の耐久化エラー: %w", err)
 	}
-	if err := syncFileAndDirectory(candidatePath, dir); err != nil {
+	// Flush through the original O_RDWR identity anchor. On Windows,
+	// openSnapshotFile intentionally returns a read-only no-reparse handle and
+	// FlushFileBuffers rejects that handle with ACCESS_DENIED. Reusing the
+	// creator descriptor also avoids a fresh pathname lookup before the final
+	// identity/digest proof.
+	if err := syncOpenFileAndDirectory(candidateFile, dir); err != nil {
 		return fmt.Errorf("復元候補のfsyncエラー: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
@@ -5862,6 +5885,16 @@ func syncFileAndDirectory(path, dir string) error {
 		return err
 	}
 	if err := file.Close(); err != nil {
+		return err
+	}
+	return syncDirectory(dir)
+}
+
+func syncOpenFileAndDirectory(file *os.File, dir string) error {
+	if file == nil {
+		return errors.New("cannot sync a nil database descriptor")
+	}
+	if err := file.Sync(); err != nil {
 		return err
 	}
 	return syncDirectory(dir)

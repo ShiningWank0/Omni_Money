@@ -66,7 +66,7 @@ func TestListValidationDescriptorBindsSQLiteToCandidateAcrossReplacementAndABA(t
 	}
 	defer os.Remove(candidatePath)
 
-	validated, err := instance.opener.Open(t.Context(), validationPath, securedb.ReadOnly)
+	validated, err := instance.opener.Open(t.Context(), validationPath, securedb.ImmutableReadOnly)
 	if err != nil {
 		t.Fatalf("descriptor path did not open the copied candidate: %v", err)
 	}
