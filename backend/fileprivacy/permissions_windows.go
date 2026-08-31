@@ -42,7 +42,10 @@ func privateDirectorySecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) 
 		return nil, fmt.Errorf("read current Windows account: %w", err)
 	}
 	sid := user.User.Sid.String()
-	sddl := "O:" + sid + "D:P(A;OICI;FA;;;" + sid + ")(A;OICI;FA;;;SY)"
+	sddl := "O:" + sid + "D:P(A;OICI;FA;;;" + sid + ")"
+	if sid != "S-1-5-18" {
+		sddl += "(A;OICI;FA;;;SY)"
+	}
 	descriptor, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
 		return nil, fmt.Errorf("create private Windows directory DACL: %w", err)
@@ -328,14 +331,20 @@ func validatePrivateFileHandle(file *os.File) error {
 	if err != nil {
 		return err
 	}
-	if dacl == nil || dacl.AceCount != 2 {
+	if dacl == nil {
 		return errors.New("private file DACL must contain only owner and LocalSystem")
 	}
 	system, err := windows.StringToSid("S-1-5-18")
 	if err != nil {
 		return err
 	}
-	want := map[string]bool{user.User.Sid.String(): false, system.String(): false}
+	want := map[string]bool{user.User.Sid.String(): false}
+	if user.User.Sid.String() != system.String() {
+		want[system.String()] = false
+	}
+	if int(dacl.AceCount) != len(want) {
+		return errors.New("private file DACL must contain only owner and LocalSystem")
+	}
 	const fileAllAccess = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
 	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
@@ -492,14 +501,20 @@ func validatePrivateDACL(file *os.File) error {
 	if err != nil {
 		return err
 	}
-	if dacl == nil || dacl.AceCount != 2 {
+	if dacl == nil {
 		return errors.New("private directory DACL must contain only the owner and LocalSystem")
 	}
 	system, err := windows.StringToSid("S-1-5-18")
 	if err != nil {
 		return err
 	}
-	want := map[string]bool{user.User.Sid.String(): false, system.String(): false}
+	want := map[string]bool{user.User.Sid.String(): false}
+	if user.User.Sid.String() != system.String() {
+		want[system.String()] = false
+	}
+	if int(dacl.AceCount) != len(want) {
+		return errors.New("private directory DACL must contain only the owner and LocalSystem")
+	}
 	const fileAllAccess = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
 	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE

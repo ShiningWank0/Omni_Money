@@ -1261,11 +1261,26 @@ func expectedLedgerTableDefinitions() map[string]string {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
 		)`),
+		"transaction_archive_amounts": canonicalDDL(fmt.Sprintf(`CREATE TABLE transaction_archive_amounts (
+			transaction_id INTEGER PRIMARY KEY,
+			amount INTEGER NOT NULL CHECK(amount > %d),
+			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+		)`, validation.MaxTransactionAmount)),
+		"transaction_image_archive": canonicalDDL(fmt.Sprintf(`CREATE TABLE transaction_image_archive (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			transaction_id INTEGER NOT NULL,
+			filename TEXT NOT NULL CHECK(length(CAST(filename AS BLOB)) <= %d),
+			data BLOB NOT NULL CHECK(length(data) BETWEEN 0 AND %d),
+			mime_type TEXT NOT NULL CHECK(length(CAST(mime_type AS BLOB)) <= %d),
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+		)`, models.MaxArchivedImageMetadataBytes, models.MaxArchivedImageBytes, models.MaxArchivedImageMetadataBytes)),
 		"tags": canonicalDDL(`CREATE TABLE tags (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
 			parent_id INTEGER DEFAULT NULL,
 			level INTEGER NOT NULL DEFAULT 1 CHECK(level IN (1, 2, 3)),
+			legacy_duplicate INTEGER NOT NULL DEFAULT 0 CHECK(legacy_duplicate IN (0, 1)),
 			FOREIGN KEY (parent_id) REFERENCES tags(id) ON DELETE CASCADE,
 			UNIQUE(name, parent_id)
 		)`),
@@ -1491,6 +1506,7 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, strictConstraints bool) error {
 	allowedTables := map[string]bool{
 		"transactions": true, "transaction_links": true, "transaction_images": true,
+		"transaction_archive_amounts": true, "transaction_image_archive": true,
 		"tags": true, "transaction_tags": true, "ai_transaction_idempotency": true,
 		"ai_daily_transaction_usage": true, "settings": true,
 	}
@@ -1517,14 +1533,16 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 		return errors.New("ledger is missing one or more required tables")
 	}
 	requiredColumns := map[string][]string{
-		"transactions":               {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
-		"transaction_links":          {"parent_id", "child_id"},
-		"transaction_images":         {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
-		"tags":                       {"id", "name", "parent_id", "level"},
-		"transaction_tags":           {"transaction_id", "tag_id"},
-		"ai_transaction_idempotency": {"credential_id", "idempotency_key_sha256", "request_sha256", "transaction_id", "response_account", "response_date", "created_at"},
-		"ai_daily_transaction_usage": {"credential_id", "utc_date", "successful_creates"},
-		"settings":                   {"key", "value"},
+		"transactions":                {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
+		"transaction_links":           {"parent_id", "child_id"},
+		"transaction_images":          {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
+		"transaction_archive_amounts": {"transaction_id", "amount"},
+		"transaction_image_archive":   {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
+		"tags":                        {"id", "name", "parent_id", "level", "legacy_duplicate"},
+		"transaction_tags":            {"transaction_id", "tag_id"},
+		"ai_transaction_idempotency":  {"credential_id", "idempotency_key_sha256", "request_sha256", "transaction_id", "response_account", "response_date", "created_at"},
+		"ai_daily_transaction_usage":  {"credential_id", "utc_date", "successful_creates"},
+		"settings":                    {"key", "value"},
 	}
 	for table, columns := range requiredColumns {
 		if err := requireColumnsContext(ctx, target, table, columns); err != nil {
@@ -1535,11 +1553,13 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 		{"index", "idx_transactions_account"}, {"index", "idx_transactions_account_date_id"},
 		{"index", "idx_transactions_date"}, {"index", "idx_transactions_item"}, {"index", "idx_transactions_memo"},
 		{"index", "idx_transaction_links_child_id"}, {"index", "idx_transaction_images_txid"},
+		{"index", "idx_transaction_image_archive_txid"},
 		{"index", "idx_tags_parent"}, {"index", "idx_tags_root_name_unique"},
 		{"index", "idx_transaction_tags_txid"}, {"index", "idx_transaction_tags_tagid"},
 		{"index", "idx_ai_idempotency_credential_key"}, {"index", "idx_ai_idempotency_transaction"},
 		{"index", "idx_ai_daily_usage_credential_date"},
 		{"trigger", "trg_transaction_images_quota_insert"}, {"trigger", "trg_transaction_images_immutable_update"},
+		{"trigger", "trg_transaction_image_archive_quota_insert"},
 		{"trigger", "validate_transactions_amount_insert"}, {"trigger", "validate_transactions_amount_update"},
 	}
 	allowedPersistentObjects := make(map[string]struct{}, len(objects))
@@ -1584,6 +1604,7 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 		"transactions":               {"idx_transactions_account", "idx_transactions_account_date_id", "idx_transactions_date", "idx_transactions_item", "idx_transactions_memo"},
 		"transaction_links":          {"idx_transaction_links_child_id"},
 		"transaction_images":         {"idx_transaction_images_txid"},
+		"transaction_image_archive":  {"idx_transaction_image_archive_txid"},
 		"tags":                       {"idx_tags_parent", "idx_tags_root_name_unique"},
 		"transaction_tags":           {"idx_transaction_tags_txid", "idx_transaction_tags_tagid"},
 		"ai_transaction_idempotency": {"idx_ai_idempotency_credential_key", "idx_ai_idempotency_transaction"},
@@ -1634,6 +1655,12 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 			{referenced: "transactions", from: "child_id", to: "id", onUpdate: "NO ACTION", onDelete: "CASCADE"},
 		},
 		"transaction_images": {
+			{referenced: "transactions", from: "transaction_id", to: "id", onUpdate: "NO ACTION", onDelete: "CASCADE"},
+		},
+		"transaction_archive_amounts": {
+			{referenced: "transactions", from: "transaction_id", to: "id", onUpdate: "NO ACTION", onDelete: "CASCADE"},
+		},
+		"transaction_image_archive": {
 			{referenced: "transactions", from: "transaction_id", to: "id", onUpdate: "NO ACTION", onDelete: "CASCADE"},
 		},
 		"tags": {
@@ -1725,11 +1752,24 @@ func validateCurrentColumnDefinitionsContext(ctx context.Context, target schemaQ
 			{name: "mime_type", columnType: "TEXT", notNull: 1, defaultValue: "'image/jpeg'"},
 			{name: "created_at", columnType: "DATETIME", defaultValue: "current_timestamp"},
 		},
+		"transaction_archive_amounts": {
+			{name: "transaction_id", columnType: "INTEGER", primaryKey: 1},
+			{name: "amount", columnType: "INTEGER", notNull: 1},
+		},
+		"transaction_image_archive": {
+			{name: "id", columnType: "INTEGER", primaryKey: 1},
+			{name: "transaction_id", columnType: "INTEGER", notNull: 1},
+			{name: "filename", columnType: "TEXT", notNull: 1},
+			{name: "data", columnType: "BLOB", notNull: 1},
+			{name: "mime_type", columnType: "TEXT", notNull: 1},
+			{name: "created_at", columnType: "DATETIME", defaultValue: "current_timestamp"},
+		},
 		"tags": {
 			{name: "id", columnType: "INTEGER", primaryKey: 1},
 			{name: "name", columnType: "TEXT", notNull: 1},
 			{name: "parent_id", columnType: "INTEGER", defaultValue: "null"},
 			{name: "level", columnType: "INTEGER", notNull: 1, defaultValue: "1"},
+			{name: "legacy_duplicate", columnType: "INTEGER", notNull: 1, defaultValue: "0"},
 		},
 		"transaction_tags": {
 			{name: "transaction_id", columnType: "INTEGER", notNull: 1, primaryKey: 1},
@@ -1802,13 +1842,53 @@ func validateTriggerDefinitionsContext(ctx context.Context, target schemaQueryer
 			BEFORE INSERT ON transaction_images
 			WHEN length(NEW.data) <= 0
 				OR length(NEW.data) > %d
-				OR (SELECT COUNT(*) FROM transaction_images WHERE transaction_id = NEW.transaction_id) >= %d
-				OR COALESCE((SELECT SUM(length(data)) FROM transaction_images WHERE transaction_id = NEW.transaction_id), 0) + length(NEW.data) > %d
-				OR COALESCE(( SELECT SUM(length(ti.data)) FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id) ), 0) + length(NEW.data) > %d
-				OR COALESCE((SELECT SUM(length(data)) FROM transaction_images), 0) + length(NEW.data) > %d
+				OR ((SELECT COUNT(*) FROM transaction_images WHERE transaction_id = NEW.transaction_id)
+					+ (SELECT COUNT(*) FROM transaction_image_archive WHERE transaction_id = NEW.transaction_id)) >= %d
+				OR (COALESCE((SELECT SUM(length(data)) FROM transaction_images WHERE transaction_id = NEW.transaction_id), 0)
+					+ COALESCE((SELECT SUM(length(data)) FROM transaction_image_archive WHERE transaction_id = NEW.transaction_id), 0)
+					+ length(NEW.data)) > %d
+				OR COALESCE((
+					SELECT SUM(bytes) FROM (
+						SELECT length(ti.data) AS bytes FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id
+						WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+						UNION ALL
+						SELECT length(ai.data) AS bytes FROM transaction_image_archive ai JOIN transactions t ON t.id = ai.transaction_id
+						WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+					)
+				), 0) + length(NEW.data) > %d
+				OR COALESCE((SELECT SUM(bytes) FROM (
+					SELECT length(data) AS bytes FROM transaction_images
+					UNION ALL SELECT length(data) AS bytes FROM transaction_image_archive
+				)), 0) + length(NEW.data) > %d
 			BEGIN
 				SELECT RAISE(ABORT, 'image storage quota exceeded');
 			END`, models.MaxImageBytes, models.MaxImagesPerTransaction, models.MaxImageBytesPerTransaction, models.MaxImageBytesPerAccount, models.MaxImageBytesDatabase)),
+		"trg_transaction_image_archive_quota_insert": canonicalDDL(fmt.Sprintf(`CREATE TRIGGER trg_transaction_image_archive_quota_insert
+			BEFORE INSERT ON transaction_image_archive
+			WHEN length(NEW.data) > %d
+				OR length(CAST(NEW.filename AS BLOB)) > %d
+				OR length(CAST(NEW.mime_type AS BLOB)) > %d
+				OR ((SELECT COUNT(*) FROM transaction_images WHERE transaction_id = NEW.transaction_id)
+					+ (SELECT COUNT(*) FROM transaction_image_archive WHERE transaction_id = NEW.transaction_id)) >= %d
+				OR (SELECT COUNT(*) FROM transaction_image_archive) >= %d
+				OR COALESCE((
+					SELECT SUM(bytes) FROM (
+						SELECT length(ti.data) AS bytes FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id
+						WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+						UNION ALL
+						SELECT length(ai.data) AS bytes FROM transaction_image_archive ai JOIN transactions t ON t.id = ai.transaction_id
+						WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+					)
+				), 0) + length(NEW.data) > %d
+				OR COALESCE((SELECT SUM(bytes) FROM (
+					SELECT length(data) AS bytes FROM transaction_images
+					UNION ALL SELECT length(data) AS bytes FROM transaction_image_archive
+				)), 0) + length(NEW.data) > %d
+			BEGIN
+				SELECT RAISE(ABORT, 'archive image storage quota exceeded');
+			END`, models.MaxArchivedImageBytes, models.MaxArchivedImageMetadataBytes, models.MaxArchivedImageMetadataBytes,
+			models.MaxArchivedImagesPerTransaction, models.MaxArchivedImagesDatabase,
+			models.MaxImageBytesPerAccount, models.MaxImageBytesDatabase)),
 		"trg_transaction_images_immutable_update": canonicalDDL(`CREATE TRIGGER trg_transaction_images_immutable_update
 			BEFORE UPDATE ON transaction_images
 			BEGIN
@@ -1886,13 +1966,17 @@ func validateIndexShapesContext(ctx context.Context, target schemaQueryer) error
 			table: "transaction_images", cols: []string{"transaction_id"},
 			ddl: "CREATE INDEX idx_transaction_images_txid ON transaction_images(transaction_id)",
 		},
+		"idx_transaction_image_archive_txid": {
+			table: "transaction_image_archive", cols: []string{"transaction_id"},
+			ddl: "CREATE INDEX idx_transaction_image_archive_txid ON transaction_image_archive(transaction_id)",
+		},
 		"idx_tags_parent": {
 			table: "tags", cols: []string{"parent_id"},
 			ddl: "CREATE INDEX idx_tags_parent ON tags(parent_id)",
 		},
 		"idx_tags_root_name_unique": {
 			table: "tags", unique: true, partial: true, cols: []string{"name"},
-			ddl: "CREATE UNIQUE INDEX idx_tags_root_name_unique ON tags(name) WHERE parent_id IS NULL",
+			ddl: "CREATE UNIQUE INDEX idx_tags_root_name_unique ON tags(name) WHERE parent_id IS NULL AND legacy_duplicate = 0",
 		},
 		"idx_transaction_tags_txid": {
 			table: "transaction_tags", cols: []string{"transaction_id"},
