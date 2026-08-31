@@ -29,6 +29,44 @@ func TestSyncOpenRestoreCandidateSupportsWindowsFlush(t *testing.T) {
 	}
 }
 
+func TestValidateSnapshotDACLAllowsDistinctOwnerPrincipalSets(t *testing.T) {
+	system, err := windows.StringToSid("S-1-5-18")
+	if err != nil {
+		t.Fatal(err)
+	}
+	administrators, err := windows.StringToSid("S-1-5-32-544")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		sddl   string
+		owner  *windows.SID
+		system *windows.SID
+		aces   uint16
+	}{
+		{name: "LocalSystem owner uses one ACE", sddl: "D:P(A;;FA;;;SY)", owner: system, system: system, aces: 1},
+		{name: "normal owner uses owner and system ACEs", sddl: "D:P(A;;FA;;;BA)(A;;FA;;;SY)", owner: administrators, system: system, aces: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			descriptor, err := windows.SecurityDescriptorFromString(test.sddl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dacl, _, err := descriptor.DACL()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dacl.AceCount != test.aces {
+				t.Fatalf("test DACL ACE count = %d, want %d", dacl.AceCount, test.aces)
+			}
+			if err := validateSnapshotDACL(dacl, test.owner, test.system); err != nil {
+				t.Fatalf("private DACL rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestListValidationAnchorBlocksWindowsCandidateReplacement(t *testing.T) {
 	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
 	snapshotPath, err := instance.CreateSnapshot(snapshotDir)

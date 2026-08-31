@@ -254,7 +254,7 @@ jobs:
           export CGO_CFLAGS="-I${SQLCIPHER_WINDOWS}/include -I${OPENSSL_WINDOWS}/include"
           export CGO_LDFLAGS="-L${SQLCIPHER_WINDOWS}/lib ${OPENSSL_WINDOWS}/lib/libcrypto.a -lws2_32 -lcrypt32 -lgdi32"
           go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" \
-            -run '^(TestEncryptedDatabaseSnapshotAndRestoreLifecycle|TestSnapshotPruneJournalRollsBackPreparedQuarantine|TestCreateSnapshotRecoversPreparedPruneJournalBeforeNewTransaction|TestPublishedPruneFinalizeStateMatrixIsCrashIdempotent|TestListSnapshotsCandidateLifetimeSerializesAcrossProcesses|TestSnapshotTransactionLockSerializesConcurrentOwners|TestListValidationAnchorBlocksWindowsCandidateReplacement|TestSnapshotTransactionLockRejectsUnsafeWindowsRootAndPrivacyDrift|TestSyncOpenRestoreCandidateSupportsWindowsFlush)$' \
+            -run '^(TestEncryptedDatabaseSnapshotAndRestoreLifecycle|TestStartupRecoveryRestoresSoleBackupBeforeFreshCreate|TestStartupRecoveryReplacesCorruptLiveWithValidBackup|TestSnapshotPruneJournalRollsBackPreparedQuarantine|TestCreateSnapshotRecoversPreparedPruneJournalBeforeNewTransaction|TestPublishedPruneFinalizeStateMatrixIsCrashIdempotent|TestListSnapshotsCandidateLifetimeSerializesAcrossProcesses|TestSnapshotTransactionLockSerializesConcurrentOwners|TestListValidationAnchorBlocksWindowsCandidateReplacement|TestSnapshotTransactionLockRejectsUnsafeWindowsRootAndPrivacyDrift|TestSyncOpenRestoreCandidateSupportsWindowsFlush|TestValidateSnapshotDACLAllowsDistinctOwnerPrincipalSets)$' \
             ./backend/database
 
       - name: Build application on Linux or macOS

@@ -16,13 +16,23 @@ var procMoveFileEx = windows.NewLazySystemDLL("kernel32.dll").NewProc("MoveFileE
 const replaceFileWriteThrough = 0x1
 
 func openSnapshotFile(path string) (*os.File, error) {
+	return openPrivateSnapshotFile(path, windows.GENERIC_READ)
+}
+
+// openDurableDatabaseFile opens the exact private, non-reparse file with
+// write access so FlushFileBuffers (os.File.Sync) is valid on Windows.
+func openDurableDatabaseFile(path string) (*os.File, error) {
+	return openPrivateSnapshotFile(path, windows.GENERIC_READ|windows.GENERIC_WRITE)
+}
+
+func openPrivateSnapshotFile(path string, access uint32) (*os.File, error) {
 	pointer, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
 	}
 	handle, err := windows.CreateFile(
 		pointer,
-		windows.GENERIC_READ,
+		access,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
@@ -102,14 +112,21 @@ func validateSnapshotHandle(file *os.File) error {
 	if err != nil {
 		return err
 	}
-	if dacl == nil || dacl.AceCount != 2 {
-		return errors.New("snapshot DACL must contain only the owner and LocalSystem")
-	}
 	system, err := windows.StringToSid("S-1-5-18")
 	if err != nil {
 		return err
 	}
-	want := map[string]bool{user.User.Sid.String(): false, system.String(): false}
+	return validateSnapshotDACL(dacl, user.User.Sid, system)
+}
+
+func validateSnapshotDACL(dacl *windows.ACL, owner, system *windows.SID) error {
+	if owner == nil || system == nil {
+		return errors.New("snapshot DACL principal is unavailable")
+	}
+	want := requiredSnapshotPrincipals(owner, system)
+	if dacl == nil || int(dacl.AceCount) != len(want) {
+		return errors.New("snapshot DACL must contain only the distinct owner and LocalSystem principals")
+	}
 	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, index, &ace); err != nil {
@@ -130,6 +147,9 @@ func validateSnapshotHandle(file *os.File) error {
 		if _, ok := want[sid.String()]; !ok {
 			return errors.New("snapshot DACL grants an unexpected principal")
 		}
+		if want[sid.String()] {
+			return errors.New("snapshot DACL contains a duplicate principal")
+		}
 		want[sid.String()] = true
 	}
 	for _, present := range want {
@@ -138,6 +158,17 @@ func validateSnapshotHandle(file *os.File) error {
 		}
 	}
 	return nil
+}
+
+func requiredSnapshotPrincipals(owner, system *windows.SID) map[string]bool {
+	want := make(map[string]bool, 2)
+	if owner != nil {
+		want[owner.String()] = false
+	}
+	if system != nil {
+		want[system.String()] = false
+	}
+	return want
 }
 
 func validSnapshotFile(info os.FileInfo) bool {

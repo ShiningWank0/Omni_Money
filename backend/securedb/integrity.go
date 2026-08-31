@@ -17,6 +17,9 @@ type databaseQueryer interface {
 var (
 	ErrCipherIntegrity = errors.New("SQLCipher page authentication failed")
 	ErrSQLiteIntegrity = errors.New("SQLite integrity check failed")
+	// ErrPlaintextHeader marks a database whose first page exposes SQLite's
+	// plaintext magic. Encrypted vault snapshots must never have this header.
+	ErrPlaintextHeader = errors.New("database has a plaintext SQLite header")
 )
 
 func (o *Opener) CheckIntegrity(ctx context.Context, db *sql.DB) error {
@@ -26,7 +29,7 @@ func (o *Opener) CheckIntegrity(ctx context.Context, db *sql.DB) error {
 	if o.Encrypted() {
 		rows, err := db.QueryContext(ctx, "PRAGMA cipher_integrity_check")
 		if err != nil {
-			return fmt.Errorf("%w: %v", ErrCipherIntegrity, err)
+			return fmt.Errorf("%w: %w", ErrCipherIntegrity, err)
 		}
 		defer rows.Close()
 		if rows.Next() {
@@ -35,7 +38,7 @@ func (o *Opener) CheckIntegrity(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("%w: %s", ErrCipherIntegrity, detail)
 		}
 		if err := rows.Err(); err != nil {
-			return fmt.Errorf("%w: %v", ErrCipherIntegrity, err)
+			return fmt.Errorf("%w: %w", ErrCipherIntegrity, err)
 		}
 	}
 	return expectSQLiteIntegrity(ctx, db)
@@ -44,7 +47,7 @@ func (o *Opener) CheckIntegrity(ctx context.Context, db *sql.DB) error {
 func expectSQLiteIntegrity(ctx context.Context, db databaseQueryer) error {
 	var result string
 	if err := db.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&result); err != nil {
-		return fmt.Errorf("%w: %v", ErrSQLiteIntegrity, err)
+		return fmt.Errorf("%w: %w", ErrSQLiteIntegrity, err)
 	}
 	if result != "ok" {
 		return fmt.Errorf("%w: %s", ErrSQLiteIntegrity, result)
@@ -55,7 +58,7 @@ func expectSQLiteIntegrity(ctx context.Context, db databaseQueryer) error {
 func expectForeignKeyIntegrity(ctx context.Context, db databaseQueryer) error {
 	rows, err := db.QueryContext(ctx, "PRAGMA foreign_key_check")
 	if err != nil {
-		return fmt.Errorf("%w: foreign_key_check: %v", ErrSQLiteIntegrity, err)
+		return fmt.Errorf("%w: foreign_key_check: %w", ErrSQLiteIntegrity, err)
 	}
 	defer rows.Close()
 	if rows.Next() {
@@ -70,7 +73,7 @@ func expectForeignKeyIntegrity(ctx context.Context, db databaseQueryer) error {
 		return fmt.Errorf("%w: foreign key violation in table %v row %v", ErrSQLiteIntegrity, values[0], values[1])
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("%w: foreign_key_check: %v", ErrSQLiteIntegrity, err)
+		return fmt.Errorf("%w: foreign_key_check: %w", ErrSQLiteIntegrity, err)
 	}
 	return nil
 }
@@ -81,10 +84,14 @@ func RequireEncryptedHeader(path string) error {
 		return err
 	}
 	defer file.Close()
-	return requireEncryptedHeaderFile(file)
+	return RequireEncryptedHeaderFile(file)
 }
 
-func requireEncryptedHeaderFile(file *os.File) error {
+// RequireEncryptedHeaderFile verifies the encrypted-header invariant through
+// an already-open, caller-owned descriptor. It deliberately does not close the
+// file. Descriptor-based callers use this form when a stable /proc/self/fd or
+// /dev/fd pathname would otherwise be rejected by the no-follow path opener.
+func RequireEncryptedHeaderFile(file *os.File) error {
 	if file == nil {
 		return errors.New("encrypted database header file is nil")
 	}
@@ -96,7 +103,12 @@ func requireEncryptedHeaderFile(file *os.File) error {
 		return fmt.Errorf("read encrypted database header: %w", err)
 	}
 	if string(header) == "SQLite format 3\x00" {
-		return errors.New("database has a plaintext SQLite header")
+		return ErrPlaintextHeader
 	}
 	return nil
+}
+
+// Kept private for package-local compatibility with older focused tests.
+func requireEncryptedHeaderFile(file *os.File) error {
+	return RequireEncryptedHeaderFile(file)
 }

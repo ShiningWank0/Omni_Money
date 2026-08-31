@@ -3,6 +3,7 @@
 package database
 
 import (
+	"errors"
 	"os"
 	"strconv"
 	"syscall"
@@ -10,6 +11,22 @@ import (
 
 func openSnapshotFile(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) // #nosec G304 -- path is a validated snapshot basename under a private directory.
+}
+
+func openDurableDatabaseFile(path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0) // #nosec G304 -- caller passes a generated private database artifact.
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil || !validSnapshotFile(info) {
+		_ = file.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("durability target is not a private regular file")
+	}
+	return file, nil
 }
 
 // validSnapshotFile deliberately uses Lstat metadata.  A restore source must

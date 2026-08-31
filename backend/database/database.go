@@ -2580,7 +2580,13 @@ func (i *Instance) listSnapshotsContext(ctx context.Context, snapshotDir string,
 		}
 		path := filepath.Join(snapshotDir, entry.Name())
 		info, err := transactionLock.lstat(path)
-		if err != nil || !validSnapshotFile(info) || !validSnapshotMode(info, encrypted) {
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("snapshot entry metadata: %w", err)
+		}
+		if !validSnapshotFile(info) || !validSnapshotMode(info, encrypted) {
 			// Listing is intentionally fail-closed per entry: a stray symlink,
 			// hard link, or non-regular file must never become a restore target.
 			continue
@@ -2615,11 +2621,25 @@ func (i *Instance) validateSnapshotEntry(ctx context.Context, path string, inspe
 	}
 	file, err := transactionLock.openArtifact(path)
 	if err != nil {
-		return false, 0, nil
+		// A pathname replacement/removal is an invalid entry and may be omitted;
+		// a stable private path that cannot be opened is infrastructure failure.
+		postInfo, statErr := transactionLock.lstat(path)
+		if os.IsNotExist(err) || os.IsNotExist(statErr) || statErr == nil && (!validSnapshotFile(postInfo) || !sameSnapshotInfo(inspected, postInfo)) {
+			return false, 0, nil
+		}
+		return false, 0, errors.Join(fmt.Errorf("snapshot source open: %w", err), statErr)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("snapshot source close: %w", closeErr))
+			valid = false
+		}
+	}()
 	fdInfo, err := file.Stat()
-	if err != nil || fdInfo.Size() < 0 || fdInfo.Size() > maxSnapshotValidationBytes || fdInfo.Size() > remainingWork ||
+	if err != nil {
+		return false, 0, fmt.Errorf("snapshot source stat: %w", err)
+	}
+	if fdInfo.Size() < 0 || fdInfo.Size() > maxSnapshotValidationBytes || fdInfo.Size() > remainingWork ||
 		!validSnapshotFile(fdInfo) || !validSnapshotMode(fdInfo, encrypted) ||
 		!snapshotSourceMatches(inspected, fdInfo) {
 		return false, 0, nil
@@ -2694,7 +2714,12 @@ func (i *Instance) validateSnapshotEntry(ctx context.Context, path string, inspe
 		_ = reopened.Close()
 		return false, used, errors.Join(errors.New("snapshot validation candidate digest changed before rooted reopen"), err)
 	}
-	defer reopened.Close()
+	defer func() {
+		if closeErr := reopened.Close(); closeErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("snapshot validation candidate anchor close: %w", closeErr))
+			valid = false
+		}
+	}()
 	if err := transactionLock.verify(); err != nil {
 		return false, used, fmt.Errorf("snapshot validation transaction boundary: %w", err)
 	}
@@ -2702,11 +2727,29 @@ func (i *Instance) validateSnapshotEntry(ctx context.Context, path string, inspe
 	// replacement must not cause a partially copied object to be treated as a
 	// validated snapshot.
 	postFDInfo, err := file.Stat()
-	if err != nil || !snapshotSourceMatches(fdInfo, postFDInfo) {
+	if err != nil {
+		return false, used, fmt.Errorf("snapshot source restat: %w", err)
+	}
+	if !snapshotSourceMatches(fdInfo, postFDInfo) {
 		return false, used, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return false, used, err
+	}
+	if encrypted {
+		// validationPath is /proc/self/fd/N or /dev/fd/N on Unix. Feeding that
+		// symlink back through RequireEncryptedHeader(path) is both unnecessary
+		// and guaranteed to fail its O_NOFOLLOW boundary. Verify the exact
+		// digest-bound descriptor instead.
+		if headerErr := securedb.RequireEncryptedHeaderFile(reopened); headerErr != nil {
+			if boundaryErr := validateListSnapshotCandidateBoundary(transactionLock, candidatePath, reopened, candidateInfo, candidateDigest); boundaryErr != nil {
+				return false, used, errors.Join(fmt.Errorf("snapshot validation encrypted header: %w", headerErr), boundaryErr)
+			}
+			if errors.Is(headerErr, securedb.ErrPlaintextHeader) || errors.Is(headerErr, io.EOF) || errors.Is(headerErr, io.ErrUnexpectedEOF) {
+				return false, used, nil
+			}
+			return false, used, fmt.Errorf("snapshot validation encrypted header: %w", headerErr)
+		}
 	}
 	// The validation copy is already pinned and digest-bound. Immutable mode
 	// prevents SQLite/SQLCipher from attempting locks or sidecars beside a
@@ -2728,7 +2771,7 @@ func (i *Instance) validateSnapshotEntry(ctx context.Context, path string, inspe
 		_ = db.Close()
 		return false, used, boundaryErr
 	}
-	validErr := i.validateSnapshotDatabaseContext(ctx, db, validationPath)
+	validErr := i.validateSnapshotDatabaseContextHeaderValidated(ctx, db, validationPath, encrypted)
 	closeErr := db.Close()
 	if closeErr != nil {
 		return false, used, fmt.Errorf("snapshot validation database close: %w", closeErr)
@@ -2737,13 +2780,25 @@ func (i *Instance) validateSnapshotEntry(ctx context.Context, path string, inspe
 		return false, used, errors.Join(validErr, boundaryErr)
 	}
 	if validErr != nil {
-		return false, used, errIfContextDone(ctx, validErr)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, used, ctxErr
+		}
+		if errors.Is(validErr, errInvalidSnapshotContent) {
+			return false, used, nil
+		}
+		return false, used, fmt.Errorf("snapshot validation database: %w", validErr)
 	}
 	// The path may not have been replaced while its descriptor was being
 	// copied/validated. The candidate remains the validated bytes even if the
 	// path was briefly swapped away, but do not cache or expose that name.
 	postInfo, postErr := transactionLock.lstat(path)
-	if postErr != nil || !sameSnapshotInfo(fdInfo, postInfo) {
+	if postErr != nil {
+		if os.IsNotExist(postErr) {
+			return false, used, nil
+		}
+		return false, used, fmt.Errorf("snapshot source final metadata: %w", postErr)
+	}
+	if !sameSnapshotInfo(fdInfo, postInfo) {
 		return false, used, nil
 	}
 	return true, used, nil
@@ -2765,14 +2820,16 @@ func validateListSnapshotCandidateBoundary(transactionLock *snapshotTransactionL
 	if err != nil {
 		return fmt.Errorf("snapshot validation candidate path: %w", err)
 	}
-	defer actualFile.Close()
 	actual, err := actualFile.Stat()
 	if err != nil || !sameSnapshotInfo(expected, actual) {
-		return errors.New("snapshot validation candidate identity changed")
+		return errors.Join(errors.New("snapshot validation candidate identity changed"), err, actualFile.Close())
 	}
 	actualDigest, err := digestOpenFile(actualFile)
 	if err != nil || !strings.EqualFold(expectedDigest, actualDigest) {
-		return errors.Join(errors.New("snapshot validation candidate path digest changed"), err)
+		return errors.Join(errors.New("snapshot validation candidate path digest changed"), err, actualFile.Close())
+	}
+	if err := actualFile.Close(); err != nil {
+		return fmt.Errorf("snapshot validation candidate path close: %w", err)
 	}
 	return nil
 }
@@ -2785,14 +2842,7 @@ func invalidSnapshotContentError(err error) bool {
 	return sqliteErr.Code == sqlite3.ErrNotADB || sqliteErr.Code == sqlite3.ErrCorrupt
 }
 
-func errIfContextDone(ctx context.Context, err error) error {
-	if ctx != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-	}
-	return nil
-}
+var errInvalidSnapshotContent = errors.New("invalid snapshot content")
 
 func sameSnapshotInfo(a, b os.FileInfo) bool {
 	return a != nil && b != nil && os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime()) && a.Mode().Perm() == b.Mode().Perm()
@@ -2832,6 +2882,14 @@ func (i *Instance) validateSnapshotDatabase(target *sql.DB, path string) error {
 }
 
 func (i *Instance) validateSnapshotDatabaseContext(ctx context.Context, target *sql.DB, path string) error {
+	return i.validateSnapshotDatabaseContextHeaderValidated(ctx, target, path, false)
+}
+
+// validateSnapshotDatabaseContextHeaderValidated separates invalid ledger
+// content from operational failures. Listing may omit the former, but must
+// propagate opener, descriptor, I/O and close failures rather than silently
+// presenting an empty snapshot set.
+func (i *Instance) validateSnapshotDatabaseContextHeaderValidated(ctx context.Context, target *sql.DB, path string, encryptedHeaderValidated bool) error {
 	if target == nil {
 		return errors.New("snapshot database is not open")
 	}
@@ -2841,28 +2899,67 @@ func (i *Instance) validateSnapshotDatabaseContext(ctx context.Context, target *
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if i.opener != nil && i.opener.Encrypted() {
+	if i.opener != nil && i.opener.Encrypted() && !encryptedHeaderValidated {
 		if err := securedb.RequireEncryptedHeader(path); err != nil {
+			if errors.Is(err, securedb.ErrPlaintextHeader) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return fmt.Errorf("%w: encrypted header: %v", errInvalidSnapshotContent, err)
+			}
 			return err
 		}
 	}
 	if err := i.checkIntegrityContext(ctx, target); err != nil {
-		return err
+		if snapshotValidationInfrastructureError(err) {
+			return err
+		}
+		return fmt.Errorf("%w: integrity: %v", errInvalidSnapshotContent, err)
 	}
 	var userTables int
 	if err := validateInternalSQLiteTablesContext(ctx, target); err != nil {
-		return fmt.Errorf("SQLite internal table validation failed: %w", err)
+		if snapshotValidationInfrastructureError(err) {
+			return fmt.Errorf("SQLite internal table validation failed: %w", err)
+		}
+		return fmt.Errorf("%w: SQLite internal table validation failed: %v", errInvalidSnapshotContent, err)
 	}
 	if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "+sqliteUserTablePredicate).Scan(&userTables); err != nil {
-		return err
+		if snapshotValidationInfrastructureError(err) {
+			return err
+		}
+		return fmt.Errorf("%w: table count: %v", errInvalidSnapshotContent, err)
 	}
 	if userTables == 0 {
-		return errors.New("empty database is not a ledger snapshot")
+		return fmt.Errorf("%w: empty database is not a ledger snapshot", errInvalidSnapshotContent)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return validateLedgerSchemaContext(ctx, target, false)
+	if err := validateLedgerSchemaContext(ctx, target, false); err != nil {
+		if snapshotValidationInfrastructureError(err) {
+			return err
+		}
+		return fmt.Errorf("%w: ledger schema: %v", errInvalidSnapshotContent, err)
+	}
+	return nil
+}
+
+func snapshotValidationInfrastructureError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var sqliteErr sqlite3.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	switch sqliteErr.Code {
+	case sqlite3.ErrBusy, sqlite3.ErrLocked, sqlite3.ErrIoErr, sqlite3.ErrCantOpen,
+		sqlite3.ErrProtocol, sqlite3.ErrFull, sqlite3.ErrReadonly, sqlite3.ErrInterrupt,
+		sqlite3.ErrPerm, sqlite3.ErrAuth, sqlite3.ErrMisuse, sqlite3.ErrNomem:
+		return true
+	default:
+		return false
+	}
 }
 
 // RestoreSnapshot はスナップショットからDBを復元する。
@@ -3076,13 +3173,23 @@ func (i *Instance) RestoreSnapshotContext(ctx context.Context, snapshotDir, snap
 	if err != nil {
 		return fmt.Errorf("現行DB退避先を作成できません: %w", err)
 	}
-	if err := copyDatabaseFile(currentPath, backupPath); err != nil {
+	backupFile, err := copyDatabaseFileOpen(currentPath, backupPath)
+	if err != nil {
 		return fmt.Errorf("現行DB退避コピーエラー: %w", err)
 	}
-	if err := syncFileAndDirectory(backupPath, dir); err != nil {
+	defer func() {
+		if backupFile != nil {
+			_ = backupFile.Close()
+		}
+	}()
+	if err := syncOpenFileAndDirectory(backupFile, dir); err != nil {
 		return fmt.Errorf("現行DB退避のfsyncエラー: %w", err)
 	}
-	backupIdentity, oldDigest, err := digestSnapshotPath(backupPath)
+	backupIdentity, err := backupFile.Stat()
+	if err != nil {
+		return fmt.Errorf("現行DB退避identity検証エラー: %w", err)
+	}
+	oldDigest, err := digestOpenFileContext(durableCtx, backupFile)
 	if err != nil {
 		return fmt.Errorf("現行DB退避digest検証エラー: %w", err)
 	}
@@ -3092,7 +3199,7 @@ func (i *Instance) RestoreSnapshotContext(ctx context.Context, snapshotDir, snap
 	if err := assertPathDigest(candidatePath, candidateIdentity, candidateDigest); err != nil {
 		return fmt.Errorf("復元候補digest再検証エラー: %w", err)
 	}
-	if err := assertPathDigest(backupPath, backupIdentity, oldDigest); err != nil {
+	if err := assertOpenFileAtPath(backupFile, backupPath); err != nil {
 		return fmt.Errorf("現行DB退避digest再検証エラー: %w", err)
 	}
 	manifest := restoreManifest{
@@ -3114,8 +3221,24 @@ func (i *Instance) RestoreSnapshotContext(ctx context.Context, snapshotDir, snap
 	if err := assertPathDigest(candidatePath, candidateIdentity, candidateDigest); err != nil {
 		return fmt.Errorf("復元候補配置前のidentity/digest検証エラー: %w", err)
 	}
-	if err := assertPathDigest(backupPath, backupIdentity, oldDigest); err != nil {
+	if anchorDigest, digestErr := digestOpenFileContext(durableCtx, backupFile); digestErr != nil || !strings.EqualFold(oldDigest, anchorDigest) {
+		return fmt.Errorf("現行DB退避配置前のdescriptor digest検証エラー: %w", errors.Join(errors.New("backup descriptor content changed"), digestErr))
+	}
+	if err := assertOpenFileAtPath(backupFile, backupPath); err != nil {
 		return fmt.Errorf("現行DB退避配置前のidentity/digest検証エラー: %w", err)
+	}
+	if finalBackupIdentity, statErr := backupFile.Stat(); statErr != nil || !sameSnapshotInfo(backupIdentity, finalBackupIdentity) {
+		return fmt.Errorf("現行DB退避配置前のidentity検証エラー: %w", errors.Join(errors.New("backup descriptor identity changed"), statErr))
+	}
+	// ReplaceFileW cannot replace a backup pathname while our anchor handle is
+	// open. Close it only at this final boundary; the immediate pathname proof
+	// below covers the short close-to-replace interval.
+	if err := backupFile.Close(); err != nil {
+		return fmt.Errorf("現行DB退避のクローズエラー: %w", err)
+	}
+	backupFile = nil
+	if err := assertPathDigest(backupPath, backupIdentity, oldDigest); err != nil {
+		return fmt.Errorf("現行DB退避配置直前のidentity/digest検証エラー: %w", err)
 	}
 
 	// Replace the live pathname in one filesystem operation. POSIX rename is
@@ -3129,6 +3252,17 @@ func (i *Instance) RestoreSnapshotContext(ctx context.Context, snapshotDir, snap
 		return fmt.Errorf("復元候補の配置エラー: %w", err)
 	}
 	removeCandidate = false
+	// On Windows ReplaceFileW deletes the prepared copy and asks the OS to
+	// recreate backupPath from the former live target. Validate that OS-produced
+	// rollback image before relying on it at any subsequent crash boundary. On
+	// Unix this revalidates the still-existing prepared copy.
+	_, replacedBackupDigest, err := digestSnapshotPath(backupPath)
+	if err != nil || !strings.EqualFold(oldDigest, replacedBackupDigest) {
+		if err == nil {
+			err = errors.New("OS-produced restore backup does not match the prepared live image")
+		}
+		return errors.Join(fmt.Errorf("復元配置後の退避DB検証エラー: %w", err), rollbackRestoreFilesExpected(currentPath, backupPath, candidatePath, i, oldDigest))
+	}
 	if err := syncDirectory(dir); err != nil {
 		return errors.Join(fmt.Errorf("復元配置のfsyncエラー: %w", err), rollbackRestoreFilesExpected(currentPath, backupPath, candidatePath, i, oldDigest))
 	}
@@ -5250,39 +5384,48 @@ func randomDatabasePath(dir, prefix string) (string, error) {
 // destination is important even though the name is random: it preserves the
 // no-overwrite boundary if a hostile process can influence the directory.
 func copyDatabaseFile(source, destination string) error {
-	in, err := openSnapshotFile(source)
+	out, err := copyDatabaseFileOpen(source, destination)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	out, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- destination is generated in the private DB directory.
+	return out.Close()
+}
+
+// copyDatabaseFileOpen returns the private O_RDWR creation descriptor after
+// the bytes have been flushed. Restore keeps this identity anchor open through
+// digest, manifest and final pre-publication checks. This is also required on
+// Windows, where Sync on a GENERIC_READ handle fails with ACCESS_DENIED.
+func copyDatabaseFileOpen(source, destination string) (*os.File, error) {
+	in, err := openSnapshotFile(source)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(destination, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- destination is generated in the private DB directory.
+	if err != nil {
+		return nil, err
 	}
 	completed := false
 	defer func() {
-		_ = out.Close()
 		if !completed {
+			_ = out.Close()
 			_ = os.Remove(destination)
 		}
 	}()
 	if err := out.Chmod(0600); err != nil {
-		return err
+		return nil, err
 	}
 	if err := fileprivacy.Harden(out); err != nil {
-		return err
+		return nil, err
 	}
 	if err := copyFileToOpenBounded(in, out, maxSnapshotValidationBytes); err != nil {
-		return err
+		return nil, err
 	}
 	if err := out.Sync(); err != nil {
-		return err
-	}
-	if err := out.Close(); err != nil {
-		return err
+		return nil, err
 	}
 	completed = true
-	return nil
+	return out, nil
 }
 
 func removeRestoreBackup(path, dir string) error {
@@ -5876,7 +6019,7 @@ func removePrivateSQLiteFile(path string) error {
 }
 
 func syncFileAndDirectory(path, dir string) error {
-	file, err := openSnapshotFile(path)
+	file, err := openDurableDatabaseFile(path)
 	if err != nil {
 		return err
 	}
