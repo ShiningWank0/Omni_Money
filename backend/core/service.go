@@ -402,7 +402,7 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 		return nil, err
 	}
 	if oldAccount != req.Account && len(preparedImages) == 0 {
-		if err := checkImageStorageQuota(tx, id, nil); err != nil {
+		if err := checkImageAccountMoveQuota(tx, id, oldAccount, req.Account); err != nil {
 			return nil, err
 		}
 	}
@@ -1971,6 +1971,61 @@ func checkImageStorageQuota(db sqlExecutor, transactionID int64, images []prepar
 	}
 	if databaseBytes+additionalBytes > models.MaxImageBytesDatabase {
 		return fmt.Errorf("DB全体の画像保存量は%d MiBまでです", models.MaxImageBytesDatabase/(1024*1024))
+	}
+	return nil
+}
+
+// checkImageAccountMoveQuota applies quota to growth, not to grandfathered
+// bytes that an account-only edit merely relocates. The database total never
+// changes. For account quota, compare aggregate overage before/after the move:
+// moving an existing over-limit transaction to an empty account keeps the
+// same overage and is allowed, while concentrating it into an already-used
+// destination (increasing total overage) is rejected.
+func checkImageAccountMoveQuota(db sqlExecutor, transactionID int64, oldAccount, newAccount string) error {
+	if oldAccount == newAccount {
+		return nil
+	}
+	var transactionBytes int64
+	if err := db.QueryRow(`SELECT COALESCE(SUM(bytes), 0) FROM (
+		SELECT length(data) AS bytes FROM transaction_images WHERE transaction_id = ?
+		UNION ALL SELECT length(data) AS bytes FROM transaction_image_archive WHERE transaction_id = ?
+	)`, transactionID, transactionID).Scan(&transactionBytes); err != nil {
+		return fmt.Errorf("取引画像使用量確認エラー: %w", err)
+	}
+	accountBytes := func(account string) (int64, error) {
+		var bytes int64
+		err := db.QueryRow(`SELECT COALESCE(SUM(bytes), 0) FROM (
+			SELECT length(ti.data) AS bytes FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id WHERE t.account = ?
+			UNION ALL SELECT length(ai.data) AS bytes FROM transaction_image_archive ai JOIN transactions t ON t.id = ai.transaction_id WHERE t.account = ?
+		)`, account, account).Scan(&bytes)
+		return bytes, err
+	}
+	oldAfter, err := accountBytes(oldAccount)
+	if err != nil {
+		return fmt.Errorf("移動元口座画像使用量確認エラー: %w", err)
+	}
+	newAfter, err := accountBytes(newAccount)
+	if err != nil {
+		return fmt.Errorf("移動先口座画像使用量確認エラー: %w", err)
+	}
+	if transactionBytes < 0 || oldAfter > math.MaxInt64-transactionBytes || newAfter < transactionBytes {
+		return fmt.Errorf("口座画像使用量の差分が不正です")
+	}
+	oldBefore := oldAfter + transactionBytes
+	newBefore := newAfter - transactionBytes
+	overage := func(bytes int64) int64 {
+		if bytes <= models.MaxImageBytesPerAccount {
+			return 0
+		}
+		return bytes - models.MaxImageBytesPerAccount
+	}
+	beforeOld, beforeNew := overage(oldBefore), overage(newBefore)
+	afterOld, afterNew := overage(oldAfter), overage(newAfter)
+	if beforeOld > math.MaxInt64-beforeNew || afterOld > math.MaxInt64-afterNew {
+		return fmt.Errorf("口座画像使用量の差分が大きすぎます")
+	}
+	if afterOld+afterNew > beforeOld+beforeNew {
+		return fmt.Errorf("口座「%s」への移動で画像保存量の超過が増加します", newAccount)
 	}
 	return nil
 }

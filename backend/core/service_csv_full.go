@@ -77,6 +77,10 @@ const (
 	maxCSVSettingKeyBytes         = 256
 	maxCSVSettingValueBytes       = 2 * 1024 * 1024
 	maxCSVParsedTextBytes   int64 = 64 * 1024 * 1024
+	// Each parsed image retains slice/map bookkeeping independently of its
+	// payload. Charge the same conservative weight on import and in export
+	// preflight so every successful export is admissible by its importer.
+	csvV3ImageParsedStructureBytes int64 = 1024
 	// image.Decode may materialize an RGBA buffer in addition to the encoded
 	// bytes. Reserve this bounded working allowance before invoking image
 	// decoders; it is released immediately after each image is validated.
@@ -751,8 +755,135 @@ func validateCSVV3ExportImageRestoreBounds(ctx context.Context, tx *sql.Tx) erro
 	return nil
 }
 
+// addCSVV3ParsedBudget is the single source of truth for the decoded-text and
+// per-image structural budget. Export preflight and both parser paths use this
+// exact arithmetic so their acceptance boundaries cannot drift.
+func addCSVV3ParsedBudget(used *int64, structuralBytes int64, values ...string) error {
+	if used == nil || structuralBytes < 0 || *used < 0 || *used > maxCSVParsedTextBytes {
+		return fmt.Errorf("CSV v3の解析済みテキスト課金が不正です")
+	}
+	additional := structuralBytes
+	for _, value := range values {
+		valueBytes := int64(len(value))
+		if valueBytes > maxCSVParsedTextBytes-additional {
+			return fmt.Errorf("CSV v3の解析済みテキスト合計が上限を超えました")
+		}
+		additional += valueBytes
+	}
+	if additional > maxCSVParsedTextBytes-*used {
+		return fmt.Errorf("CSV v3の解析済みテキスト合計が上限を超えました")
+	}
+	*used += additional
+	return nil
+}
+
+// validateCSVV3ExportParsedBudget runs before the CSV writer is constructed.
+// All reads share backupToCSVV3In's read transaction with the subsequent
+// export, preventing a concurrent mutation from invalidating the preflight.
+func validateCSVV3ExportParsedBudget(ctx context.Context, tx *sql.Tx) error {
+	var used int64
+	rows, err := tx.QueryContext(ctx, `SELECT account, date, item, type, memo FROM transactions ORDER BY date, id`)
+	if err != nil {
+		return fmt.Errorf("CSV v3取引memory事前検査エラー: %w", err)
+	}
+	for rows.Next() {
+		var account, date, item, txType, memo string
+		if err := rows.Scan(&account, &date, &item, &txType, &memo); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("CSV v3取引memory事前検査エラー: %w", err)
+		}
+		if err := addCSVV3ParsedBudget(&used, 0, account, date, item, txType, memo); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("CSV v3 exportはimportのmemory上限を超えます: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("CSV v3取引memory事前検査エラー: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("CSV v3取引memory事前検査クローズエラー: %w", err)
+	}
+
+	rows, err = tx.QueryContext(ctx, `SELECT filename, mime_type, created_at FROM transaction_images
+		UNION ALL SELECT filename, mime_type, created_at FROM transaction_image_archive
+		ORDER BY 1, 2, 3`)
+	if err != nil {
+		return fmt.Errorf("CSV v3画像memory事前検査エラー: %w", err)
+	}
+	for rows.Next() {
+		var filename, mimeType, createdAt string
+		if err := rows.Scan(&filename, &mimeType, &createdAt); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("CSV v3画像memory事前検査エラー: %w", err)
+		}
+		if err := addCSVV3ParsedBudget(&used, csvV3ImageParsedStructureBytes, filename, mimeType, createdAt); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("CSV v3 exportはimportのmemory上限を超えます: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("CSV v3画像memory事前検査エラー: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("CSV v3画像memory事前検査クローズエラー: %w", err)
+	}
+
+	rows, err = tx.QueryContext(ctx, `SELECT name FROM tags ORDER BY level, id`)
+	if err != nil {
+		return fmt.Errorf("CSV v3タグmemory事前検査エラー: %w", err)
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("CSV v3タグmemory事前検査エラー: %w", err)
+		}
+		if err := addCSVV3ParsedBudget(&used, 0, name); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("CSV v3 exportはimportのmemory上限を超えます: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("CSV v3タグmemory事前検査エラー: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("CSV v3タグmemory事前検査クローズエラー: %w", err)
+	}
+
+	rows, err = tx.QueryContext(ctx, `SELECT key, value FROM settings
+		WHERE key IN ('credit_card_items', 'bank_account_items') ORDER BY key`)
+	if err != nil {
+		return fmt.Errorf("CSV v3設定memory事前検査エラー: %w", err)
+	}
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("CSV v3設定memory事前検査エラー: %w", err)
+		}
+		if err := addCSVV3ParsedBudget(&used, 0, key, value); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("CSV v3 exportはimportのmemory上限を超えます: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("CSV v3設定memory事前検査エラー: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("CSV v3設定memory事前検査クローズエラー: %w", err)
+	}
+	return nil
+}
+
 func backupToCSVV3In(ctx context.Context, tx *sql.Tx, dst io.Writer) (string, error) {
 	if err := validateCSVV3ExportImageRestoreBounds(ctx, tx); err != nil {
+		return "", err
+	}
+	if err := validateCSVV3ExportParsedBudget(ctx, tx); err != nil {
 		return "", err
 	}
 	output := &csvLimitedStringWriter{dst: dst, limit: maxCSVExportBytes}
@@ -1334,22 +1465,11 @@ func validateCSVV3TextSize(label, value string, maxBytes int, required bool) err
 }
 
 func (p *csvV3Import) addParsedText(values ...string) error {
-	var additional int64
-	for _, value := range values {
-		additional += int64(len([]byte(value)))
-	}
-	return p.addParsedTextBytes(additional)
+	return addCSVV3ParsedBudget(&p.parsedTextBytes, 0, values...)
 }
 
 func (p *csvV3Import) addParsedTextBytes(additional int64) error {
-	if additional < 0 {
-		return fmt.Errorf("CSV v3の解析済みテキスト課金が不正です")
-	}
-	if additional > maxCSVParsedTextBytes-p.parsedTextBytes {
-		return fmt.Errorf("CSV v3の解析済みテキスト合計が上限を超えました")
-	}
-	p.parsedTextBytes += additional
-	return nil
+	return addCSVV3ParsedBudget(&p.parsedTextBytes, additional)
 }
 
 func (p *csvV3Import) cleanup() error {
@@ -1720,7 +1840,7 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 			// Charge a fixed structural weight in addition to the actual text. This
 			// bounds slices/maps/row bookkeeping for archives containing many tiny
 			// or empty images without conflating heap metadata with spool capacity.
-			if err := parsed.addParsedTextBytes(1024); err != nil {
+			if err := parsed.addParsedTextBytes(csvV3ImageParsedStructureBytes); err != nil {
 				return csvV3Import{}, fmt.Errorf("CSV画像metadata一時領域が上限に達しました (行%d): %w", rowNumber, err)
 			}
 			filename, err := csvV3DecodedText(record, headerMap, "filename", true)
@@ -1817,7 +1937,7 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 			}
 			parsed.decodedImageBytes += int64(len(prepared.data))
 			image := csvV3Image{id: id, transactionID: txID, filename: prepared.filename, mimeType: prepared.mimeType, createdAt: createdAt, data: prepared.data, archiveLegacy: archiveImage}
-			if spoolImages && len(prepared.data) > 0 {
+			if spoolImages {
 				if parsed.imageTempDir == "" {
 					dir, imageRoot, err := fileprivacy.CreatePrivateTempDir("omni-money-csv-images-")
 					if err != nil {
@@ -1841,9 +1961,13 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 				// identical private-file copy is live. The persistent admission above
 				// covers the eventual private file; reserve a second worst-case copy
 				// only for this short write window.
-				tempRelease, available := TryAcquireCSVTempBudget(int64(len(data)))
-				if !available {
-					return csvV3Import{}, fmt.Errorf("CSV画像一時領域が上限に達しました")
+				tempRelease := func() {}
+				if len(data) > 0 {
+					var available bool
+					tempRelease, available = TryAcquireCSVTempBudget(int64(len(data)))
+					if !available {
+						return csvV3Import{}, fmt.Errorf("CSV画像一時領域が上限に達しました")
+					}
 				}
 				parsed.tempReleases = append(parsed.tempReleases, tempRelease)
 				parseTempReleases = append(parseTempReleases, tempRelease)
@@ -2149,9 +2273,28 @@ type csvImageUsage struct {
 	bytes int64
 }
 
+func csvV3ImageSpoolBounds(row csvV3Image) (maxBytes int64, allowEmpty bool) {
+	if row.archiveLegacy {
+		return models.MaxArchivedImageBytes, true
+	}
+	return models.MaxImageBytes, false
+}
+
+func validateCSVV3ImageSpoolSize(row csvV3Image, size int64) error {
+	maxBytes, allowEmpty := csvV3ImageSpoolBounds(row)
+	if size < 0 || (!allowEmpty && size == 0) || size > maxBytes {
+		return fmt.Errorf("画像一時ファイルのサイズが不正です")
+	}
+	return nil
+}
+
 func csvV3ImageBytes(row csvV3Image) (int64, error) {
 	if row.dataPath == "" {
-		return int64(len(row.data)), nil
+		size := int64(len(row.data))
+		if err := validateCSVV3ImageSpoolSize(row, size); err != nil {
+			return 0, err
+		}
+		return size, nil
 	}
 	file, err := openCSVTempImage(row)
 	if err != nil {
@@ -2161,8 +2304,11 @@ func csvV3ImageBytes(row csvV3Image) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if !fileprivacy.IsPrivate(file, info) || info.Size() <= 0 || info.Size() > models.MaxImageBytes {
+	if !fileprivacy.IsPrivate(file, info) {
 		return 0, fmt.Errorf("画像一時ファイルが不正です")
+	}
+	if err := validateCSVV3ImageSpoolSize(row, info.Size()); err != nil {
+		return 0, err
 	}
 	return info.Size(), nil
 }
@@ -2176,24 +2322,32 @@ func readCSVTempImage(row csvV3Image) ([]byte, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if !fileprivacy.IsPrivate(file, info) || info.Size() <= 0 || info.Size() > models.MaxImageBytes {
+	if !fileprivacy.IsPrivate(file, info) {
 		return nil, nil, fmt.Errorf("画像一時ファイルが不正です")
+	}
+	if err := validateCSVV3ImageSpoolSize(row, info.Size()); err != nil {
+		return nil, nil, err
 	}
 	// The persistent-file admission is retained by parsed.cleanup. Charge the
 	// decoded heap copy while it is read and consumed by the INSERT as well.
 	// The caller owns this release and must not release it until ExecContext has
 	// returned; otherwise another import can allocate into the live INSERT
 	// buffer and exceed the weighted process budget.
-	release, available := TryAcquireCSVTempBudget(info.Size())
-	if !available {
-		return nil, nil, fmt.Errorf("CSV画像一時領域が上限に達しました")
+	release := func() {}
+	if info.Size() > 0 {
+		var available bool
+		release, available = TryAcquireCSVTempBudget(info.Size())
+		if !available {
+			return nil, nil, fmt.Errorf("CSV画像一時領域が上限に達しました")
+		}
 	}
-	data, err := io.ReadAll(io.LimitReader(file, models.MaxImageBytes+1))
+	maxBytes, allowEmpty := csvV3ImageSpoolBounds(row)
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
 		release()
 		return nil, nil, err
 	}
-	if len(data) == 0 || int64(len(data)) > models.MaxImageBytes || int64(len(data)) != row.tempInfo.Size() {
+	if (!allowEmpty && len(data) == 0) || int64(len(data)) > maxBytes || int64(len(data)) != row.tempInfo.Size() {
 		release()
 		return nil, nil, fmt.Errorf("画像一時ファイルのサイズが不正です")
 	}

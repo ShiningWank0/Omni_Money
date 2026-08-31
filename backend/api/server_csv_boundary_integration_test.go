@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/csv"
 	"encoding/hex"
@@ -161,6 +162,48 @@ func TestProductionServerCSVStaysInsideAuthenticatedVault(t *testing.T) {
 
 	assertServerCSVAccounts(t, serveServerCSVRequest(t, handler, sessionA, http.MethodGet, "/api/backup_csv", nil), "imported-only-admin-a")
 	assertServerCSVAccounts(t, serveServerCSVRequest(t, handler, sessionB, http.MethodGet, "/api/backup_csv", nil), "only-user-b")
+
+	t.Run("raw HTTP preserves six MiB opaque legacy image", func(t *testing.T) {
+		base, err := serviceA.BackupToCSV()
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy := bytes.Repeat([]byte{0x5a}, 6*1024*1024)
+		archive := addServerCSVLegacyImage(t, base, legacy)
+		request := httptest.NewRequest(http.MethodPost, "https://money.example.test/api/import_csv?mode=replace", bytes.NewReader(archive))
+		request.AddCookie(&http.Cookie{Name: middleware.SecureSessionCookieName, Value: sessionA.ID})
+		request.Header.Set("Origin", "https://money.example.test")
+		request.Header.Set("Sec-Fetch-Site", "same-origin")
+		request.Header.Set("Content-Type", "text/csv")
+		request.Header.Set(middleware.CSRFHeaderName, sessionA.CSRFToken)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("raw legacy import status = %d: %s", response.Code, response.Body.String())
+		}
+		exported := serveServerCSVRequest(t, handler, sessionA, http.MethodGet, "/api/backup_csv", nil)
+		if exported.Code != http.StatusOK {
+			t.Fatalf("raw legacy re-export status = %d", exported.Code)
+		}
+		records, err := csv.NewReader(bytes.NewReader(exported.Body.Bytes())).ReadAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, record := range records[1:] {
+			if len(record) != 23 || record[1] != "image_legacy" {
+				continue
+			}
+			decoded, err := base64.StdEncoding.Strict().DecodeString(record[16])
+			if err != nil || !bytes.Equal(decoded, legacy) || record[14] != "legacy.bin" || record[15] != "application/octet-stream" {
+				t.Fatalf("raw legacy image changed: bytes=%d filename=%q mime=%q err=%v", len(decoded), record[14], record[15], err)
+			}
+			found = true
+		}
+		if !found {
+			t.Fatal("raw legacy image missing after re-export")
+		}
+	})
 
 	t.Run("server feature boundaries", func(t *testing.T) {
 		statusResponse := serveServerCSVRequest(t, handler, sessionA, http.MethodGet, "/api/auth/status", nil)
@@ -444,4 +487,74 @@ func rewriteServerCSVTransactionAccount(t *testing.T, content, account string) s
 		t.Fatal(err)
 	}
 	return output.String()
+}
+
+func addServerCSVLegacyImage(t *testing.T, content string, data []byte) []byte {
+	t.Helper()
+	records, err := csv.NewReader(bytes.NewBufferString(content)).ReadAll()
+	if err != nil || len(records) < 3 {
+		t.Fatalf("canonical CSV fixture parse: %v", err)
+	}
+	header := records[0]
+	columns := make(map[string]int, len(header))
+	for index, name := range header {
+		columns[name] = index
+	}
+	manifestIndex := len(records) - 1
+	if records[manifestIndex][columns["record_type"]] != "manifest" {
+		t.Fatal("canonical CSV fixture lacks manifest")
+	}
+	transactionID := ""
+	for _, record := range records[1:manifestIndex] {
+		if record[columns["record_type"]] == "transaction" || record[columns["record_type"]] == "transaction_legacy" {
+			transactionID = record[columns["id"]]
+			break
+		}
+	}
+	if transactionID == "" {
+		t.Fatal("canonical CSV fixture lacks transaction")
+	}
+	image := make([]string, len(header))
+	image[columns["omni_money_csv_version"]] = "3"
+	image[columns["record_type"]] = "image_legacy"
+	image[columns["id"]] = "-1"
+	image[columns["transaction_id"]] = transactionID
+	image[columns["filename"]] = "legacy.bin"
+	image[columns["mime_type"]] = "application/octet-stream"
+	image[columns["data_base64"]] = base64.StdEncoding.EncodeToString(data)
+	records = append(records[:manifestIndex], append([][]string{image}, records[manifestIndex:]...)...)
+	manifestIndex++
+
+	var manifest struct {
+		Format  string           `json:"format"`
+		Version int              `json:"version"`
+		Counts  map[string]int64 `json:"counts"`
+		Digest  string           `json:"digest"`
+	}
+	if err := json.Unmarshal([]byte(records[manifestIndex][columns["setting_value"]]), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest.Counts["image_legacy"]++
+	digest := sha256.New()
+	for _, record := range records[1:manifestIndex] {
+		var length [8]byte
+		for _, field := range record {
+			binary.BigEndian.PutUint64(length[:], uint64(len(field)))
+			_, _ = digest.Write(length[:])
+			_, _ = digest.Write([]byte(field))
+		}
+	}
+	manifest.Digest = hex.EncodeToString(digest.Sum(nil))
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records[manifestIndex][columns["setting_value"]] = string(encoded)
+	var output bytes.Buffer
+	writer := csv.NewWriter(&output)
+	writer.WriteAll(records)
+	if err := writer.Error(); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
 }

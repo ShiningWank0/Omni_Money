@@ -12,6 +12,7 @@ import (
 
 	"omni_money/backend/database"
 	"omni_money/backend/models"
+	"omni_money/backend/validation"
 )
 
 func TestLegacyCSVLargeInt64AmountUsesArchiveProvenanceAndRoundTrips(t *testing.T) {
@@ -171,11 +172,12 @@ func TestCSVV3PreservesBoundedEmptyAndLargeLegacyImages(t *testing.T) {
 	}
 	txID, _ := result.LastInsertId()
 	large := bytes.Repeat([]byte{0x5a}, 6*1024*1024)
+	maxArchive := bytes.Repeat([]byte{0x6b}, int(models.MaxArchivedImageBytes))
 	for _, image := range []struct {
 		filename string
 		mime     string
 		data     []byte
-	}{{"", "", []byte{}}, {" legacy.bin ", " APPLICATION/OCTET-STREAM ", large}} {
+	}{{"", "", []byte{}}, {" legacy.bin ", " APPLICATION/OCTET-STREAM ", large}, {"max-archive.bin", "application/octet-stream", maxArchive}} {
 		if _, err := database.GetDB().Exec(`INSERT INTO transaction_image_archive (transaction_id, filename, data, mime_type)
 			VALUES (?, ?, ?, ?)`, txID, image.filename, image.data, image.mime); err != nil {
 			t.Fatal(err)
@@ -185,39 +187,57 @@ func TestCSVV3PreservesBoundedEmptyAndLargeLegacyImages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("export bounded legacy images: %v", err)
 	}
-	if _, err := service.ImportCSV(archive, "replace"); err != nil {
-		t.Fatalf("restore bounded legacy images: %v", err)
-	}
-	rows, err := database.GetDB().Query(`SELECT filename, mime_type, data FROM transaction_image_archive ORDER BY id`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	seen := make(map[string]bool)
-	for rows.Next() {
-		var filename, mime string
-		var data []byte
-		if err := rows.Scan(&filename, &mime, &data); err != nil {
+	assertRestored := func(path string) {
+		t.Helper()
+		rows, err := database.GetDB().Query(`SELECT filename, mime_type, data FROM transaction_image_archive ORDER BY id`)
+		if err != nil {
 			t.Fatal(err)
 		}
-		switch filename {
-		case "":
-			if mime != "" || len(data) != 0 {
-				t.Fatalf("empty legacy image changed: %q/%d", mime, len(data))
+		defer rows.Close()
+		seen := make(map[string]bool)
+		for rows.Next() {
+			var filename, mime string
+			var data []byte
+			if err := rows.Scan(&filename, &mime, &data); err != nil {
+				t.Fatal(err)
 			}
-			seen["empty"] = true
-		case " legacy.bin ":
-			if mime != " APPLICATION/OCTET-STREAM " || !bytes.Equal(data, large) {
-				t.Fatalf("large legacy image changed: %q/%d", mime, len(data))
+			switch filename {
+			case "":
+				if mime != "" || len(data) != 0 {
+					t.Fatalf("%s empty legacy image changed: %q/%d", path, mime, len(data))
+				}
+				seen["empty"] = true
+			case " legacy.bin ":
+				if mime != " APPLICATION/OCTET-STREAM " || !bytes.Equal(data, large) {
+					t.Fatalf("%s large legacy image changed: %q/%d", path, mime, len(data))
+				}
+				seen["large"] = true
+			case "max-archive.bin":
+				if mime != "application/octet-stream" || !bytes.Equal(data, maxArchive) {
+					t.Fatalf("%s maximum legacy image changed: %q/%d", path, mime, len(data))
+				}
+				seen["maximum"] = true
+			default:
+				t.Fatalf("%s restored unexpected legacy filename %q", path, filename)
 			}
-			seen["large"] = true
-		default:
-			t.Fatalf("restored unexpected legacy filename %q", filename)
+		}
+		if !seen["empty"] || !seen["large"] || !seen["maximum"] {
+			t.Fatalf("%s restored legacy images = %#v", path, seen)
 		}
 	}
-	if !seen["empty"] || !seen["large"] {
-		t.Fatalf("restored legacy images = %#v", seen)
+	if _, err := service.ImportCSVReaderContext(context.Background(), strings.NewReader(archive), "replace"); err != nil {
+		t.Fatalf("reader restore bounded legacy images: %v", err)
 	}
+	assertRestored("reader")
+
+	backupPath, err := service.BackupToCSVDirectory(t.TempDir())
+	if err != nil {
+		t.Fatalf("desktop file export bounded legacy images: %v", err)
+	}
+	if _, err := service.ImportCSVFileContext(context.Background(), backupPath, "replace"); err != nil {
+		t.Fatalf("desktop file restore bounded legacy images: %v", err)
+	}
+	assertRestored("desktop file")
 }
 
 func TestTransactionImagePaginationAndGrandfatheredAccountMove(t *testing.T) {
@@ -257,6 +277,60 @@ func TestTransactionImagePaginationAndGrandfatheredAccountMove(t *testing.T) {
 	}
 }
 
+func TestGrandfatheredOver128MiBAccountMoveUsesBeforeAfterGrowth(t *testing.T) {
+	setupCoreTestDB(t)
+	service := &Service{db: database.GetDB(), legacy: true}
+	result, err := database.GetDB().Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+		VALUES ('old-account', '2026-01-01', 'old', 'expense', 1, -1, '')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txID, _ := result.LastInsertId()
+	if _, err := database.GetDB().Exec(`DROP TRIGGER trg_transaction_image_archive_quota_insert`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.GetDB().Exec(`PRAGMA ignore_check_constraints = ON`); err != nil {
+		t.Fatal(err)
+	}
+	grandfatheredBytes := models.MaxImageBytesPerAccount + 1
+	if _, err := database.GetDB().Exec(`INSERT INTO transaction_image_archive (transaction_id, filename, data, mime_type)
+		VALUES (?, 'pre-quota.bin', zeroblob(?), 'application/octet-stream')`, txID, grandfatheredBytes); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.UpdateTransaction(txID, models.TransactionRequest{
+		Account: "new-account", Date: "2026-01-01", Item: "moved", Type: "expense", Amount: 1,
+	})
+	if err != nil {
+		t.Fatalf("grandfathered %d-byte move: %v", grandfatheredBytes, err)
+	}
+	if updated.Account != "new-account" {
+		t.Fatalf("updated account = %q", updated.Account)
+	}
+
+	other, err := database.GetDB().Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+		VALUES ('occupied-account', '2026-01-02', 'other', 'income', 1, 1, '')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherID, _ := other.LastInsertId()
+	if _, err := database.GetDB().Exec(`INSERT INTO transaction_image_archive (transaction_id, filename, data, mime_type)
+		VALUES (?, 'one-byte.bin', X'01', 'application/octet-stream')`, otherID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpdateTransaction(txID, models.TransactionRequest{
+		Account: "occupied-account", Date: "2026-01-01", Item: "must-rollback", Type: "expense", Amount: 1,
+	}); err == nil || !strings.Contains(err.Error(), "超過が増加") {
+		t.Fatalf("overage-growing move result = %v", err)
+	}
+	var account string
+	if err := database.GetDB().QueryRow("SELECT account FROM transactions WHERE id = ?", txID).Scan(&account); err != nil {
+		t.Fatal(err)
+	}
+	if account != "new-account" {
+		t.Fatalf("failed move was not rolled back: account=%q", account)
+	}
+}
+
 func TestCSVV3RejectsArchiveImageCountAndMetadataBeyondBounds(t *testing.T) {
 	t.Run("per transaction count", func(t *testing.T) {
 		setupCoreTestDB(t)
@@ -281,6 +355,59 @@ func TestCSVV3RejectsArchiveImageCountAndMetadataBeyondBounds(t *testing.T) {
 		service := &Service{db: database.GetDB(), legacy: true}
 		if _, err := service.ImportCSV(content, "replace"); err == nil || !strings.Contains(err.Error(), "4096") {
 			t.Fatalf("archive metadata result = %v", err)
+		}
+	})
+}
+
+func TestCSVV3SharedParsedBudgetBoundariesAndExportPreflight(t *testing.T) {
+	t.Run("roughly seventeen thousand maximum ordinary memos", func(t *testing.T) {
+		var used int64
+		memo := strings.Repeat("m", validation.MaxMemoBytes)
+		for i := 0; i < int(maxCSVParsedTextBytes/int64(validation.MaxMemoBytes)); i++ {
+			if err := addCSVV3ParsedBudget(&used, 0, memo); err != nil {
+				t.Fatalf("memo %d unexpectedly exceeded shared budget: %v", i, err)
+			}
+		}
+		if used != maxCSVParsedTextBytes {
+			t.Fatalf("memo budget = %d, want %d", used, maxCSVParsedTextBytes)
+		}
+		if err := addCSVV3ParsedBudget(&used, 0, "x"); err == nil {
+			t.Fatal("one byte beyond memo boundary was accepted")
+		}
+	})
+
+	t.Run("sixty five thousand five hundred thirty seven empty images", func(t *testing.T) {
+		var used int64
+		for i := 0; i < 65_536; i++ {
+			if err := addCSVV3ParsedBudget(&used, csvV3ImageParsedStructureBytes); err != nil {
+				t.Fatalf("image %d unexpectedly exceeded shared budget: %v", i, err)
+			}
+		}
+		if used != maxCSVParsedTextBytes {
+			t.Fatalf("image structure budget = %d, want %d", used, maxCSVParsedTextBytes)
+		}
+		if err := addCSVV3ParsedBudget(&used, csvV3ImageParsedStructureBytes); err == nil {
+			t.Fatal("65,537th empty image was accepted")
+		}
+	})
+
+	t.Run("export rejects before first byte", func(t *testing.T) {
+		setupCoreTestDB(t)
+		service := &Service{db: database.GetDB(), legacy: true}
+		memo := strings.Repeat("m", maxCSVFieldBytes)
+		for i := 0; i < 8; i++ {
+			if _, err := database.GetDB().Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+				VALUES (?, '2026-01-01', 'i', 'income', 1, 0, ?)`, fmt.Sprintf("a%d", i), memo); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var output bytes.Buffer
+		err := service.BackupToCSVStreamContext(context.Background(), &output)
+		if err == nil || !strings.Contains(err.Error(), "memory上限") {
+			t.Fatalf("oversized decoded export result = %v", err)
+		}
+		if output.Len() != 0 {
+			t.Fatalf("preflight wrote %d bytes before rejecting archive", output.Len())
 		}
 	})
 }
