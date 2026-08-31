@@ -1,7 +1,10 @@
 // Package models はデータベースの構造定義（ORMモデル）を提供する
 package models
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
 
 const (
 	// MaxImageBytes は画像1件のデコード後バイト数上限（5 MiB）。
@@ -16,6 +19,12 @@ const (
 	MaxImageBytesPerAccount int64 = 128 * 1024 * 1024
 	// MaxImageBytesDatabase はDB全体に保存できる画像データ合計上限（256 MiB）。
 	MaxImageBytesDatabase int64 = 256 * 1024 * 1024
+	// Archive-only bounds preserve pre-quota images without exposing an
+	// unbounded multi-user parsing/storage surface.
+	MaxArchivedImageBytes           int64 = 8 * 1024 * 1024
+	MaxArchivedImagesPerTransaction       = 1_000
+	MaxArchivedImagesDatabase             = 100_000
+	MaxArchivedImageMetadataBytes         = 4 * 1024
 )
 
 // Transaction は取引データの構造体
@@ -38,13 +47,14 @@ type TransactionLink struct {
 
 // LinkedTransactionResponse は紐付け取引のレスポンス（簡易情報）
 type LinkedTransactionResponse struct {
-	ID       int64  `json:"id"`
-	FundItem string `json:"fundItem"`
-	Date     string `json:"date"`
-	Item     string `json:"item"`
-	Type     string `json:"type"`
-	Amount   int64  `json:"amount"`
-	Memo     string `json:"memo"`
+	ID          int64  `json:"id"`
+	FundItem    string `json:"fundItem"`
+	Date        string `json:"date"`
+	Item        string `json:"item"`
+	Type        string `json:"type"`
+	Amount      int64  `json:"amount"`
+	AmountExact string `json:"amount_exact"`
+	Memo        string `json:"memo"`
 }
 
 // TransactionImage は取引画像の構造体（Agent.md §6.5）
@@ -72,6 +82,14 @@ type TransactionImageResponse struct {
 	CreatedAt string `json:"created_at"`
 	DataURL   string `json:"data_url,omitempty"` // data:mime;base64,... の形式
 	Invalid   bool   `json:"invalid,omitempty"`  // 旧DB内の不正画像はデータを返さず削除だけ許可
+}
+
+// TransactionImagePage bounds image materialization for server and Desktop
+// clients. Cursor is an opaque decimal offset retained only for compatibility;
+// callers must pass it back unchanged.
+type TransactionImagePage struct {
+	Images     []TransactionImageResponse `json:"images"`
+	NextCursor string                     `json:"next_cursor,omitempty"`
 }
 
 // AccountImageStorageUsage は口座単位の画像保存量を表す。
@@ -115,12 +133,13 @@ type TagDeleteImpact struct {
 
 // TagSummary はタグ別集計データ（円グラフ用）
 type TagSummary struct {
-	TagID    int64        `json:"tag_id"`
-	TagName  string       `json:"tag_name"`
-	Amount   int64        `json:"amount"`
-	Count    int          `json:"count"`
-	Ratio    float64      `json:"ratio"` // 割合（0.0〜1.0）
-	Children []TagSummary `json:"children,omitempty"`
+	TagID       int64        `json:"tag_id"`
+	TagName     string       `json:"tag_name"`
+	Amount      int64        `json:"amount"`
+	AmountExact string       `json:"amount_exact"`
+	Count       int          `json:"count"`
+	Ratio       float64      `json:"ratio"` // 割合（0.0〜1.0）
+	Children    []TagSummary `json:"children,omitempty"`
 }
 
 // Setting は設定情報の構造体（キー・バリュー形式）
@@ -144,24 +163,27 @@ type TransactionRequest struct {
 
 // TransactionResponse はフロントエンドに返す取引データ
 type TransactionResponse struct {
-	ID       int64                      `json:"id"`
-	FundItem string                     `json:"fundItem"`
-	Account  string                     `json:"account"`
-	Date     string                     `json:"date"`
-	Item     string                     `json:"item"`
-	Type     string                     `json:"type"`
-	Amount   int64                      `json:"amount"`
-	Balance  int64                      `json:"balance"`
-	Memo     string                     `json:"memo"`
-	Images   []TransactionImageResponse `json:"images,omitempty"`
-	Tags     []Tag                      `json:"tags,omitempty"`
+	ID           int64                      `json:"id"`
+	FundItem     string                     `json:"fundItem"`
+	Account      string                     `json:"account"`
+	Date         string                     `json:"date"`
+	Item         string                     `json:"item"`
+	Type         string                     `json:"type"`
+	Amount       int64                      `json:"amount"`
+	AmountExact  string                     `json:"amount_exact"`
+	Balance      int64                      `json:"balance"`
+	BalanceExact string                     `json:"balance_exact"`
+	Memo         string                     `json:"memo"`
+	Images       []TransactionImageResponse `json:"images,omitempty"`
+	Tags         []Tag                      `json:"tags,omitempty"`
 }
 
 // BalanceHistoryResponse は残高推移データのレスポンス
 type BalanceHistoryResponse struct {
-	Accounts []string           `json:"accounts"`
-	Dates    []string           `json:"dates"`
-	Balances map[string][]int64 `json:"balances"`
+	Accounts      []string            `json:"accounts"`
+	Dates         []string            `json:"dates"`
+	Balances      map[string][]int64  `json:"balances"`
+	BalancesExact map[string][]string `json:"balances_exact"`
 }
 
 // AnalysisRequest はAI分析リクエストの構造体（Agent.md §6.3）
@@ -180,20 +202,24 @@ type AnalysisRequest struct {
 
 // AITransactionDetail は明示権限とpagination付きでのみ返す最小明細。
 type AITransactionDetail struct {
-	ID      int64  `json:"id"`
-	Account string `json:"account"`
-	Date    string `json:"date"`
-	Item    string `json:"item"`
-	Type    string `json:"type"`
-	Amount  int64  `json:"amount"`
-	Memo    string `json:"memo,omitempty"`
+	ID          int64  `json:"id"`
+	Account     string `json:"account"`
+	Date        string `json:"date"`
+	Item        string `json:"item"`
+	Type        string `json:"type"`
+	Amount      int64  `json:"amount"`
+	AmountExact string `json:"amount_exact"`
+	Memo        string `json:"memo,omitempty"`
 }
 
 // AnalysisResponse はAI分析レスポンスの構造体
 type AnalysisResponse struct {
 	TotalIncome           int64                 `json:"total_income"`
+	TotalIncomeExact      string                `json:"total_income_exact"`
 	TotalExpense          int64                 `json:"total_expense"`
+	TotalExpenseExact     string                `json:"total_expense_exact"`
 	NetAmount             int64                 `json:"net_amount"`
+	NetAmountExact        string                `json:"net_amount_exact"`
 	Count                 int                   `json:"count"`
 	TagSummaries          []TagSummary          `json:"tag_summaries,omitempty"`
 	TagSummariesTruncated bool                  `json:"tag_summaries_truncated,omitempty"`
@@ -211,14 +237,20 @@ func (t *Transaction) ToResponse() TransactionResponse {
 	}
 
 	return TransactionResponse{
-		ID:       t.ID,
-		FundItem: t.Account,
-		Account:  t.Account,
-		Date:     dateStr,
-		Item:     t.Item,
-		Type:     t.Type,
-		Amount:   t.Amount,
-		Balance:  t.Balance,
-		Memo:     t.Memo,
+		ID:           t.ID,
+		FundItem:     t.Account,
+		Account:      t.Account,
+		Date:         dateStr,
+		Item:         t.Item,
+		Type:         t.Type,
+		Amount:       t.Amount,
+		AmountExact:  strconv.FormatInt(t.Amount, 10),
+		Balance:      t.Balance,
+		BalanceExact: strconv.FormatInt(t.Balance, 10),
+		Memo:         t.Memo,
 	}
 }
+
+// ExactInt64 returns the lossless decimal JSON companion for JavaScript/Wails
+// consumers while the existing numeric field remains for older clients.
+func ExactInt64(value int64) string { return strconv.FormatInt(value, 10) }

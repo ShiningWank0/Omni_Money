@@ -132,6 +132,60 @@ func TestTagNameValidationIsSharedByCreateAndUpdate(t *testing.T) {
 	}
 }
 
+func TestTagCRUDNormalizesArchivedRootMarkersWithoutMerging(t *testing.T) {
+	setupCoreTestDB(t)
+	if _, err := database.GetDB().Exec(`INSERT INTO tags (name, parent_id, level, legacy_duplicate) VALUES ('legacy', NULL, 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	created, err := CreateTagByPath("legacy/child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Name != "child" {
+		t.Fatalf("created = %#v", created)
+	}
+	var roots, marker int
+	if err := database.GetDB().QueryRow("SELECT COUNT(*), COALESCE(MAX(legacy_duplicate), 0) FROM tags WHERE name = 'legacy' AND parent_id IS NULL").Scan(&roots, &marker); err != nil {
+		t.Fatal(err)
+	}
+	if roots != 1 || marker != 0 {
+		t.Fatalf("lone legacy root was not promoted: count=%d marker=%d", roots, marker)
+	}
+
+	var firstID int64
+	if err := database.GetDB().QueryRow("SELECT id FROM tags WHERE name = 'legacy'").Scan(&firstID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.GetDB().Exec(`INSERT INTO tags (name, parent_id, level, legacy_duplicate) VALUES ('legacy', NULL, 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateTag(firstID, "renamed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.GetDB().QueryRow("SELECT legacy_duplicate FROM tags WHERE id = ?", firstID).Scan(&marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker != 0 {
+		t.Fatalf("renamed unique root marker=%d, want 0", marker)
+	}
+	var duplicateID int64
+	if err := database.GetDB().QueryRow("SELECT id FROM tags WHERE name = 'legacy'").Scan(&duplicateID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.GetDB().Exec("INSERT INTO tags (name, parent_id, level, legacy_duplicate) VALUES ('renamed', NULL, 1, 1)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteTag(firstID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.GetDB().QueryRow("SELECT legacy_duplicate FROM tags WHERE id = ?", duplicateID).Scan(&marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker != 0 {
+		t.Fatalf("remaining duplicate root marker=%d, want promoted 0", marker)
+	}
+}
+
 func TestAddTransactionTagsIsAtomicOnUnknownTag(t *testing.T) {
 	setupCoreTestDB(t)
 	txID := insertTestTransaction(t, "cash", "2026-01-01", "item", "expense", 10, -10)

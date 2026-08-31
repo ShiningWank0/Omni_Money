@@ -134,7 +134,7 @@
                     <span class="linked-account">{{ lt.fundItem }}</span>
                     <span class="linked-item-name">{{ lt.item }}</span>
                     <span :class="lt.type === 'income' ? 'linked-amount-income' : 'linked-amount-expense'">
-                      {{ lt.type === 'income' ? '+' : '-' }}¥{{ Number(lt.amount).toLocaleString() }}
+                      {{ lt.type === 'income' ? '+' : '-' }}¥{{ formatExactInteger(lt.amount, lt.amount_exact) }}
                     </span>
                   </div>
                   <button type="button" class="link-remove" @click="unlinkTransaction(lt.id)">×</button>
@@ -151,7 +151,7 @@
                   <span class="linked-account">{{ sr.fundItem || sr.account }}</span>
                   <span class="linked-item-name">{{ sr.item }}</span>
                   <span :class="sr.type === 'income' ? 'linked-amount-income' : 'linked-amount-expense'">
-                    {{ sr.type === 'income' ? '+' : '-' }}¥{{ Number(sr.amount).toLocaleString() }}
+                    {{ sr.type === 'income' ? '+' : '-' }}¥{{ formatExactInteger(sr.amount, sr.amount_exact) }}
                   </span>
                 </div>
               </div>
@@ -183,6 +183,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { getTags, createTag, createTagByPath, getTransactionLinks, addTransactionLink, removeTransactionLink, getTransactions, isWailsMode } from '../utils/api'
+import { formatExactInteger } from '../utils/exactAmount'
 
 const MAX_TRANSACTION_AMOUNT = 1_000_000_000
 
@@ -543,7 +544,7 @@ onMounted(async () => {
     form.value.fundItem = tx.account || tx.fundItem || ''
     form.value.type = tx.type || 'expense'
     form.value.item = tx.item || ''
-    form.value.amount = String(tx.amount || '')
+    form.value.amount = String(tx.amount_exact ?? tx.amount ?? '')
     form.value.memo = tx.memo || ''
 
     // 既存タグをロード

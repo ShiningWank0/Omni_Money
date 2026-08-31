@@ -37,26 +37,28 @@ func TestTagSummaryThreeLevelGoldenPreservesOrderAndRatios(t *testing.T) {
 	total := float64(105)
 	want := []models.TagSummary{
 		{
-			TagID:   primaryID,
-			TagName: "primary",
-			Amount:  65,
-			Count:   4,
-			Ratio:   65 / total,
+			TagID:       primaryID,
+			TagName:     "primary",
+			Amount:      65,
+			AmountExact: "65",
+			Count:       4,
+			Ratio:       65 / total,
 			Children: []models.TagSummary{
 				{
-					TagID:   highID,
-					TagName: "high",
-					Amount:  50,
-					Count:   2,
-					Ratio:   50 / total,
+					TagID:       highID,
+					TagName:     "high",
+					Amount:      50,
+					AmountExact: "50",
+					Count:       2,
+					Ratio:       50 / total,
 					Children: []models.TagSummary{
-						{TagID: grandchildID, TagName: "grandchild", Amount: 30, Count: 1, Ratio: 30 / total},
+						{TagID: grandchildID, TagName: "grandchild", Amount: 30, AmountExact: "30", Count: 1, Ratio: 30 / total},
 					},
 				},
-				{TagID: lowID, TagName: "low", Amount: 5, Count: 1, Ratio: 5 / total},
+				{TagID: lowID, TagName: "low", Amount: 5, AmountExact: "5", Count: 1, Ratio: 5 / total},
 			},
 		},
-		{TagID: secondaryID, TagName: "secondary", Amount: 40, Count: 1, Ratio: 40 / total},
+		{TagID: secondaryID, TagName: "secondary", Amount: 40, AmountExact: "40", Count: 1, Ratio: 40 / total},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("tag summary mismatch\n got: %#v\nwant: %#v", got, want)

@@ -126,6 +126,7 @@ func TestFinancialErrorResponsesNeverExposeInternalErrors(t *testing.T) {
 		{"validation", errors.New(secret), http.StatusBadRequest, http.StatusBadRequest, financialInvalidRequestMessage},
 		{"internal", errors.New(secret), http.StatusInternalServerError, http.StatusInternalServerError, financialInternalErrorMessage},
 		{"unavailable", errors.Join(core.ErrServiceUnavailable, errors.New(secret)), http.StatusBadRequest, http.StatusServiceUnavailable, financialServiceUnavailableMessage},
+		{"legacy replace remediation", core.ErrCSVReplaceRequiresV3, http.StatusBadRequest, http.StatusBadRequest, "旧形式のCSVはappendで取り込めます。完全置換にはCSV v3を使用してください"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

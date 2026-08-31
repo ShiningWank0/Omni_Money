@@ -21,6 +21,135 @@ func TestLedgerSchemaRecordsCurrentVersion(t *testing.T) {
 		t.Fatalf("schema version = %d, want %d", version, ledgerSchemaVersion)
 	}
 }
+
+func TestLedgerSchemaV5AddsArchiveSidecarsWithoutChangingCurrentRows(t *testing.T) {
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "v3.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	// Build the current shape once, then remove only the additive v4 objects to
+	// model a v3 ledger. Existing constrained transaction/image rows must survive
+	// the atomic additive migration unchanged.
+	if err := createTablesOn(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+		VALUES ('cash', '2026-01-01', 'kept', 'income', 42, 42, 'memo')`); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TRIGGER validate_transactions_amount_insert`,
+		`DROP TRIGGER validate_transactions_amount_update`,
+		`PRAGMA ignore_check_constraints = ON`,
+		`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+			VALUES ('legacy', '2020-01-01', 'legacy-large', 'income', 1000000001, 1000000001, 'exact')`,
+		`PRAGMA ignore_check_constraints = OFF`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("prepare legacy amount %q: %v", statement, err)
+		}
+	}
+	for _, statement := range []string{
+		`DROP TRIGGER trg_transaction_image_archive_quota_insert`,
+		`DROP TRIGGER trg_transaction_images_quota_insert`,
+		`DROP TABLE transaction_image_archive`,
+		`DROP TABLE transaction_archive_amounts`,
+		`PRAGMA user_version = 3`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("prepare v3 schema %q: %v", statement, err)
+		}
+	}
+	if err := createTablesOn(db); err != nil {
+		t.Fatalf("v3 to v4 migration: %v", err)
+	}
+	var amount, balance int64
+	if err := db.QueryRow(`SELECT amount, balance FROM transactions WHERE item = 'kept'`).Scan(&amount, &balance); err != nil {
+		t.Fatal(err)
+	}
+	if amount != 42 || balance != 42 {
+		t.Fatalf("current row changed during migration: %d/%d", amount, balance)
+	}
+	var stored, archived, legacyBalance int64
+	if err := db.QueryRow(`SELECT t.amount, a.amount, t.balance FROM transactions t
+		JOIN transaction_archive_amounts a ON a.transaction_id = t.id WHERE t.item = 'legacy-large'`).Scan(&stored, &archived, &legacyBalance); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 1_000_000_000 || archived != 1_000_000_001 || legacyBalance != 1_000_000_001 {
+		t.Fatalf("legacy amount migration = stored %d archived %d balance %d", stored, archived, legacyBalance)
+	}
+	for _, table := range []string{"transaction_archive_amounts", "transaction_image_archive"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("archive table %s = %d/%v", table, count, err)
+		}
+	}
+}
+
+func TestLedgerSchemaV5LosslesslyRebuildsV4ArchiveAndMigratesLargeAmount(t *testing.T) {
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "v4.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := createTablesOn(db); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+			VALUES ('cash', '2026-01-01', 'kept', 'income', 42, 42, '')`,
+		`DROP TRIGGER trg_transaction_images_quota_insert`,
+		`DROP TRIGGER trg_transaction_image_archive_quota_insert`,
+		`DROP INDEX idx_transaction_image_archive_txid`,
+		`DROP TABLE transaction_image_archive`,
+		`CREATE TABLE transaction_image_archive (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			transaction_id INTEGER NOT NULL,
+			filename TEXT NOT NULL,
+			data BLOB NOT NULL CHECK(length(data) BETWEEN 1 AND 5242880),
+			mime_type TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX idx_transaction_image_archive_txid ON transaction_image_archive(transaction_id)`,
+		`INSERT INTO transaction_image_archive (id, transaction_id, filename, data, mime_type, created_at)
+			VALUES (7, 1, ' exact.PNG ', X'010203', ' IMAGE/PNG ', '2026-01-02 03:04:05')`,
+		`DROP TRIGGER validate_transactions_amount_insert`,
+		`DROP TRIGGER validate_transactions_amount_update`,
+		`PRAGMA ignore_check_constraints = ON`,
+		`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+			VALUES ('legacy', '2020-01-01', 'large', 'income', 1000000001, 1000000001, '')`,
+		`PRAGMA ignore_check_constraints = OFF`,
+		`PRAGMA user_version = 4`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("prepare v4 schema %q: %v", statement, err)
+		}
+	}
+	if err := createTablesOn(db); err != nil {
+		t.Fatalf("v4 to v5 migration: %v", err)
+	}
+	var id int64
+	var filename, mime, createdAt string
+	var data []byte
+	if err := db.QueryRow(`SELECT id, filename, data, mime_type, CAST(created_at AS TEXT) FROM transaction_image_archive`).Scan(&id, &filename, &data, &mime, &createdAt); err != nil {
+		t.Fatal(err)
+	}
+	if id != 7 || filename != " exact.PNG " || mime != " IMAGE/PNG " || string(data) != "\x01\x02\x03" || createdAt != "2026-01-02 03:04:05" {
+		t.Fatalf("v4 image changed: %d/%q/%x/%q/%q", id, filename, data, mime, createdAt)
+	}
+	var stored, archived int64
+	if err := db.QueryRow(`SELECT t.amount, a.amount FROM transactions t JOIN transaction_archive_amounts a ON a.transaction_id=t.id WHERE t.item='large'`).Scan(&stored, &archived); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 1_000_000_000 || archived != 1_000_000_001 {
+		t.Fatalf("large amount migration = %d/%d", stored, archived)
+	}
+	if _, err := db.Exec(`INSERT INTO transaction_image_archive (transaction_id, filename, data, mime_type) VALUES (1, '', X'', '')`); err != nil {
+		t.Fatalf("v5 empty legacy image: %v", err)
+	}
+}
 func TestLedgerSchemaMigrationFailureRollsBackAtomically(t *testing.T) {
 	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "broken.db"))
 	if err != nil {

@@ -4,7 +4,6 @@ package database
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -23,7 +22,7 @@ import (
 )
 
 const defaultSnapshotMaxTotalBytes int64 = 2 * 1024 * 1024 * 1024
-const ledgerSchemaVersion = 2
+const ledgerSchemaVersion = 5
 
 const writableSQLiteQuery = "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
 const snapshotSQLiteQuery = "mode=rw&_busy_timeout=5000&_foreign_keys=ON&_synchronous=FULL"
@@ -301,6 +300,43 @@ func createTablesOn(target *sql.DB) error {
 		return fmt.Errorf("スキーマtransaction開始エラー: %w", err)
 	}
 	defer tx.Rollback()
+	archiveImageTableSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS transaction_image_archive (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		transaction_id INTEGER NOT NULL,
+		filename TEXT NOT NULL CHECK(length(CAST(filename AS BLOB)) <= %d),
+		data BLOB NOT NULL CHECK(length(data) BETWEEN 0 AND %d),
+		mime_type TEXT NOT NULL CHECK(length(CAST(mime_type AS BLOB)) <= %d),
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+	)`, models.MaxArchivedImageMetadataBytes, models.MaxArchivedImageBytes, models.MaxArchivedImageMetadataBytes)
+	if version < 5 {
+		// v5 tightens and extends archive accounting. Recreate both named triggers
+		// in this same schema transaction so v4 definitions cannot survive their
+		// CREATE TRIGGER IF NOT EXISTS declarations.
+		for _, name := range []string{"trg_transaction_images_quota_insert", "trg_transaction_image_archive_quota_insert"} {
+			if _, err := tx.Exec(`DROP TRIGGER IF EXISTS ` + name); err != nil {
+				return fmt.Errorf("旧画像quota trigger削除エラー: %w", err)
+			}
+		}
+		if version == 4 {
+			// SQLite cannot add CHECK constraints in place. Rebuild the v4 archive
+			// table atomically and copy every ID and byte exactly. Any row outside the
+			// new explicit bounds aborts and rolls back rather than being truncated.
+			if _, err := tx.Exec(`ALTER TABLE transaction_image_archive RENAME TO transaction_image_archive_v4`); err != nil {
+				return fmt.Errorf("v4 legacy画像table退避エラー: %w", err)
+			}
+			if _, err := tx.Exec(archiveImageTableSQL); err != nil {
+				return fmt.Errorf("v5 legacy画像table作成エラー: %w", err)
+			}
+			if _, err := tx.Exec(`INSERT INTO transaction_image_archive (id, transaction_id, filename, data, mime_type, created_at)
+				SELECT id, transaction_id, filename, data, mime_type, created_at FROM transaction_image_archive_v4`); err != nil {
+				return fmt.Errorf("v4 legacy画像lossless移行エラー: %w", err)
+			}
+			if _, err := tx.Exec(`DROP TABLE transaction_image_archive_v4`); err != nil {
+				return fmt.Errorf("v4 legacy画像table削除エラー: %w", err)
+			}
+		}
+	}
 
 	statements := []string{
 		// 取引テーブル
@@ -332,12 +368,22 @@ func createTablesOn(target *sql.DB) error {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
 		)`,
+		// Archive sidecars preserve historical values that cannot be represented by
+		// current write constraints. They are not writable by normal APIs: CSV
+		// restore is the sole producer and validates int64/binary/global bounds.
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS transaction_archive_amounts (
+			transaction_id INTEGER PRIMARY KEY,
+			amount INTEGER NOT NULL CHECK(amount > %d),
+			FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+		)`, validation.MaxTransactionAmount),
+		archiveImageTableSQL,
 		// タグテーブル（Agent.md §6.6: 3階層タグシステム）
 		`CREATE TABLE IF NOT EXISTS tags (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
 			parent_id INTEGER DEFAULT NULL,
 			level INTEGER NOT NULL DEFAULT 1 CHECK(level IN (1, 2, 3)),
+			legacy_duplicate INTEGER NOT NULL DEFAULT 0 CHECK(legacy_duplicate IN (0, 1)),
 			FOREIGN KEY (parent_id) REFERENCES tags(id) ON DELETE CASCADE,
 			UNIQUE(name, parent_id)
 		)`,
@@ -388,6 +434,7 @@ func createTablesOn(target *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_transactions_memo ON transactions(memo)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_links_child_id ON transaction_links(child_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_images_txid ON transaction_images(transaction_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_transaction_image_archive_txid ON transaction_image_archive(transaction_id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_idempotency_credential_key
 			ON ai_transaction_idempotency(credential_id, idempotency_key_sha256)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_idempotency_transaction
@@ -398,15 +445,24 @@ func createTablesOn(target *sql.DB) error {
 			BEFORE INSERT ON transaction_images
 			WHEN length(NEW.data) <= 0
 				OR length(NEW.data) > %d
-				OR (SELECT COUNT(*) FROM transaction_images WHERE transaction_id = NEW.transaction_id) >= %d
-				OR COALESCE((SELECT SUM(length(data)) FROM transaction_images WHERE transaction_id = NEW.transaction_id), 0) + length(NEW.data) > %d
+				OR ((SELECT COUNT(*) FROM transaction_images WHERE transaction_id = NEW.transaction_id)
+					+ (SELECT COUNT(*) FROM transaction_image_archive WHERE transaction_id = NEW.transaction_id)) >= %d
+				OR (COALESCE((SELECT SUM(length(data)) FROM transaction_images WHERE transaction_id = NEW.transaction_id), 0)
+					+ COALESCE((SELECT SUM(length(data)) FROM transaction_image_archive WHERE transaction_id = NEW.transaction_id), 0)
+					+ length(NEW.data)) > %d
 				OR COALESCE((
-					SELECT SUM(length(ti.data))
-					FROM transaction_images ti
-					JOIN transactions t ON t.id = ti.transaction_id
-					WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+					SELECT SUM(bytes) FROM (
+						SELECT length(ti.data) AS bytes FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id
+						WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+						UNION ALL
+						SELECT length(ai.data) AS bytes FROM transaction_image_archive ai JOIN transactions t ON t.id = ai.transaction_id
+						WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+					)
 				), 0) + length(NEW.data) > %d
-				OR COALESCE((SELECT SUM(length(data)) FROM transaction_images), 0) + length(NEW.data) > %d
+				OR COALESCE((SELECT SUM(bytes) FROM (
+					SELECT length(data) AS bytes FROM transaction_images
+					UNION ALL SELECT length(data) AS bytes FROM transaction_image_archive
+				)), 0) + length(NEW.data) > %d
 			BEGIN
 				SELECT RAISE(ABORT, 'image storage quota exceeded');
 			END`,
@@ -421,6 +477,32 @@ func createTablesOn(target *sql.DB) error {
 			BEGIN
 				SELECT RAISE(ABORT, 'transaction images are immutable; delete and re-add the image');
 			END`,
+		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS trg_transaction_image_archive_quota_insert
+			BEFORE INSERT ON transaction_image_archive
+			WHEN length(NEW.data) > %d
+				OR length(CAST(NEW.filename AS BLOB)) > %d
+				OR length(CAST(NEW.mime_type AS BLOB)) > %d
+				OR ((SELECT COUNT(*) FROM transaction_images WHERE transaction_id = NEW.transaction_id)
+					+ (SELECT COUNT(*) FROM transaction_image_archive WHERE transaction_id = NEW.transaction_id)) >= %d
+				OR (SELECT COUNT(*) FROM transaction_image_archive) >= %d
+				OR COALESCE((
+					SELECT SUM(bytes) FROM (
+						SELECT length(ti.data) AS bytes FROM transaction_images ti JOIN transactions t ON t.id = ti.transaction_id
+						WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+						UNION ALL
+						SELECT length(ai.data) AS bytes FROM transaction_image_archive ai JOIN transactions t ON t.id = ai.transaction_id
+						WHERE t.account = (SELECT account FROM transactions WHERE id = NEW.transaction_id)
+					)
+				), 0) + length(NEW.data) > %d
+				OR COALESCE((SELECT SUM(bytes) FROM (
+					SELECT length(data) AS bytes FROM transaction_images
+					UNION ALL SELECT length(data) AS bytes FROM transaction_image_archive
+				)), 0) + length(NEW.data) > %d
+			BEGIN
+				SELECT RAISE(ABORT, 'archive image storage quota exceeded');
+			END`, models.MaxArchivedImageBytes, models.MaxArchivedImageMetadataBytes, models.MaxArchivedImageMetadataBytes,
+			models.MaxArchivedImagesPerTransaction, models.MaxArchivedImagesDatabase,
+			models.MaxImageBytesPerAccount, models.MaxImageBytesDatabase),
 		`CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_txid ON transaction_tags(transaction_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transaction_tags_tagid ON transaction_tags(tag_id)`,
@@ -448,25 +530,42 @@ func createTablesOn(target *sql.DB) error {
 				return fmt.Errorf("SQL実行エラー (%s): %w", stmt[:50], err)
 			}
 		}
-		// SQLite considers NULL values distinct in a regular UNIQUE index, so
-		// the historical UNIQUE(name, parent_id) did not protect root tags.
-		// Never guess which duplicate a user intended: refuse the migration
-		// atomically and require an explicit, user-audited merge instead.
-		var duplicateRoot string
-		err := tx.QueryRow(`
-			SELECT name FROM tags
-			WHERE parent_id IS NULL
-			GROUP BY name
-			HAVING COUNT(*) > 1
-			ORDER BY name
-			LIMIT 1`).Scan(&duplicateRoot)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("rootタグ重複検査エラー: %w", err)
+		if version < 5 {
+			// Some pre-v5 databases were created before the shared amount trigger
+			// and may contain positive int64 amounts above the current write limit.
+			// Capture the exact value before replacing it with a constrained
+			// surrogate; all service reads use the sidecar as the effective amount.
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO transaction_archive_amounts (transaction_id, amount)
+				SELECT id, amount FROM transactions WHERE amount > ?`, validation.MaxTransactionAmount); err != nil {
+				return fmt.Errorf("legacy取引金額archive移行エラー: %w", err)
+			}
+			if _, err := tx.Exec(`UPDATE transactions SET amount = ? WHERE amount > ?`, validation.MaxTransactionAmount, validation.MaxTransactionAmount); err != nil {
+				return fmt.Errorf("legacy取引金額surrogate移行エラー: %w", err)
+			}
 		}
-		if err == nil {
-			return fmt.Errorf("rootタグ名が重複しているためschema migrationを中止しました: %q", duplicateRoot)
+		// v2 and earlier databases have no marker column. Add it atomically,
+		// preserve every pre-existing duplicate root, and mark all but the
+		// lowest-id row as archive-only. Normal writes remain unique through the
+		// partial index; CSV v3 tag_legacy rows can restore the historical rows
+		// without merging, renaming, or dropping them.
+		var hasLegacyDuplicate int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('tags') WHERE name = 'legacy_duplicate'`).Scan(&hasLegacyDuplicate); err != nil {
+			return fmt.Errorf("rootタグ互換列検査エラー: %w", err)
 		}
-		if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_root_name_unique ON tags(name) WHERE parent_id IS NULL`); err != nil {
+		if hasLegacyDuplicate == 0 {
+			if _, err := tx.Exec(`ALTER TABLE tags ADD COLUMN legacy_duplicate INTEGER NOT NULL DEFAULT 0 CHECK(legacy_duplicate IN (0, 1))`); err != nil {
+				return fmt.Errorf("rootタグ互換列追加エラー: %w", err)
+			}
+		}
+		if _, err := tx.Exec(`DROP INDEX IF EXISTS idx_tags_root_name_unique`); err != nil {
+			return fmt.Errorf("rootタグ一意index更新エラー: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE tags SET legacy_duplicate = CASE WHEN id IN (
+			SELECT MIN(id) FROM tags WHERE parent_id IS NULL GROUP BY name
+		) THEN 0 ELSE CASE WHEN parent_id IS NULL THEN 1 ELSE legacy_duplicate END END`); err != nil {
+			return fmt.Errorf("rootタグ互換marker更新エラー: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_root_name_unique ON tags(name) WHERE parent_id IS NULL AND legacy_duplicate = 0`); err != nil {
 			return fmt.Errorf("rootタグ一意index作成エラー: %w", err)
 		}
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", ledgerSchemaVersion)); err != nil {
@@ -493,10 +592,13 @@ func validateCriticalSchema(target schemaQueryer) error {
 		return fmt.Errorf("データベース接続が初期化されていません")
 	}
 	requiredColumns := map[string][]string{
-		"transactions":               {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
-		"transaction_images":         {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
-		"ai_transaction_idempotency": {"credential_id", "idempotency_key_sha256", "request_sha256", "transaction_id", "response_account", "response_date", "created_at"},
-		"ai_daily_transaction_usage": {"credential_id", "utc_date", "successful_creates"},
+		"transactions":                {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
+		"transaction_images":          {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
+		"transaction_archive_amounts": {"transaction_id", "amount"},
+		"transaction_image_archive":   {"id", "transaction_id", "filename", "data", "mime_type", "created_at"},
+		"tags":                        {"id", "name", "parent_id", "level", "legacy_duplicate"},
+		"ai_transaction_idempotency":  {"credential_id", "idempotency_key_sha256", "request_sha256", "transaction_id", "response_account", "response_date", "created_at"},
+		"ai_daily_transaction_usage":  {"credential_id", "utc_date", "successful_creates"},
 	}
 	for table, required := range requiredColumns {
 		rows, err := target.Query("PRAGMA table_info(" + table + ")")
@@ -530,12 +632,14 @@ func validateCriticalSchema(target schemaQueryer) error {
 		name       string
 	}{
 		{objectType: "index", name: "idx_transaction_images_txid"},
+		{objectType: "index", name: "idx_transaction_image_archive_txid"},
 		{objectType: "index", name: "idx_tags_root_name_unique"},
 		{objectType: "index", name: "idx_ai_idempotency_credential_key"},
 		{objectType: "index", name: "idx_ai_idempotency_transaction"},
 		{objectType: "index", name: "idx_ai_daily_usage_credential_date"},
 		{objectType: "trigger", name: "trg_transaction_images_quota_insert"},
 		{objectType: "trigger", name: "trg_transaction_images_immutable_update"},
+		{objectType: "trigger", name: "trg_transaction_image_archive_quota_insert"},
 	}
 	for _, object := range requiredObjects {
 		var count int
@@ -572,7 +676,7 @@ func validateRootTagIndex(target schemaQueryer) error {
 		return fmt.Errorf("rootタグ一意indexの対象が不正です")
 	}
 	canonicalSQL := strings.Join(strings.Fields(strings.ToLower(definition.String)), " ")
-	if canonicalSQL != "create unique index idx_tags_root_name_unique on tags(name) where parent_id is null" {
+	if canonicalSQL != "create unique index idx_tags_root_name_unique on tags(name) where parent_id is null and legacy_duplicate = 0" {
 		return fmt.Errorf("rootタグ一意indexの定義が不正です: %q", definition.String)
 	}
 

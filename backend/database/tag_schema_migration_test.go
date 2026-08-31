@@ -4,11 +4,10 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
-func TestTagRootPartialUniqueIndexRejectsDuplicateAndMigrationIsFailClosed(t *testing.T) {
+func TestTagRootPartialUniqueIndexArchivesDuplicateRootsLosslessly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "duplicate-root.db")
 	instance, err := OpenPlainInstance(path)
 	if err != nil {
@@ -24,22 +23,29 @@ func TestTagRootPartialUniqueIndexRejectsDuplicateAndMigrationIsFailClosed(t *te
 	if _, err := instance.DB().Exec("PRAGMA user_version = 1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := createTablesOn(instance.DB()); err == nil || !strings.Contains(err.Error(), "rootタグ名が重複") {
+	if err := createTablesOn(instance.DB()); err != nil {
 		t.Fatalf("duplicate migration error = %v", err)
 	}
 	var version int
 	if err := instance.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 {
-		t.Fatalf("failed migration changed version to %d", version)
+	if version != ledgerSchemaVersion {
+		t.Fatalf("migration version = %d", version)
 	}
 	var indexCount int
 	if err := instance.DB().QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_tags_root_name_unique'").Scan(&indexCount); err != nil {
 		t.Fatal(err)
 	}
-	if indexCount != 0 {
-		t.Fatal("failed migration left the partial index behind")
+	if indexCount != 1 {
+		t.Fatal("migration did not recreate the partial index")
+	}
+	var roots, archived int
+	if err := instance.DB().QueryRow("SELECT COUNT(*), COALESCE(SUM(legacy_duplicate), 0) FROM tags WHERE name = 'same' AND parent_id IS NULL").Scan(&roots, &archived); err != nil {
+		t.Fatal(err)
+	}
+	if roots != 2 || archived != 1 {
+		t.Fatalf("duplicate roots were not preserved: count=%d archived=%d", roots, archived)
 	}
 }
 
@@ -66,7 +72,7 @@ func TestTagRootPartialUniqueIndexExistsOnNewLedger(t *testing.T) {
 	}
 }
 
-func TestTagMigrationRejectsSameNamedNonUniqueIndex(t *testing.T) {
+func TestTagMigrationRepairsSameNamedNonUniqueIndex(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wrong-index.db")
 	instance, err := OpenPlainInstance(path)
 	if err != nil {
@@ -79,14 +85,14 @@ func TestTagMigrationRejectsSameNamedNonUniqueIndex(t *testing.T) {
 	if _, err := instance.DB().Exec("PRAGMA user_version = 1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := createTablesOn(instance.DB()); err == nil || !strings.Contains(err.Error(), "定義が不正") {
+	if err := createTablesOn(instance.DB()); err != nil {
 		t.Fatalf("wrong index migration error = %v", err)
 	}
 	var version int
 	if err := instance.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 {
-		t.Fatalf("wrong index migration changed version to %d", version)
+	if version != ledgerSchemaVersion {
+		t.Fatalf("wrong index migration version = %d", version)
 	}
 }

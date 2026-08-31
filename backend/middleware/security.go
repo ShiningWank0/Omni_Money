@@ -2,17 +2,45 @@
 package middleware
 
 import (
+	"io"
+	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"time"
+
+	"omni_money/backend/core"
+	"omni_money/backend/fileprivacy"
 )
+
+func cleanupCSVSpoolFile(temp *fileprivacy.PrivateTempFile) {
+	if temp == nil {
+		return
+	}
+	path := temp.Path
+	if err := temp.Cleanup(); err != nil {
+		log.Printf("security_event=csv_spool_cleanup_failed path=%q error=%v", path, err)
+	}
+}
 
 const (
 	cspHeaderValue = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:"
 
 	// maxRequestBodySize はリクエストボディの最大サイズ（10MB）
 	maxRequestBodySize = 10 * 1024 * 1024
+	// Raw CSV v3 may carry the complete image quota as base64. Keep the larger
+	// allowance scoped to the authenticated import endpoint; JSON compatibility
+	// requests use the smaller cap below. These are fixed wire-size caps, not
+	// estimates of JSON escaping overhead (decoded CSV is checked again by the
+	// API/core layer).
+	maxCSVRequestBodySize = core.MaxCSVImportWireBytes
+	// Spooling is intentionally tolerant of slow, authenticated clients. The
+	// body is written to a bounded private file before the heavy core slot is
+	// acquired; a 15-second deadline would make a valid 512 MiB upload require
+	// an unrealistic 34 MiB/s minimum sustained rate.
+	csvUploadReadTimeout = 10 * time.Minute
 )
 
 // SecurityHeadersMiddleware はセキュリティヘッダーを全レスポンスに付与する
@@ -35,8 +63,108 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 // MaxBodySizeMiddleware はリクエストボディサイズを制限しDoS攻撃を緩和する
 func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the registered financial import method gets the large-body
+		// spool/deadline path. Matching by path alone would let GET, trailing
+		// slash, or an unregistered route consume a 520 MiB reservation.
+		isCSVImport := r.Method == http.MethodPost && r.URL.Path == "/api/import_csv"
+		limit := int64(maxRequestBodySize)
+		csvBody := false
 		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+			if isCSVImport {
+				// Raw CSV is the primary streaming format.  The JSON shape is a
+				// deliberately small compatibility path, so reject a large JSON
+				// envelope before json.Decoder allocates its string value.
+				mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+				switch mediaType {
+				case "text/csv", "application/csv", "application/octet-stream":
+					limit = maxCSVRequestBodySize
+					csvBody = true
+				case "application/json":
+					limit = core.MaxCSVJSONWireBytes
+					csvBody = true
+				}
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+		}
+		if isCSVImport && csvBody && r.Body != nil {
+			if r.ContentLength > limit {
+				http.Error(w, "CSV request is too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			// Reserve the full possible private-file size before reading the
+			// body. The reservation is shared with image import spools and
+			// exports, and is held until cleanup after the downstream handler.
+			tempRelease, available := core.TryAcquireCSVTempBudget(limit)
+			if !available {
+				http.Error(w, "CSV upload spool is busy", http.StatusTooManyRequests)
+				return
+			}
+			defer tempRelease()
+			// Large uploads get a route-local read deadline. The server-wide
+			// ReadTimeout remains unchanged for ordinary API requests.
+			responseController := http.NewResponseController(w)
+			_ = responseController.SetReadDeadline(time.Now().Add(csvUploadReadTimeout))
+			defer responseController.SetReadDeadline(time.Time{})
+			// Authentication middleware wraps this middleware in the production
+			// chain. Spool only after authentication, so a slow client consumes
+			// bounded private disk space but cannot hold the processing slot.
+			temp, err := fileprivacy.CreatePrivateTempFile("omni-money-csv-upload-")
+			if err != nil {
+				http.Error(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage)
+				return
+			}
+			tmp := temp.File
+			cleanup := func() {
+				cleanupCSVSpoolFile(temp)
+			}
+			info, statErr := tmp.Stat()
+			if statErr != nil || !fileprivacy.IsPrivate(tmp, info) {
+				cleanup()
+				http.Error(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage)
+				return
+			}
+			written, copyErr := io.Copy(tmp, r.Body)
+			if copyErr != nil {
+				cleanup()
+				if written >= limit {
+					http.Error(w, "CSV request is too large", http.StatusRequestEntityTooLarge)
+				} else {
+					http.Error(w, "CSV upload failed", http.StatusBadRequest)
+				}
+				return
+			}
+			if err := tmp.Sync(); err != nil {
+				cleanup()
+				http.Error(w, "CSV upload spool failed", http.StatusInsufficientStorage)
+				return
+			}
+			if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+				cleanup()
+				http.Error(w, "CSV upload spool failed", http.StatusInsufficientStorage)
+				return
+			}
+			oldBody := r.Body
+			r.Body = tmp
+			_ = oldBody.Close()
+			// Keep the weighted reservation while the private spool remains
+			// on disk and while parsed image files may be created.
+			defer cleanup()
+			// A recent-auth check performed before a slow upload is not sufficient:
+			// revalidate after spooling, before admitting the heavy processing slot
+			// or allowing the import handler to mutate the vault.
+			if checked, recent := RevalidateRecentAuthentication(r.Context()); checked && !recent {
+				writeRecentAuthRequired(w)
+				return
+			}
+			release, ok := core.TryAcquireCSVImportSlot()
+			if !ok {
+				http.Error(w, "CSV import is busy", http.StatusTooManyRequests)
+				return
+			}
+			defer release()
+			ctx := core.WithCSVImportReservation(r.Context())
+			ctx = core.WithCSVTempReservation(ctx)
+			r = r.WithContext(ctx)
 		}
 		next.ServeHTTP(w, r)
 	})

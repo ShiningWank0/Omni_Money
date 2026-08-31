@@ -1,11 +1,28 @@
 package middleware
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
 )
+
+type recentAuthCheckContextKey struct{}
+
+// RevalidateRecentAuthentication performs the second, post-spool check for a
+// sensitive request. The boolean reports whether RecentAuthMiddleware
+// installed a check; callers outside that middleware remain compatible.
+func RevalidateRecentAuthentication(ctx context.Context) (checked, recent bool) {
+	if ctx == nil {
+		return false, true
+	}
+	check, ok := ctx.Value(recentAuthCheckContextKey{}).(func() bool)
+	if !ok || check == nil {
+		return false, true
+	}
+	return true, check()
+}
 
 // CSRFMiddleware combines a session-bound synchronizer token with strict
 // Origin and Fetch Metadata checks. SameSite cookies remain a third layer.
@@ -110,16 +127,26 @@ func RecentAuthMiddleware(sessionManager *SessionManager, next http.Handler) htt
 		}
 		session, ok := SessionFromContext(r.Context())
 		if !ok || !sessionManager.IsRecent(session.ID) {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("Cache-Control", "no-store")
-			w.WriteHeader(http.StatusPreconditionRequired)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"error":                "この操作には再認証が必要です",
-				"recent_auth_required": true,
-			})
+			writeRecentAuthRequired(w)
 			return
 		}
-		next.ServeHTTP(w, r)
+		// The initial check protects the body spool. Install a callback so the
+		// downstream handler can revalidate after a slow spool and immediately
+		// before any destructive DB mutation.
+		ctx := context.WithValue(r.Context(), recentAuthCheckContextKey{}, func() bool {
+			return sessionManager.IsRecent(session.ID)
+		})
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func writeRecentAuthRequired(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusPreconditionRequired)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"error":                "この操作には再認証が必要です",
+		"recent_auth_required": true,
 	})
 }
 

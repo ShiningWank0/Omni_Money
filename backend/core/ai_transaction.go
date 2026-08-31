@@ -149,9 +149,11 @@ func claimAIIdempotency(ctx context.Context, tx *sql.Tx, identity AITransactionI
 		return false, nil, errors.New("idempotency metadata is incomplete")
 	}
 	return true, &models.TransactionResponse{
-		ID:      transactionID.Int64,
-		Account: account.String,
-		Date:    date.String,
+		ID:           transactionID.Int64,
+		Account:      account.String,
+		Date:         date.String,
+		AmountExact:  "0",
+		BalanceExact: "0",
 	}, nil
 }
 

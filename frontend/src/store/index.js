@@ -7,6 +7,7 @@ import {
     getBankAccountSettings,
     getItems
 } from '../utils/api'
+import { exactInteger } from '../utils/exactAmount'
 
 export const useAppStore = defineStore('app', () => {
     // 口座関連
@@ -52,11 +53,11 @@ export const useAppStore = defineStore('app', () => {
             const current = latestByAccount.get(account)
             if (!current || timestamp > current.timestamp ||
                 (timestamp === current.timestamp && tx.id > current.id)) {
-                latestByAccount.set(account, { balance: tx.balance, timestamp, id: tx.id })
+                latestByAccount.set(account, { balance: exactInteger(tx.balance, tx.balance_exact), timestamp, id: tx.id })
             }
         }
 
-        return [...latestByAccount.values()].reduce((sum, entry) => sum + entry.balance, 0)
+        return [...latestByAccount.values()].reduce((sum, entry) => sum + entry.balance, BigInt(0))
     })
 
     // 資金項目列を表示するかどうか

@@ -123,10 +123,10 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 	})
 
 	var handler http.Handler = mux
+	handler = middleware.MaxBodySizeMiddleware(handler)
 	handler = middleware.RecentAuthMiddleware(dependencies.Sessions, handler)
 	handler = middleware.CSRFMiddleware(dependencies.Sessions, handler)
 	handler = middleware.VaultSessionAuthMiddleware(dependencies.Sessions, dependencies.Control, handler)
-	handler = middleware.MaxBodySizeMiddleware(handler)
 	handler = middleware.RateLimitMiddleware(handler)
 	handler = middleware.CORSMiddleware(handler)
 	handler = middleware.NoStoreAPIMiddleware(handler)

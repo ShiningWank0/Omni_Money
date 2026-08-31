@@ -143,6 +143,26 @@ func BackupToCSV() (string, error) {
 	return s.BackupToCSV()
 }
 
+// BackupToCSVV2 is an explicit transactions-only compatibility export. It is
+// not a complete backup and is intended only for append/import by old clients.
+func BackupToCSVV2() (string, error) {
+	s, err := newLegacyService()
+	if err != nil {
+		return "", err
+	}
+	return s.BackupToCSVV2()
+}
+
+// BackupToCSVFull always emits the normalized v3 export, including extension
+// columns for images, tags, links, and settings even when they are empty.
+func BackupToCSVFull() (string, error) {
+	s, err := newLegacyService()
+	if err != nil {
+		return "", err
+	}
+	return s.BackupToCSVFull()
+}
+
 func BackupToCSVFile() (string, error) {
 	s, err := newLegacyService()
 	if err != nil {

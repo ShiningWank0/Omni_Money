@@ -404,6 +404,44 @@ func TestVaultSessionMiddlewareRefreshesUserAndReleasesChildAfterPanic(t *testin
 	}
 }
 
+func TestVaultSessionMiddlewareAllowsExactlyOnceEarlyLeaseRelease(t *testing.T) {
+	instance := openMiddlewareTestInstance(t)
+	manager := NewSessionManagerWithConfig(securityTestSessionConfig())
+	t.Cleanup(manager.Close)
+	user := testControlUser(testVaultSessionUserID)
+	lifecycle := newFakeVaultLifecycle(t, instance, user.ID)
+	session := createTestVaultSession(t, manager, user, lifecycle.root())
+	store := &fakeCurrentUserStore{user: user}
+	handler := VaultSessionAuthMiddleware(manager, store, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if _, ok := CoreServiceFromContext(r.Context()); !ok {
+			t.Fatal("core service missing before early release")
+		}
+		var callers sync.WaitGroup
+		for i := 0; i < 32; i++ {
+			callers.Add(1)
+			go func() {
+				defer callers.Done()
+				ReleaseRequestVaultLease(r.Context())
+			}()
+		}
+		callers.Wait()
+		if _, ok := CoreServiceFromContext(r.Context()); ok {
+			t.Fatal("core service remained available after early lease release")
+		}
+		// The middleware defer calls the same exactly-once release path.
+		ReleaseRequestVaultLease(r.Context())
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), vaultSessionRequest(t, manager, session))
+	references, roots, borrows, children, duplicates := lifecycle.counts()
+	if references != 1 || roots != 0 || borrows != 1 || children != 1 || duplicates != 0 {
+		t.Fatalf("early release lifecycle refs=%d roots=%d borrows=%d children=%d duplicates=%d", references, roots, borrows, children, duplicates)
+	}
+	manager.DeleteSession(session.ID)
+	if references, _, _, _, duplicates = lifecycle.counts(); references != 0 || duplicates != 0 {
+		t.Fatalf("final early release lifecycle refs=%d duplicates=%d", references, duplicates)
+	}
+}
+
 func TestVaultSessionLongRequestSurvivesDisableWhileNewRequestsFailClosed(t *testing.T) {
 	instance := openMiddlewareTestInstance(t)
 	manager := NewSessionManagerWithConfig(securityTestSessionConfig())

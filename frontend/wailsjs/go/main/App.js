@@ -26,6 +26,10 @@ export function BackupToCSVFile() {
   return window['go']['main']['App']['BackupToCSVFile']();
 }
 
+export function BackupToCSVFull() {
+  return window['go']['main']['App']['BackupToCSVFull']();
+}
+
 export function ChangeDesktopVaultPassword(arg1, arg2) {
   return window['go']['main']['App']['ChangeDesktopVaultPassword'](arg1, arg2);
 }
@@ -82,6 +86,10 @@ export function GetItems(arg1) {
   return window['go']['main']['App']['GetItems'](arg1);
 }
 
+export function GetTagDeleteImpact(arg1) {
+  return window['go']['main']['App']['GetTagDeleteImpact'](arg1);
+}
+
 export function GetTagSummary(arg1, arg2, arg3) {
   return window['go']['main']['App']['GetTagSummary'](arg1, arg2, arg3);
 }
@@ -92,6 +100,10 @@ export function GetTags() {
 
 export function GetTransactionImages(arg1) {
   return window['go']['main']['App']['GetTransactionImages'](arg1);
+}
+
+export function GetTransactionImagesPage(arg1, arg2, arg3) {
+  return window['go']['main']['App']['GetTransactionImagesPage'](arg1, arg2, arg3);
 }
 
 export function GetTransactionLinks(arg1) {
@@ -108,6 +120,10 @@ export function GetTransactions(arg1, arg2) {
 
 export function ImportCSV(arg1, arg2) {
   return window['go']['main']['App']['ImportCSV'](arg1, arg2);
+}
+
+export function ImportCSVFile(arg1) {
+  return window['go']['main']['App']['ImportCSVFile'](arg1);
 }
 
 export function ListSnapshots() {

@@ -22,6 +22,13 @@ func TestCreateExclusivePrivateFileDACL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsPrivate(file, info) {
+		t.Fatal("CreateExclusive file failed the actual DACL privacy check")
+	}
 
 	if _, err := CreateExclusive(root, directory, "private.csv"); !os.IsExist(err) {
 		t.Fatalf("duplicate private file error = %v, want already exists", err)
@@ -48,9 +55,6 @@ func TestCreateExclusivePrivateFileDACL(t *testing.T) {
 	if dacl == nil {
 		t.Fatal("private file DACL is absent")
 	}
-	if dacl.AceCount != 2 {
-		t.Fatalf("private file DACL ACE count = %d, want current account and LocalSystem only", dacl.AceCount)
-	}
 	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatal(err)
@@ -59,9 +63,12 @@ func TestCreateExclusivePrivateFileDACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{
-		currentUser.User.Sid.String(): false,
-		system.String():               false,
+	want := map[string]bool{currentUser.User.Sid.String(): false}
+	if currentUser.User.Sid.String() != system.String() {
+		want[system.String()] = false
+	}
+	if int(dacl.AceCount) != len(want) {
+		t.Fatalf("private file DACL ACE count = %d, want %d distinct principals", dacl.AceCount, len(want))
 	}
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
@@ -70,6 +77,9 @@ func TestCreateExclusivePrivateFileDACL(t *testing.T) {
 		}
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
 			t.Fatalf("private file DACL ACE %d is not allow-only", i)
+		}
+		if ace.Mask != windows.ACCESS_MASK(fileAllAccess) {
+			t.Fatalf("private file DACL ACE %d mask = %#x, want full file access", i, ace.Mask)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		if _, ok := want[sid.String()]; !ok {

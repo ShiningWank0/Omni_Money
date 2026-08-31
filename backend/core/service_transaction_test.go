@@ -65,6 +65,38 @@ func TestBalanceAndAnalysisRejectInt64Overflow(t *testing.T) {
 	}
 }
 
+func TestCrossAccountAggregatesUseCheckedArithmetic(t *testing.T) {
+	setupCoreTestDB(t)
+	db := database.GetDB()
+	if _, err := db.Exec("DROP TRIGGER validate_transactions_amount_insert"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA ignore_check_constraints = ON"); err != nil {
+		t.Fatal(err)
+	}
+	tagID := insertTagSummaryTestTag(t, "overflow", nil, 1)
+	for index, amount := range []int64{math.MaxInt64, 1} {
+		result, err := db.Exec(
+			`INSERT INTO transactions (account, date, item, type, amount, balance) VALUES (?, ?, 'item', 'income', ?, ?)`,
+			[]string{"first", "second"}[index],
+			[]string{"2026-01-01", "2026-01-02"}[index],
+			amount,
+			amount,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		transactionID, _ := result.LastInsertId()
+		linkAnalysisTestTag(t, transactionID, tagID)
+	}
+	if _, err := AnalyzeTransactions(models.AnalysisRequest{}); err == nil || !strings.Contains(err.Error(), "分析集計オーバーフロー") {
+		t.Fatalf("cross-account analysis overflow = %v", err)
+	}
+	if _, err := GetTagSummary("income", "", ""); err == nil || !strings.Contains(err.Error(), "タグ直接金額集計オーバーフロー") {
+		t.Fatalf("cross-account tag overflow = %v", err)
+	}
+}
+
 func TestAddTransactionRollsBackOnTagError(t *testing.T) {
 	setupCoreTestDB(t)
 	req := transactionRequest("cash", "2026-01-01", "食費", "expense", 1000)

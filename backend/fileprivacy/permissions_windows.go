@@ -13,12 +13,22 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// FILE_ALL_ACCESS is the standard file object access mask. x/sys/windows does
+// not expose this aggregate constant on all supported versions.
+const fileAllAccess uint32 = 0x1F01FF
+
 func privateSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return nil, fmt.Errorf("read current Windows account: %w", err)
 	}
-	sddl := "D:P(A;;FA;;;" + user.User.Sid.String() + ")(A;;FA;;;SY)"
+	currentSID := user.User.Sid.String()
+	// LocalSystem's current SID is already SY. Avoid emitting duplicate ACEs;
+	// the DACL still grants exactly the same principal set.
+	sddl := "D:P(A;;FA;;;" + currentSID + ")"
+	if currentSID != "S-1-5-18" {
+		sddl += "(A;;FA;;;SY)"
+	}
 	descriptor, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
 		return nil, fmt.Errorf("create private Windows DACL: %w", err)
@@ -111,4 +121,64 @@ func Harden(file *os.File) error {
 		return fmt.Errorf("apply private Windows DACL: %w", err)
 	}
 	return nil
+}
+
+// IsPrivate proves the actual DACL on the open handle rather than trusting
+// Windows' emulated FileInfo mode bits. Only the current user and LocalSystem
+// may have full access, and inheritance must be disabled.
+func IsPrivate(file *os.File, info os.FileInfo) bool {
+	if file == nil || info == nil || !info.Mode().IsRegular() {
+		return false
+	}
+	descriptor, err := windows.GetSecurityInfo(
+		windows.Handle(file.Fd()),
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return false
+	}
+	control, _, err := descriptor.Control()
+	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
+		return false
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return false
+	}
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return false
+	}
+	system, err := windows.StringToSid("S-1-5-18")
+	if err != nil {
+		return false
+	}
+	want := map[string]bool{current.User.Sid.String(): false}
+	if current.User.Sid.String() != system.String() {
+		want[system.String()] = false
+	}
+	if int(dacl.AceCount) != len(want) {
+		return false
+	}
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask != windows.ACCESS_MASK(fileAllAccess) {
+			return false
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if _, ok := want[sid.String()]; !ok {
+			return false
+		}
+		if want[sid.String()] {
+			return false
+		}
+		want[sid.String()] = true
+	}
+	for _, present := range want {
+		if !present {
+			return false
+		}
+	}
+	return true
 }
