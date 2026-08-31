@@ -987,12 +987,24 @@ validate_pinned_toolchain() {
 }
 
 validate_pinned_tool_by_name() {
-  local expected="$1" i
+  local expected="$1" i actual_device actual_inode actual_nlink actual_hash
   for i in "${!tool_names[@]}"; do
     [ "${tool_names[$i]}" = "$expected" ] || continue
-    validate_pinned_file "${tool_paths[$i]}" "trusted ${tool_names[$i]} executable" \
-      "${tool_devices[$i]}" "${tool_inodes[$i]}" "${tool_nlinks[$i]}" "${tool_hashes[$i]}" root
-    return
+    if validate_pinned_file "${tool_paths[$i]}" "trusted ${tool_names[$i]} executable" \
+      "${tool_devices[$i]}" "${tool_inodes[$i]}" "${tool_nlinks[$i]}" "${tool_hashes[$i]}" root; then
+      return 0
+    fi
+    if [ "$safe_update_test_mode" -eq 1 ]; then
+      actual_device="$(stat_device "${tool_paths[$i]}" 2>/dev/null || printf '<unavailable>')"
+      actual_inode="$(stat_inode "${tool_paths[$i]}" 2>/dev/null || printf '<unavailable>')"
+      actual_nlink="$(stat_nlink "${tool_paths[$i]}" 2>/dev/null || printf '<unavailable>')"
+      actual_hash="$(sha256_file "${tool_paths[$i]}" 2>/dev/null || printf '<unavailable>')"
+      printf 'safe-update test diagnostic: pinned %s path=%s device=%s/%s inode=%s/%s nlink=%s/%s sha256=%s/%s\n' \
+        "$expected" "${tool_paths[$i]}" \
+        "${tool_devices[$i]}" "$actual_device" "${tool_inodes[$i]}" "$actual_inode" \
+        "${tool_nlinks[$i]}" "$actual_nlink" "${tool_hashes[$i]}" "$actual_hash" >&2
+    fi
+    return 1
   done
   fail "pinned isolation tool is missing: $expected"
   return 1
