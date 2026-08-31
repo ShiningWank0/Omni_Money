@@ -16,6 +16,8 @@ export function AddTransactionTags(arg1:number,arg2:Array<number>):Promise<void>
 
 export function BackupToCSVFile():Promise<string>;
 
+export function BackupToCSVFull():Promise<string>;
+
 export function ChangeDesktopVaultPassword(arg1:string,arg2:string):Promise<desktopaccount.Status>;
 
 export function CreateSnapshot():Promise<string>;
@@ -44,11 +46,15 @@ export function GetDesktopVaultStatus():Promise<desktopaccount.Status>;
 
 export function GetItems(arg1:string):Promise<Array<string>>;
 
+export function GetTagDeleteImpact(arg1:number):Promise<models.TagDeleteImpact>;
+
 export function GetTagSummary(arg1:string,arg2:string,arg3:string):Promise<Array<models.TagSummary>>;
 
 export function GetTags():Promise<Array<models.Tag>>;
 
 export function GetTransactionImages(arg1:number):Promise<Array<models.TransactionImageResponse>>;
+
+export function GetTransactionImagesPage(arg1:number,arg2:string,arg3:number):Promise<models.TransactionImagePage>;
 
 export function GetTransactionLinks(arg1:number):Promise<Array<models.LinkedTransactionResponse>>;
 
@@ -57,6 +63,8 @@ export function GetTransactionTags(arg1:number):Promise<Array<models.Tag>>;
 export function GetTransactions(arg1:string,arg2:string):Promise<Array<models.TransactionResponse>>;
 
 export function ImportCSV(arg1:string,arg2:string):Promise<number>;
+
+export function ImportCSVFile(arg1:string):Promise<number>;
 
 export function ListSnapshots():Promise<Array<string>>;
 

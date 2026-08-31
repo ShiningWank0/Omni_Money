@@ -138,8 +138,8 @@
                 <td class="date-cell">{{ formatDateTime(transaction.date) }}</td>
                 <td v-if="store.shouldShowFundItemColumn">{{ transaction.fundItem || transaction.account }}</td>
                 <td>{{ transaction.item }}</td>
-                <td class="numeric-cell" :class="getAmountCellClass(transaction.type)">{{ formatAmount(transaction.amount, transaction.type) }}</td>
-                <td class="numeric-cell">{{ isCreditCardItem(transaction.account || transaction.fundItem) ? '-' : formatCurrency(transaction.balance) }}</td>
+                <td class="numeric-cell" :class="getAmountCellClass(transaction.type)">{{ formatAmount(transaction.amount, transaction.type, transaction.amount_exact) }}</td>
+                <td class="numeric-cell">{{ isCreditCardItem(transaction.account || transaction.fundItem) ? '-' : formatCurrency(transaction.balance, transaction.balance_exact) }}</td>
               </tr>
             </template>
           </tbody>
@@ -295,6 +295,7 @@ import DesktopVaultGate from './components/DesktopVaultGate.vue'
 import { csvExportWarning } from './utils/csvSafety'
 import { isDesktopVaultUnlocked } from './utils/desktopVaultSafety'
 import { passkeysSupported } from './utils/passkeys'
+import { formatExactCurrency } from './utils/exactAmount'
 
 // 初期表示に不要な管理・分析モーダルは、開いた時だけ読み込む。
 const CSVImportModal = defineAsyncComponent(() => import('./components/CSVImportModal.vue'))
@@ -414,14 +415,13 @@ const isTableLoading = computed(() => isInitialLoading.value || store.loading)
 const transactionColumnCount = computed(() => store.shouldShowFundItemColumn ? 5 : 4)
 
 // 通貨フォーマット
-function formatCurrency(value) {
-  if (value == null) return '¥0'
-  return '¥' + value.toLocaleString('ja-JP')
+function formatCurrency(value, exactValue) {
+  return formatExactCurrency(value, exactValue)
 }
 
-function formatAmount(amount, type) {
+function formatAmount(amount, type, amountExact) {
   const prefix = type === 'income' ? '+' : '-'
-  return prefix + '¥' + amount.toLocaleString('ja-JP')
+  return prefix + formatExactCurrency(amount, amountExact)
 }
 
 function formatDateTime(dateStr) {
@@ -438,7 +438,7 @@ function getAmountCellClass(type) {
 
 function getTransactionAriaLabel(transaction) {
   const account = transaction.fundItem || transaction.account || '資金項目なし'
-  return `${formatDateTime(transaction.date)}、${account}、${transaction.item}、${formatAmount(transaction.amount, transaction.type)}。編集する`
+  return `${formatDateTime(transaction.date)}、${account}、${transaction.item}、${formatAmount(transaction.amount, transaction.type, transaction.amount_exact)}。編集する`
 }
 
 function isCreditCardItem(account) {
@@ -537,7 +537,11 @@ async function backupToCSV() {
     showToast(isWailsMode
       ? 'CSVバックアップを保存しました ✓'
       : 'CSVのダウンロードを開始しました。暗号化済みの保存先を確認してください ✓')
-  } catch {
+  } catch (e) {
+    if (e?.message?.includes('キャンセル')) {
+      showToast('CSV保存をキャンセルしました')
+      return
+    }
     showToast('CSVバックアップに失敗しました', 'error')
   }
 }

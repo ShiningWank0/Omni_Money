@@ -674,7 +674,8 @@ export async function saveBankAccountSettings(items) {
 }
 
 /**
- * CSVバックアップを取得
+ * CSVバックアップを取得。常に画像・タグ・タグ紐付け・取引リンク・
+ * ledger設定を含むCSV v3を返す。
  * @returns {Promise<string>}
  */
 export async function backupToCSV() {
@@ -683,7 +684,7 @@ export async function backupToCSV() {
   }
   const res = await apiFetch('/api/backup_csv')
   await validateCSVResponse(res)
-  return await res.text()
+  return await readBoundedCSVText(res, 64 * 1024 * 1024)
 }
 
 async function validateCSVResponse(response) {
@@ -695,6 +696,47 @@ async function validateCSVResponse(response) {
   }
 }
 
+async function readBoundedCSVText(response, maxBytes) {
+  const contentLengthHeader = response.headers.get('Content-Length')
+  const contentLength = contentLengthHeader == null ? NaN : Number(contentLengthHeader)
+  if (Number.isFinite(contentLength) && (contentLength < 0 || contentLength > maxBytes)) {
+    throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+  }
+  if (response.body && typeof response.body.getReader === 'function') {
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder('utf-8', { fatal: true })
+    const chunks = []
+    let total = 0
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (!value) continue
+        total += value.byteLength
+        if (total > maxBytes) {
+          await reader.cancel()
+          throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+        }
+        chunks.push(decoder.decode(value, { stream: true }))
+      }
+      chunks.push(decoder.decode())
+      return chunks.join('')
+    } catch (error) {
+      try { await reader.cancel() } catch (_) { /* best effort */ }
+      throw error
+    }
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  if (bytes.byteLength > maxBytes) {
+    throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch (_) {
+    throw new Error('CSVバックアップは有効なUTF-8ではありません')
+  }
+}
+
 /**
  * CSVバックアップファイルをダウンロードフォルダに保存
  * @returns {Promise<string>} - 保存先ファイルパス
@@ -703,16 +745,140 @@ export async function backupToCSVFile() {
   if (isWails) {
     return await window.go.main.App.BackupToCSVFile()
   }
-  // サーバーモード時はブラウザダウンロードにフォールバック
-  const res = await apiFetch('/api/backup_csv')
-  await validateCSVResponse(res)
-
   const downloadName = `transactions_backup_${new Date().toISOString().slice(0, 10)}.csv`
+	// showSaveFilePicker requires transient user activation. Acquire the file
+	// handle before starting the network request, so a slow server response
+	// cannot consume that activation and a canceled picker starts no export.
+	let saveHandle = null
+	if (typeof window.showSaveFilePicker === 'function') {
+		saveHandle = await window.showSaveFilePicker({
+			suggestedName: downloadName,
+			types: [{ description: 'CSV', accept: { 'text/csv': ['.csv'] } }]
+		})
+	}
+	// サーバーモード時はブラウザダウンロードにフォールバック
+	let res = null
+	try {
+		res = await apiFetch('/api/backup_csv')
+		await validateCSVResponse(res)
+	} catch (error) {
+		try { await res?.body?.cancel?.() } catch (_) { /* best effort */ }
+		throw error
+	}
+	if (saveHandle) {
+		let writable = null
+		try {
+			if (!res.body || typeof res.body.pipeTo !== 'function') {
+				throw new Error('CSVストリームが利用できません')
+			}
+			const maxCSVBytes = 512 * 1024 * 1024
+			const contentLengthHeader = res.headers.get('Content-Length')
+			const contentLength = contentLengthHeader == null ? NaN : Number(contentLengthHeader)
+			if (Number.isFinite(contentLength) && (contentLength < 0 || contentLength > maxCSVBytes)) {
+				throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+			}
+			writable = await saveHandle.createWritable()
+			let totalBytes = 0
+			const checkChunk = chunk => {
+				// Fetch body chunks are byte-oriented Uint8Arrays. Do not fall back to
+				// string.length, which counts UTF-16 code units rather than wire bytes.
+				const chunkBytes = chunk?.byteLength
+				if (!Number.isSafeInteger(chunkBytes) || chunkBytes < 0 || totalBytes > maxCSVBytes - chunkBytes) {
+					throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+				}
+				totalBytes += chunkBytes
+			}
+			if (typeof res.body.getReader === 'function' &&
+				(typeof writable.getWriter === 'function' || typeof writable.write === 'function')) {
+				// Read explicitly so an over-limit response can cancel the locked
+				// reader. Calling response.body.cancel() after pipeThrough has locked
+				// the stream is not reliable in all browsers.
+				const reader = res.body.getReader()
+				const writer = typeof writable.getWriter === 'function'
+					? writable.getWriter()
+					: { write: chunk => writable.write(chunk), close: () => writable.close?.(), abort: reason => writable.abort?.(reason) }
+				try {
+					for (;;) {
+						const { done, value } = await reader.read()
+						if (done) break
+						checkChunk(value)
+						await writer.write(value)
+					}
+					await writer.close()
+				} catch (error) {
+					try { await reader.cancel(error) } catch (_) { /* best effort */ }
+					try { await writer.abort?.(error) } catch (_) { /* best effort */ }
+					throw error
+				}
+			} else {
+				// Keep compatibility with older/mock stream implementations that only
+				// expose pipeTo. Native ReadableStreams use WritableStream here, while
+				// simple Wails/test shims can consume the equivalent sink object.
+				const sink = {
+					write(chunk) {
+						checkChunk(chunk)
+						return writable.write?.(chunk)
+					},
+					close() { return writable.close?.() },
+					abort(reason) { return writable.abort?.(reason) }
+				}
+				const pipeSink = typeof WritableStream === 'function' ? new WritableStream(sink) : sink
+				await res.body.pipeTo(pipeSink)
+			}
+			return downloadName
+		} catch (error) {
+			try { await writable?.abort() } catch (_) { /* best effort */ }
+			// A writable failure can leave the response body unread. Explicitly
+			// cancel it so the server can release its export spool and admission.
+			try { await res.body?.cancel?.() } catch (_) { /* best effort */ }
+			throw error
+		}
+	}
+	// Without a writable file stream, a Blob download necessarily keeps the
+	// response chunks and the final Blob live together. Keep this compatibility
+	// path deliberately small and reject a large response before any body
+	// allocation when the server provided Content-Length. Full-size exports
+	// require showSaveFilePicker or the Desktop file API.
+	const browserBlobCap = 64 * 1024 * 1024
+	const contentLengthHeader = res.headers.get('Content-Length')
+	const contentLength = contentLengthHeader == null ? NaN : Number(contentLengthHeader)
+	if (Number.isFinite(contentLength) && (contentLength < 0 || contentLength + 3 > browserBlobCap)) {
+		try { await res.body?.cancel?.() } catch (_) { /* best effort */ }
+		throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+	}
   let objectURL = null
   let anchor = null
   try {
-    const csvContent = await res.text()
-    const blob = new Blob(['\uFEFF', csvContent], { type: 'text/csv;charset=utf-8;' })
+    const chunks = []
+    let total = 3
+    if (res.body && typeof res.body.getReader === 'function') {
+      const reader = res.body.getReader()
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (value) {
+            total += value.byteLength
+            if (total > browserBlobCap) {
+              await reader.cancel()
+              throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+            }
+            chunks.push(value)
+          }
+        }
+      } catch (error) {
+        try { await reader.cancel() } catch (_) { /* best effort */ }
+        throw error
+      }
+    } else {
+      const bytes = new Uint8Array(await res.arrayBuffer())
+      total += bytes.byteLength
+      if (total > browserBlobCap) {
+        throw new Error('CSVバックアップが大きすぎます。ファイル保存を使用してください')
+      }
+      chunks.push(bytes)
+    }
+    const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), ...chunks], { type: 'text/csv;charset=utf-8;' })
     objectURL = URL.createObjectURL(blob)
     anchor = document.createElement('a')
     anchor.href = objectURL
@@ -727,14 +893,47 @@ export async function backupToCSVFile() {
 }
 
 /**
- * CSVインポート
- * @param {string} content
+ * CSVインポート（旧v1/v2 transactions-only形式と、完全なv3形式に対応）
+ * @param {string|Blob} content - string is the bounded Wails/JSON compatibility path; Blob streams as raw CSV.
  * @param {string} mode
  * @returns {Promise<number>}
  */
 export async function importCSV(content, mode = 'append') {
   if (isWails) {
-    return await window.go.main.App.ImportCSV(content, mode)
+    // The native binding owns the file descriptor and OS picker.  Keep the
+    // string call below solely for older Wails clients that have no file API.
+    if (content == null && typeof window.go.main.App.ImportCSVFile === 'function') {
+      return await window.go.main.App.ImportCSVFile(mode)
+    }
+    let text
+    if (typeof content === 'string') {
+      text = content
+    } else {
+      if (content.size > 64 * 1024 * 1024) throw new Error('CSVファイルが大きすぎます')
+      try {
+        text = new TextDecoder('utf-8', { fatal: true }).decode(await content.arrayBuffer())
+      } catch (_) {
+        throw new Error('CSVファイルは有効なUTF-8で指定してください')
+      }
+    }
+    return await window.go.main.App.ImportCSV(text, mode)
+  }
+  if (content instanceof Blob) {
+    const maxCSVBytes = 512 * 1024 * 1024
+    if (content.size > maxCSVBytes) {
+      throw new Error('CSVファイルが大きすぎます')
+    }
+    const res = await apiFetch(`/api/import_csv?mode=${encodeURIComponent(mode)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/csv' },
+      body: content
+    })
+    await throwIfNotOk(res, 'CSVインポートに失敗しました')
+    const data = await res.json()
+    if (!Number.isInteger(data?.imported_count) || data.imported_count < 0) {
+      throw new Error('CSVインポートの応答が不正です')
+    }
+    return data.imported_count
   }
   const res = await apiFetch('/api/import_csv', {
     method: 'POST',
@@ -820,10 +1019,37 @@ export async function addTransactionImage(transactionId, imageData) {
  * @returns {Promise<object[]>}
  */
 export async function getTransactionImages(transactionId) {
+  const images = []
+  let cursor = ''
+  const seenCursors = new Set()
+  do {
+    if (seenCursors.has(cursor) || images.length > 1010) {
+      throw new Error('画像一覧のpagination応答が上限を超えています')
+    }
+    seenCursors.add(cursor)
+    const page = await getTransactionImagesPage(transactionId, cursor, 2)
+    images.push(...(page.images || []))
+    if (images.length > 1010) throw new Error('画像一覧の件数が上限を超えています')
+    cursor = page.next_cursor || ''
+  } while (cursor !== '')
+  return images
+}
+
+/**
+ * 取引画像を上限付きで取得
+ * @param {number} transactionId
+ * @param {string} cursor
+ * @param {number} limit
+ * @returns {Promise<{images: object[], next_cursor?: string}>}
+ */
+export async function getTransactionImagesPage(transactionId, cursor = '', limit = 2) {
   if (isWails) {
-    return await window.go.main.App.GetTransactionImages(transactionId)
+    return await window.go.main.App.GetTransactionImagesPage(transactionId, cursor, limit)
   }
-  const res = await apiFetch(`/api/transaction_images/${transactionId}`)
+  const params = new URLSearchParams({ paged: '1', limit: String(limit) })
+  if (cursor) params.set('cursor', cursor)
+  const res = await apiFetch(`/api/transaction_images/${transactionId}?${params.toString()}`)
+  await throwIfNotOk(res, '画像一覧の取得に失敗しました')
   return await res.json()
 }
 
