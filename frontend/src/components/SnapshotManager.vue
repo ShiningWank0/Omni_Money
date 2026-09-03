@@ -1,9 +1,9 @@
 <template>
-  <div class="modal-overlay" @click="$emit('close')">
+  <div class="modal-overlay" @click="closeSnapshotManager">
     <div class="modal-content snapshot-modal" @click.stop>
       <div class="snapshot-header">
         <h3>スナップショット管理</h3>
-        <button class="close-btn" @click="$emit('close')">&times;</button>
+        <button class="close-btn" @click="closeSnapshotManager" :disabled="isRestoring">&times;</button>
       </div>
 
       <div class="snapshot-info-text">
@@ -53,6 +53,10 @@ import {
   clearSessionSecrets,
   isWailsMode
 } from '../utils/api'
+import {
+  clearSnapshotRestoreMarker,
+  notifySnapshotRestoreCompletion
+} from '../utils/snapshotRestore'
 
 const emit = defineEmits(['close', 'restored'])
 
@@ -61,6 +65,11 @@ const isRestoring = ref(false)
 const confirmingSnapshot = ref(null)
 const message = ref('')
 const messageType = ref('info')
+
+function closeSnapshotManager() {
+  if (isRestoring.value) return
+  emit('close')
+}
 
 function formatSnapshotName(name) {
   return name.replace('.db', '').replace('omni_money_', '')
@@ -93,8 +102,7 @@ async function executeRestore(name) {
       snapshots.value = []
       confirmingSnapshot.value = null
       isRestoring.value = false
-      emit('close')
-      emit('restored')
+      notifySnapshotRestoreCompletion(emit)
       return
     }
     finishRestoreAndRequireLogin('snapshot-restored')
@@ -108,8 +116,7 @@ async function executeRestore(name) {
       snapshots.value = []
       isRestoring.value = false
       confirmingSnapshot.value = null
-      emit('close')
-      emit('restored', { failed: true })
+      notifySnapshotRestoreCompletion(emit, true)
       return
     }
     // The server drains sessions before attempting disk restore, so a failed
@@ -121,7 +128,7 @@ async function executeRestore(name) {
 
 function finishRestoreAndRequireLogin(reason) {
   clearSessionSecrets()
-  localStorage.removeItem('snapshot_restored')
+  clearSnapshotRestoreMarker()
   snapshots.value = []
   confirmingSnapshot.value = null
   message.value = ''
