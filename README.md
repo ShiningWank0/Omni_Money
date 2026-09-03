@@ -3,12 +3,15 @@
 Omni Money は、Go と Vue.js で構築された家計簿アプリケーションです。
 Wails によるデスクトップアプリとして使えるほか、Docker でサーバーモードとして起動し、ブラウザから利用することもできます。
 
-|  | Desktop | multi-user server |
+| Capability | Desktop | multi-user server |
 | --- | --- | --- |
-| 利用形態 | Wails、roleを持たない単一 local vault | Docker/headless、複数 user |
-| 認証 | password/recovery、idle lock | Argon2id envelope、invite/reset、role、passkey |
-| データ | local vault | control DB と user vault を分離 |
-| AI | production 非提供 | production 非提供（旧AI envは起動拒否） |
+| Ledger / credential lifecycle | Wails、roleなしの単一 local vault、password/recovery、idle lock | Docker/headless、control DBとuser vault分離、Argon2id envelope、invite/reset、role、passkey、session/vault lease |
+| CSV v3 | transactions/images/tags/links/ledger settingsを含む平文full ledger | 同左。auth/control/key、snapshot、volume recoveryは含まない |
+| Snapshot | 手動のみ。自動snapshotは未接続 | 本人に束縛された手動APIのみ。自動snapshotは未接続 |
+| Automatic snapshot | 未接続 | 未接続 |
+| AI | production 非提供 | production 非提供。旧AI設定は列挙分を起動拒否 |
+| Schema / legacy migration | schema migrationと明示的な旧root DB移行 | schema migrationのみ。旧single-DB serverからmulti-userへの自動移行は非提供、CSV v3による手動移行が必要 |
+| safe-update | server用safe-update対象外。固定artifactをrelease workflowで検証 | project `omni-money` のcompose/env/digestを固定検証し、固定imageをatomic更新 |
 
 旧 Python 版の `legacy_reference/` は参照専用です。現行の取引管理、複数口座、CSV ledger、snapshot復元、タグ分析を Go/Vue 構成で提供します。
 
@@ -245,7 +248,7 @@ TrueNAS Custom Appでは `compose.yaml` 相当の設定を使い、次を守っ�
 
 ## AI（両 production mode で非提供）
 
-AI資格情報はまだcontrol userとvault DEKに結び付いていません。このためproduction serverはAI関連環境変数が1つでも設定されていると起動を拒否し、AI listenerとWeb consoleを登録しません。旧AI実装とCLIは将来のuser-bound capability移行の参考としてsourceに残していますが、現在のserver運用では使用しないでください。進捗は[AI連携ロードマップ](docs/ai-integration-roadmap.md)と[server multi-vault security model](docs/server-multi-vault.md)を参照してください。
+AI資格情報はまだcontrol userとvault DEKに結び付いていません。このためproduction serverは `backend/config/server.go` が列挙する旧設定（`AI_API_TOKEN`、`AI_CREDENTIALS_FILE`、`AI_CONSOLE_TOKEN_FILE`、`AI_AUDIT_HMAC_KEYRING_FILE`、`AI_HOST_IP`、`AI_PORT`、`AI_ALLOW_REMOTE`、AI TLS関連file）が設定されている場合に起動を拒否し、AI listenerとWeb consoleを登録しません。列挙外の環境変数まで一括拒否する契約ではありません。旧AI実装とCLIは将来のuser-bound capability移行の参考としてsourceに残していますが、現在のserver運用では使用しないでください。進捗は[AI連携ロードマップ](docs/ai-integration-roadmap.md)と[server multi-vault security model](docs/server-multi-vault.md)を参照してください。
 
 <!-- Legacy AI protocol documentation is intentionally omitted from the active server instructions. -->
 

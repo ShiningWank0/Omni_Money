@@ -4,10 +4,15 @@
 
 ### 現行モード契約
 
-| モード | 認証・データ | 現行制約 |
+| Capability | Desktop | multi-user server |
 | --- | --- | --- |
-| Desktop | Wails、roleを持たない単一 local vault | 起動時 locked、password/recovery、5〜120分（既定15分）のidle lock。AIは非提供。 |
-| multi-user server | Docker/headless、control DB と user ごとの SQLCipher vault | Argon2id envelope、invite/reset、role、passkey。AIは非提供。 |
+| Ledger / credential lifecycle | roleなしの単一 local vault、password/recovery、起動時locked、idle lock | control DBとuser vault分離、Argon2id envelope、invite/reset、role、passkey、session/vault lease |
+| CSV v3 | transactions/images/tags/links/ledger settingsを含む平文full ledger | 同左。auth/control/key、snapshot、volume recoveryは含まない |
+| Snapshot | 手動のみ。自動snapshotは未接続 | 本人に束縛された手動APIのみ。自動snapshotは未接続 |
+| Automatic snapshot | 未接続 | 未接続 |
+| AI | production 非提供 | production 非提供。旧AI設定は列挙分を起動拒否 |
+| Schema / legacy migration | schema migrationと明示的な旧root DB移行 | schema migrationのみ。旧single-DB serverからmulti-userへの自動移行は非提供、CSV v3による手動移行が必要 |
+| safe-update | server用safe-update対象外。固定artifactをrelease workflowで検証 | project `omni-money` のcompose/env/digestを固定検証し、固定imageをatomic更新 |
 
 server の金融 API は authenticated principal に束縛された vault lease のみを受け取り、Desktop/global DBへfallbackしない。`/api/v1/ai/*` と `/api/ai-console/*` はproductionで404、feature statusのAIはfalseである。
 
@@ -120,7 +125,7 @@ Go/Vueで構成された ledger を、利用者端末の Desktop と Docker/head
 
 
 
-### 6.4. AI向けAPI（廃止済み・将来設計）
+### 6.3. AI向けAPI（廃止済み・将来設計）
 
 Desktop と multi-user server の両 production mode では AI を提供しない。`/api/v1/ai/*` と `/api/ai-console/*` は 404 であり、旧AI環境変数を設定すると server の起動を拒否する。以下の旧API・資格情報・listener案は dormant legacy と、将来 user-vault-bound に再設計する Stage 4（planned/unshipped）の資料であり、現行機能として実装・文書化してはならない。詳細は [AI連携ロードマップ](docs/ai-integration-roadmap.md) を参照する。
 
@@ -180,7 +185,7 @@ security headers と CORS は `backend/middleware/security.go` と server router
 
 server環境変数の完全な source of truth は [`.env.example`](.env.example) と [利用ガイド](docs/how-to-use.md) である。主要な必須値は `CONTROL_DB_PATH`、`CONTROL_DB_ENCRYPTION_KEY_FILE`、`VAULT_ROOT`、`DATA_AT_REST_MODE`、`DATA_AT_REST_ATTESTATION_FILE`、`ALLOWED_HOSTS` とする。control key はattested data root外、vault rootはattested data root内の専用領域に置く。
 
-旧 `DB_PATH`、`DB_ENCRYPTION_KEY_FILE`、`AUTH_PASSWORD_HASH`、`AUTH_REQUIRE_TOTP`、`AUTH_TOTP_SECRET_FILE` および `AI_API_TOKEN`、`AI_CREDENTIALS_FILE`、`AI_CONSOLE_TOKEN_FILE`、`AI_HOST_IP`、`AI_PORT`、`AI_ALLOW_REMOTE`、AI TLS関連fileは設定時に production 起動を拒否する。文書で旧名を紹介するときは廃止設定であることを明記する。
+旧 `DB_PATH`、`DB_ENCRYPTION_KEY_FILE`、`AUTH_PASSWORD_HASH`、`AUTH_REQUIRE_TOTP`、`AUTH_TOTP_SECRET_FILE` および `AI_API_TOKEN`、`AI_CREDENTIALS_FILE`、`AI_CONSOLE_TOKEN_FILE`、`AI_AUDIT_HMAC_KEYRING_FILE`、`AI_HOST_IP`、`AI_PORT`、`AI_ALLOW_REMOTE`、`AI_TLS_CERT_FILE`、`AI_TLS_KEY_FILE`、`AI_TLS_CLIENT_CA_FILE`、`AI_TLS_CA_FILE`、`AI_TLS_CLIENT_CERT_FILE`、`AI_TLS_CLIENT_KEY_FILE`は設定時に production 起動を拒否する。文書で旧名を紹介するときは廃止設定であることを明記する。
 
 
 ## 7. データベース設計（SQLite）
@@ -214,7 +219,8 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
   * `name`: タグ名
   * `parent_id`: 親タグID（NULLの場合はトップレベル）
   * `level`: 階層レベル（1: タグ、2: サブタグ、3: サブサブタグ）
-  * UNIQUE制約: `(name, parent_id)` の組み合わせで一意
+  * childは `(name, parent_id)` の組み合わせをUNIQUE制約で一意にする。
+  * active rootは `parent_id IS NULL AND legacy_duplicate = 0` を条件とする partial unique index `idx_tags_root_name_unique` で一意にする。legacy duplicateはarchive-only markerとして保持する。
 
 * **TransactionTags（取引タグ紐付け）**
   * `transaction_id`: 取引ID（外部キー）
@@ -222,7 +228,7 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
   * 複合主キー: `(transaction_id, tag_id)`
 
 * **Settings（設定情報）**
-  * ledger設定はschema migrationと現行database実装に従う。root tag名は正規化され、legacy duplicate markerを除外するpartial unique indexで一意性を維持する。
+  * ledger設定はschema migrationと現行database実装に従う。
 
 
 
@@ -248,48 +254,22 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
 
 #### 8.2.1. デスクトップ用構築（`release-desktop.yml`）
 
-* **トリガー**: `main` ブランチへの `push` イベントで、`paths` フィルターにより `VERSION` ファイルが変更された場合のみ実行する。
-  ```yaml
-  on:
-    push:
-      branches: [main]
-      paths: ['VERSION']
-  ```
-* **バージョン読み取り**: ワークフロー冒頭で `VERSION` ファイルの内容を読み取り、環境変数 `APP_VERSION` に格納する。
-  ```yaml
-  - name: Read version
-    run: echo "APP_VERSION=$(cat VERSION)" >> $GITHUB_ENV
-  ```
-* **ビルドマトリクス**: macOS Intel (`darwin/amd64`)、macOS Apple Silicon (`darwin/arm64`)、Windows (`windows/amd64`)、Linux (`linux/amd64`) の4 artifactを固定 toolchain で並列生成する。
-* **Wails/SQLCipher**: Wails v2.11.0 を固定し、各OSの `scripts/build-sqlcipher-*.sh` と release workflow の固定 tags/CGO 設定を使用する。
-* **バージョンの埋め込み**: ビルド時に `-ldflags "-X main.version=${{ env.APP_VERSION }}"` を用いてバイナリにバージョン情報を埋め込む。
-* **GitHub Releasesへの発行**: 既存 workflow の固定 action と release 手順に従う。GitHub操作を手作業で代替したり、未承認のPR/Issue操作を行ったりしない。
-* **重複リリース防止**: 同一バージョンのReleaseが既に存在する場合はスキップする。
+* **PR**: build設定・実行可能コードに関係するpathの変更時に、release workflowが4 artifactのbuild検証を行う。PR buildは配布Releaseやversion tagを作成しない。
+* **main**: `VERSION`変更時だけ、固定Wails v2.11.0・固定SQLCipher・固定tags/CGO設定でmacOS Intel (`darwin/amd64`)、macOS Apple Silicon (`darwin/arm64`)、Windows (`windows/amd64`)、Linux (`linux/amd64`) の4 artifactをbuildし、version releaseを公開する。
+* **source of truth**: path filter、version埋め込み、固定action、重複release防止は `release-desktop.yml` を参照する。
 
 #### 8.2.2. コンテナ用構築（`release-docker.yml`）
 
-* **トリガー**: `main` の `VERSION` 変更時に実行し、release workflow の実際の path filter を変更しない。
-* **Dockerイメージの構築**: サーバーモード用の `Dockerfile` を用いてコンテナイメージを構築する。ビルド引数でバージョンを渡す。
-  ```yaml
-  - name: Build and push Docker image
-    uses: docker/build-push-action@v5
-    with:
-      push: true
-      tags: |
-        ghcr.io/${{ github.repository }}:${{ env.APP_VERSION }}
-        ghcr.io/${{ github.repository }}:latest
-      build-args: |
-        VERSION=${{ env.APP_VERSION }}
-  ```
-* **登録先**: GitHub Container Registryへ version tag を公開し、安定版だけ既存 workflow の方針に従って `latest` を更新する。
-* **マルチアーキテクチャ**: linux/amd64 と linux/arm64 の両方を構築する。
+* **トリガー**: `main` の `VERSION`変更時に、Dockerfileと固定SQLCipher buildを使って実行する。PRのDesktop artifact buildとは別のserver image releaseである。
+* **マルチアーキテクチャ**: linux/amd64 と linux/arm64 の両方を構築し、version tagを公開する。`latest`はstable releaseに限って更新する。
+* **source of truth**: image action、権限、tag、push条件は `release-docker.yml` を参照し、無条件のlatest例を文書へ複製しない。
 
 ### 8.3. バージョンのアプリへの埋め込み
 
 `VERSION` ファイルの値を実行時に参照する仕組みは、現行の `main.go`、frontend build設定、Dockerfile、release workflowをsource of truthとして維持・検証する。
 
 * **Go側**: `main.go` にパッケージ変数 `var version = "dev"` を定義する。CI/CDでのビルド時に `-ldflags` でこの変数を上書きする。ローカル開発時は `"dev"` のまま動作する。
-* **フロントエンド側**: ビルド時に `VITE_APP_VERSION` 環境変数として渡し、Vue.jsから `import.meta.env.VITE_APP_VERSION` で参照可能にする。画面のフッターやバージョン情報画面で表示する。
+* **フロントエンド側**: ビルド時に `VITE_APP_VERSION` を渡し、Vue.jsから `import.meta.env.VITE_APP_VERSION` で表示する。
 * **Docker**: `Dockerfile` 内で `ARG VERSION=dev` を定義し、 ビルド時の `--build-arg` で渡す。環境変数として実行時にも参照可能にする。
 
 
@@ -317,10 +297,9 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
    - **使用方法**: 端末はApple Silicon（M4 Pro）であるため、ARM構造（`linux/arm64`）での動作を基本とすること。`Dockerfile` の動作検証として `docker build` や `docker run` を適宜実行し、サーバー単独での正常動作を確認すること。
 
 
-## 10. AIエージェントへの実装指示（ステップ）
+## 10. 今後の変更時のguardrails
 
-開発は必ず以下の順序で進めること。
-
-* **ステップ1〜5**: 現行のfolder責務、Vue UI、database schema、vault-bound service、既存UIを維持・検証する。新規実装時はsourceとsecurity boundaryを先に照合する。
-* **ステップ6**: AI用APIは実装しない。自動状態保存部品もproduction serverへ接続しない。将来設計は `docs/ai-integration-roadmap.md` に隔離する。
-* **ステップ7〜9**: 現行 Dockerfile/server起動、固定SQLCipher build、CI/release workflow、server middlewareとDesktop local authを維持・検証する。セキュリティ・認証の契約は §6.7 と各source/testを参照する。
+- mode、auth、vault、CSV、snapshot、AI、releaseの変更は、先に現行 source/test とこの文書の capability matrixを照合する。
+- Desktop は roleのない local vault、server は control/vault分離を維持する。旧 single-DB server、bcrypt/TOTP、旧AI envを復活させない。
+- production AIと自動server snapshotは現状未提供・未接続である。将来提供する場合は user-vault binding、別設計、明示的な承認、security testを必須にする。
+- 配布は固定SQLCipher/Wails/Docker workflowを使い、通常Go/Nodeテスト、frontend build、security tests、actionlint、`git diff --check`を通す。

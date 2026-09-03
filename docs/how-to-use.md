@@ -144,14 +144,13 @@ TrueNAS Custom Appにはrepositoryの`compose.yaml`と同等のservice、secret�
 
 ## 5. Backupと復旧試験
 
-snapshot単体はDR setではありません。暗号化されたdataに加え、次を別々の安全な場所へbackupします。
+snapshot単体はDR setではありません。次の全てを別々の安全な場所へbackupします。
 
-- control DB key
-- 暗号化volumeのkey/recovery material
-- attestationと更新手順
-- 各userが保持するrecovery code
-
+- control DB（`control/omni_control.db`）と独立したcontrol DB key
+- 各user vault（`vaults/<vault-id>/ledger.db`）
 - 各user vaultの暗号化snapshot
+- 暗号化volumeのkey/recovery material、attestation、復旧・更新手順
+- 各userが保持するrecovery code
 
 backup取得だけでは不十分です。本番とは隔離した環境で定期的に復旧し、control DB/key、vault/snapshot、volume recovery material、recovery codeが揃ってcontrol DBが開くこと、user本人のrecovery codeで対象vaultだけが開くこと、別userやAdminからは開けないことを確認します。元snapshotは変更しません。
 

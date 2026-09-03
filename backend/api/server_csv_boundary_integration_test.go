@@ -226,15 +226,16 @@ func TestProductionServerCSVStaysInsideAuthenticatedVault(t *testing.T) {
 		}
 
 		for name, test := range map[string]struct {
-			path string
-			want int
+			method string
+			path   string
+			want   int
 		}{
-			"snapshots unavailable": {path: "/api/snapshots", want: http.StatusServiceUnavailable},
-			"AI console absent":     {path: "/api/ai-console/transactions", want: http.StatusNotFound},
-			"AI transaction absent": {path: "/api/v1/ai/transactions", want: http.StatusNotFound},
+			"snapshots unavailable": {method: http.MethodGet, path: "/api/snapshots", want: http.StatusServiceUnavailable},
+			"AI console absent":     {method: http.MethodPost, path: "/api/ai-console/transactions", want: http.StatusNotFound},
+			"AI transaction absent": {method: http.MethodPost, path: "/api/v1/ai/transactions", want: http.StatusNotFound},
 		} {
 			t.Run(name, func(t *testing.T) {
-				response := serveServerCSVRequest(t, handler, sessionA, http.MethodGet, test.path, nil)
+				response := serveServerCSVRequest(t, handler, sessionA, test.method, test.path, nil)
 				if response.Code != test.want {
 					t.Fatalf("status = %d, want %d", response.Code, test.want)
 				}

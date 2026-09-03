@@ -96,7 +96,9 @@ jobs:
             rg -q 'AI.*(非提供|未提供)|production.*AI.*非提供' "$file"
           done
           for file in README.md Agent.md; do
-            rg -q 'CSV.*v3|CSV v3' "$file"
+            for row in 'Ledger / credential lifecycle' 'CSV v3' 'Snapshot' 'Automatic snapshot' 'AI' 'Schema / legacy migration' 'safe-update'; do
+              rg -q "^\\| ${row} \\|" "$file"
+            done
           done
           for file in README.md Agent.md docs/how-to-use.md docs/server-multi-vault.md; do
             rg -q 'snapshot.*(DR|DR set)|DR.*snapshot' "$file"
