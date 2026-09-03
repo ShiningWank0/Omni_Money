@@ -272,8 +272,8 @@ npm run build
 `VERSION` を更新して `main` に反映すると、GitHub Actions がリリース処理を実行します。
 
 - `validate-version.yml`: PR で `VERSION` の後退を検知
-- `release-desktop.yml`: macOS Intel、macOS Apple Silicon、Windows、Linux の4 Desktop artifactを固定Wails/SQLCipherでビルド
-- `release-docker.yml`: GHCR 向け Docker イメージをビルド
+- `release-desktop.yml`: 関連pathを変更したPRではmacOS Intel、macOS Apple Silicon、Windows、Linuxの4 Desktop artifactを固定Wails/SQLCipherでbuild検証するが、配布Releaseやversion tagはpublishしない。`main`ではVERSIONまたはrelease workflow自体の変更時に4 artifactをbuildし、version releaseをpublishする。
+- `release-docker.yml`: `main`のVERSION変更時にGHCR向けlinux/amd64 + linux/arm64のmulti-arch manifestをbuildし、stable releaseだけ`latest`を更新する。
 
 ## 機能追加リスト
 

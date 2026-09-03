@@ -6,7 +6,7 @@
 
 | Capability | Desktop | multi-user server |
 | --- | --- | --- |
-| Ledger / credential lifecycle | roleなしの単一 local vault、password/recovery、起動時locked、idle lock | control DBとuser vault分離、Argon2id envelope、invite/reset、role、passkey、session/vault lease |
+| Ledger / credential lifecycle | Wails、roleなしの単一 local vault、password/recovery、idle lock | Docker/headless、control DBとuser vault分離、Argon2id envelope、invite/reset、role、passkey、session/vault lease |
 | CSV v3 | transactions/images/tags/links/ledger settingsを含む平文full ledger | 同左。auth/control/key、snapshot、volume recoveryは含まない |
 | Snapshot | 手動のみ。自動snapshotは未接続 | 本人に束縛された手動APIのみ。自動snapshotは未接続 |
 | Automatic snapshot | 未接続 | 未接続 |
@@ -121,11 +121,11 @@ Go/Vueで構成された ledger を、利用者端末の Desktop と Docker/head
   * 銀行口座項目は紐付け候補の分類にのみ使い、クレジットカード項目のように残高計算・残高推移から除外してはならない。
   * 取引更新や設定変更により既存の紐付けがこの条件を満たさなくなった場合は、不正な紐付けを削除して整合性を維持する。
 
-* **スナップショット**: `backend/database/` の自動作成部品は参照・テスト用であり、production serverの自動スケジューラには未接続である。現行serverは認証済み本人の明示的な手動APIだけを提供し、snapshotは同じvault DEKの暗号文として扱う。application Admin/APIには他userの平文を開示しないが、同じservice UID、host root/operator、binary、process memoryはtrust boundary内である。snapshot単体はDR setではなく、control DB/key、vault/snapshot、volume recovery material、recovery codeを揃える。
+### 6.3. スナップショット（現行は手動のみ）
 
+`backend/database/` の自動作成部品は参照・テスト用であり、production serverの自動スケジューラには未接続である。Desktopもserverも現行は手動snapshotだけを提供する。server snapshotは認証済み本人の明示的な手動APIで、同じvault DEKの暗号文として扱う。application Admin/APIには他userの平文を開示しないが、同じservice UID、host root/operator、binary、process memoryはtrust boundary内である。snapshot単体はDR setではなく、control DB/key、vault/snapshot、volume recovery material、recovery codeを揃える。
 
-
-### 6.3. AI向けAPI（廃止済み・将来設計）
+### 6.4. AI向けAPI（廃止済み・将来設計）
 
 Desktop と multi-user server の両 production mode では AI を提供しない。`/api/v1/ai/*` と `/api/ai-console/*` は 404 であり、旧AI環境変数を設定すると server の起動を拒否する。以下の旧API・資格情報・listener案は dormant legacy と、将来 user-vault-bound に再設計する Stage 4（planned/unshipped）の資料であり、現行機能として実装・文書化してはならない。詳細は [AI連携ロードマップ](docs/ai-integration-roadmap.md) を参照する。
 
@@ -246,7 +246,7 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
   - `PATCH`（例: 0.1.0 → 0.1.1）: バグ修正、軽微な改修
   - `MINOR`（例: 0.1.1 → 0.2.0）: 機能追加、画面変更
   - `MAJOR`（例: 0.2.0 → 1.0.0）: 破壊的変更、大規模刷新
-* **CI/CDトリガー条件**: `VERSION` 起点の release workflow と、PR/push/schedule の検証 workflow を分ける。Desktop release は `VERSION` と実行可能コード・build設定に関係する path の変更時だけ起動する。
+* **CI/CDトリガー条件**: `VERSION` 起点の release workflow と、PR/push/schedule の検証 workflow を分ける。Desktop releaseは関連pathを変更したPRでbuild検証し、`main`では`VERSION`またはrelease workflow自体の変更時にpublishする。
 
 ### 8.2. GitHub Actions ワークフロー構成
 
@@ -255,7 +255,7 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
 #### 8.2.1. デスクトップ用構築（`release-desktop.yml`）
 
 * **PR**: build設定・実行可能コードに関係するpathの変更時に、release workflowが4 artifactのbuild検証を行う。PR buildは配布Releaseやversion tagを作成しない。
-* **main**: `VERSION`変更時だけ、固定Wails v2.11.0・固定SQLCipher・固定tags/CGO設定でmacOS Intel (`darwin/amd64`)、macOS Apple Silicon (`darwin/arm64`)、Windows (`windows/amd64`)、Linux (`linux/amd64`) の4 artifactをbuildし、version releaseを公開する。
+* **main**: `VERSION`またはrelease workflow自体の変更時に、固定Wails v2.11.0・固定SQLCipher・固定tags/CGO設定でmacOS Intel (`darwin/amd64`)、macOS Apple Silicon (`darwin/arm64`)、Windows (`windows/amd64`)、Linux (`linux/amd64`) の4 artifactをbuildし、version releaseを公開する。
 * **source of truth**: path filter、version埋め込み、固定action、重複release防止は `release-desktop.yml` を参照する。
 
 #### 8.2.2. コンテナ用構築（`release-docker.yml`）

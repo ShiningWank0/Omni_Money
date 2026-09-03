@@ -96,8 +96,20 @@ jobs:
             rg -q 'AI.*(非提供|未提供)|production.*AI.*非提供' "$file"
           done
           for file in README.md Agent.md; do
-            for row in 'Ledger / credential lifecycle' 'CSV v3' 'Snapshot' 'Automatic snapshot' 'AI' 'Schema / legacy migration' 'safe-update'; do
-              rg -q "^\\| ${row} \\|" "$file"
+            while IFS= read -r row; do
+              if ! grep -Fqx -- "$row" "$file"; then
+                echo "missing exact capability matrix row in $file: $row" >&2
+                exit 1
+              fi
+            done <<'EOF'
+          | Ledger / credential lifecycle | Wails、roleなしの単一 local vault、password/recovery、idle lock | Docker/headless、control DBとuser vault分離、Argon2id envelope、invite/reset、role、passkey、session/vault lease |
+          | CSV v3 | transactions/images/tags/links/ledger settingsを含む平文full ledger | 同左。auth/control/key、snapshot、volume recoveryは含まない |
+          | Snapshot | 手動のみ。自動snapshotは未接続 | 本人に束縛された手動APIのみ。自動snapshotは未接続 |
+          | Automatic snapshot | 未接続 | 未接続 |
+          | AI | production 非提供 | production 非提供。旧AI設定は列挙分を起動拒否 |
+          | Schema / legacy migration | schema migrationと明示的な旧root DB移行 | schema migrationのみ。旧single-DB serverからmulti-userへの自動移行は非提供、CSV v3による手動移行が必要 |
+          | safe-update | server用safe-update対象外。固定artifactをrelease workflowで検証 | project `omni-money` のcompose/env/digestを固定検証し、固定imageをatomic更新 |
+          EOF
             done
           done
           for file in README.md Agent.md docs/how-to-use.md docs/server-multi-vault.md; do
