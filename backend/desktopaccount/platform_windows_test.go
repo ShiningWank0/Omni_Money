@@ -84,7 +84,7 @@ func assertWindowsProtectedDACL(t *testing.T, handle windows.Handle, wantInherit
 	descriptor, err := windows.GetSecurityInfo(
 		handle,
 		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -106,6 +106,13 @@ func assertWindowsProtectedDACL(t *testing.T, handle windows.Handle, wantInherit
 	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatal(err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner == nil || !owner.Equals(currentUser.User.Sid) {
+		t.Fatalf("private Windows owner = %v, want current account %s", owner, currentUser.User.Sid.String())
 	}
 	system, err := windows.StringToSid("S-1-5-18")
 	if err != nil {

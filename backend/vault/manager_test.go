@@ -98,6 +98,57 @@ func TestAcquireReusesOnlyExactBinding(t *testing.T) {
 	}
 }
 
+func TestSessionRootValidationSerializesWithCrossUserAcquire(t *testing.T) {
+	manager := newPlainTestManager(t)
+	root, err := manager.Acquire("user-1", testVaultID, testKey(0x19))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		root.Release()
+		if err := manager.Close(context.Background()); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	// ValidateSessionRoot is called while SessionManager.mu is held, but it
+	// must still take this Manager's mutex. Exercise that exact boundary while
+	// another user repeatedly inserts/removes an entry from m.entries; the
+	// race detector must see no unsynchronized map access.
+	var wg sync.WaitGroup
+	var failures atomic.Int32
+	for worker := 0; worker < 8; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for attempt := 0; attempt < 25; attempt++ {
+				if err := root.ValidateSessionRoot(); err != nil {
+					failures.Add(1)
+				}
+				for {
+					lease, err := manager.Acquire("user-2", secondTestVaultID, testKey(0x29))
+					if errors.Is(err, ErrDraining) {
+						// Release of the previous short-lived lease may be
+						// closing this entry. That transient is expected; retry
+						// until this iteration has a successful acquisition.
+						continue
+					}
+					if err != nil {
+						failures.Add(1)
+						break
+					}
+					lease.Release()
+					break
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if got := failures.Load(); got != 0 {
+		t.Fatalf("cross-user validation/acquire failures = %d", got)
+	}
+}
+
 func TestAcquireRejectsVaultSharedAcrossUsers(t *testing.T) {
 	manager := newPlainTestManager(t)
 	first, err := manager.Acquire("user-1", testVaultID, testKey(0x11))

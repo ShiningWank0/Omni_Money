@@ -10,7 +10,7 @@ attestation file自身と、filesystem rootからその親directoryまでの各c
 
 ## 対象
 
-- server modeのcontrol DB、ユーザーvault、SQLite WAL/SHM（snapshot APIは現在無効）
+- server modeのcontrol DB、ユーザーvault、SQLite WAL/SHM、ユーザーごとのSQLCipher snapshot
 - volumeの複製、host snapshot、外部backup
 - serverから取得したCSVを保存する媒体
 
@@ -88,7 +88,7 @@ restore試験後にsafe-updateを有効化してください。
 
 ## 復旧試験とrotation
 
-本番data rootを直接変更せず、暗号化backupの複製を別の隔離volumeでunlockします。control DBとuser vaultを復元し、外部公開せず起動して`PRAGMA integrity_check`、代表的な残高・画像・tag、user本人のrecovery codeによるvault復旧を確認します。multi-user serverのsnapshot routeは現在無効なので、snapshot restoreを復旧手順に含めません。試験用copyを廃棄した実施時刻だけを`recovery_tested_at`へ記録します。
+本番data rootを直接変更せず、SQLCipher snapshot（同じvault DEKで暗号化されたciphertext）の複製を別の隔離volumeでunlockします。control DBとuser vaultを復元し、外部公開せず起動して`PRAGMA integrity_check`、現行schema migration、critical index/trigger、代表的な残高・画像・tag、user本人のrecovery codeによるvault復旧を確認します。snapshot restoreの演習では、破損・wrong-key・別user・symlink/hardlinkを拒否し、失敗後も元live DBをreopenできることを確認します。試験用copyを廃棄した実施時刻だけを`recovery_tested_at`へ記録します。
 
 rotation前に現行keyで復旧できるbackupを作り、新key slot/versionを追加します。新keyで別sessionからunlockできることを確認してから`key_id`と`next_rotation_at`を更新し、recovery期間後に旧keyをretireします。key喪失時にOmni Moneyから復元する方法はありません。
 

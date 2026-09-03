@@ -71,3 +71,31 @@ func TestPlainReadOnlyPurposeCannotCreateOrWrite(t *testing.T) {
 		t.Fatal("read-only opener accepted a write")
 	}
 }
+
+func TestPlainImmutableReadOnlyPurposeCannotCreateOrWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "immutable.db")
+	opener := NewPlainOpener()
+	writable, err := opener.Open(context.Background(), path, Writable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writable.Exec("CREATE TABLE sample (id INTEGER PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	readOnly, err := opener.Open(context.Background(), path, ImmutableReadOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readOnly.Close()
+	if err := readOnly.PingContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readOnly.Exec("INSERT INTO sample DEFAULT VALUES"); err == nil {
+		t.Fatal("immutable read-only opener accepted a write")
+	}
+}

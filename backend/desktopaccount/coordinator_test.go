@@ -165,6 +165,32 @@ func TestCoordinatorSnapshotLifecycle(t *testing.T) {
 	lease.Release()
 }
 
+func TestCoordinatorSnapshotFailureForcesLockAndReauthentication(t *testing.T) {
+	c := newTestCoordinator(t, t.TempDir())
+	recovery, err := c.Setup(testPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clear(recovery)
+	t.Cleanup(func() { _ = c.Close() })
+	path, err := c.CreateSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("corrupt snapshot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RestoreSnapshot(filepath.Base(path)); err == nil {
+		t.Fatal("corrupt snapshot restore unexpectedly succeeded")
+	}
+	if c.Status().Unlocked {
+		t.Fatal("failed restore left the Desktop coordinator unlocked")
+	}
+	if _, err := c.Service(); !errors.Is(err, ErrLocked) {
+		t.Fatalf("Service after failed restore = %v, want ErrLocked", err)
+	}
+}
+
 func TestCoordinatorRestartBeginsLockedAndReopensPersistedAccount(t *testing.T) {
 	root := t.TempDir()
 	first := newTestCoordinator(t, root)

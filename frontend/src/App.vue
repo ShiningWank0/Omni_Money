@@ -1212,7 +1212,14 @@ async function submitPasskeyReauthentication() {
 }
 
 async function handleSnapshotRestored() {
-  // 全状態をリセットしてから再取得
+	if (isWailsMode) {
+		// The desktop restore has no server session to expire. Purge all mounted
+		// state, lock the vault, then reload into the normal unlock gate.
+		await lockDesktopVaultNow()
+		window.location.reload()
+		return
+	}
+	// 全状態をリセットしてから再取得
   store.resetState()
   try {
     await store.fetchAccounts()

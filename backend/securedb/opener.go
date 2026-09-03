@@ -34,7 +34,16 @@ const (
 	Writable Purpose = iota
 	Snapshot
 	ReadOnly
+	// ImmutableReadOnly is reserved for private, descriptor-bound snapshot
+	// validation copies whose bytes are already pinned by the caller. SQLite
+	// must not attempt to create journal or shared-memory files next to a
+	// /proc/self/fd or /dev/fd path while SQLCipher opens that descriptor.
+	ImmutableReadOnly
 )
+
+func (purpose Purpose) readOnly() bool {
+	return purpose == ReadOnly || purpose == ImmutableReadOnly
+}
 
 type Opener struct {
 	mu        sync.RWMutex
@@ -121,15 +130,18 @@ func openPlain(path string, purpose Purpose) (*sql.DB, error) {
 	query := url.Values{}
 	query.Set("_busy_timeout", "5000")
 	query.Set("_foreign_keys", "ON")
-	if purpose != ReadOnly {
+	if !purpose.readOnly() {
 		query.Set("_synchronous", "FULL")
 	}
 	switch purpose {
 	case Snapshot:
 		query.Set("mode", "rw")
 		query.Set("_journal_mode", "DELETE")
-	case ReadOnly:
+	case ReadOnly, ImmutableReadOnly:
 		query.Set("mode", "ro")
+		if purpose == ImmutableReadOnly {
+			query.Set("immutable", "1")
+		}
 	default:
 		query.Set("_journal_mode", "WAL")
 	}
@@ -153,8 +165,11 @@ func (c *encryptedConnector) Connect(context.Context) (driver.Conn, error) {
 	query := url.Values{"key": []string{string(keySpec)}}
 	if c.purpose == Snapshot {
 		query.Set("mode", "rw")
-	} else if c.purpose == ReadOnly {
+	} else if c.purpose.readOnly() {
 		query.Set("mode", "ro")
+		if c.purpose == ImmutableReadOnly {
+			query.Set("immutable", "1")
+		}
 	}
 	dsn := databaseFileURL(c.path, query)
 	clear(keySpec)
@@ -188,7 +203,7 @@ func (c *encryptedConnector) Connect(context.Context) (driver.Conn, error) {
 		} else if c.purpose == Writable {
 			statements = append(statements, "PRAGMA journal_mode = WAL")
 		}
-		if c.purpose != ReadOnly {
+		if !c.purpose.readOnly() {
 			statements = append(statements, "PRAGMA synchronous = FULL")
 		}
 		for _, statement := range statements {

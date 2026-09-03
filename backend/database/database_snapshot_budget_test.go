@@ -1,9 +1,13 @@
 package database
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestPruneSnapshotsEnforcesCountAndByteBudget(t *testing.T) {
@@ -60,5 +64,88 @@ func TestSnapshotMaxTotalBytesValidation(t *testing.T) {
 	t.Setenv("SNAPSHOT_MAX_TOTAL_BYTES", "0")
 	if _, err := snapshotMaxTotalBytes(); err == nil {
 		t.Fatal("zero budget was accepted")
+	}
+	t.Setenv("SNAPSHOT_MAX_TOTAL_BYTES", fmt.Sprintf("%d", maxSnapshotValidationBytes+1))
+	if _, err := snapshotMaxTotalBytes(); err == nil {
+		t.Fatal("budget above the per-file validation ceiling was accepted")
+	}
+}
+
+func TestListSnapshotsContextHonorsCancellationBeforeValidation(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := instance.ListSnapshotsContext(ctx, snapshotDir); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled snapshot listing error = %v, want context.Canceled", err)
+	}
+}
+
+func TestSnapshotValidationAdmissionIsProcessWideAndCancelable(t *testing.T) {
+	first, _, firstSnapshots := newPlainSnapshotTestInstance(t)
+	second, _, secondSnapshots := newPlainSnapshotTestInstance(t)
+	_ = first
+	snapshotValidationAdmission <- struct{}{}
+	defer snapshotValidationAdmissionRelease()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := second.ListSnapshotsContext(ctx, secondSnapshots); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second tenant admission error = %v, want context deadline", err)
+	}
+	_ = firstSnapshots
+}
+
+func TestCreateSnapshotContextHonorsCancellationBeforeAdmission(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	if _, err := instance.CreateSnapshot(snapshotDir); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotValidationAdmission <- struct{}{}
+	defer snapshotValidationAdmissionRelease()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := instance.CreateSnapshotContext(ctx, snapshotDir); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("canceled snapshot creation error = %v, want context deadline", err)
+	}
+	after, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("canceled snapshot creation changed public generations: before=%d after=%d", len(before), len(after))
+	}
+}
+
+func TestDirectoryScanBoundsEntriesBeforeMaterializing(t *testing.T) {
+	dir := t.TempDir()
+	for index := 0; index <= maxSnapshotDirectoryEntries; index++ {
+		path := filepath.Join(dir, fmt.Sprintf("entry-%03d", index))
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := readDirectoryEntriesContext(context.Background(), dir, maxSnapshotDirectoryEntries); err == nil {
+		t.Fatal("directory scan accepted more than its bounded entry count")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := readDirectoryEntriesContext(ctx, dir, maxSnapshotDirectoryEntries); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled directory scan error = %v, want context.Canceled", err)
+	}
+}
+
+func TestCreateSnapshotAllowsExactRemainingBudget(t *testing.T) {
+	instance, _, snapshotDir := newPlainSnapshotTestInstance(t)
+	insertSnapshotTestTransaction(t, instance, "exact-budget")
+	required, err := sqliteDatabaseSize(instance.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SNAPSHOT_MAX_TOTAL_BYTES", fmt.Sprintf("%d", required))
+	if _, err := instance.CreateSnapshot(snapshotDir); err != nil {
+		t.Fatalf("snapshot using exactly the configured budget failed: %v", err)
 	}
 }

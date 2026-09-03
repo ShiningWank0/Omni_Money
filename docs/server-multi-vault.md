@@ -12,6 +12,7 @@ data/
   control/omni_control.db          SQLCipher, opened with the server control key
   vaults/<opaque-vault-id>/
     ledger.db                      SQLCipher, opened with that user's vault key
+    snapshots/<timestamp>.db       SQLCipher ciphertext, opened only with the same vault key
 ```
 
 The control database contains identities, roles, account state, one-way token
@@ -110,17 +111,31 @@ request's guarded `core.Service`; absence of that service is a fixed 503 and
 never falls back to the Desktop/global database. Admin actor IDs come only from
 the refreshed authenticated user context, never a request field.
 
-Per-user snapshot restore and AI delegation are not yet safely expressible
-through the vault manager. Server routes report snapshots unavailable, omit the
-AI console/listener, and startup rejects legacy AI environment settings. These
-features remain disabled until they have manager-exclusive or user-bound
-capabilities.
+Per-user snapshots are exposed only through the authenticated user's bound
+request lease. `GET` and `POST /api/snapshots` never accept a user ID, vault ID,
+path, or directory and return basenames only. Each snapshot is made with the
+same per-vault SQLCipher DEK as `ledger.db`; it is ciphertext suitable for an
+off-host encrypted backup, not a plaintext export. Retention is bounded by 30
+generations and `SNAPSHOT_MAX_TOTAL_BYTES`.
+
+Restore is a high-impact operation requiring CSRF and recent reauthentication.
+The exact restore route first authenticates the current user without borrowing
+the request child lease, then obtains a root-only manager capability. That
+capability drains every session for that user, waits for in-flight requests,
+atomically validates and swaps the candidate database, and closes/zeroizes the
+instance. A restore never affects another user's vault. The browser is forced
+to log in again after either a successful restore or a failed restore attempt.
+An application administrator may manage accounts, but cannot list, decrypt, or
+restore another user's snapshots.
 
 ## Threat boundary
 
 This design protects stopped databases, snapshots, copied files, and the product's
 application-level administrator boundary. It also prevents accidental cross-user
 database selection in normal server handlers.
+
+The snapshot threat model assumes a single writer per service and UID. Ciphertext
+replay or replacement by that same service UID is outside this boundary.
 
 It cannot protect an unlocked vault from an operating-system administrator or
 malware that can replace the server binary, inspect process memory, inject code,
@@ -137,10 +152,23 @@ The multi-vault change is intentionally split into reviewable stages:
 2. instance-bound business services, atomic credential/reset mutations, and
    session/request vault lease ownership;
 3. first-admin HTTP bootstrap, invitations, login/recovery/reset, production
-   route selection, and the account-only admin UI (delivered); legacy
-   single-user migration remains follow-up work;
+   route selection, account-only admin UI, and authenticated per-user snapshots;
 4. per-user AI credentials bound cryptographically to their owner vault;
 5. the desktop single-user vault setup, unlock, recovery, and lock lifecycle.
 
-The first stage exposes no multi-user HTTP endpoints. Issue #62 remains open until
-the server and desktop flows are complete and verified on the latest `main`.
+## Snapshot restore drill
+
+Back up only the encrypted `snapshots/` files to an off-host encrypted backup
+system. During a drill, copy the ciphertext and the user's recovery material
+to an isolated data root, start the server without exposing it, and verify a
+known transaction, image, tag, `PRAGMA integrity_check`, current schema
+migration, and critical indexes/triggers. Exercise a corrupt file, a wrong-key
+file, and a rollback failure. Keep the original snapshot unchanged. After a
+restore, all sessions are revoked and the user must log in again; record the
+drill time without logging keys, paths, or financial contents.
+
+The app-admin boundary does not protect a host root or a process that can read
+the server's memory: an operator able to replace the binary, inspect memory,
+or capture a password can obtain a live DEK. SQLCipher snapshots, encrypted
+off-host storage, least privilege, and host-volume encryption protect data at
+rest within the application threat model, not a compromised host.

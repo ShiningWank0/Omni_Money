@@ -9,6 +9,7 @@ import (
 	"omni_money/backend/control"
 	"omni_money/backend/middleware"
 	"omni_money/backend/serverauth"
+	"omni_money/backend/vault"
 )
 
 // ServerAccountService is the account-plane capability exposed to the HTTP
@@ -45,13 +46,21 @@ type ServerPasskeyService interface {
 	DeletePasskey(context.Context, string, []byte) error
 }
 
+// ServerSnapshotService is the session-bound root operation used only by the
+// exact restore route.  Snapshot create/list use the request lease installed
+// by VaultSessionAuthMiddleware.
+type ServerSnapshotService interface {
+	BeginRestore(string) (*vault.RestoreOperation, string, error)
+}
+
 var _ ServerPasskeyService = (*serverauth.Service)(nil)
 
 type ServerDependencies struct {
-	Accounts ServerAccountService
-	Sessions *middleware.SessionManager
-	Control  ServerControlStore
-	Now      func() time.Time
+	Accounts  ServerAccountService
+	Sessions  *middleware.SessionManager
+	Control   ServerControlStore
+	Now       func() time.Time
+	Snapshots ServerSnapshotService
 }
 
 func (d ServerDependencies) now() time.Time {
@@ -105,10 +114,15 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 	mux.HandleFunc("/api/admin/password-resets", handleServerPasswordResetCreation(dependencies))
 
 	registerFinancialRoutes(mux)
-	// Snapshot restore needs a manager-exclusive operation that does not exist
-	// yet. Never route it through the legacy global database in server mode.
-	mux.HandleFunc("/api/snapshots", handleServerFeatureUnavailable)
-	mux.HandleFunc("/api/snapshots/restore", handleServerFeatureUnavailable)
+	if dependencies.Snapshots == nil {
+		// Keep a fail-closed boundary for test/degraded configurations that do
+		// not provide the root-only manager capability.
+		mux.HandleFunc("/api/snapshots", handleServerFeatureUnavailable)
+		mux.HandleFunc("/api/snapshots/restore", handleServerFeatureUnavailable)
+	} else {
+		mux.HandleFunc("/api/snapshots", handleServerSnapshots)
+		mux.HandleFunc("/api/snapshots/restore", handleServerSnapshotRestore(dependencies))
+	}
 	// Static AI credentials are not bound to a UserID/VaultID/DEK. The
 	// multi-user server keeps both the console relay and AI listener absent.
 	mux.HandleFunc("/api/ai-console/", http.NotFound)
@@ -124,6 +138,9 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 
 	var handler http.Handler = mux
 	handler = middleware.MaxBodySizeMiddleware(handler)
+	// VaultSessionAuthMiddleware is the outermost layer and installs only
+	// identity/current-user context for exact restore. CSRF and recent-auth
+	// then run, and ordinary requests borrow a child lease inside that layer.
 	handler = middleware.RecentAuthMiddleware(dependencies.Sessions, handler)
 	handler = middleware.CSRFMiddleware(dependencies.Sessions, handler)
 	handler = middleware.VaultSessionAuthMiddleware(dependencies.Sessions, dependencies.Control, handler)

@@ -179,9 +179,10 @@ func newServerRuntime(
 		return nil, fmt.Errorf("server authenticationを初期化できません: %w", err)
 	}
 	publicHandler, err := api.NewServerRouter(api.ServerDependencies{
-		Accounts: accountService,
-		Sessions: runtime.sessions,
-		Control:  controlStore,
+		Accounts:  accountService,
+		Sessions:  runtime.sessions,
+		Control:   controlStore,
+		Snapshots: runtime.sessions,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("production routerを初期化できません: %w", err)

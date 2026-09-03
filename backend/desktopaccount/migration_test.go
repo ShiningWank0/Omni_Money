@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -130,6 +131,114 @@ func TestLegacyMigrationCopiesEveryDatabaseAndRequiresRecoveryAcknowledgment(t *
 	}
 	if err := c.AcknowledgeRecovery(); err != nil {
 		t.Fatalf("idempotent AcknowledgeRecovery: %v", err)
+	}
+}
+
+func TestLegacyMigrationAllowsOnlyTrustedDestinationSnapshotCoordinationFile(t *testing.T) {
+	prepare := func(t *testing.T) (string, *Coordinator, string) {
+		t.Helper()
+		root := t.TempDir()
+		createLegacyTestDatabase(t, filepath.Join(root, legacyDBFileName))
+		if err := os.Mkdir(filepath.Join(root, "snapshots"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		createLegacyTestDatabase(t, filepath.Join(root, "snapshots", "snapshot_20260828.db"))
+		coordinator := newMigrationTestCoordinator(t, root)
+		recovery, err := coordinator.MigrateLegacy(testPassword)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clear(recovery)
+		lockPath := filepath.Join(root, "vaults", coordinator.manifest.VaultID, "snapshots", database.SnapshotTransactionLockFileName)
+		if err := database.ValidateSnapshotTransactionLock(lockPath); err != nil {
+			t.Fatalf("migration did not create a trusted destination lock: %v", err)
+		}
+		return root, coordinator, lockPath
+	}
+
+	t.Run("exact destination lock", func(t *testing.T) {
+		_, coordinator, _ := prepare(t)
+		if err := coordinator.AcknowledgeRecovery(); err != nil {
+			t.Fatalf("trusted destination lock was rejected: %v", err)
+		}
+	})
+
+	t.Run("unknown destination", func(t *testing.T) {
+		root, coordinator, _ := prepare(t)
+		unknown := filepath.Join(root, "vaults", coordinator.manifest.VaultID, database.SnapshotTransactionLockFileName)
+		if err := os.WriteFile(unknown, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := coordinator.AcknowledgeRecovery(); err == nil {
+			t.Fatal("migration accepted a coordination file outside the destination snapshot directory")
+		}
+	})
+
+	t.Run("content tamper", func(t *testing.T) {
+		_, coordinator, lockPath := prepare(t)
+		if err := os.WriteFile(lockPath, []byte("tampered"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := coordinator.AcknowledgeRecovery(); err == nil {
+			t.Fatal("migration accepted a content-bearing coordination file")
+		}
+	})
+
+	t.Run("permission tamper", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Unix mode bits are not authoritative on Windows")
+		}
+		_, coordinator, lockPath := prepare(t)
+		if err := os.Chmod(lockPath, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := coordinator.AcknowledgeRecovery(); err == nil {
+			t.Fatal("migration accepted a non-private coordination file")
+		}
+	})
+
+	t.Run("symlink tamper", func(t *testing.T) {
+		root, coordinator, lockPath := prepare(t)
+		if err := os.Remove(lockPath); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(root, "lock-target")
+		if err := os.WriteFile(target, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, lockPath); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if err := coordinator.AcknowledgeRecovery(); err == nil {
+			t.Fatal("migration accepted a symlinked coordination file")
+		}
+	})
+
+	t.Run("duplicate hardlink", func(t *testing.T) {
+		_, coordinator, lockPath := prepare(t)
+		if err := os.Link(lockPath, lockPath+".duplicate"); err != nil {
+			t.Skipf("hard links unavailable: %v", err)
+		}
+		if err := coordinator.AcknowledgeRecovery(); err == nil {
+			t.Fatal("migration accepted a multiply-linked coordination file")
+		}
+	})
+}
+
+func TestLegacyMigrationRejectsSnapshotCoordinationFileInSource(t *testing.T) {
+	root := t.TempDir()
+	createLegacyTestDatabase(t, filepath.Join(root, legacyDBFileName))
+	if err := os.Mkdir(filepath.Join(root, "snapshots"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "snapshots", database.SnapshotTransactionLockFileName), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := newMigrationTestCoordinator(t, root)
+	recovery, err := coordinator.MigrateLegacy(testPassword)
+	clear(recovery)
+	if err == nil {
+		t.Fatal("migration accepted a snapshot coordination file in the legacy source tree")
 	}
 }
 

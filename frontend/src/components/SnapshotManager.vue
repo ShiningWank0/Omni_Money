@@ -1,9 +1,9 @@
 <template>
-  <div class="modal-overlay" @click="$emit('close')">
+  <div class="modal-overlay" @click="closeSnapshotManager">
     <div class="modal-content snapshot-modal" @click.stop>
       <div class="snapshot-header">
         <h3>スナップショット管理</h3>
-        <button class="close-btn" @click="$emit('close')">&times;</button>
+        <button class="close-btn" @click="closeSnapshotManager" :disabled="isRestoring">&times;</button>
       </div>
 
       <div class="snapshot-info-text">
@@ -49,8 +49,14 @@
 import { ref, onMounted } from 'vue'
 import {
   listSnapshots as apiListSnapshots,
-  restoreSnapshot as apiRestoreSnapshot
+  restoreSnapshot as apiRestoreSnapshot,
+  clearSessionSecrets,
+  isWailsMode
 } from '../utils/api'
+import {
+  clearSnapshotRestoreMarker,
+  executeSnapshotRestore
+} from '../utils/snapshotRestore'
 
 const emit = defineEmits(['close', 'restored'])
 
@@ -59,6 +65,11 @@ const isRestoring = ref(false)
 const confirmingSnapshot = ref(null)
 const message = ref('')
 const messageType = ref('info')
+
+function closeSnapshotManager() {
+  if (isRestoring.value) return
+  emit('close')
+}
 
 function formatSnapshotName(name) {
   return name.replace('.db', '').replace('omni_money_', '')
@@ -80,21 +91,28 @@ async function fetchSnapshots() {
 }
 
 async function executeRestore(name) {
-  isRestoring.value = true
-  message.value = ''
-  try {
-    await apiRestoreSnapshot(name)
-    localStorage.setItem('snapshot_restored', 'success')
-    setTimeout(() => {
-      window.location.reload()
-    }, 300)
-  } catch (e) {
-    localStorage.setItem('snapshot_restored', 'error:' + (e.message || '不明なエラー'))
-    message.value = '復元に失敗しました: ' + e.message
-    messageType.value = 'error'
-    isRestoring.value = false
-    confirmingSnapshot.value = null
-  }
+  return executeSnapshotRestore({
+    name,
+    restore: apiRestoreSnapshot,
+    isDesktop: isWailsMode,
+    setRestoring: value => { isRestoring.value = value },
+    clearMessage: () => { message.value = '' },
+    clearSecrets: clearSessionSecrets,
+    purgeState: () => {
+      snapshots.value = []
+      confirmingSnapshot.value = null
+      message.value = ''
+    },
+    clearMarker: clearSnapshotRestoreMarker,
+    emit,
+    createSessionExpiredEvent: reason => new CustomEvent('omni-money:session-expired', {
+      cancelable: true,
+      detail: { reason }
+    }),
+    dispatchSessionExpired: event => window.dispatchEvent(event),
+    isOnLoginPage: () => window.location.pathname === '/login',
+    redirectToLogin: reason => window.location.replace(`/login?reason=${encodeURIComponent(reason)}`)
+  })
 }
 
 onMounted(fetchSnapshots)
