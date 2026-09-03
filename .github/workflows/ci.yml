@@ -93,7 +93,7 @@ jobs:
           set -euo pipefail
           test -f Agent.md
           for file in README.md Agent.md docs/ai-integration-roadmap.md; do
-            rg -q 'AI.*(非提供|未提供)|production.*AI.*非提供' "$file"
+            grep -Eq 'AI.*(非提供|未提供)|production.*AI.*非提供' "$file"
           done
           for file in README.md Agent.md; do
             while IFS= read -r row; do
@@ -110,15 +110,15 @@ jobs:
           | Schema / legacy migration | schema migrationと明示的な旧root DB移行 | schema migrationのみ。旧single-DB serverからmulti-userへの自動移行は非提供、CSV v3による手動移行が必要 |
           | safe-update | server用safe-update対象外。固定artifactをrelease workflowで検証 | project `omni-money` のcompose/env/digestを固定検証し、固定imageをatomic更新 |
           EOF
-            done
-          for file in README.md Agent.md docs/how-to-use.md docs/server-multi-vault.md; do
-            rg -q 'snapshot.*(DR|DR set)|DR.*snapshot' "$file"
           done
-          if rg -n '^\|.*(DB_PATH|AUTH_PASSWORD_HASH|AUTH_TOTP|AI_)' Agent.md README.md; then
+          for file in README.md Agent.md docs/how-to-use.md docs/server-multi-vault.md; do
+            grep -Eq 'snapshot.*(DR|DR set)|DR.*snapshot' "$file"
+          done
+          if grep -En '^\|.*(DB_PATH|AUTH_PASSWORD_HASH|AUTH_TOTP|AI_)' Agent.md README.md; then
             echo 'legacy environment names must not reappear as current documentation table rows' >&2
             exit 1
           fi
-          if rg -n 'wails@latest|go install .*wails.*@latest|(^|[[:space:]])wails (dev|build)([[:space:]]|$)' README.md Agent.md docs AGENT_WORKFLOW.md; then
+          if grep -Enr 'wails@latest|go install .*wails.*@latest|(^|[[:space:]])wails (dev|build)([[:space:]]|$)' README.md Agent.md docs AGENT_WORKFLOW.md; then
             echo 'documentation must not prescribe an unpinned or bare Wails command' >&2
             exit 1
           fi
