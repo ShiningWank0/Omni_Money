@@ -154,8 +154,8 @@ export function RestoreSnapshot(arg1) {
   return window['go']['main']['App']['RestoreSnapshot'](arg1);
 }
 
-export function RotateDesktopVaultRecovery(arg1) {
-  return window['go']['main']['App']['RotateDesktopVaultRecovery'](arg1);
+export function RotateDesktopVaultRecovery(arg1, arg2) {
+  return window['go']['main']['App']['RotateDesktopVaultRecovery'](arg1, arg2);
 }
 
 export function SaveBankAccountSettings(arg1) {

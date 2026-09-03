@@ -113,7 +113,7 @@ func (s *Store) ListInvitations(ctx context.Context) ([]Invitation, error) {
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, `SELECT `+invitationColumns+`
-		FROM invitations ORDER BY created_at_ms DESC, id`)
+		FROM invitations ORDER BY created_at_ms DESC, id LIMIT 500`)
 	if err != nil {
 		return nil, fmt.Errorf("list invitations: %w", err)
 	}

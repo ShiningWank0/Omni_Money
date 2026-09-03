@@ -47,6 +47,21 @@
         </p>
       </section>
 
+      <section class="admin-section" aria-labelledby="capabilities-title">
+        <div class="section-title-row"><h3 id="capabilities-title">発行済みtoken</h3><button type="button" class="secondary" :disabled="busy" @click="loadCapabilities">更新</button></div>
+        <p>token本体やhashは一覧へ表示しません。pendingのtokenだけを必要に応じて取り消せます。</p>
+        <h4>招待</h4>
+        <ul class="capability-list">
+          <li v-for="item in invitations" :key="item.id"><span>{{ item.email }} / {{ stateLabel(item.state) }} / 期限 {{ formatDate(item.expires_at) }}</span><button v-if="item.state === 'pending'" type="button" class="danger" :disabled="busy" @click="revokeInvitation(item)">取消</button></li>
+          <li v-if="!invitations.length">発行済みの招待はありません</li>
+        </ul>
+        <h4>パスワード再設定</h4>
+        <ul class="capability-list">
+          <li v-for="item in passwordResets" :key="item.id"><span>{{ userName(item.user_id) }} / {{ stateLabel(item.state) }} / 期限 {{ formatDate(item.expires_at) }}</span><button v-if="item.state === 'pending'" type="button" class="danger" :disabled="busy" @click="revokePasswordReset(item)">取消</button></li>
+          <li v-if="!passwordResets.length">発行済みの再設定tokenはありません</li>
+        </ul>
+      </section>
+
       <section class="admin-section users-section" aria-labelledby="users-title">
         <div class="section-title-row">
           <h3 id="users-title">ユーザー一覧</h3>
@@ -62,7 +77,7 @@
             <tbody>
               <tr v-for="user in users" :key="user.id">
                 <td><strong>{{ user.display_name }}</strong><span>{{ user.email }}</span></td>
-                <td>{{ user.role === 'admin' ? '管理者' : '一般' }}</td>
+				<td><select :value="user.role" :disabled="busy || user.state !== 'active'" @change="changeRole(user, $event.target.value)"><option value="user">一般</option><option value="admin">管理者</option></select></td>
                 <td>{{ user.state === 'active' ? '有効' : '無効' }}</td>
                 <td>{{ formatDate(user.last_login_at) }}</td>
                 <td class="user-actions">
@@ -73,6 +88,7 @@
                     :disabled="busy || Boolean(issuedToken) || user.state !== 'active' || user.id === currentUserId"
                     @click="disableUser(user)"
                   >無効化</button>
+				  <button v-if="user.state === 'disabled'" type="button" :disabled="busy" @click="enableUser(user)">再有効化</button>
                 </td>
               </tr>
               <tr v-if="users.length === 0"><td colspan="5">ユーザーはいません</td></tr>
@@ -90,12 +106,20 @@ import {
   createServerInvitation,
   createServerPasswordReset,
   disableServerUser,
-  listServerUsers
+	  enableServerUser,
+	  listServerInvitations,
+	  listServerPasswordResets,
+	  listServerUsers,
+	  revokeServerInvitation,
+	  revokeServerPasswordReset,
+	  setServerUserRole
 } from '../utils/api'
 
 const props = defineProps({ currentUserId: { type: String, default: '' } })
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'signed-out'])
 const users = ref([])
+const invitations = ref([])
+const passwordResets = ref([])
 const loadingUsers = ref(false)
 const busy = ref(false)
 const inviteEmail = ref('')
@@ -131,7 +155,7 @@ function close() {
 }
 
 onBeforeUnmount(clearTransientState)
-onMounted(loadUsers)
+onMounted(async () => { await Promise.all([loadUsers(), loadCapabilities()]) })
 
 async function loadUsers() {
   loadingUsers.value = true
@@ -145,6 +169,13 @@ async function loadUsers() {
   }
 }
 
+async function loadCapabilities() {
+  errorMessage.value = ''
+  try {
+	[invitations.value, passwordResets.value] = await Promise.all([listServerInvitations(), listServerPasswordResets()])
+  } catch (error) { errorMessage.value = error?.message || '発行済みtokenを取得できませんでした' }
+}
+
 async function createInvitation() {
   busy.value = true
   errorMessage.value = ''
@@ -155,6 +186,7 @@ async function createInvitation() {
     issuedTokenKind.value = 'invite'
     inviteEmail.value = ''
     if (!issuedToken.value) throw new Error('招待tokenを受け取れませんでした')
+	await loadCapabilities()
   } catch (error) {
     forgetIssuedToken()
     errorMessage.value = error?.message || '招待を作成できませんでした'
@@ -172,6 +204,7 @@ async function startPasswordReset(user) {
     issuedToken.value = result?.token || ''
     issuedTokenKind.value = 'reset'
     if (!issuedToken.value) throw new Error('再設定tokenを受け取れませんでした')
+	await loadCapabilities()
   } catch (error) {
     forgetIssuedToken()
     errorMessage.value = error?.message || 'パスワード再設定を開始できませんでした'
@@ -179,6 +212,46 @@ async function startPasswordReset(user) {
     busy.value = false
   }
 }
+
+async function enableUser(user) {
+  if (!window.confirm(`${user.display_name} (${user.email}) を再有効化しますか？`)) return
+  busy.value = true; errorMessage.value = ''; infoMessage.value = ''
+  try { await enableServerUser(user.id); infoMessage.value = `${user.display_name} を再有効化しました`; await loadUsers() }
+  catch (error) { errorMessage.value = error?.message || 'ユーザーを再有効化できませんでした' }
+  finally { busy.value = false }
+}
+
+async function changeRole(user, role) {
+  if (role === user.role) return
+  if (!window.confirm(`${user.display_name} の権限を ${role === 'admin' ? '管理者' : '一般ユーザー'} に変更しますか？ 対象ユーザーは全端末からログアウトします。`)) { await loadUsers(); return }
+  busy.value = true; errorMessage.value = ''; infoMessage.value = ''
+	  try {
+	    await setServerUserRole(user.id, role)
+	    if (user.id === props.currentUserId) { emit('signed-out'); return }
+	    infoMessage.value = '権限を変更しました'; await loadUsers()
+	  }
+  catch (error) { errorMessage.value = error?.message || '権限を変更できませんでした'; await loadUsers() }
+  finally { busy.value = false }
+}
+
+async function revokeInvitation(item) {
+  if (!window.confirm(`${item.email} への招待を取り消しますか？`)) return
+  busy.value = true; errorMessage.value = ''
+  try { await revokeServerInvitation(item.id); infoMessage.value = '招待を取り消しました'; await loadCapabilities() }
+  catch (error) { errorMessage.value = error?.message || '招待を取り消せませんでした' }
+  finally { busy.value = false }
+}
+
+async function revokePasswordReset(item) {
+  if (!window.confirm(`${userName(item.user_id)} の再設定tokenを取り消しますか？`)) return
+  busy.value = true; errorMessage.value = ''
+  try { await revokeServerPasswordReset(item.id); infoMessage.value = '再設定tokenを取り消しました'; await loadCapabilities() }
+  catch (error) { errorMessage.value = error?.message || '再設定tokenを取り消せませんでした' }
+  finally { busy.value = false }
+}
+
+function userName(id) { const user = users.value.find(item => item.id === id); return user ? `${user.display_name} (${user.email})` : id }
+function stateLabel(state) { return ({ pending: '有効', accepted: '使用済み', consumed: '使用済み', revoked: '取消済み', expired: '期限切れ' })[state] || state }
 
 async function disableUser(user) {
   if (!window.confirm(`${user.display_name} (${user.email}) を無効化しますか？`)) return
@@ -240,6 +313,7 @@ td span { display: block; color: #666; overflow-wrap: anywhere; }
 .message.error { color: #a51d1d; background: #fff0f0; }
 .message.info { color: #176b2c; background: #edfff1; }
 .loading { margin-top: 0.75rem; }
+.capability-list { display:grid; gap:.5rem; padding:0; list-style:none; }.capability-list li { display:flex; align-items:center; justify-content:space-between; gap:.75rem; padding:.5rem; border-bottom:1px solid #e5e7f2; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (max-width: 760px) { .invite-form { grid-template-columns: 1fr; } .admin-card { padding: 1rem; } }
 </style>

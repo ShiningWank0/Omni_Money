@@ -2,6 +2,8 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -342,4 +344,21 @@ func auditAuth(event, clientIP, reason string) {
 	clientIP = strings.ReplaceAll(strings.ReplaceAll(clientIP, "\n", ""), "\r", "")
 	reason = strings.ReplaceAll(strings.ReplaceAll(reason, "\n", ""), "\r", "")
 	log.Printf("security_event=%s client_ip=%q reason=%q", event, clientIP, reason)
+}
+
+// auditCredentialMutation extends the existing security logger with stable,
+// pseudonymous account references. Raw user IDs and credential material never
+// enter logs; actor and target are still distinguishable for incident review.
+func auditCredentialMutation(event, clientIP, actorID, targetID string) {
+	clientIP = strings.ReplaceAll(strings.ReplaceAll(clientIP, "\n", ""), "\r", "")
+	log.Printf("security_event=%s client_ip=%q actor_ref=%q target_ref=%q",
+		event, clientIP, auditAccountReference(actorID), auditAccountReference(targetID))
+}
+
+func auditAccountReference(userID string) string {
+	if userID == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(userID))
+	return "sha256:" + hex.EncodeToString(digest[:12])
 }

@@ -26,6 +26,21 @@ type ServerAccountService interface {
 	DisableUser(context.Context, string, string, time.Time) error
 }
 
+type ServerCredentialLifecycleService interface {
+	ChangePassword(context.Context, string, []byte, []byte, bool, time.Time) (int, error)
+	RotateRecoveryCode(context.Context, string, []byte, []byte, time.Time) error
+	ListCredentials(context.Context, string) (serverauth.CredentialInventory, error)
+}
+
+type ServerAdminLifecycleService interface {
+	EnableUser(context.Context, string, string, time.Time) error
+	SetUserRole(context.Context, string, string, control.Role, time.Time) error
+	ListInvitations(context.Context) ([]control.Invitation, error)
+	RevokeInvitation(context.Context, string, string, time.Time) error
+	ListPasswordResets(context.Context) ([]control.PasswordResetTicket, error)
+	RevokePasswordReset(context.Context, string, string, time.Time) error
+}
+
 // ServerControlStore is intentionally limited to non-secret control-plane
 // projections needed by HTTP. UserSummary contains no vault path, financial
 // metadata, credential envelope, or password material.
@@ -53,7 +68,14 @@ type ServerSnapshotService interface {
 	BeginRestore(string) (*vault.RestoreOperation, string, error)
 }
 
+type ServerPasskeyBulkService interface {
+	DeleteAllPasskeys(context.Context, string) (int, error)
+}
+
 var _ ServerPasskeyService = (*serverauth.Service)(nil)
+var _ ServerPasskeyBulkService = (*serverauth.Service)(nil)
+var _ ServerCredentialLifecycleService = (*serverauth.Service)(nil)
+var _ ServerAdminLifecycleService = (*serverauth.Service)(nil)
 
 type ServerDependencies struct {
 	Accounts  ServerAccountService
@@ -96,6 +118,11 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 	mux.HandleFunc("/api/auth/logout-all", handleServerLogoutAll(dependencies))
 	mux.HandleFunc("/api/auth/reauth", handleServerReauthentication(dependencies))
 	mux.HandleFunc("/api/auth/keepalive", handleAuthKeepalive)
+	if lifecycle, ok := dependencies.Accounts.(ServerCredentialLifecycleService); ok {
+		mux.HandleFunc("/api/auth/credentials", handleServerCredentialInventory(lifecycle))
+		mux.HandleFunc("/api/auth/password", handleServerPasswordChange(dependencies, lifecycle))
+		mux.HandleFunc("/api/auth/recovery-code", handleServerRecoveryRotation(dependencies, lifecycle))
+	}
 	passkeys, passkeysAvailable := dependencies.Accounts.(ServerPasskeyService)
 	if passkeysAvailable {
 		mux.HandleFunc("/api/auth/passkeys/login/begin", handlePasskeyLoginBegin(dependencies, passkeys))
@@ -105,13 +132,18 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 		mux.HandleFunc("/api/auth/passkeys/reauth/begin", handlePasskeyReauthenticationBegin(dependencies, passkeys))
 		mux.HandleFunc("/api/auth/passkeys/reauth/finish", handlePasskeyReauthenticationFinish(dependencies, passkeys))
 		mux.HandleFunc("/api/auth/passkeys", handlePasskeyList(passkeys))
-		mux.HandleFunc("/api/auth/passkeys/", handlePasskeyDelete(passkeys))
+		if bulk, ok := dependencies.Accounts.(ServerPasskeyBulkService); ok {
+			mux.HandleFunc("/api/auth/passkeys/all", handleAllPasskeysDelete(dependencies, bulk))
+		}
+		mux.HandleFunc("/api/auth/passkeys/", handlePasskeyDelete(dependencies, passkeys))
 	}
 
 	mux.HandleFunc("/api/admin/users", handleServerUsers(dependencies))
 	mux.HandleFunc("/api/admin/users/", handleServerUserAction(dependencies))
 	mux.HandleFunc("/api/admin/invitations", handleServerInvitationCreation(dependencies))
+	mux.HandleFunc("/api/admin/invitations/", handleServerInvitationAction(dependencies))
 	mux.HandleFunc("/api/admin/password-resets", handleServerPasswordResetCreation(dependencies))
+	mux.HandleFunc("/api/admin/password-resets/", handleServerPasswordResetAction(dependencies))
 
 	registerFinancialRoutes(mux)
 	if dependencies.Snapshots == nil {

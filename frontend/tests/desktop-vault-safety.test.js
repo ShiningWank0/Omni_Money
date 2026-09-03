@@ -26,7 +26,7 @@ test('setup and legacy migration states remain distinct', () => {
   assert.equal(desktopVaultNeedsSetup({ state: 'locked', configured: true }), false)
 })
 
-test('recovery delivery cannot be confirmed until the code is saved and no operation is running', () => {
+test('a recovery candidate cannot be committed until the code is saved and no operation is running', () => {
   assert.equal(canConfirmDesktopRecoveryDelivery({ recoveryCode: '', recoverySaved: true, busy: false }), false)
   assert.equal(canConfirmDesktopRecoveryDelivery({ recoveryCode: 'one-time-code', recoverySaved: false, busy: false }), false)
   assert.equal(canConfirmDesktopRecoveryDelivery({ recoveryCode: 'one-time-code', recoverySaved: true, busy: true }), false)
@@ -34,8 +34,11 @@ test('recovery delivery cannot be confirmed until the code is saved and no opera
 })
 
 test('desktop password policy is byte-based and requires confirmation', () => {
-  assert.throws(() => validateNewDesktopPassword('short', 'short'), /12〜1024 bytes/)
-  assert.throws(() => validateNewDesktopPassword('x'.repeat(1025), 'x'.repeat(1025)), /12〜1024 bytes/)
-  assert.throws(() => validateNewDesktopPassword('long-enough-passphrase', 'different-passphrase'), /一致しません/)
-  assert.doesNotThrow(() => validateNewDesktopPassword('長い長い長い長い', '長い長い長い長い'))
+	  assert.throws(() => validateNewDesktopPassword('short', 'short'), /12〜1024 bytes/)
+	  assert.doesNotThrow(() => validateNewDesktopPassword('x'.repeat(257), 'x'.repeat(257)))
+	  assert.doesNotThrow(() => validateNewDesktopPassword('x'.repeat(1024), 'x'.repeat(1024)))
+	  assert.throws(() => validateNewDesktopPassword('x'.repeat(1025), 'x'.repeat(1025)), /12〜1024 bytes/)
+	  assert.throws(() => validateNewDesktopPassword('long-enough-passphrase', 'different-passphrase'), /一致しません/)
+	  assert.doesNotThrow(() => validateNewDesktopPassword('長長長長', '長長長長'))
+	  assert.throws(() => validateNewDesktopPassword('長'.repeat(342), '長'.repeat(342)), /12〜1024 bytes/)
 })
