@@ -170,6 +170,74 @@ if (
   echo "FAIL: non-object container network state was accepted" >&2; exit 1
 fi
 
+# Every external producer that authorizes a state transition must have its exit
+# status checked independently of plausible stdout.
+if (
+  docker_cli() { printf '%s\n' healthy; return 31; }
+  container_health test-container
+); then
+  echo "FAIL: container health stdout from a failed producer was accepted" >&2; exit 1
+fi
+if (
+  container_image_id() { printf '%s\n' sha256:expected; return 31; }
+  validate_container_config test-container sha256:expected created test-container
+); then
+  echo "FAIL: container config stdout from a failed producer was accepted" >&2; exit 1
+fi
+if (
+  network_name=omni-money-pangolin; network_id=network-123
+  container_networks() { printf '%s\n' '{"omni-money-pangolin":{"NetworkID":"network-123","IPAddress":"172.30.240.2"}}'; return 31; }
+  validate_single_network_ip test-container
+); then
+  echo "FAIL: network identity stdout from a failed producer was accepted" >&2; exit 1
+fi
+if (
+  current_removed_expected=0
+  docker_cli() { return 0; }
+  container_state() { printf '%s\n' exited; return 31; }
+  stop_container_safely test-container candidate
+); then
+  echo "FAIL: stopped-state stdout from a failed producer was accepted" >&2; exit 1
+fi
+if (
+  validate_existing_directory() { return 0; }
+  stat_device() { printf '%s\n' 1; return 31; }
+  validate_pinned_directory test-directory test-directory 1 2 3
+); then
+  echo "FAIL: pinned directory identity stdout from a failed producer was accepted" >&2; exit 1
+fi
+if (
+  validate_existing_file() { return 0; }
+  stat_device() { printf '%s\n' 1; }
+  stat_inode() { printf '%s\n' 2; }
+  stat_nlink() { printf '%s\n' 1; }
+  sha256_file() { printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; return 31; }
+  validate_pinned_file test-file test-file 1 2 1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+); then
+  echo "FAIL: pinned file digest stdout from a failed producer was accepted" >&2; exit 1
+fi
+if (
+  grep() { printf '%s\n' 1; return 31; }
+  count_image_env_lines test-env
+); then
+  echo "FAIL: env count stdout from a failed grep was accepted" >&2; exit 1
+fi
+
+network_name=omni-money-pangolin; network_id=network-123
+for malformed_networks in '[]' 'null'; do
+  if (
+    container_networks() { printf '%s\n' "$malformed_networks"; }
+    disconnect_candidate_ingress test-container
+  ); then
+    printf 'FAIL: rollback ingress isolation accepted non-object networks: %s\n' "$malformed_networks" >&2
+    exit 1
+  fi
+done
+(
+  container_networks() { printf '%s\n' '{}'; }
+  disconnect_candidate_ingress test-container
+) || { echo "FAIL: empty object rollback ingress isolation was rejected" >&2; exit 1; }
+
 # Realistic util-linux JSON may retain children even when callers request a
 # list. Both a foreign filesystem and a same-device bind can therefore hide
 # below the top-level entry unless the tree is traversed recursively.
@@ -347,6 +415,8 @@ case "$fmt:$path" in
   "%a:"*"/recovery/"*) echo 400; exit 0 ;;
   "%u:$MOCK_ATTESTATION") echo 0; exit 0 ;;
   "%g:$MOCK_ATTESTATION") echo 0; exit 0 ;;
+  "%u:"*"/mock-bin/"*) echo 0; exit 0 ;;
+  "%g:"*"/mock-bin/"*) echo 0; exit 0 ;;
   "%a:$MOCK_ATTESTATION") echo 444; exit 0 ;;
   "%u:"*"/mock-bin/tar") echo 0; exit 0 ;;
   "%g:"*"/mock-bin/tar") echo 0; exit 0 ;;
