@@ -111,7 +111,6 @@ jobs:
           | safe-update | server用safe-update対象外。固定artifactをrelease workflowで検証 | project `omni-money` のcompose/env/digestを固定検証し、固定imageをatomic更新 |
           EOF
             done
-          done
           for file in README.md Agent.md docs/how-to-use.md docs/server-multi-vault.md; do
             rg -q 'snapshot.*(DR|DR set)|DR.*snapshot' "$file"
           done
