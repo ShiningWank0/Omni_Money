@@ -8,9 +8,9 @@
 
 ReleasesからOS向けartifactを取得します。配布artifactは固定版SQLCipherを静的に組み込み、暗号化DBの作成、誤った鍵の拒否、平文headerとcanaryの不在、load extensionの無効化をCIでartifact自身に実行させてから公開します。
 
-開発buildでも、通常のSQLiteを組み込むtagなしの `wails build` / `wails dev` は使わないでください。各OS向けの `scripts/build-sqlcipher-*.sh` でSQLCipherを作成し、release workflowと同じ `libsqlite3,sqlite_omit_load_extension` build tagとCGO設定で起動します。SQLCipherが不足・不正な場合、Desktopは平文DBへfallbackせず起動を拒否します。
+開発buildでも通常SQLiteや未固定のDesktop CLIへ切り替えないでください。各OS向けの `scripts/build-sqlcipher-*.sh` でSQLCipherを作成し、release workflowと同じ `libsqlite3,sqlite_omit_load_extension` build tagとCGO設定で起動します。SQLCipherが不足・不正な場合、Desktopは平文DBへfallbackせず起動を拒否します。[SQLCipher鍵の運用](sqlcipher-key-operations.md)も参照してください。
 
-Desktop版は単一ユーザー運用です。初回起動でローカルAdminのpasswordを設定し、1回だけ表示されるrecovery codeをpassword manager等へ保存します。取引データはOS標準のapplication data directory内のランダムなvault ID配下に、SQLCipher 4.18.0で暗号化して保存されます。
+Desktop版はroleを持たない単一local vault運用です。初回起動でpasswordを設定し、1回だけ表示されるrecovery codeをpassword manager等へ保存します。取引データはOS標準のapplication data directory内のランダムなvault ID配下に、SQLCipher 4.18.0で暗号化して保存されます。
 
 - macOS: `~/Library/Application Support/OmniMoney/vaults/<vault-id>/omni_money.db`
 - Windows: `%APPDATA%/OmniMoney/vaults/<vault-id>/omni_money.db`
@@ -31,9 +31,11 @@ serverは次の領域を分離します。
 - control DB key: user vaultのDEKとは独立したowner-only secret
 - recovery code: browserが生成し、userだけが保存するvault復旧用secret
 
-Adminはuserの追加・無効化等を管理できますが、userのpasswordまたはrecovery codeなしにuser vaultの中身を復号できません。serverのsnapshot APIも本人のrequest leaseに束縛されるため、adminでも他user vaultのsnapshotを列挙・復号・復元できません。snapshot restore後は全sessionが失効し、再ログインが必要です。
+Adminはuserの追加・無効化等を管理できますが、userのpasswordまたはrecovery codeなしにuser vaultの中身を復号できません。serverのsnapshot APIも本人のrequest leaseに束縛されるため、application Admin/APIでも他user vaultの平文を列挙・復号・復元できません。ただし同じservice UID、host root/operator、差し替え可能なbinary、process memoryはtrust boundary内です。手動APIに加え、`core.Service`経由のledger mutation成功後にuser vault単位の自動snapshotを非同期作成します。自動処理はburstをcoalesceして30世代と容量上限を維持しますが、時刻schedule・retention policy・失敗通知を管理する製品UIはありません。snapshot restore後は全sessionが失効し、再ログインが必要です。
 
 詳細は[server multi-vault security model](server-multi-vault.md)、[SQLCipher鍵の運用](sqlcipher-key-operations.md)、[保存時暗号化volumeの運用contract](at-rest-encryption.md)を参照してください。
+
+AIはDesktop/serverのproductionで提供していません。user-vault-bound AIはStage 4のplanned/unshipped設計であり、旧AI packageや追加portを運用へ持ち込まないでください。
 
 ## 3. Docker Composeでローカル確認
 
@@ -142,14 +144,15 @@ TrueNAS Custom Appにはrepositoryの`compose.yaml`と同等のservice、secret�
 
 ## 5. Backupと復旧試験
 
-暗号化されたdataだけでなく、次を別々の安全な場所へbackupします。
+snapshot単体はDR setではありません。次の全てを別々の安全な場所へbackupします。
 
-- control DB key
-- 暗号化volumeのkey/recovery material
-- attestationと更新手順
+- control DB（`control/omni_control.db`）と独立したcontrol DB key
+- 各user vault（`vaults/<vault-id>/ledger.db`）
+- 各user vaultの暗号化snapshot
+- 暗号化volumeのkey/recovery material、attestation、復旧・更新手順
 - 各userが保持するrecovery code
 
-backup取得だけでは不十分です。本番とは隔離した環境で定期的に復旧し、control DBが開くこと、user本人のrecovery codeで対象vaultだけが開くこと、別userやAdminからは開けないことを確認します。
+backup取得だけでは不十分です。本番とは隔離した環境で定期的に復旧し、control DB/key、vault/snapshot、volume recovery material、recovery codeが揃ってcontrol DBが開くこと、user本人のrecovery codeで対象vaultだけが開くこと、別userやAdminからは開けないことを確認します。元snapshotは変更しません。
 
 ## 6. よくある起動エラー
 

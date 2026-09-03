@@ -1,34 +1,22 @@
-# AI連携・Discordレシート登録ロードマップ
+# AI連携・Discordレシート登録ロードマップ（廃止済みlegacy／将来設計）
 
 ## 1. 目的
 
-最終目標は、Discordなどへ投稿されたレシート画像をローカルLLMまたはクラウドLLMで読み取り、Omni Moneyへ安全に画像付き取引として登録することです。
+これは現行機能の説明ではない。Desktop と multi-user server の両 production mode で AI は未提供であり、server は user/vault に束縛されない旧 AI environment variables を設定すると起動を拒否する。旧 package、CLI、route/schema は retired legacy と、将来の user-vault-bound design を検討する資料としてのみ残す。
 
-LLMの出力は正しいとは限りません。AI専用入口はLLMの候補値をそのままDBへ流さず、アプリケーション側の検証を通してから登録します。既存データの編集、削除、設定変更、CSVインポート、スナップショット復元はAIへ許可しません。
+将来設計でも、LLMの出力をそのままDBへ流さず、vault-bound application serviceの検証・scope・監査を通す。既存データの編集、削除、設定変更、CSV import、snapshot restore は許可しない。
 
-## 2. 現在の実装
+## 2. 現在のproduction status
 
-現在のAI専用入口は、公開Webと同じGoプロセス内にある別HTTPリスナーです。独立したマネージャープロセスではありません。
+現在、AI listener、AI console、AI credentialは存在しない。公開Webにも専用listenerにもAI routeを登録せず、`/api/v1/ai/*` と `/api/ai-console/*` は 404 である。
 
-| 項目 | 現在の状態 |
+| モード／項目 | 現在の状態 |
 | --- | --- |
-| AI待受 | 既定 `127.0.0.1:4001` |
-| 認証 | 最大90日のBearer資格情報（hash保存、scope・口座・許可タグID・期間・件数制約） |
-| 通信 | loopback限定HTTP、非loopbackはTLS 1.3 + mTLS必須 |
-| 取引追加 | `POST /api/v1/ai/transactions` |
-| 分析 | `POST /api/v1/ai/analysis` |
-| 分析結果 | 既定は単一許可口座・最大30日の集計のみ。明細・メモは追加scopeとpagination |
-| 編集・削除 | ルートを提供せず、POST以外は拒否 |
-| 公開Webとの分離 | 公開Webの4000番にはAIルートを登録しない |
-| AI専用入力検証 | 必須項目、種類、正の金額、日付範囲を検証 |
-| 日付範囲 | サーバーの今日を基準に1年前から2日後まで（両端を含む） |
-| タグ | 資格情報の許可IDだけを受け付け、存在確認と重複排除を行い、未許可・未知IDを同じ403で拒否 |
-| 画像 | Base64、ファイル名、対応MIMEを事前検証してから追加 |
-| 管理UI | セッション認証済みWebからサーバー内部でAI専用リスナーへ固定中継 |
+| Desktop / server のAI | 非提供（productionでは旧設定を拒否、AI routeは404） |
+| dormant source | retired legacy。production capabilityや認証情報のsource of truthではない |
+| Stage 4 | user-vault-bound AI capabilityとして planned/unshipped |
 
-AI経由の追加は可能ですが、変更と削除はできません。通常の人間向け取引画面にはAI専用の日付範囲制限を適用しません。
-
-## 3. 推奨する責務分離
+## 3. 将来の責務分離（未出荷）
 
 ```mermaid
 flowchart LR
@@ -47,7 +35,7 @@ flowchart LR
 
 クラウドLLMを使う場合も、クラウド側から自宅へ着信させません。ローカルのAdapterがクラウドAPIへ発信して構造化結果を受け取り、内部のManagerへ渡します。
 
-## 4. AI Transaction Managerの将来API
+## 4. AI Transaction Managerの将来API（未出荷）
 
 すべてPOSTとし、パスと資格情報scopeを明示的に許可します。
 
@@ -60,11 +48,11 @@ flowchart LR
 
 `context` はLLMが `現金`、`銀行口座` などの既存口座やタグを知るために使います。取引明細は返しません。新しい口座名をAIが自由に作ることは既定で許可せず、現在の候補から選ばせます。
 
-## 5. 入力検証ポリシー
+## 5. 将来の入力検証ポリシー
 
 AI入力はJSON Schemaに合っていても信用せず、サーバー側で再検証します。
 
-### 現在実装する検証
+### 将来実装する検証
 
 - `account`、`date`、`item`、`type`、`amount`を必須とする
 - 前後の空白を除去する
@@ -85,9 +73,9 @@ AI入力はJSON Schemaに合っていても信用せず、サーバー側で再�
 - 画像やタグの1件でも失敗した場合は全体をrollbackする
 - `Idempotency-Key` を必須にし、Discordの再送で同じ取引を重複登録しない
 
-## 6. 画像の受け渡し
+## 6. 将来の画像の受け渡し（未出荷）
 
-MVPでは既存APIと互換性のあるBase64方式を使います。
+将来のMVPで採用を検討する方式であり、現行production APIでは使えない。
 
 1. Discord AdapterがDiscord CDNから画像を取得します。
 2. Content-Type、ダウンロード上限、timeoutを確認します。
@@ -99,7 +87,7 @@ Managerへ任意のファイルパスや任意URLを渡す方式は採用しま�
 
 Base64は元データより約33%大きくなるため、現在のHTTP body上限10MiBを踏まえて画像上限を決定します。大容量化が必要になった段階でmultipartまたは内部オブジェクト参照を検討します。
 
-## 7. Discord処理フロー
+## 7. 将来のDiscord処理フロー（未出荷）
 
 1. Discord Adapterがイベントを受信し、署名とbot tokenを検証します。
 2. レシート添付を上限・timeout付きで取得します。
@@ -112,13 +100,13 @@ Base64は元データより約33%大きくなるため、現在のHTTP body上�
 
 レシート内の文字列にはprompt injectionが含まれる可能性があります。LLMへ汎用的なtool実行権限を与えず、構造化出力だけを許可します。
 
-## 8. UIからの操作
+## 8. 将来のUIからの操作（未出荷）
 
-サーバーモードの「AI API操作」画面は、通常のセッション認証を通過したリクエストだけを受けます。ブラウザはAI用Bearer tokenや接続先を保持しません。公開Webサーバーが固定された2操作だけをloopbackのAI専用リスナーへ転送します。
+将来のサーバーモード「AI API操作」画面案は通常のセッション認証と user/vault binding を通す。現行serverにはこの画面もBearer tokenもlistenerも存在しない。
 
-この管理画面はAPI契約の確認と手動入力用です。LLM providerのAPIキーを入力する画面ではありません。ローカル/クラウドLLM連携は別プロセスのAdapterから行います。
+この管理画面と別プロセスAdapterは将来案であり、現行のproduction capabilityではない。
 
-## 9. セキュリティと監査
+## 9. 将来のセキュリティと監査
 
 - client別token、最小scope、rotation、revokeを維持し、90日以内に更新する
 - 資格情報と接続元単位のrate limitを維持する
@@ -128,7 +116,7 @@ Base64は元データより約33%大きくなるため、現在のHTTP body上�
 - Manager障害時にDB直接書き込みへfallbackしない
 - Dockerでは最終的にManagerをprivate networkのみに置き、host portsを公開しない
 
-## 10. 段階的な実装計画
+## 10. 段階的な実装計画（Stage 4 planned/unshipped）
 
 1. AI分析の全フィルター整合と回帰テスト
 2. AI専用の日付・必須項目検証と管理UI

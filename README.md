@@ -3,7 +3,17 @@
 Omni Money は、Go と Vue.js で構築された家計簿アプリケーションです。
 Wails によるデスクトップアプリとして使えるほか、Docker でサーバーモードとして起動し、ブラウザから利用することもできます。
 
-旧 Python 版の `legacy_reference/` を参照しながら、取引管理、複数口座管理、CSV バックアップ、スナップショット復元、タグ分析、AI 向け API などを Go/Vue 構成へ移行しています。
+| Capability | Desktop | multi-user server |
+| --- | --- | --- |
+| Ledger / credential lifecycle | Wails、roleなしの単一 local vault、password/recovery、idle lock | Docker/headless、control DBとuser vault分離、Argon2id envelope、invite/reset、role、passkey、session/vault lease |
+| CSV v3 | transactions/images/tags/links/ledger settingsを含む平文full ledger | 同左。auth/control/key、snapshot、volume recoveryは含まない |
+| Snapshot | local vaultの手動create/list/restore API。SQLCipher暗号文 | 本人のrequest leaseに束縛された手動create/list/restore API。同じvault DEKの暗号文 |
+| Automatic snapshot | `core.Service`のledger mutation成功後に非同期作成。burst coalesce、30世代/容量上限。時刻・retention設定/失敗通知UIなし | 同左。user vault単位で作成 |
+| AI | production 非提供 | production 非提供。旧AI設定は列挙分を起動拒否 |
+| Schema / legacy migration | schema migrationと明示的な旧root DB移行 | schema migrationのみ。旧single-DB serverからmulti-userへの自動移行は非提供、CSV v3による手動移行が必要 |
+| safe-update | server用safe-update対象外。固定artifactをrelease workflowで検証 | project `omni-money` のcompose/env/digestを固定検証し、固定imageをatomic更新 |
+
+旧 Python 版の `legacy_reference/` は参照専用です。現行の取引管理、複数口座、CSV ledger、snapshot復元、タグ分析を Go/Vue 構成で提供します。
 
 ## 使い方
 
@@ -22,20 +32,20 @@ macOS デスクトップアプリ、Mac + Colima、TrueNAS Custom App の詳し�
 - 取引画像の添付、一覧取得、削除
 - 最大 3 階層のタグ管理とタグ別円グラフ分析
 - 取引同士の紐付け
-- AI エージェント向けの取引追加 API と分析 API
+- AI は両モードの production で提供していません（旧実装は dormant legacy）
 - GitHub Actions による VERSION 起点のデスクトップ版リリースと Docker イメージリリース
 
 ### CSV 完全バックアップ（v3）
 
-CSV出力は常にv3の正規化形式です。画像はファイル名・検証済みMIMEタイプ・Base64バイナリとして別レコードに格納し、タグ・リンクは元IDを参照して復元時に新しいIDへ安全に再採番します。旧クライアント互換のtransactions-only v2が必要な場合だけ、明示的な `BackupToCSVV2` 互換APIを使用してください。v2は完全バックアップではなくappend用途に限られます。
+CSV出力は常にv3の完全ledger形式です。transactions、images、tags、links、ledger settingsを含み、画像はファイル名・検証済みMIMEタイプ・Base64バイナリとして別レコードに格納します。タグ・リンクは元IDを参照して復元時に安全に再採番します。CSVと画像のBase64は常に平文であり、auth/control DB、credential、DEK/key、snapshot、volume recovery materialは含みません。旧クライアント互換のtransactions-only v2が必要な場合だけ、明示的な `BackupToCSVV2` 互換APIを使用してください。v2は完全バックアップではなくappend用途に限られます。
 
 v1/v2（`id,account,date,item,type,amount,balance[,memo]`）は引き続きappendインポートできます。旧形式のreplaceは、画像・タグ・リンクなどを表現できず安全な完全置換にならないため拒否されます。完全置換にはCSV v3を使用してください。v3ではバージョン、レコード種別、Base64画像を厳格に検証し、サイズ・MIME・重複ID・CSV式注入を拒否します。v3 export末尾には全record typeの件数とcanonical digestを含むmanifestを必ず付け、replaceでは公式完全ヘッダーとmanifestが一致しない入力をDB変更前に拒否します。CSV v3のreplaceインポートは全レコードと設定を1つのSQLite transactionで処理し、画像や関連付けの途中失敗を含め完全にrollbackします。appendは既存の取引関連データとledger設定を保持し、CSVのallowlist設定が既存値と異なる場合は競合としてatomicに中止します。既存の取引リンクを自動削除することはありません。ストリーミングのraw CSVは512 MiB、解析済みテキストは64 MiB、行数は100万行までです。後方互換のWails/JSON文字列経路は64 MiBに制限されるため、完全バックアップにはDesktopのファイルダイアログまたはserverのraw CSV uploadを使用してください。
 
-CSVは画像を含め暗号化されない平文です。DesktopではダイアログでFileVault・BitLocker・LUKS等に保護された保存先を選び、serverではブラウザのダウンロード先が暗号化volume上であることを確認してください。保存先や共有先の安全性はアプリから検証できません。
+CSVは画像を含め常に暗号化されない平文です。DesktopではダイアログでFileVault・BitLocker・LUKS等に保護された保存先を選び、serverではブラウザのダウンロード先が暗号化volume上であることを確認してください。保存先や共有先の安全性はアプリから検証できません。
 
 ### 画像添付の安全上限
 
-通常Web、デスクトップ、AI APIの画像添付には同じ検証と保存上限が適用されます。
+通常Webとデスクトップの画像添付には同じ検証と保存上限が適用されます。AI APIはproductionでは提供しません。
 
 - 対応形式: 静止画のJPEG、PNG、GIF、WebP（MIME、拡張子、実データが一致すること）
 - 画像1件: 5 MiB、20メガピクセルまで
@@ -60,10 +70,16 @@ CSVは画像を含め暗号化されない平文です。Desktopではダイア�
 ├── backend/              # Go バックエンド
 │   ├── api/              # サーバーモード用 REST API
 │   ├── core/             # ビジネスロジック
-│   ├── database/         # SQLite 初期化、スナップショット
-│   ├── middleware/       # ユーザー認証、AI API 認証など
+│   ├── database/         # ledger、CSV v3、snapshot lifecycle
+│   ├── control/          # server identity、role、session、envelope metadata
+│   ├── desktopaccount/   # Desktop local password/recovery/lock lifecycle
+│   ├── keyenvelope/      # Argon2id、AES-GCM、password/recovery/passkey envelope
+│   ├── serverauth/       # multi-user password/passkey/invite/reset
+│   ├── securedb/         # SQLCipher open/validation
+│   ├── vault/            # per-user vault manager、lease、drain、zeroize
+│   ├── middleware/       # session、CSRF、proxy、security boundary
 │   └── models/           # データモデル
-├── frontend/             # Vue フロントエンド
+├── frontend/             # Vue フロントエンド（`src/`、`wailsjs/`、`index.html`）
 │   └── src/
 │       ├── components/   # 画面部品
 │       ├── store/        # Pinia store
@@ -84,14 +100,10 @@ CSVは画像を含め暗号化されない平文です。Desktopではダイア�
 - Go 1.26.6 以上（CI・リリースは 1.26.7）
 - Node.js 24.19 以上
 - npm
-- Wails CLI
+- 固定版 Wails v2.11.0（配布workflowが導入）
 - Docker
 
-Wails CLI が未インストールの場合:
-
-```bash
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
-```
+Desktopの開発・配布は、[利用ガイド](docs/how-to-use.md)と[SQLCipher鍵の運用](docs/sqlcipher-key-operations.md)に記載した固定SQLCipher手順、および固定版Wailsを使ってください。未固定版やタグなしのWails CLIを実行しないでください。
 
 ## セットアップ
 
@@ -105,17 +117,7 @@ cd ..
 
 ## デスクトップアプリとして起動
 
-開発モード:
-
-```bash
-wails dev
-```
-
-ビルド:
-
-```bash
-wails build
-```
+開発・配布時も通常SQLiteや未固定CLIへ切り替えず、各OS向け `scripts/build-sqlcipher-*.sh` と release workflow の固定 `libsqlite3 sqlite_omit_load_extension` build tag/CGO設定を使用します。具体的な検証方法は[利用ガイド](docs/how-to-use.md)を参照してください。
 
 デスクトップモードでは、SQLite データベースは OS 標準のアプリケーションデータディレクトリに保存されます。
 
@@ -123,7 +125,7 @@ DesktopとserverのDB、WAL、snapshotはSQLCipher 4.18.0で暗号化し、所�
 
 - macOS: `~/Library/Application Support/OmniMoney/vaults/<vault-id>/omni_money.db`
 - Windows: `%APPDATA%/OmniMoney/vaults/<vault-id>/omni_money.db`
-- Linux: `~/.local/share/OmniMoney/vaults/<vault-id>/omni_money.db`
+- Linux: `$XDG_DATA_HOME/OmniMoney/vaults/<vault-id>/omni_money.db`（未設定時は `~/.local/share/OmniMoney`）
 
 ## サーバーモードで起動
 
@@ -153,34 +155,13 @@ control鍵とinitial-admin setup tokenは別々のowner-only secretとして生�
 
 直接起動した公開Webは標準で `127.0.0.1:4000` で待ち受けます。`ALLOWED_HOSTS` は直接起動でも必須です。非loopback平文HTTPは許可されず、TLSまたは固定したtrusted proxy経由のHTTPSが必要です。同梱のComposeはPangolin/Newt専用構成で、ホストへポートを公開しません。ローカル利用時だけ `compose.local.yaml` を重ねます。
 
-multi-user serverのsnapshot APIは認証済み本人のvaultだけに束縛され、snapshotは既存per-vault SQLCipher DEKで暗号化されます。管理者でも他user vaultの列挙・復号・復元はできません。旧AI環境変数を指定すると起動を拒否します。詳細は[server multi-vault security model](docs/server-multi-vault.md)を参照してください。
+multi-user serverのsnapshot APIは認証済み本人のvaultだけに束縛され、snapshotは既存per-vault SQLCipher DEKで暗号化されます。application Admin/APIでも他user vaultの平文を列挙・復号・復元できませんが、同じservice UID、host root/operator、差し替え可能なbinary、process memoryは同じtrust boundaryです。手動create/list/restore APIに加え、`core.Service`経由のledger mutation成功後にuser vault単位の自動snapshotを非同期作成します。自動処理はburstをcoalesceし、30世代と容量上限でpruneしますが、時刻schedule、retention policy、失敗通知を管理する製品UIはありません。旧AI環境変数を指定すると起動を拒否します。詳細は[server multi-vault security model](docs/server-multi-vault.md)を参照してください。
 
-主な環境変数:
+### Disaster Recovery (DR)
 
-| 変数 | 既定値 | 説明 |
-| --- | --- | --- |
-| `CONTROL_DB_PATH` | なし（serverでは必須） | attested data root配下のSQLCipher control DB |
-| `CONTROL_DB_ENCRYPTION_KEY_FILE` | なし（serverでは必須） | control DB専用32 byte鍵の秘密ファイル（data root外） |
-| `VAULT_ROOT` | なし（serverでは必須） | 同じattested data root配下のユーザーvault専用directory |
-| `INITIAL_ADMIN_SETUP_TOKEN_FILE` | 初回のみ必須 | 最初のAdmin作成を認可するbase64url token file |
-| `AUTH_KDF_CONCURRENCY` | `2` | Argon2id認証処理の同時実行上限（1〜16） |
-| `DATA_AT_REST_MODE` | なし（serverでは必須） | `external-encrypted-volume`だけを許可 |
-| `DATA_AT_REST_ATTESTATION_FILE` | なし（serverでは必須） | data root、非秘密key ID、検証・復旧・rotation時刻を記録したfile |
-| `HOST_IP` | `127.0.0.1` | 直接起動時の待受アドレス（Docker内部は `0.0.0.0`） |
-| `WEB_EXTERNAL_HOST` | なし | Docker等で内部待受と実際のpublish先が異なる場合の公開先host |
-| `PORT` | `4000` | 待受ポート |
-| `SESSION_MAX_AGE_HOURS` | `8` | セッションの絶対有効期間（時間） |
-| `SESSION_IDLE_TIMEOUT_MINUTES` | `15` | 無操作セッションのタイムアウト（分）。画面も自動ロック |
-| `SESSION_REAUTH_MAX_AGE_MINUTES` | `5` | CSV入出力・復元等の高影響操作で要求するパスワード再確認の有効期間（分） |
-| `SESSION_MAX_CONCURRENT` | `3` | 1ユーザーあたりの同時セッション上限 |
-| `TRUSTED_PROXIES` | なし | 信頼する最後段プロキシの固定IPまたは狭いCIDR（IPv4は`/24`以上、IPv6は`/120`以上） |
-| `FORCE_HTTPS` | `false` | 公開WebのHTTPSリダイレクト |
-| `HTTPS_REDIRECT_HOST` | なし | HTTPSリダイレクト先 |
-| `ALLOWED_HOSTS` | なし（必須） | すべてのリクエストで許可する正確な公開Host |
-| `PASSKEY_RP_ID` | 公開Hostから導出 | パスキーのRelying Party ID（scheme/portなし） |
-| `PASSKEY_ORIGINS` | 公開Hostから導出 | WebAuthnを許可する正確なorigin（カンマ区切り） |
-| `ALLOW_INSECURE_HTTP` | `false` | loopbackだけへpublishするローカル構成用。非loopback平文HTTPは許可されない |
-| `CORS_ALLOWED_ORIGINS` | 同一オリジンのみ | 許可する CORS オリジンのカンマ区切りリスト |
+snapshot単体はDR setではありません。control DBとcontrol key、各user vaultと暗号化snapshot、volumeのkey/recovery material・attestation/復旧手順、各userのrecovery codeを別々に保管し、隔離環境でrestore drillを行います。
+
+serverの環境変数は [.env.example](.env.example) を唯一の雛形とし、詳細な必須条件とsecret/owner/modeは[利用ガイド](docs/how-to-use.md)を参照してください。旧 single-DB、bcrypt/TOTP、旧AI envは設定時に起動を拒否します。
 
 ## Docker で起動
 
@@ -214,7 +195,7 @@ docker run --rm \
 起動後、ブラウザで `http://localhost:4000` を開きます。初回Admin作成後の再起動では、setup tokenの環境変数とmountを外します。
 Colima、LAN 公開、TrueNAS Custom App の手順は[利用ガイド](docs/how-to-use.md)を参照してください。
 
-`compose.ai.yaml` は旧単一DB用で、現在のmulti-user serverでは意図的に起動拒否されます。
+`compose.ai.yaml` は旧単一DB用で、現在のmulti-user serverでは意図的に起動拒否されます。旧AI packageは将来のuser-vault-bound設計の参考資料であり、production機能ではありません。
 
 ### Docker Compose / Pangolin / TrueNAS
 
@@ -265,9 +246,9 @@ TrueNAS Custom Appでは `compose.yaml` 相当の設定を使い、次を守っ�
 - AI用の追加ポートやlegacy AI overlayを公開しない
 - 外部公開はPangolin等でTLS終端し、`TRUSTED_PROXIES`をNewtの固定IPだけに設定する
 
-## AI API（multi-user serverでは一時無効）
+## AI（両 production mode で非提供）
 
-AI資格情報はまだcontrol userとvault DEKに結び付いていません。このためproduction serverはAI関連環境変数が1つでも設定されていると起動を拒否し、AI listenerとWeb consoleを登録しません。旧AI実装とCLIは将来のuser-bound capability移行の参考としてsourceに残していますが、現在のserver運用では使用しないでください。進捗は[AI連携ロードマップ](docs/ai-integration-roadmap.md)と[server multi-vault security model](docs/server-multi-vault.md)を参照してください。
+AI資格情報はまだcontrol userとvault DEKに結び付いていません。このためproduction serverは `backend/config/server.go` が列挙する旧設定（`AI_API_TOKEN`、`AI_CREDENTIALS_FILE`、`AI_CONSOLE_TOKEN_FILE`、`AI_AUDIT_HMAC_KEYRING_FILE`、`AI_HOST_IP`、`AI_PORT`、`AI_ALLOW_REMOTE`、AI TLS関連file）が設定されている場合に起動を拒否し、AI listenerとWeb consoleを登録しません。列挙外の環境変数まで一括拒否する契約ではありません。旧AI実装とCLIは将来のuser-bound capability移行の参考としてsourceに残していますが、現在のserver運用では使用しないでください。進捗は[AI連携ロードマップ](docs/ai-integration-roadmap.md)と[server multi-vault security model](docs/server-multi-vault.md)を参照してください。
 
 <!-- Legacy AI protocol documentation is intentionally omitted from the active server instructions. -->
 
@@ -291,8 +272,8 @@ npm run build
 `VERSION` を更新して `main` に反映すると、GitHub Actions がリリース処理を実行します。
 
 - `validate-version.yml`: PR で `VERSION` の後退を検知
-- `release-desktop.yml`: macOS、Windows、Linux 向け Wails アプリをビルド
-- `release-docker.yml`: GHCR 向け Docker イメージをビルド
+- `release-desktop.yml`: 関連pathを変更したPRではmacOS Intel、macOS Apple Silicon、Windows、Linuxの4 Desktop artifactを固定Wails/SQLCipherでbuild検証するが、配布Releaseやversion tagはpublishしない。`main`ではVERSIONまたはrelease workflow自体の変更時に4 artifactをbuildし、version releaseをpublishする。
+- `release-docker.yml`: `main`のVERSION変更時にGHCR向けlinux/amd64 + linux/arm64のmulti-arch manifestをbuildし、stable releaseだけ`latest`を更新する。
 
 ## 機能追加リスト
 
@@ -303,7 +284,7 @@ npm run build
 - 取引紐付けの検索・候補表示 UI の改善
 - スナップショット作成タイミングの設定化
 - CSV インポート時の差分確認、重複検出、プレビュー機能
-- AI 分析 API の集計軸追加とレスポンス形式の拡張
+- 将来の user-vault-bound AI 設計（Stage 4、未出荷）の検討
 
 ## ライセンス
 
