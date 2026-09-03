@@ -64,7 +64,11 @@ function withThrowingLocalStorage(callback) {
   try {
     return callback()
   } finally {
-    Object.defineProperty(globalThis, 'localStorage', descriptor)
+    if (descriptor) {
+      Object.defineProperty(globalThis, 'localStorage', descriptor)
+    } else {
+      delete globalThis.localStorage
+    }
   }
 }
 
