@@ -7,8 +7,8 @@ Wails によるデスクトップアプリとして使えるほか、Docker で�
 | --- | --- | --- |
 | Ledger / credential lifecycle | Wails、roleなしの単一 local vault、password/recovery、idle lock | Docker/headless、control DBとuser vault分離、Argon2id envelope、invite/reset、role、passkey、session/vault lease |
 | CSV v3 | transactions/images/tags/links/ledger settingsを含む平文full ledger | 同左。auth/control/key、snapshot、volume recoveryは含まない |
-| Snapshot | 手動のみ。自動snapshotは未接続 | 本人に束縛された手動APIのみ。自動snapshotは未接続 |
-| Automatic snapshot | 未接続 | 未接続 |
+| Snapshot | local vaultの手動create/list/restore API。SQLCipher暗号文 | 本人のrequest leaseに束縛された手動create/list/restore API。同じvault DEKの暗号文 |
+| Automatic snapshot | mutation後に非同期作成。burst coalesce、30世代/容量上限。時刻・retention設定/失敗通知UIなし | 同左。user vault単位で作成 |
 | AI | production 非提供 | production 非提供。旧AI設定は列挙分を起動拒否 |
 | Schema / legacy migration | schema migrationと明示的な旧root DB移行 | schema migrationのみ。旧single-DB serverからmulti-userへの自動移行は非提供、CSV v3による手動移行が必要 |
 | safe-update | server用safe-update対象外。固定artifactをrelease workflowで検証 | project `omni-money` のcompose/env/digestを固定検証し、固定imageをatomic更新 |
@@ -155,7 +155,7 @@ control鍵とinitial-admin setup tokenは別々のowner-only secretとして生�
 
 直接起動した公開Webは標準で `127.0.0.1:4000` で待ち受けます。`ALLOWED_HOSTS` は直接起動でも必須です。非loopback平文HTTPは許可されず、TLSまたは固定したtrusted proxy経由のHTTPSが必要です。同梱のComposeはPangolin/Newt専用構成で、ホストへポートを公開しません。ローカル利用時だけ `compose.local.yaml` を重ねます。
 
-multi-user serverのsnapshot APIは認証済み本人のvaultだけに束縛され、snapshotは既存per-vault SQLCipher DEKで暗号化されます。application Admin/APIでも他user vaultの平文を列挙・復号・復元できませんが、同じservice UID、host root/operator、差し替え可能なbinary、process memoryは同じtrust boundaryです。自動snapshotはproduction serverに未接続で、現行は明示的な手動APIだけです。旧AI環境変数を指定すると起動を拒否します。詳細は[server multi-vault security model](docs/server-multi-vault.md)を参照してください。
+multi-user serverのsnapshot APIは認証済み本人のvaultだけに束縛され、snapshotは既存per-vault SQLCipher DEKで暗号化されます。application Admin/APIでも他user vaultの平文を列挙・復号・復元できませんが、同じservice UID、host root/operator、差し替え可能なbinary、process memoryは同じtrust boundaryです。手動create/list/restore APIに加え、財務mutation後にuser vault単位の自動snapshotを非同期作成します。自動処理はburstをcoalesceし、30世代と容量上限でpruneしますが、時刻schedule、retention policy、失敗通知を管理する製品UIはありません。旧AI環境変数を指定すると起動を拒否します。詳細は[server multi-vault security model](docs/server-multi-vault.md)を参照してください。
 
 ### Disaster Recovery (DR)
 

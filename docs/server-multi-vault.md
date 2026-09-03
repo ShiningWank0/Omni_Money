@@ -124,11 +124,15 @@ Per-user snapshots are exposed only through the authenticated user's bound
 request lease. `GET` and `POST /api/snapshots` never accept a user ID, vault ID,
 path, or directory and return basenames only. Each snapshot is made with the
 same per-vault SQLCipher DEK as `ledger.db`; it is ciphertext suitable for an
-off-host encrypted backup, not a plaintext export. Retention is bounded by 30
-generations and `SNAPSHOT_MAX_TOTAL_BYTES`.
+off-host encrypted backup, not a plaintext export.
 
-Snapshot automation is not connected to the production server. The current
-server path is an explicit, authenticated manual API. An application Admin/API
+Every financial mutation uses its vault-bound `core.Service` to schedule an
+asynchronous snapshot. Bursts are coalesced into at most one follow-up run, and
+each automatic run prunes to 30 generations and `SNAPSHOT_MAX_TOTAL_BYTES`.
+This is mutation-triggered automation, not a configurable wall-clock schedule;
+there is no product UI for timing, retention policy, or failure notification.
+The server's manual create API does not immediately run retention cleanup, so
+its generations are pruned by the next automatic run. An application Admin/API
 cannot list, decrypt, or restore another user's plaintext snapshots, but the
 same service UID, host root/operator, replaceable binary, and process memory
 remain inside the hosting trust boundary.

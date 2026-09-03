@@ -8,17 +8,17 @@
 | --- | --- | --- |
 | Ledger / credential lifecycle | Wails、roleなしの単一 local vault、password/recovery、idle lock | Docker/headless、control DBとuser vault分離、Argon2id envelope、invite/reset、role、passkey、session/vault lease |
 | CSV v3 | transactions/images/tags/links/ledger settingsを含む平文full ledger | 同左。auth/control/key、snapshot、volume recoveryは含まない |
-| Snapshot | 手動のみ。自動snapshotは未接続 | 本人に束縛された手動APIのみ。自動snapshotは未接続 |
-| Automatic snapshot | 未接続 | 未接続 |
+| Snapshot | local vaultの手動create/list/restore API。SQLCipher暗号文 | 本人のrequest leaseに束縛された手動create/list/restore API。同じvault DEKの暗号文 |
+| Automatic snapshot | mutation後に非同期作成。burst coalesce、30世代/容量上限。時刻・retention設定/失敗通知UIなし | 同左。user vault単位で作成 |
 | AI | production 非提供 | production 非提供。旧AI設定は列挙分を起動拒否 |
 | Schema / legacy migration | schema migrationと明示的な旧root DB移行 | schema migrationのみ。旧single-DB serverからmulti-userへの自動移行は非提供、CSV v3による手動移行が必要 |
 | safe-update | server用safe-update対象外。固定artifactをrelease workflowで検証 | project `omni-money` のcompose/env/digestを固定検証し、固定imageをatomic更新 |
 
 server の金融 API は authenticated principal に束縛された vault lease のみを受け取り、Desktop/global DBへfallbackしない。`/api/v1/ai/*` と `/api/ai-console/*` はproductionで404、feature statusのAIはfalseである。
 
-現行の責務は `backend/api`（router/CSV/snapshot）、`backend/control`（identity/role/envelope metadata）、`backend/core`（vault-bound service）、`backend/database`（ledger/CSV/manual snapshot）、`backend/desktopaccount`（local lifecycle）、`backend/keyenvelope`（Argon2id/AES-GCM）、`backend/serverauth`、`backend/securedb`、`backend/vault`（lease/drain）に分かれる。`frontend/src` はUIとDesktop idle-lock、`scripts` は固定SQLCipherとsafe-update、`legacy_reference` は非実行参照、`compose*.yaml` と `Dockerfile` はserver配備を担当する。
+現行の責務は `backend/api`（router/CSV/snapshot）、`backend/control`（identity/role/envelope metadata）、`backend/core`（vault-bound service）、`backend/database`（ledger/CSV/snapshot lifecycle）、`backend/desktopaccount`（local lifecycle）、`backend/keyenvelope`（Argon2id/AES-GCM）、`backend/serverauth`、`backend/securedb`、`backend/vault`（lease/drain）に分かれる。`frontend/src` はUIとDesktop idle-lock、`scripts` は固定SQLCipherとsafe-update、`legacy_reference` は非実行参照、`compose*.yaml` と `Dockerfile` はserver配備を担当する。
 
-`backend/database` に自動 snapshot の部品・テストは残るが、production serverの自動スケジューラには未接続である。server snapshotは本人が明示的に呼ぶAPIのみである。
+`core.Service` は各Desktop/server vault instanceの `StartAutoSnapshot` に束縛され、財務mutation成功後に非同期snapshotを作成する。これはwall-clock schedulerではなく、時刻・retention policy・失敗通知を利用者が設定する製品機能はない。
 
 ## 1. プロジェクト概要
 Go/Vueで構成された ledger を、利用者端末の Desktop と Docker/headless の multi-user server の2モードで提供する。旧Python版は `legacy_reference/` の参照資料に限る。
@@ -121,9 +121,9 @@ Go/Vueで構成された ledger を、利用者端末の Desktop と Docker/head
   * 銀行口座項目は紐付け候補の分類にのみ使い、クレジットカード項目のように残高計算・残高推移から除外してはならない。
   * 取引更新や設定変更により既存の紐付けがこの条件を満たさなくなった場合は、不正な紐付けを削除して整合性を維持する。
 
-### 6.3. スナップショット（現行は手動のみ）
+### 6.3. スナップショット（手動APIとmutation連動）
 
-`backend/database/` の自動作成部品は参照・テスト用であり、production serverの自動スケジューラには未接続である。Desktopもserverも現行は手動snapshotだけを提供する。server snapshotは認証済み本人の明示的な手動APIで、同じvault DEKの暗号文として扱う。application Admin/APIには他userの平文を開示しないが、同じservice UID、host root/operator、binary、process memoryはtrust boundary内である。snapshot単体はDR setではなく、control DB/key、vault/snapshot、volume recovery material、recovery codeを揃える。
+Desktopとserverは手動create/list/restoreを提供し、財務mutation後にはbound vault instanceの自動snapshotを非同期作成する。burst中は最大1回のfollow-upへcoalesceし、自動作成後に30世代と `SNAPSHOT_MAX_TOTAL_BYTES` の範囲へpruneする。これは時刻schedulerではなく、時刻・retention policy・失敗通知の設定UIはない。serverの手動createは直後にpruneせず、次の自動作成時のretention処理まで持ち越す。server snapshotは認証済み本人のrequest leaseに束縛され、同じvault DEKの暗号文として扱う。application Admin/APIには他userの平文を開示しないが、同じservice UID、host root/operator、binary、process memoryはtrust boundary内である。snapshot単体はDR setではなく、control DB/key、vault/snapshot、volume recovery material、recovery codeを揃える。
 
 ### 6.4. AI向けAPI（廃止済み・将来設計）
 
@@ -301,5 +301,5 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
 
 - mode、auth、vault、CSV、snapshot、AI、releaseの変更は、先に現行 source/test とこの文書の capability matrixを照合する。
 - Desktop は roleのない local vault、server は control/vault分離を維持する。旧 single-DB server、bcrypt/TOTP、旧AI envを復活させない。
-- production AIと自動server snapshotは現状未提供・未接続である。将来提供する場合は user-vault binding、別設計、明示的な承認、security testを必須にする。
+- production AIは現状非提供である。自動server snapshotはmutation連動で提供済みだが、時刻schedule・可変retention・失敗通知を追加する場合は、既存のuser-vault bindingと暗号化境界を保ち、別設計、明示的な承認、security testを必須にする。
 - 配布は固定SQLCipher/Wails/Docker workflowを使い、通常Go/Nodeテスト、frontend build、security tests、actionlint、`git diff --check`を通す。

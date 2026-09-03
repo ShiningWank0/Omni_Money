@@ -31,7 +31,7 @@ serverは次の領域を分離します。
 - control DB key: user vaultのDEKとは独立したowner-only secret
 - recovery code: browserが生成し、userだけが保存するvault復旧用secret
 
-Adminはuserの追加・無効化等を管理できますが、userのpasswordまたはrecovery codeなしにuser vaultの中身を復号できません。serverのsnapshot APIも本人のrequest leaseに束縛されるため、application Admin/APIでも他user vaultの平文を列挙・復号・復元できません。ただし同じservice UID、host root/operator、差し替え可能なbinary、process memoryはtrust boundary内です。自動snapshotはproduction serverへ未接続で、明示的な手動APIだけを使用します。snapshot restore後は全sessionが失効し、再ログインが必要です。
+Adminはuserの追加・無効化等を管理できますが、userのpasswordまたはrecovery codeなしにuser vaultの中身を復号できません。serverのsnapshot APIも本人のrequest leaseに束縛されるため、application Admin/APIでも他user vaultの平文を列挙・復号・復元できません。ただし同じservice UID、host root/operator、差し替え可能なbinary、process memoryはtrust boundary内です。手動APIに加え、財務mutation後にuser vault単位の自動snapshotを非同期作成します。自動処理はburstをcoalesceして30世代と容量上限を維持しますが、時刻schedule・retention policy・失敗通知を管理する製品UIはありません。snapshot restore後は全sessionが失効し、再ログインが必要です。
 
 詳細は[server multi-vault security model](server-multi-vault.md)、[SQLCipher鍵の運用](sqlcipher-key-operations.md)、[保存時暗号化volumeの運用contract](at-rest-encryption.md)を参照してください。
 
