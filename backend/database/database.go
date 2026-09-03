@@ -6,7 +6,6 @@ import (
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"database/sql"
-	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -897,7 +896,7 @@ func validateCurrentTransactionImagesContext(ctx context.Context, target schemaQ
 		var name, columnType string
 		var defaultValue any
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			return errors.Join(err, rows.Close())
+			return closeSchemaRowsWith(err, rows)
 		}
 		if index >= len(wantColumns) {
 			return schemaMismatchRows(schemaMismatchf("transaction_images has unexpected extra columns"), rows)
@@ -924,7 +923,7 @@ func validateCurrentTransactionImagesContext(ctx context.Context, target schemaQ
 		var id, seq int
 		var referenced, from, to, onUpdate, onDelete, match string
 		if err := rows.Scan(&id, &seq, &referenced, &from, &to, &onUpdate, &onDelete, &match); err != nil {
-			return errors.Join(err, rows.Close())
+			return closeSchemaRowsWith(err, rows)
 		}
 		foreignKeyCount++
 		if foreignKeyCount != 1 || referenced != "transactions" || from != "transaction_id" || to != "id" || strings.ToUpper(onUpdate) != "NO ACTION" || strings.ToUpper(onDelete) != "CASCADE" {
@@ -944,9 +943,7 @@ func validateCurrentTransactionImagesContext(ctx context.Context, target schemaQ
 	if rows.Next() {
 		return schemaMismatchRows(schemaMismatchf("foreign_key_check reported an orphan row"), rows)
 	}
-	iterationErr := rows.Err()
-	closeErr := rows.Close()
-	return errors.Join(iterationErr, closeErr)
+	return closeSchemaRows(rows)
 }
 
 type schemaQueryer interface {
@@ -961,19 +958,24 @@ func closeSchemaRows(rows *sql.Rows) error {
 	if rows == nil {
 		return nil
 	}
-	return errors.Join(rows.Err(), rows.Close())
+	iterationErr := rows.Err()
+	closeErr := rows.Close()
+	return errors.Join(iterationErr, closeErr, rows.Err())
 }
 
 func schemaMismatchRows(err error, rows *sql.Rows) error {
 	if rows == nil {
 		return markSchemaMismatch(err)
 	}
-	iterationErr := rows.Err()
-	closeErr := rows.Close()
-	if iterationErr != nil || closeErr != nil {
-		return errors.Join(iterationErr, closeErr)
+	marked := markSchemaMismatch(err)
+	if rowsErr := closeSchemaRows(rows); rowsErr != nil {
+		return errors.Join(marked, rowsErr)
 	}
-	return markSchemaMismatch(err)
+	return marked
+}
+
+func closeSchemaRowsWith(err error, rows *sql.Rows) error {
+	return errors.Join(err, closeSchemaRows(rows))
 }
 
 func validateCriticalSchema(target schemaQueryer) error {
@@ -1008,7 +1010,7 @@ func validateCriticalSchemaContext(ctx context.Context, target schemaQueryer) er
 			var notNull, primaryKey int
 			var defaultValue interface{}
 			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-				return errors.Join(fmt.Errorf("必須列検査スキャンエラー (%s): %w", table, err), rows.Close())
+				return closeSchemaRowsWith(fmt.Errorf("必須列検査スキャンエラー (%s): %w", table, err), rows)
 			}
 			found[name] = struct{}{}
 		}
@@ -1513,7 +1515,7 @@ func validateInternalSQLiteTablesContext(ctx context.Context, target schemaQuery
 		var name string
 		var definition sql.NullString
 		if err := rows.Scan(&name, &definition); err != nil {
-			return errors.Join(err, rows.Close())
+			return closeSchemaRowsWith(err, rows)
 		}
 		want, ok := expected[name]
 		if !ok || !definition.Valid || canonicalDDL(definition.String) != want {
@@ -1538,7 +1540,7 @@ func requireColumnsContext(ctx context.Context, target schemaQueryer, table stri
 		var name, columnType string
 		var defaultValue any
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			return errors.Join(err, rows.Close())
+			return closeSchemaRowsWith(err, rows)
 		}
 		found[name] = true
 	}
@@ -1571,7 +1573,7 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			return errors.Join(err, rows.Close())
+			return closeSchemaRowsWith(err, rows)
 		}
 		if !allowedTables[name] {
 			return schemaMismatchRows(schemaMismatchf("unexpected ledger table %s", name), rows)
@@ -1632,7 +1634,7 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 	for persistentRows.Next() {
 		var typ, name string
 		if err := persistentRows.Scan(&typ, &name); err != nil {
-			return errors.Join(err, persistentRows.Close())
+			return closeSchemaRowsWith(err, persistentRows)
 		}
 		if _, ok := allowedPersistentObjects[typ+"\x00"+name]; !ok {
 			return schemaMismatchRows(schemaMismatchf("unexpected ledger persistent object %s %s", typ, name), persistentRows)
@@ -1738,7 +1740,7 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 			var id, seq int
 			var referenced, from, to, onUpdate, onDelete, match string
 			if err := rows.Scan(&id, &seq, &referenced, &from, &to, &onUpdate, &onDelete, &match); err != nil {
-				return errors.Join(err, rows.Close())
+				return closeSchemaRowsWith(err, rows)
 			}
 			actual = append(actual, expectedForeignKey{referenced: referenced, from: from, to: to, onUpdate: strings.ToUpper(onUpdate), onDelete: strings.ToUpper(onDelete)})
 		}
@@ -1860,7 +1862,7 @@ func validateCurrentColumnDefinitionsContext(ctx context.Context, target schemaQ
 			var name, columnType string
 			var defaultValue any
 			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-				return errors.Join(err, rows.Close())
+				return closeSchemaRowsWith(err, rows)
 			}
 			if index >= len(want) {
 				return schemaMismatchRows(schemaMismatchf("%s has unexpected extra columns", table), rows)
@@ -2071,7 +2073,7 @@ func validateIndexShapesContext(ctx context.Context, target schemaQueryer) error
 			var seq, unique, partial int
 			var indexName, origin string
 			if err := rows.Scan(&seq, &indexName, &unique, &origin, &partial); err != nil {
-				return errors.Join(err, rows.Close())
+				return closeSchemaRowsWith(err, rows)
 			}
 			if indexName == name {
 				found = unique == boolToInt(want.unique) && partial == boolToInt(want.partial)
@@ -2092,7 +2094,7 @@ func validateIndexShapesContext(ctx context.Context, target schemaQueryer) error
 			var seq, cid, descending, key int
 			var column, collation sql.NullString
 			if err := rows.Scan(&seq, &cid, &column, &descending, &collation, &key); err != nil {
-				return errors.Join(err, rows.Close())
+				return closeSchemaRowsWith(err, rows)
 			}
 			if key == 0 {
 				continue
@@ -2157,7 +2159,7 @@ func validateRootTagIndexContext(ctx context.Context, target schemaQueryer) erro
 		var seq, unique, partial int
 		var name, origin string
 		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
-			return errors.Join(fmt.Errorf("rootタグ一意index属性の読み取りに失敗しました: %w", err), rows.Close())
+			return closeSchemaRowsWith(fmt.Errorf("rootタグ一意index属性の読み取りに失敗しました: %w", err), rows)
 		}
 		if name == "idx_tags_root_name_unique" {
 			if unique != 1 || partial != 1 {
@@ -2182,7 +2184,7 @@ func validateRootTagIndexContext(ctx context.Context, target schemaQueryer) erro
 		var seq, cid int
 		var column string
 		if err := rows.Scan(&seq, &cid, &column); err != nil {
-			return errors.Join(fmt.Errorf("rootタグ一意index列の読み取りに失敗しました: %w", err), rows.Close())
+			return closeSchemaRowsWith(fmt.Errorf("rootタグ一意index列の読み取りに失敗しました: %w", err), rows)
 		}
 		columns++
 		if columns != 1 || column != "name" {
@@ -2878,11 +2880,34 @@ func validateListSnapshotCandidateBoundary(transactionLock *snapshotTransactionL
 }
 
 func invalidSnapshotContentError(err error) bool {
-	var sqliteErr sqlite3.Error
-	if !errors.As(err, &sqliteErr) {
+	if err == nil {
 		return false
 	}
-	return sqliteErr.Code == sqlite3.ErrNotADB || sqliteErr.Code == sqlite3.ErrCorrupt
+	if unwrapper, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := unwrapper.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !invalidSnapshotContentError(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if _, ok := err.(*securedb.IntegrityMismatchError); ok {
+		return true
+	}
+	if sqliteErr, ok := err.(sqlite3.Error); ok {
+		return sqliteErr.Code == sqlite3.ErrNotADB || sqliteErr.Code == sqlite3.ErrCorrupt
+	}
+	if sqliteErr, ok := err.(*sqlite3.Error); ok && sqliteErr != nil {
+		return sqliteErr.Code == sqlite3.ErrNotADB || sqliteErr.Code == sqlite3.ErrCorrupt
+	}
+	if unwrapper, ok := err.(interface{ Unwrap() error }); ok {
+		return invalidSnapshotContentError(unwrapper.Unwrap())
+	}
+	return false
 }
 
 var errInvalidSnapshotContent = errors.New("invalid snapshot content")
@@ -2921,13 +2946,41 @@ func markSchemaNoRows(err error) error {
 }
 
 func snapshotSchemaInvalidContent(err error) bool {
+	return invalidSnapshotValidationError(err)
+}
+
+// invalidSnapshotValidationError accepts only errors that prove the
+// candidate's bytes are invalid. Any joined/underlying operational error must
+// keep the listing request fail-closed and visible to its caller.
+func invalidSnapshotValidationError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return errors.Is(err, sql.ErrNoRows) || func() bool {
-		var mismatch *schemaMismatchError
-		return errors.As(err, &mismatch)
-	}()
+	if unwrapper, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := unwrapper.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !invalidSnapshotValidationError(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if _, ok := err.(*schemaMismatchError); ok {
+		return true
+	}
+	if unwrapper, ok := err.(interface{ Unwrap() error }); ok {
+		return invalidSnapshotValidationError(unwrapper.Unwrap())
+	}
+	return invalidSnapshotContentError(err)
+}
+
+// snapshotValidationInfrastructureError is retained for package-local
+// callers; anything that is not proven content corruption is infrastructure.
+func snapshotValidationInfrastructureError(err error) bool {
+	return err != nil && !invalidSnapshotValidationError(err)
 }
 
 func wrapInvalidSnapshotContent(err error) error {
@@ -3001,22 +3054,19 @@ func (i *Instance) validateSnapshotDatabaseContextHeaderValidated(ctx context.Co
 		}
 	}
 	if err := i.checkIntegrityContext(ctx, target); err != nil {
-		if snapshotValidationInfrastructureError(err) {
-			return fmt.Errorf("snapshot integrity validation: %w", err)
+		if invalidSnapshotValidationError(err) {
+			return wrapInvalidSnapshotContent(fmt.Errorf("integrity: %w", err))
 		}
-		return wrapInvalidSnapshotContent(fmt.Errorf("integrity: %w", err))
+		return fmt.Errorf("snapshot integrity validation: %w", err)
 	}
 	var userTables int
 	if err := validateInternalSQLiteTablesContext(ctx, target); err != nil {
-		if snapshotSchemaInvalidContent(err) {
+		if invalidSnapshotValidationError(err) {
 			return wrapInvalidSnapshotContent(fmt.Errorf("SQLite internal table validation: %w", err))
 		}
 		return fmt.Errorf("SQLite internal table validation failed: %w", err)
 	}
 	if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "+sqliteUserTablePredicate).Scan(&userTables); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return wrapInvalidSnapshotContent(err)
-		}
 		return fmt.Errorf("snapshot table count validation: %w", err)
 	}
 	if userTables == 0 {
@@ -3026,33 +3076,12 @@ func (i *Instance) validateSnapshotDatabaseContextHeaderValidated(ctx context.Co
 		return err
 	}
 	if err := validateLedgerSchemaContext(ctx, target, false); err != nil {
-		if snapshotSchemaInvalidContent(err) {
+		if invalidSnapshotValidationError(err) {
 			return wrapInvalidSnapshotContent(fmt.Errorf("ledger schema: %w", err))
 		}
 		return fmt.Errorf("ledger schema validation failed: %w", err)
 	}
 	return nil
-}
-
-func snapshotValidationInfrastructureError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, driver.ErrBadConn) {
-		return true
-	}
-	var sqliteErr sqlite3.Error
-	if !errors.As(err, &sqliteErr) {
-		return false
-	}
-	switch sqliteErr.Code {
-	case sqlite3.ErrBusy, sqlite3.ErrLocked, sqlite3.ErrIoErr, sqlite3.ErrCantOpen,
-		sqlite3.ErrProtocol, sqlite3.ErrFull, sqlite3.ErrReadonly, sqlite3.ErrInterrupt,
-		sqlite3.ErrPerm, sqlite3.ErrAuth, sqlite3.ErrMisuse, sqlite3.ErrNomem:
-		return true
-	default:
-		return false
-	}
 }
 
 // RestoreSnapshot はスナップショットからDBを復元する。

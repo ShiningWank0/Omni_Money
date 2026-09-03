@@ -22,45 +22,115 @@ var (
 	ErrPlaintextHeader = errors.New("database has a plaintext SQLite header")
 )
 
+// IntegrityMismatchError is returned only when an integrity pragma completed
+// normally and reported a failing row/result.  Driver, query, scan, context,
+// and rows-close failures are deliberately returned as their original errors
+// so callers can distinguish damaged content from an unavailable database.
+type IntegrityMismatchError struct {
+	kind   error
+	detail string
+}
+
+func (e *IntegrityMismatchError) Error() string {
+	if e == nil {
+		return "integrity check failed"
+	}
+	if e.kind == nil {
+		return e.detail
+	}
+	if e.detail == "" {
+		return e.kind.Error()
+	}
+	return fmt.Sprintf("%s: %s", e.kind, e.detail)
+}
+
+func (e *IntegrityMismatchError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.kind
+}
+
+func newIntegrityMismatch(kind error, detail string) error {
+	return &IntegrityMismatchError{kind: kind, detail: detail}
+}
+
+// closeIntegrityRows preserves both iteration and driver Close failures. A
+// Close can itself update Rows.Err, so inspect it before and after closing.
+func closeIntegrityRows(rows *sql.Rows) error {
+	if rows == nil {
+		return nil
+	}
+	iterationErr := rows.Err()
+	closeErr := rows.Close()
+	return errors.Join(iterationErr, closeErr, rows.Err())
+}
+
 func (o *Opener) CheckIntegrity(ctx context.Context, db *sql.DB) error {
 	if db == nil {
 		return errors.New("database is not open")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if o.Encrypted() {
 		rows, err := db.QueryContext(ctx, "PRAGMA cipher_integrity_check")
 		if err != nil {
-			return fmt.Errorf("%w: %w", ErrCipherIntegrity, err)
+			return fmt.Errorf("cipher integrity query: %w", err)
 		}
-		defer rows.Close()
 		if rows.Next() {
 			var detail string
-			_ = rows.Scan(&detail)
-			return fmt.Errorf("%w: %s", ErrCipherIntegrity, detail)
+			if scanErr := rows.Scan(&detail); scanErr != nil {
+				return errors.Join(fmt.Errorf("cipher integrity result scan: %w", scanErr), closeIntegrityRows(rows))
+			}
+			if rowsErr := closeIntegrityRows(rows); rowsErr != nil {
+				return fmt.Errorf("cipher integrity rows: %w", rowsErr)
+			}
+			return newIntegrityMismatch(ErrCipherIntegrity, detail)
 		}
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("%w: %w", ErrCipherIntegrity, err)
+		if rowsErr := closeIntegrityRows(rows); rowsErr != nil {
+			return fmt.Errorf("cipher integrity rows: %w", rowsErr)
 		}
 	}
 	return expectSQLiteIntegrity(ctx, db)
 }
 
 func expectSQLiteIntegrity(ctx context.Context, db databaseQueryer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rows, err := db.QueryContext(ctx, "PRAGMA integrity_check")
+	if err != nil {
+		return fmt.Errorf("SQLite integrity query: %w", err)
+	}
+	if !rows.Next() {
+		rowsErr := closeIntegrityRows(rows)
+		if rowsErr != nil {
+			return fmt.Errorf("SQLite integrity rows: %w", rowsErr)
+		}
+		return sql.ErrNoRows
+	}
 	var result string
-	if err := db.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&result); err != nil {
-		return fmt.Errorf("%w: %w", ErrSQLiteIntegrity, err)
+	if err := rows.Scan(&result); err != nil {
+		return errors.Join(fmt.Errorf("SQLite integrity result scan: %w", err), closeIntegrityRows(rows))
+	}
+	if rowsErr := closeIntegrityRows(rows); rowsErr != nil {
+		return fmt.Errorf("SQLite integrity rows: %w", rowsErr)
 	}
 	if result != "ok" {
-		return fmt.Errorf("%w: %s", ErrSQLiteIntegrity, result)
+		return newIntegrityMismatch(ErrSQLiteIntegrity, result)
 	}
 	return nil
 }
 
 func expectForeignKeyIntegrity(ctx context.Context, db databaseQueryer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	rows, err := db.QueryContext(ctx, "PRAGMA foreign_key_check")
 	if err != nil {
-		return fmt.Errorf("%w: foreign_key_check: %w", ErrSQLiteIntegrity, err)
+		return fmt.Errorf("foreign_key_check query: %w", err)
 	}
-	defer rows.Close()
 	if rows.Next() {
 		values := make([]any, 4)
 		destinations := make([]any, len(values))
@@ -68,12 +138,15 @@ func expectForeignKeyIntegrity(ctx context.Context, db databaseQueryer) error {
 			destinations[index] = &values[index]
 		}
 		if err := rows.Scan(destinations...); err != nil {
-			return fmt.Errorf("%w: foreign_key_check: %v", ErrSQLiteIntegrity, err)
+			return errors.Join(fmt.Errorf("foreign_key_check result scan: %w", err), closeIntegrityRows(rows))
 		}
-		return fmt.Errorf("%w: foreign key violation in table %v row %v", ErrSQLiteIntegrity, values[0], values[1])
+		if rowsErr := closeIntegrityRows(rows); rowsErr != nil {
+			return fmt.Errorf("foreign_key_check rows: %w", rowsErr)
+		}
+		return newIntegrityMismatch(ErrSQLiteIntegrity, fmt.Sprintf("foreign key violation in table %v row %v", values[0], values[1]))
 	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("%w: foreign_key_check: %w", ErrSQLiteIntegrity, err)
+	if rowsErr := closeIntegrityRows(rows); rowsErr != nil {
+		return fmt.Errorf("foreign_key_check rows: %w", rowsErr)
 	}
 	return nil
 }
