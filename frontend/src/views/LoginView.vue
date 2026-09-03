@@ -54,15 +54,14 @@
               type="password"
               class="form-input"
               :autocomplete="mode === 'login' ? 'current-password' : 'new-password'"
-              minlength="12"
-              maxlength="256"
+			  maxlength="1024"
               required
             >
           </div>
 
           <div v-if="setupRequired || mode !== 'login'" class="form-group">
             <label for="password-confirmation" class="form-label">パスワード（確認）</label>
-            <input id="password-confirmation" v-model="passwordConfirmation" type="password" class="form-input" autocomplete="new-password" minlength="12" maxlength="256" required>
+			<input id="password-confirmation" v-model="passwordConfirmation" type="password" class="form-input" autocomplete="new-password" maxlength="1024" required>
           </div>
 
           <div v-if="needsNewRecovery" class="recovery-panel">
@@ -111,6 +110,7 @@ import {
   setupInitialAdmin
 } from '../utils/api'
 import { passkeysSupported } from '../utils/passkeys'
+import { validateNewPassword, validatePasswordBytes } from '../utils/passwordPolicy'
 import {
   destroySecretBytes,
   generateRecoverySecret,
@@ -218,8 +218,8 @@ async function copyRecoveryCode() {
 }
 
 function requireMatchingNewCredentials() {
-  if (password.value !== passwordConfirmation.value) throw new Error('確認用パスワードが一致しません')
-  if (!recoverySaved.value || !newRecoveryBytes.value) throw new Error('回復コードを安全な場所へ保存してください')
+	  validateNewPassword(password.value, passwordConfirmation.value)
+	  if (!recoverySaved.value || !newRecoveryBytes.value) throw new Error('回復コードを安全な場所へ保存してください')
 }
 
 async function handleSubmit() {
@@ -227,10 +227,11 @@ async function handleSubmit() {
   errorMessage.value = ''
   infoMessage.value = ''
   let currentRecoveryBytes = null
-  let completed = false
-  try {
-    if (setupRequired.value) {
-      requireMatchingNewCredentials()
+	let completed = false
+	try {
+	  if (setupRequired.value || mode.value !== 'login') requireMatchingNewCredentials()
+	  else validatePasswordBytes(password.value)
+	  if (setupRequired.value) {
       await setupInitialAdmin({
         setupToken: setupToken.value,
         email: email.value,
@@ -257,8 +258,7 @@ async function handleSubmit() {
       window.location.href = '/'
       return
     }
-    if (mode.value === 'invite') {
-      requireMatchingNewCredentials()
+	  if (mode.value === 'invite') {
       const result = await acceptServerInvitation({
         token: operationToken.value,
         displayName: displayName.value,
@@ -270,8 +270,7 @@ async function handleSubmit() {
       setMode('login', 'アカウントを作成しました。設定したパスワードでログインしてください')
       return
     }
-    if (mode.value === 'reset') {
-      requireMatchingNewCredentials()
+	  if (mode.value === 'reset') {
       currentRecoveryBytes = recoveryCodeToSecret(currentRecoveryCode.value)
       await completeServerPasswordReset({
         token: operationToken.value,

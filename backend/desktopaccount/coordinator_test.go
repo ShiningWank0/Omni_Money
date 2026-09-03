@@ -14,6 +14,7 @@ import (
 	"omni_money/backend/core"
 	"omni_money/backend/database"
 	"omni_money/backend/keyenvelope"
+	"omni_money/backend/passwordpolicy"
 	"omni_money/backend/securedb"
 )
 
@@ -90,13 +91,29 @@ func TestCoordinatorLifecycleAndCredentialRotation(t *testing.T) {
 	if err := c.ChangePassword(testPassword, testNewPassword); err != nil {
 		t.Fatalf("ChangePassword: %v", err)
 	}
-	rotated, err := c.RotateRecovery(testNewPassword)
+	rotated := bytes.Repeat([]byte{0x5a}, keyenvelope.RecoverySecretSize)
+	oldDEK, err := keyenvelope.UnwrapWithRecovery(c.manifest.RecoveryEnvelope, recovery, c.manifest.context())
 	if err != nil {
+		t.Fatalf("unwrap original recovery envelope: %v", err)
+	}
+	defer clear(oldDEK)
+	if err := c.RotateRecovery(testNewPassword, rotated); err != nil {
 		t.Fatalf("RotateRecovery: %v", err)
 	}
 	defer clear(rotated)
 	if bytes.Equal(rotated, recovery) {
-		t.Fatal("recovery rotation returned the previous secret")
+		t.Fatal("test recovery candidate matches the previous secret")
+	}
+	newDEK, err := keyenvelope.UnwrapWithRecovery(c.manifest.RecoveryEnvelope, rotated, c.manifest.context())
+	if err != nil {
+		t.Fatalf("unwrap rotated recovery envelope: %v", err)
+	}
+	defer clear(newDEK)
+	if !bytes.Equal(oldDEK, newDEK) {
+		t.Fatal("recovery rotation changed the data encryption key")
+	}
+	if status := c.Status(); !status.Unlocked {
+		t.Fatalf("rotation unexpectedly locked the desktop vault: %+v", status)
 	}
 	if err := c.Lock(); err != nil {
 		t.Fatal(err)
@@ -217,23 +234,74 @@ func TestCoordinatorRestartBeginsLockedAndReopensPersistedAccount(t *testing.T) 
 	}
 }
 
+func TestRecoveryRotationIsAtomicAndRetryableWithTheSameCandidate(t *testing.T) {
+	root := t.TempDir()
+	c := newTestCoordinator(t, root)
+	initialRecovery, err := c.Setup(testPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(initialRecovery)
+	t.Cleanup(func() { _ = c.Close() })
+
+	context := c.manifest.context()
+	initialDEK, err := keyenvelope.UnwrapWithRecovery(c.manifest.RecoveryEnvelope, initialRecovery, context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(initialDEK)
+	candidate := bytes.Repeat([]byte{0xa5}, keyenvelope.RecoverySecretSize)
+	defer clear(candidate)
+
+	originalManifestPath := c.manifestPath
+	c.manifestPath = filepath.Join(root, "missing", manifestFileName)
+	if err := c.RotateRecovery(testPassword, candidate); err == nil {
+		t.Fatal("RotateRecovery unexpectedly succeeded when atomic publication failed")
+	}
+	if _, err := keyenvelope.UnwrapWithRecovery(c.manifest.RecoveryEnvelope, initialRecovery, context); err != nil {
+		t.Fatalf("failed publication invalidated the old recovery code: %v", err)
+	}
+	if _, err := keyenvelope.UnwrapWithRecovery(c.manifest.RecoveryEnvelope, candidate, context); !errors.Is(err, keyenvelope.ErrAuthentication) {
+		t.Fatalf("failed publication activated the candidate: %v", err)
+	}
+	c.manifestPath = originalManifestPath
+
+	if err := c.RotateRecovery(testPassword, candidate); err != nil {
+		t.Fatalf("RotateRecovery: %v", err)
+	}
+	if err := c.RotateRecovery(testPassword, candidate); err != nil {
+		t.Fatalf("same-candidate retry after an ambiguous response: %v", err)
+	}
+	rotatedDEK, err := keyenvelope.UnwrapWithRecovery(c.manifest.RecoveryEnvelope, candidate, context)
+	if err != nil {
+		t.Fatalf("candidate recovery code was not active: %v", err)
+	}
+	defer clear(rotatedDEK)
+	if !bytes.Equal(initialDEK, rotatedDEK) {
+		t.Fatal("recovery rotation changed the data encryption key")
+	}
+	if _, err := keyenvelope.UnwrapWithRecovery(c.manifest.RecoveryEnvelope, initialRecovery, context); !errors.Is(err, keyenvelope.ErrAuthentication) {
+		t.Fatalf("old recovery code remained active after publication: %v", err)
+	}
+}
+
 func TestCoordinatorPasswordPolicyIsEnforcedByPackage(t *testing.T) {
 	c := newTestCoordinator(t, t.TempDir())
 	for _, password := range [][]byte{
-		bytes.Repeat([]byte{'x'}, minPasswordBytes-1),
-		bytes.Repeat([]byte{'x'}, maxPasswordBytes+1),
+		bytes.Repeat([]byte{'x'}, passwordpolicy.MinimumBytes-1),
+		bytes.Repeat([]byte{'x'}, passwordpolicy.MaximumBytes+1),
 	} {
 		if _, err := c.Setup(password); !errors.Is(err, ErrInvalidPassword) {
 			t.Fatalf("Setup password length %d error = %v", len(password), err)
 		}
 	}
-	recovery, err := c.Setup(bytes.Repeat([]byte{'x'}, minPasswordBytes))
+	recovery, err := c.Setup(bytes.Repeat([]byte{'x'}, passwordpolicy.MinimumBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
 	clear(recovery)
 	t.Cleanup(func() { _ = c.Close() })
-	if err := c.ChangePassword(bytes.Repeat([]byte{'x'}, minPasswordBytes), []byte("short")); !errors.Is(err, ErrInvalidPassword) {
+	if err := c.ChangePassword(bytes.Repeat([]byte{'x'}, passwordpolicy.MinimumBytes), []byte("short")); !errors.Is(err, ErrInvalidPassword) {
 		t.Fatalf("ChangePassword policy error = %v", err)
 	}
 }

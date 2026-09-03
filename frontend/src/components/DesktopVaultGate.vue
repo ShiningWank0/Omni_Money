@@ -13,7 +13,7 @@
         <span>データを上書きせず、アプリを終了してバックアップを確認してください。</span>
       </div>
 
-      <div v-else-if="recoveryCode" class="desktop-vault-form" aria-live="polite">
+	  <div v-else-if="recoveryCode" class="desktop-vault-form" aria-live="polite">
         <h2>回復コードを保存してください</h2>
         <p>「保管庫を開く」を完了すると、このコードは再表示できません。パスワードを忘れた場合に必要で、Omni Money側では復元できません。</p>
         <label for="desktop-recovery-output">回復コード</label>
@@ -25,9 +25,9 @@
           <span>パスワード管理ツール等、Omni Moneyとは別の安全な場所に保存しました</span>
         </label>
         <button type="button" class="primary-button" :disabled="!canFinishRecovery" @click="finishRecoveryDelivery">{{ busy ? '保存確認中…' : '保管庫を開く' }}</button>
-      </div>
+	  </div>
 
-      <form v-else-if="legacyMigrationRequired" class="desktop-vault-form" @submit.prevent="migrateLegacyVault">
+	  <form v-else-if="legacyMigrationRequired" class="desktop-vault-form" @submit.prevent="migrateLegacyVault">
         <h2>{{ legacyMigrationResuming ? '中断した移行を再開' : '既存データを暗号化保管庫へ移行' }}</h2>
         <div class="desktop-vault-warning" role="alert">
           <strong>{{ legacyMigrationResuming ? '暗号化移行は完了していますが、回復コードの受け取り確認が残っています。' : '平文のデータベースが見つかりました。' }}</strong>
@@ -37,9 +37,9 @@
           <span v-else>回復コードの再配送は、暗号化移行をやり直す操作ではありません。現在のデータフォルダーをバックアップした上で再開してください。</span>
         </div>
         <label for="desktop-migration-password">{{ legacyMigrationResuming ? '移行時のパスワード' : '新しいパスワード（UTF-8で12 bytes以上）' }}</label>
-        <input id="desktop-migration-password" v-model="password" type="password" :autocomplete="legacyMigrationResuming ? 'current-password' : 'new-password'" maxlength="256" required autofocus>
+		<input id="desktop-migration-password" v-model="password" type="password" :autocomplete="legacyMigrationResuming ? 'current-password' : 'new-password'" maxlength="1024" required autofocus>
         <label for="desktop-migration-password-confirmation">パスワードの確認</label>
-        <input id="desktop-migration-password-confirmation" v-model="passwordConfirmation" type="password" :autocomplete="legacyMigrationResuming ? 'current-password' : 'new-password'" maxlength="256" required>
+		<input id="desktop-migration-password-confirmation" v-model="passwordConfirmation" type="password" :autocomplete="legacyMigrationResuming ? 'current-password' : 'new-password'" maxlength="1024" required>
         <label v-if="!legacyMigrationResuming" class="save-confirmation">
           <input v-model="legacyBackupConfirmed" type="checkbox">
           <span>{{ legacyMigrationResuming ? '現在のデータフォルダー全体を安全な場所へバックアップしました' : '平文データを含むデータフォルダー全体を、暗号化された安全な場所へバックアップしました' }}</span>
@@ -52,9 +52,9 @@
         <h2>最初の管理者を作成</h2>
         <p>Desktop版は単一ユーザーです。このアカウントが管理者を兼ね、取引データはSQLCipherで暗号化されます。</p>
         <label for="desktop-new-password">パスワード（UTF-8で12 bytes以上）</label>
-        <input id="desktop-new-password" v-model="password" type="password" autocomplete="new-password" maxlength="256" required autofocus>
+		<input id="desktop-new-password" v-model="password" type="password" autocomplete="new-password" maxlength="1024" required autofocus>
         <label for="desktop-new-password-confirmation">パスワードの確認</label>
-        <input id="desktop-new-password-confirmation" v-model="passwordConfirmation" type="password" autocomplete="new-password" maxlength="256" required>
+		<input id="desktop-new-password-confirmation" v-model="passwordConfirmation" type="password" autocomplete="new-password" maxlength="1024" required>
         <div v-if="operationError" class="desktop-vault-error" role="alert">{{ operationError }}</div>
         <button class="primary-button" type="submit" :disabled="busy">{{ busy ? '暗号化保管庫を作成中…' : '管理者と保管庫を作成' }}</button>
       </form>
@@ -64,9 +64,9 @@
         <label for="desktop-recovery-code">回復コード</label>
         <textarea id="desktop-recovery-code" v-model.trim="enteredRecoveryCode" rows="3" autocomplete="off" spellcheck="false" required></textarea>
         <label for="desktop-recovery-password">新しいパスワード（UTF-8で12 bytes以上）</label>
-        <input id="desktop-recovery-password" v-model="password" type="password" autocomplete="new-password" maxlength="256" required>
+		<input id="desktop-recovery-password" v-model="password" type="password" autocomplete="new-password" maxlength="1024" required>
         <label for="desktop-recovery-password-confirmation">新しいパスワードの確認</label>
-        <input id="desktop-recovery-password-confirmation" v-model="passwordConfirmation" type="password" autocomplete="new-password" maxlength="256" required>
+		<input id="desktop-recovery-password-confirmation" v-model="passwordConfirmation" type="password" autocomplete="new-password" maxlength="1024" required>
         <div v-if="operationError" class="desktop-vault-error" role="alert">{{ operationError }}</div>
         <div class="button-row">
           <button type="button" class="secondary-button" :disabled="busy" @click="cancelRecovery">戻る</button>
@@ -77,7 +77,7 @@
       <form v-else class="desktop-vault-form" @submit.prevent="unlockVault">
         <h2>保管庫を開く</h2>
         <label for="desktop-password">パスワード</label>
-        <input id="desktop-password" v-model="password" type="password" autocomplete="current-password" maxlength="256" required autofocus>
+		<input id="desktop-password" v-model="password" type="password" autocomplete="current-password" maxlength="1024" required autofocus>
         <div v-if="operationError" class="desktop-vault-error" role="alert">{{ operationError }}</div>
         <button class="primary-button" type="submit" :disabled="busy">{{ busy ? '確認中…' : 'ロックを解除' }}</button>
         <button class="link-button" type="button" :disabled="busy" @click="startRecovery">パスワードを忘れた場合</button>
@@ -89,11 +89,11 @@
 <script setup>
 import { computed, ref } from 'vue'
 import {
-  acknowledgeDesktopVaultRecovery,
+	acknowledgeDesktopVaultRecovery,
   migrateLegacyDesktopVault,
   recoverDesktopVault,
   setupDesktopVault,
-  unlockDesktopVault
+	unlockDesktopVault
 } from '../utils/api'
 import {
   canConfirmDesktopRecoveryDelivery,
@@ -101,6 +101,7 @@ import {
   desktopVaultNeedsSetup,
   validateNewDesktopPassword
 } from '../utils/desktopVaultSafety'
+import { validatePasswordBytes } from '../utils/passwordPolicy'
 
 const props = defineProps({
   status: { type: Object, default: null },
@@ -161,8 +162,9 @@ async function setupVault() {
 async function migrateLegacyVault() {
   if (busy.value || (!legacyMigrationResuming.value && !legacyBackupConfirmed.value)) return
   operationError.value = ''
-  try {
-    validateNewPassword()
+	try {
+	  if (legacyMigrationResuming.value) validatePasswordBytes(password.value)
+	  else validateNewPassword()
     busy.value = true
     const result = await migrateLegacyDesktopVault(password.value)
     recoveryCode.value = result?.recovery_code || ''
@@ -180,8 +182,9 @@ async function unlockVault() {
   if (busy.value) return
   operationError.value = ''
   busy.value = true
-  try {
-    const status = await unlockDesktopVault(password.value)
+	try {
+	  validatePasswordBytes(password.value)
+	  const status = await unlockDesktopVault(password.value)
     emit('unlocked', status)
   } catch (error) {
     operationError.value = error?.message || 'パスワードを確認できませんでした'
@@ -239,12 +242,12 @@ async function finishRecoveryDelivery() {
     // Migration keeps a durable delivery record until this succeeds. Setup
     // and ordinary recovery use the same call; the backend treats the absence
     // of a pending delivery record as a successful idempotent acknowledgement.
-    const acknowledgedStatus = await acknowledgeDesktopVaultRecovery()
-    const status = acknowledgedStatus || pendingUnlockedStatus.value
+	  const acknowledgedStatus = await acknowledgeDesktopVaultRecovery()
+	  const status = acknowledgedStatus || pendingUnlockedStatus.value
     if (!status?.unlocked && status?.state !== 'unlocked') {
-      throw new Error('回復コードの保存確認後も保管庫が開いていません')
+      throw new Error('保存確認後も保管庫がロックされています')
     }
-    recoveryCode.value = ''
+	  recoveryCode.value = ''
     recoverySaved.value = false
     recoveryCopied.value = false
     pendingUnlockedStatus.value = null

@@ -23,10 +23,10 @@
       <section class="credential-section">
         <h3>パスワードを変更</h3>
         <p v-if="!isWailsMode">変更後は全端末からログアウトします。登録済みパスキーは、下の選択に従って残すか一括失効します。</p>
-        <form @submit.prevent="changePassword">
-          <label>現在のパスワード<input v-model="currentPassword" type="password" autocomplete="current-password" maxlength="1024" required></label>
-          <label>新しいパスワード<input v-model="newPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label>
-          <label>新しいパスワード（確認）<input v-model="newPasswordConfirmation" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label>
+		<form @submit.prevent="changePassword">
+		  <label>現在のパスワード<input v-model="currentPassword" type="password" autocomplete="current-password" maxlength="1024" required></label>
+		  <label>新しいパスワード<input v-model="newPassword" type="password" autocomplete="new-password" maxlength="1024" required></label>
+		  <label>新しいパスワード（確認）<input v-model="newPasswordConfirmation" type="password" autocomplete="new-password" maxlength="1024" required></label>
           <label v-if="!isWailsMode" class="check-row">
             <input v-model="revokePasskeys" type="checkbox">
             登録済みパスキーもすべて失効する
@@ -40,19 +40,19 @@
 
       <section class="credential-section">
         <h3>回復コードを更新</h3>
-        <p>現在のコードは直ちに失効します。新しいコードを安全な場所へ保存してください。サーバーでは更新後に全端末からログアウトします。</p>
+        <p>候補をこの端末で作成し、安全な場所へ保存したことを確認してから更新します。確認前は現在のコードが有効なままです。サーバーでは更新後に全端末からログアウトします。</p>
         <form @submit.prevent="rotateRecovery">
           <label>現在のパスワード<input v-model="recoveryPassword" type="password" autocomplete="current-password" maxlength="1024" required></label>
-          <button type="submit" :disabled="busy || Boolean(recoveryCode)">新しい回復コードを発行</button>
+          <button type="submit" :disabled="busy || Boolean(recoveryCode)">新しい回復コードの候補を作成</button>
         </form>
       </section>
 
       <section v-if="recoveryCode" class="recovery-panel" aria-live="polite">
         <h3>新しい回復コード</h3>
-        <p>この画面を閉じると再表示できません。保存を確認するまで閉じないでください。</p>
+        <p>まだアカウントには反映されていません。この画面を閉じると再表示できないため、先に安全な場所へ保存してください。</p>
         <textarea :value="recoveryCode" readonly rows="3" @focus="$event.target.select()"></textarea>
         <label class="check-row"><input v-model="recoverySaved" type="checkbox">安全な場所へ保存しました</label>
-        <button type="button" :disabled="!recoverySaved" @click="finishRecovery">保存を確認</button>
+        <button type="button" :disabled="!canCommitRecovery" @click="finishRecovery">保存済みのコードへ更新</button>
       </section>
 
       <section v-if="!isWailsMode" class="credential-section">
@@ -65,13 +65,14 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
 	  changeDesktopVaultPassword, changeServerPassword, isWailsMode, listServerCredentials, logoutAll,
   rotateDesktopVaultRecovery, rotateServerRecoveryCode
 } from '../utils/api'
-import { generateRecoverySecret, recoverySecretToCode } from '../utils/recovery'
-import { validateNewDesktopPassword } from '../utils/desktopVaultSafety'
+import { destroySecretBytes, generateRecoverySecret, recoverySecretToCode } from '../utils/recovery'
+import { canConfirmDesktopRecoveryDelivery, validateNewDesktopPassword } from '../utils/desktopVaultSafety'
+import { validatePasswordBytes } from '../utils/passwordPolicy'
 
 const emit = defineEmits(['close', 'session-invalidated', 'signed-out'])
 const busy = ref(false)
@@ -85,6 +86,13 @@ const recoverySaved = ref(false)
 const errorMessage = ref('')
 const infoMessage = ref('')
 const inventory = ref(null)
+let pendingRecoverySecret = null
+let serverRecoveryOutcomeUnknown = false
+const canCommitRecovery = computed(() => canConfirmDesktopRecoveryDelivery({
+  recoveryCode: recoveryCode.value,
+  recoverySaved: recoverySaved.value,
+  busy: busy.value
+}))
 
 function clearSecrets() {
   currentPassword.value = ''
@@ -92,22 +100,26 @@ function clearSecrets() {
   newPasswordConfirmation.value = ''
   recoveryPassword.value = ''
   recoveryCode.value = ''
+  recoverySaved.value = false
+  destroySecretBytes(pendingRecoverySecret)
+  pendingRecoverySecret = null
+  serverRecoveryOutcomeUnknown = false
 }
 
 function close() {
   if (busy.value) return
   if (recoveryCode.value && !recoverySaved.value && !window.confirm('新しい回復コードを保存せずに閉じますか？')) return
-	  const serverRecoveryPending = !isWailsMode && Boolean(recoveryCode.value)
+  const mustSignOut = serverRecoveryOutcomeUnknown
   clearSecrets()
-	  if (serverRecoveryPending) emit('signed-out')
-	  else emit('close')
+  emit(mustSignOut ? 'signed-out' : 'close')
 }
 
 async function changePassword() {
   errorMessage.value = ''
   infoMessage.value = ''
-  try {
-    validateNewDesktopPassword(newPassword.value, newPasswordConfirmation.value)
+	try {
+	  validatePasswordBytes(currentPassword.value)
+	  validateNewDesktopPassword(newPassword.value, newPasswordConfirmation.value)
     if (currentPassword.value === newPassword.value) throw new Error('現在と異なるパスワードを指定してください')
     busy.value = true
     if (isWailsMode) {
@@ -134,42 +146,53 @@ async function changePassword() {
   }
 }
 
-async function rotateRecovery() {
+function rotateRecovery() {
   errorMessage.value = ''
   infoMessage.value = ''
-  busy.value = true
-  let secret
   try {
-    if (isWailsMode) {
-      const response = await rotateDesktopVaultRecovery(recoveryPassword.value)
-      recoveryCode.value = response?.recovery_code || ''
-    } else {
-      secret = generateRecoverySecret()
-      recoveryCode.value = recoverySecretToCode(secret)
-      await rotateServerRecoveryCode({ currentPassword: recoveryPassword.value, newRecoverySecret: secret })
-	  emit('session-invalidated')
-    }
-    if (!recoveryCode.value) throw new Error('新しい回復コードを受け取れませんでした')
+    validatePasswordBytes(recoveryPassword.value)
+    destroySecretBytes(pendingRecoverySecret)
+    pendingRecoverySecret = generateRecoverySecret()
+    recoveryCode.value = recoverySecretToCode(pendingRecoverySecret)
+    recoverySaved.value = false
+    serverRecoveryOutcomeUnknown = false
   } catch (error) {
-	    if (isWailsMode || error?.definitiveResponse) {
-	      recoveryCode.value = ''
-	      errorMessage.value = error?.message || '回復コードを更新できませんでした'
-	    } else {
-	      emit('session-invalidated')
-	      errorMessage.value = '通信結果を確認できませんでした。更新が完了した可能性があるため、表示中の候補コードを保存してから再ログインし、回復コードを改めて更新してください。'
-	    }
-  } finally {
-    if (secret) secret.fill(0)
-    recoveryPassword.value = ''
-    busy.value = false
+    clearSecrets()
+    errorMessage.value = error?.message || '回復コードの候補を作成できませんでした'
   }
 }
 
-function finishRecovery() {
-  recoveryCode.value = ''
-  recoverySaved.value = false
-  if (isWailsMode) infoMessage.value = '新しい回復コードの保存を確認しました'
-  else emit('signed-out')
+async function finishRecovery() {
+  if (!canCommitRecovery.value || !pendingRecoverySecret) return
+  busy.value = true
+  errorMessage.value = ''
+  infoMessage.value = ''
+  try {
+    if (isWailsMode) {
+      await rotateDesktopVaultRecovery(recoveryPassword.value, recoveryCode.value)
+      clearSecrets()
+      infoMessage.value = '回復コードを更新しました'
+      return
+    }
+    await rotateServerRecoveryCode({ currentPassword: recoveryPassword.value, newRecoverySecret: pendingRecoverySecret })
+    clearSecrets()
+    emit('signed-out')
+  } catch (error) {
+    recoveryPassword.value = ''
+    if (!isWailsMode && error?.definitiveResponse !== true) {
+      serverRecoveryOutcomeUnknown = true
+      emit('session-invalidated')
+      errorMessage.value = '通信結果を確認できませんでした。保存済みの候補が反映された可能性があります。再ログイン後、この候補を回復コードとして保管してください。'
+      return
+    }
+    if (isWailsMode) {
+      errorMessage.value = `${error?.message || '更新結果を確認できませんでした'}。保存済みの同じ候補で再試行できます。更新されていなければ現在の回復コードが引き続き有効です。`
+      return
+    }
+    errorMessage.value = error?.message || '回復コードを更新できませんでした'
+  } finally {
+    busy.value = false
+  }
 }
 
 async function endAllSessions() {

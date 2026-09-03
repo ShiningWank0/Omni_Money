@@ -55,8 +55,7 @@ func TestLegacyMigrationCopiesEveryDatabaseAndRequiresRecoveryAcknowledgment(t *
 	if err := c.ChangePassword(testPassword, testNewPassword); !errors.Is(err, ErrMigrationPending) {
 		t.Fatalf("pending ChangePassword error = %v", err)
 	}
-	if next, err := c.RotateRecovery(testPassword); !errors.Is(err, ErrMigrationPending) {
-		clear(next)
+	if err := c.RotateRecovery(testPassword, bytes.Repeat([]byte{0x7a}, keyenvelope.RecoverySecretSize)); !errors.Is(err, ErrMigrationPending) {
 		t.Fatalf("pending RotateRecovery error = %v", err)
 	}
 	if lease, err := c.Service(); !errors.Is(err, ErrMigrationPending) {

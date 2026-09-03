@@ -474,6 +474,11 @@ func TestCompletePasswordResetCommitsAllStateAndReturnsSafeDTO(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.CreatePasskeyCredential(
+		context.Background(), testPasskeyInput(member.ID, "reset-revoked passkey", 140), testNow.Add(time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
 	tokenHash := testTokenHash(t, 90)
 	ticket, err := store.CreatePasswordResetTicket(
 		context.Background(), admin.ID, member.ID,
@@ -562,6 +567,13 @@ func TestCompletePasswordResetCommitsAllStateAndReturnsSafeDTO(t *testing.T) {
 	if siblingState != PasswordResetRevoked {
 		t.Fatalf("sibling reset ticket state = %s", siblingState)
 	}
+	passkeys, err := store.ListPasskeyCredentials(context.Background(), member.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(passkeys) != 0 {
+		t.Fatalf("password reset left passkeys active: %#v", passkeys)
+	}
 	if _, err := store.CompletePasswordReset(context.Background(), CompletePasswordResetInput{
 		TokenHash:                tokenHash,
 		ExpectedRecoveryEnvelope: storedRecovery,
@@ -569,6 +581,114 @@ func TestCompletePasswordResetCommitsAllStateAndReturnsSafeDTO(t *testing.T) {
 		RecoveryEnvelope:         *testRecovery(94),
 	}, testNow.Add(6*time.Minute)); !errors.Is(err, ErrResetTicketInactive) {
 		t.Fatalf("reused completed reset error = %v", err)
+	}
+}
+
+func TestCompletePasswordResetRollsBackPasskeyRevocationWithEnvelopeFailure(t *testing.T) {
+	store := openTestStore(t)
+	admin := bootstrapTestAdmin(t, store)
+	member := inviteAndAccept(t, store, admin.ID, testMemberID, "reset-rollback@example.com", RoleUser, 150)
+	ctx := context.Background()
+	expectedPassword, err := store.GetPasswordCredential(ctx, member.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedRecovery, err := store.GetActiveRecoveryEnvelope(ctx, member.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	passkey, err := store.CreatePasskeyCredential(ctx, testPasskeyInput(member.ID, "rollback passkey", 151), testNow.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenHash := testTokenHash(t, 152)
+	if _, err := store.CreatePasswordResetTicket(ctx, admin.ID, member.ID, CreatePasswordResetTicketInput{
+		TokenHash: tokenHash, ExpiresAt: testNow.Add(30 * time.Minute),
+	}, testNow.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `CREATE TRIGGER fail_reset_consumption
+		BEFORE UPDATE OF state ON password_reset_tickets
+		WHEN NEW.state = 'consumed'
+		BEGIN SELECT RAISE(ABORT, 'injected reset failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	replacementRecovery := *testRecovery(153)
+	replacementRecovery.ID = "recovery_rollback_123456"
+	if _, err := store.CompletePasswordReset(ctx, CompletePasswordResetInput{
+		TokenHash: tokenHash, ExpectedRecoveryEnvelope: expectedRecovery,
+		PasswordCredential: testCredential(153), RecoveryEnvelope: replacementRecovery,
+	}, testNow.Add(3*time.Minute)); err == nil {
+		t.Fatal("injected reset failure was ignored")
+	}
+	storedPassword, err := store.GetPasswordCredential(ctx, member.ID)
+	if err != nil || !reflect.DeepEqual(storedPassword.Envelope, expectedPassword.Envelope) {
+		t.Fatalf("failed reset changed password envelope: %#v, %v", storedPassword, err)
+	}
+	storedRecovery, err := store.GetActiveRecoveryEnvelope(ctx, member.ID)
+	if err != nil || storedRecovery.ID != expectedRecovery.ID {
+		t.Fatalf("failed reset changed recovery envelope: %#v, %v", storedRecovery, err)
+	}
+	if _, err := store.GetPasskeyCredential(ctx, member.ID, passkey.ID); err != nil {
+		t.Fatalf("failed reset did not roll back passkey revocation: %v", err)
+	}
+	ticket, err := store.GetPasswordResetTicketByTokenHash(ctx, tokenHash)
+	if err != nil || ticket.State != PasswordResetPending {
+		t.Fatalf("failed reset changed ticket: %#v, %v", ticket, err)
+	}
+}
+
+func TestCompletePasswordResetSerializesWithPasskeyLoginCommit(t *testing.T) {
+	store := openTestStore(t)
+	admin := bootstrapTestAdmin(t, store)
+	member := inviteAndAccept(t, store, admin.ID, testMemberID, "reset-passkey-race@example.com", RoleUser, 160)
+	ctx := context.Background()
+	expectedRecovery, err := store.GetActiveRecoveryEnvelope(ctx, member.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	passkey, err := store.CreatePasskeyCredential(ctx, testPasskeyInput(member.ID, "racing passkey", 161), testNow.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenHash := testTokenHash(t, 162)
+	if _, err := store.CreatePasswordResetTicket(ctx, admin.ID, member.ID, CreatePasswordResetTicketInput{
+		TokenHash: tokenHash, ExpiresAt: testNow.Add(30 * time.Minute),
+	}, testNow.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	replacementRecovery := *testRecovery(163)
+	replacementRecovery.ID = "recovery_passkey_race_123"
+	start := make(chan struct{})
+	resetResult := make(chan error, 1)
+	passkeyResult := make(chan error, 1)
+	go func() {
+		<-start
+		_, err := store.CompletePasswordReset(ctx, CompletePasswordResetInput{
+			TokenHash: tokenHash, ExpectedRecoveryEnvelope: expectedRecovery,
+			PasswordCredential: testCredential(163), RecoveryEnvelope: replacementRecovery,
+		}, testNow.Add(3*time.Minute))
+		resetResult <- err
+	}()
+	go func() {
+		<-start
+		updated := passkey.Credential
+		updated.Authenticator.SignCount++
+		passkeyResult <- store.RecordSuccessfulPasskeyUse(ctx, passkey, updated, testNow.Add(3*time.Minute), true)
+	}()
+	close(start)
+	if err := <-resetResult; err != nil {
+		t.Fatalf("reset lost passkey race: %v", err)
+	}
+	if err := <-passkeyResult; err != nil && !errors.Is(err, ErrCredentialConflict) && !errors.Is(err, ErrNotFound) {
+		t.Fatalf("passkey race returned unexpected error: %v", err)
+	}
+	passkeys, err := store.ListPasskeyCredentials(ctx, member.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(passkeys) != 0 {
+		t.Fatalf("passkey remained active after reset race: %#v", passkeys)
 	}
 }
 

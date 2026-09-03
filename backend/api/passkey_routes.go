@@ -132,6 +132,7 @@ func handlePasskeyRegistrationFinish(dependencies ServerDependencies, passkeys S
 			writePasskeyError(w, err, false)
 			return
 		}
+		auditCredentialMutation("server_passkey_registered", middleware.ClientIPFromRequest(r), session.UserID, session.UserID)
 		jsonResponse(w, map[string]any{"passkey": result}, http.StatusCreated)
 	}
 }
@@ -242,6 +243,7 @@ func handlePasskeyDelete(dependencies ServerDependencies, passkeys ServerPasskey
 			writePasskeyError(w, err, false)
 			return
 		}
+		auditCredentialMutation("server_passkey_revoked", middleware.ClientIPFromRequest(r), session.UserID, session.UserID)
 		dependencies.Sessions.ClearSessionCookie(w, r)
 		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
 		// Revocation invalidates every session and drains the open vault. The
@@ -271,6 +273,7 @@ func handleAllPasskeysDelete(dependencies ServerDependencies, passkeys ServerPas
 			writePasskeyError(w, err, false)
 			return
 		}
+		auditCredentialMutation("server_passkeys_revoked", middleware.ClientIPFromRequest(r), session.UserID, session.UserID)
 		dependencies.Sessions.ClearSessionCookie(w, r)
 		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
 		jsonResponse(w, map[string]interface{}{"success": true, "revoked_passkeys": removed, "reauthentication_required": true}, http.StatusOK)

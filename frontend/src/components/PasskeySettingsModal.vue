@@ -27,7 +27,7 @@
           </label>
           <label>
             現在のパスワード
-            <input v-model="password" type="password" autocomplete="current-password" minlength="12" maxlength="256" :disabled="busy || !supported" required>
+			<input v-model="password" type="password" autocomplete="current-password" maxlength="1024" :disabled="busy || !supported" required>
           </label>
           <button type="submit" :disabled="busy || !supported">{{ registering ? '登録中...' : 'パスキーを登録' }}</button>
         </form>
@@ -63,6 +63,7 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { deleteAllPasskeys, deletePasskey, listPasskeys, registerPasskey } from '../utils/api'
 import { passkeysSupported } from '../utils/passkeys'
+import { validatePasswordBytes } from '../utils/passwordPolicy'
 
 const emit = defineEmits(['close'])
 const passkeys = ref([])
@@ -107,9 +108,10 @@ async function register() {
   registering.value = true
   busy.value = true
   errorMessage.value = ''
-  infoMessage.value = ''
-  try {
-    await registerPasskey({ name: name.value, password: password.value })
+	infoMessage.value = ''
+	try {
+	  validatePasswordBytes(password.value)
+	  await registerPasskey({ name: name.value, password: password.value })
     name.value = ''
     infoMessage.value = 'パスキーを登録しました。次回からパスワードまたはパスキーでログインできます'
     passkeys.value = await listPasskeys()

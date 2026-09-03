@@ -15,12 +15,11 @@ import (
 	"omni_money/backend/control"
 	"omni_money/backend/keyenvelope"
 	"omni_money/backend/middleware"
+	"omni_money/backend/passwordpolicy"
 	"omni_money/backend/securedb"
 )
 
 const (
-	minimumPasswordBytes  = 12
-	maximumPasswordBytes  = 1024
 	defaultKDFConcurrency = 2
 	maximumKDFConcurrency = 16
 )
@@ -28,7 +27,7 @@ const (
 var (
 	ErrInvalidCredentials = errors.New("invalid account credentials")
 	ErrInvalidRecovery    = errors.New("invalid recovery credentials")
-	ErrInvalidPassword    = errors.New("password must contain between 12 and 1024 bytes")
+	ErrInvalidPassword    = passwordpolicy.ErrInvalid
 	ErrInvalidAccountData = errors.New("account setup data is invalid")
 	ErrAuthenticationBusy = errors.New("password authentication capacity is busy")
 	ErrServiceUnavailable = errors.New("server account service is unavailable")
@@ -886,7 +885,7 @@ func (s *Service) finishDrain(ctx context.Context, wait func(context.Context) er
 }
 
 func validateNewPassword(password []byte) error {
-	if len(password) < minimumPasswordBytes || len(password) > maximumPasswordBytes {
+	if err := passwordpolicy.Validate(password); err != nil {
 		return ErrInvalidPassword
 	}
 	return nil

@@ -218,6 +218,16 @@ func (s *Store) CompletePasswordReset(
 			return err
 		}
 
+		// Recovery proves possession of the offline recovery secret, not of any
+		// registered WebAuthn authenticator. Revoke every passkey in the same
+		// IMMEDIATE transaction as both envelope replacements and ticket
+		// consumption so no old authentication path survives a reset and no
+		// partial revocation can commit on a later failure.
+		if _, err := connection.ExecContext(ctx,
+			"DELETE FROM passkey_credentials WHERE user_id = ?", ticket.UserID); err != nil {
+			return fmt.Errorf("revoke passkeys during password reset: %w", err)
+		}
+
 		passwordUpdate, err := connection.ExecContext(ctx, `UPDATE password_credentials
 			SET envelope_json = ?, updated_at_ms = ?
 			WHERE user_id = ? AND updated_at_ms < ?`,

@@ -5,7 +5,7 @@
       :status="desktopVaultStatus"
       :loading="desktopVaultLoading"
       :fatal-error="desktopVaultError"
-      @unlocked="handleDesktopVaultUnlocked"
+	  @unlocked="handleDesktopVaultUnlocked"
     />
     <template v-else>
     <div v-if="idleScreenLocked" class="idle-lock-curtain" role="status" aria-live="polite">
@@ -265,7 +265,7 @@
 
     <CredentialSettingsModal
       v-if="showCredentialSettings"
-      @close="showCredentialSettings = false"
+	  @close="showCredentialSettings = false"
 	  @session-invalidated="clearSensitiveStateForIdle(true)"
       @signed-out="handleCredentialSignedOut"
     />
@@ -284,7 +284,7 @@
             class="reauth-input"
             type="password"
             autocomplete="current-password"
-            maxlength="256"
+			maxlength="1024"
             required
           >
           <div v-if="reauthError" class="reauth-error">{{ reauthError }}</div>
@@ -335,6 +335,7 @@ import {
   saveDesktopIdleMinutes
 } from './utils/desktopIdleLock'
 import { passkeysSupported } from './utils/passkeys'
+import { validatePasswordBytes } from './utils/passwordPolicy'
 import { formatExactCurrency } from './utils/exactAmount'
 
 // 初期表示に不要な管理・分析モーダルは、開いた時だけ読み込む。
@@ -1199,9 +1200,10 @@ function cancelReauthentication() {
 async function submitReauthentication() {
   if (!reauthRequest || reauthLoading.value) return
   reauthLoading.value = true
-  reauthError.value = ''
-  try {
-    await reauthenticate(reauthPassword.value)
+	reauthError.value = ''
+	try {
+	  validatePasswordBytes(reauthPassword.value)
+	  await reauthenticate(reauthPassword.value)
     reauthRequest.resolve(true)
     reauthRequest = null
     showReauthModal.value = false

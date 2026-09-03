@@ -6,7 +6,18 @@ global.window = {
   dispatchEvent() {},
   btoa(value) { return Buffer.from(value, 'binary').toString('base64') }
 }
-global.CustomEvent = class CustomEvent { constructor(type, init) { this.type = type; this.detail = init?.detail } }
+global.CustomEvent = class CustomEvent {
+  constructor(type, init) {
+    this.type = type
+    this.detail = init?.detail
+    this.cancelable = init?.cancelable === true
+    this.defaultPrevented = false
+  }
+
+  preventDefault() {
+    if (this.cancelable) this.defaultPrevented = true
+  }
+}
 
 const calls = []
 global.fetch = async (url, options) => {
@@ -48,4 +59,27 @@ test('credential HTTP rejection is marked definitive for recovery-code ambiguity
 	  rotateServerRecoveryCode({ currentPassword: 'current-password', newRecoverySecret: new Uint8Array(32) }),
 	  error => error.message === 'gateway failure' && error.definitiveResponse === false
 	)
+})
+
+test('login_required credential response requests in-memory state purge before redirect', async () => {
+  const events = []
+  const redirects = []
+  window.dispatchEvent = event => {
+    events.push(event)
+    event.preventDefault()
+    return false
+  }
+  window.location.replace = value => redirects.push(value)
+  global.fetch = async () => new Response(JSON.stringify({ error: 'expired', login_required: true }), {
+    status: 401, headers: { 'Content-Type': 'application/json' }
+  })
+
+  await assert.rejects(
+    changeServerPassword({ currentPassword: 'current-password', newPassword: 'replacement-password', revokePasskeys: false }),
+    error => error.loginRequired === true && error.definitiveResponse === true
+  )
+  assert.equal(events.length, 1)
+  assert.equal(events[0].type, 'omni-money:session-expired')
+  assert.equal(events[0].detail.reason, 'session-expired')
+  assert.equal(redirects.length, 0, 'App handler owns redirect after purging sensitive state')
 })

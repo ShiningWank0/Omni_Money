@@ -230,7 +230,7 @@ func handleServerPasswordChange(dependencies ServerDependencies, lifecycle Serve
 		}
 		dependencies.Sessions.ClearSessionCookie(w, r)
 		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
-		auditAuth("server_password_changed", middleware.ClientIPFromRequest(r), "")
+		auditCredentialMutation("server_password_changed", middleware.ClientIPFromRequest(r), session.UserID, session.UserID)
 		jsonResponse(w, map[string]interface{}{"success": true, "revoked_passkeys": revoked, "reauthentication_required": true}, http.StatusOK)
 	}
 }
@@ -261,7 +261,7 @@ func handleServerRecoveryRotation(dependencies ServerDependencies, lifecycle Ser
 		}
 		dependencies.Sessions.ClearSessionCookie(w, r)
 		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
-		auditAuth("server_recovery_code_rotated", middleware.ClientIPFromRequest(r), "")
+		auditCredentialMutation("server_recovery_code_rotated", middleware.ClientIPFromRequest(r), session.UserID, session.UserID)
 		jsonResponse(w, map[string]interface{}{"success": true, "reauthentication_required": true}, http.StatusOK)
 	}
 }
@@ -519,6 +519,7 @@ func handleServerPasswordResetCompletion(dependencies ServerDependencies) http.H
 			writeServerAccountError(w, err, serverOperationPublicToken)
 			return
 		}
+		auditCredentialMutation("server_password_reset_completed", middleware.ClientIPFromRequest(r), ticket.UserID, ticket.UserID)
 		jsonResponse(w, map[string]interface{}{"password_reset": serverPasswordResetResponse(ticket)}, http.StatusOK)
 	}
 }

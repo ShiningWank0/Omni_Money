@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -46,6 +47,11 @@ func (*lifecycleServerAccounts) ListCredentials(context.Context, string) (server
 }
 
 func TestServerCredentialLifecycleRoutesUseAuthenticatedUserAndNeverExposeSecrets(t *testing.T) {
+	var auditOutput bytes.Buffer
+	originalLogOutput := log.Writer()
+	log.SetOutput(&auditOutput)
+	t.Cleanup(func() { log.SetOutput(originalLogOutput) })
+
 	t.Setenv("ALLOWED_HOSTS", "money.example.test")
 	t.Setenv("FORCE_HTTPS", "false")
 	t.Setenv("TRUSTED_PROXIES", "")
@@ -82,6 +88,21 @@ func TestServerCredentialLifecycleRoutesUseAuthenticatedUserAndNeverExposeSecret
 	if !stringsContain(response.Header().Values("Set-Cookie"), "Max-Age=0") {
 		t.Fatal("password change did not clear the session cookie")
 	}
+	audit := auditOutput.String()
+	for _, forbidden := range []string{"current-password", "replacement-password", user.ID, user.Email} {
+		if bytes.Contains([]byte(audit), []byte(forbidden)) {
+			t.Fatalf("credential route audit exposed %q: %s", forbidden, audit)
+		}
+	}
+	for _, required := range []string{
+		"security_event=server_password_changed",
+		"actor_ref=\"" + auditAccountReference(user.ID) + "\"",
+		"target_ref=\"" + auditAccountReference(user.ID) + "\"",
+	} {
+		if !bytes.Contains([]byte(audit), []byte(required)) {
+			t.Fatalf("credential route audit missing %q: %s", required, audit)
+		}
+	}
 
 	inventory := serveServerCSVRequest(t, handler, session, http.MethodGet, "/api/auth/credentials", nil)
 	if inventory.Code != http.StatusOK {
@@ -90,6 +111,33 @@ func TestServerCredentialLifecycleRoutesUseAuthenticatedUserAndNeverExposeSecret
 	for _, forbidden := range []string{"verifier", "envelope", "salt", "public_key", "vault"} {
 		if bytes.Contains(bytes.ToLower(inventory.Body.Bytes()), []byte(forbidden)) {
 			t.Fatalf("credential inventory exposed %q: %s", forbidden, inventory.Body.String())
+		}
+	}
+}
+
+func TestCredentialMutationAuditUsesSafeReferencesAndNoSecrets(t *testing.T) {
+	var output bytes.Buffer
+	original := log.Writer()
+	log.SetOutput(&output)
+	t.Cleanup(func() { log.SetOutput(original) })
+
+	actor := "user_actor_01HZX7CYK3XPSJ0HE8P2RQ7V4M"
+	target := "user_target_01HZX7CYK3XPSJ0HE8P2RQ7V4M"
+	auditCredentialMutation("server_password_reset_completed", "192.0.2.10", actor, target)
+
+	audit := output.String()
+	for _, forbidden := range []string{actor, target} {
+		if bytes.Contains([]byte(audit), []byte(forbidden)) {
+			t.Fatalf("credential audit exposed %q: %s", forbidden, audit)
+		}
+	}
+	for _, required := range []string{
+		"security_event=server_password_reset_completed",
+		"actor_ref=\"" + auditAccountReference(actor) + "\"",
+		"target_ref=\"" + auditAccountReference(target) + "\"",
+	} {
+		if !bytes.Contains([]byte(audit), []byte(required)) {
+			t.Fatalf("credential audit missing %q: %s", required, audit)
 		}
 	}
 }

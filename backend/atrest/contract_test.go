@@ -260,12 +260,22 @@ func rewriteTestAttestation(t *testing.T, path string, mutate func(*attestationD
 
 func writeTestAttestation(t *testing.T, now time.Time, mutate func(*attestationDocument)) (string, string, string) {
 	t.Helper()
-	// Keep the security fixture independent of a linked worktree's shared
-	// parent (for example /tmp), while preserving owner-only permissions.
-	parent, err := os.MkdirTemp(t.TempDir(), "atrest-test-")
+	// Prefer the test runner's private temporary tree (for example macOS
+	// TMPDIR). Linux normally places it below shared /tmp, so fall back to the
+	// user's protected home directory to preserve the production ancestor
+	// contract without making every test write to HOME unnecessarily.
+	base := t.TempDir()
+	if err := validateAttestationParents(filepath.Join(base, "attestation.json")); err != nil {
+		base, err = os.UserHomeDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	parent, err := os.MkdirTemp(base, ".omni-atrest-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
 	parent, err = filepath.Abs(parent)
 	if err != nil {
 		t.Fatal(err)
