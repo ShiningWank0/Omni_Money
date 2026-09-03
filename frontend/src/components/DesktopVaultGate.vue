@@ -5,6 +5,8 @@
       <h1 id="desktop-vault-title">Omni Money</h1>
       <p class="desktop-vault-subtitle">暗号化されたローカル保管庫</p>
 
+      <BuildInfo />
+
       <div v-if="loading" class="desktop-vault-status" role="status">保管庫の状態を確認しています…</div>
 
       <div v-else-if="fatalError" class="desktop-vault-error" role="alert">
@@ -88,6 +90,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
+import BuildInfo from './BuildInfo.vue'
 import {
 	acknowledgeDesktopVaultRecovery,
   migrateLegacyDesktopVault,

@@ -1,14 +1,21 @@
+# すべてのartifactで共有するrelease version。各stageで再宣言してscopeへ取り込む。
+ARG VERSION=dev
+
 # ===== Stage 1: フロントエンドのビルド =====
 FROM node:24.19.0-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS frontend-builder
+
+ARG VERSION
 
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
 RUN npm ci --include=dev --ignore-scripts
 COPY frontend/ ./
-RUN npm run build
+RUN VITE_APP_VERSION="$VERSION" npm run build
 
 # ===== Stage 2: バックエンドのビルド =====
 FROM golang:1.26.7-alpine@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468 AS backend-builder
+
+ARG VERSION
 
 # SQLCipherは公式v4.18.0 source archiveをchecksum固定でbuildする。
 RUN apk add --no-cache build-base linux-headers curl tcl openssl-dev
@@ -25,9 +32,6 @@ RUN go mod download
 COPY server.go ./
 COPY backend/ ./backend/
 
-# バージョン情報
-ARG VERSION=dev
-
 # サーバーモードでビルド（-tags server で server.go を使用）
 RUN CGO_ENABLED=1 \
     CGO_CFLAGS="-I/usr/local/include" \
@@ -43,7 +47,7 @@ RUN CGO_ENABLED=1 \
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 # バージョン情報を実行時環境変数として参照可能にする（§8.3準拠）
-ARG VERSION=dev
+ARG VERSION
 ENV VERSION=${VERSION} \
     LD_LIBRARY_PATH=/usr/local/lib
 
