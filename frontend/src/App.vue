@@ -149,6 +149,8 @@
       </div>
     </div>
 
+    <BuildInfo />
+
     <!-- 新規取引追加モーダル -->
     <TransactionModal
       v-if="showAddTransactionModal"
@@ -325,6 +327,7 @@ import { ref, computed, defineAsyncComponent, onMounted, onBeforeUnmount, watch,
 import { useAppStore } from './store/index'
 import TransactionModal from './components/TransactionModal.vue'
 import DesktopVaultGate from './components/DesktopVaultGate.vue'
+import BuildInfo from './components/BuildInfo.vue'
 import { csvExportWarning } from './utils/csvSafety'
 import { isDesktopVaultUnlocked } from './utils/desktopVaultSafety'
 import {

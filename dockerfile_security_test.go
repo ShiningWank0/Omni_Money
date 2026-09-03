@@ -38,6 +38,40 @@ func TestDockerBaseImagesUsePinnedSupportedVersions(t *testing.T) {
 	}
 }
 
+func TestDockerBuildPropagatesVersionToFrontendAndRuntime(t *testing.T) {
+	contents, err := os.ReadFile("Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(contents)
+	firstFrom := strings.Index(dockerfile, "\nFROM ")
+	if firstFrom < 0 {
+		t.Fatal("Dockerfile has no FROM instruction")
+	}
+	globalVersionArg := strings.Index(dockerfile, "ARG VERSION=dev")
+	if globalVersionArg < 0 || globalVersionArg > firstFrom {
+		t.Error("Dockerfile must declare the global VERSION ARG before the first FROM")
+	}
+	stageVersionArgs := 0
+	for _, line := range strings.Split(dockerfile, "\n") {
+		if strings.TrimSpace(line) == "ARG VERSION" {
+			stageVersionArgs++
+		}
+	}
+	if stageVersionArgs != 3 {
+		t.Errorf("each build/runtime stage must redeclare VERSION exactly once, got %d stage declarations", stageVersionArgs)
+	}
+	for _, required := range []string{
+		`RUN VITE_APP_VERSION="$VERSION" npm run build`,
+		`-ldflags "-X main.version=${VERSION} -s -w"`,
+		"ENV VERSION=${VERSION}",
+	} {
+		if !strings.Contains(dockerfile, required) {
+			t.Errorf("Dockerfile version propagation is missing %q", required)
+		}
+	}
+}
+
 func TestComposeAppliesRuntimeSandboxAndMultiVaultBoundaries(t *testing.T) {
 	contents, err := os.ReadFile("compose.yaml")
 	if err != nil {

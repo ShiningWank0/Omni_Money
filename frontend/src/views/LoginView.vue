@@ -4,6 +4,7 @@
       <div class="login-card">
         <div class="login-header">
           <h1 class="app-title">Omni Money</h1>
+          <BuildInfo />
           <p class="app-subtitle">{{ pageTitle }}</p>
         </div>
 
@@ -100,6 +101,7 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import BuildInfo from '../components/BuildInfo.vue'
 import {
   acceptServerInvitation,
   completeServerPasswordReset,
