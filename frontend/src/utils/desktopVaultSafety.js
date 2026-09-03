@@ -17,11 +17,6 @@ export function canConfirmDesktopRecoveryDelivery({ recoveryCode, recoverySaved,
 }
 
 export function validateNewDesktopPassword(password, confirmation) {
-  const passwordBytes = new TextEncoder().encode(password).length
-  if (passwordBytes < 12 || passwordBytes > 1024) {
-    throw new Error('パスワードは12〜1024 bytesにしてください')
-  }
-  if (password !== confirmation) {
-    throw new Error('パスワードが一致しません')
-  }
+	  validateNewPassword(password, confirmation)
 }
+import { validateNewPassword } from './passwordPolicy.js'

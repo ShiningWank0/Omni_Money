@@ -22,6 +22,7 @@ import (
 	"omni_money/backend/core"
 	"omni_money/backend/database"
 	"omni_money/backend/keyenvelope"
+	"omni_money/backend/passwordpolicy"
 	"omni_money/backend/securedb"
 )
 
@@ -32,8 +33,6 @@ const (
 	legacyDBFileName      = "omni_money.db"
 	vaultDBFileName       = "omni_money.db"
 	plaintextSQLiteHeader = "SQLite format 3\x00"
-	minPasswordBytes      = 12
-	maxPasswordBytes      = 1024
 )
 
 var (
@@ -45,7 +44,7 @@ var (
 	ErrLeaseReleased           = errors.New("desktop account service lease is released")
 	ErrLegacyMigrationRequired = errors.New("legacy plaintext Desktop database requires explicit migration")
 	ErrMigrationPending        = errors.New("legacy Desktop migration recovery acknowledgment is pending")
-	ErrInvalidPassword         = errors.New("password must contain between 12 and 1024 bytes")
+	ErrInvalidPassword         = passwordpolicy.ErrInvalid
 )
 
 // Status contains only non-secret state and is safe to expose to the Desktop
@@ -483,50 +482,44 @@ func (c *Coordinator) ChangePassword(currentPassword, newPassword []byte) error 
 }
 
 // RotateRecovery replaces the recovery envelope after re-authenticating the
-// password. The returned raw secret must be exported and cleared by the caller.
-func (c *Coordinator) RotateRecovery(currentPassword []byte) (recoverySecret []byte, err error) {
+// password. The caller must generate and save the candidate secret before
+// calling: manifest publication is the single atomic commit point.
+func (c *Coordinator) RotateRecovery(currentPassword, recoverySecret []byte) error {
 	passwordCopy, err := copyPassword(currentPassword)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer clear(passwordCopy)
+	if len(recoverySecret) != keyenvelope.RecoverySecretSize {
+		return keyenvelope.ErrInvalidRecoverySecret
+	}
+	recoveryCopy := append([]byte(nil), recoverySecret...)
+	defer clear(recoveryCopy)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.requireUnlockedLocked(); err != nil {
-		return nil, err
+		return err
 	}
 	dek, err := keyenvelope.UnwrapWithPassword(c.manifest.PasswordEnvelope, passwordCopy, c.manifest.context())
 	if err != nil {
 		clear(dek)
-		return nil, err
+		return err
 	}
 	defer clear(dek)
-	recoverySecret, err = keyenvelope.GenerateRecoverySecret()
+	recoveryEnvelope, err := keyenvelope.WrapWithRecovery(dek, recoveryCopy, c.manifest.context())
 	if err != nil {
-		return nil, err
-	}
-	succeeded := false
-	defer func() {
-		if !succeeded {
-			clear(recoverySecret)
-			recoverySecret = nil
-		}
-	}()
-	recoveryEnvelope, err := keyenvelope.WrapWithRecovery(dek, recoverySecret, c.manifest.context())
-	if err != nil {
-		return nil, err
+		return err
 	}
 	replacement, err := c.manifest.withEnvelopes(c.manifest.PasswordEnvelope, recoveryEnvelope)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if err := writeManifestAtomic(c.manifestPath, replacement); err != nil {
-		return nil, err
+		return err
 	}
 	c.manifest = replacement
-	succeeded = true
-	return recoverySecret, nil
+	return nil
 }
 
 // Service borrows a guarded business service. Lock and Close wait for all
@@ -813,7 +806,7 @@ func (c *Coordinator) vaultPath(vaultID string) string {
 }
 
 func copyPassword(password []byte) ([]byte, error) {
-	if len(password) < minPasswordBytes || len(password) > maxPasswordBytes {
+	if err := passwordpolicy.Validate(password); err != nil {
 		return nil, ErrInvalidPassword
 	}
 	return append([]byte(nil), password...), nil

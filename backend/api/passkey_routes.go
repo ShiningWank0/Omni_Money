@@ -132,6 +132,7 @@ func handlePasskeyRegistrationFinish(dependencies ServerDependencies, passkeys S
 			writePasskeyError(w, err, false)
 			return
 		}
+		auditCredentialMutation("server_passkey_registered", middleware.ClientIPFromRequest(r), session.UserID, session.UserID)
 		jsonResponse(w, map[string]any{"passkey": result}, http.StatusCreated)
 	}
 }
@@ -212,7 +213,7 @@ func handlePasskeyList(passkeys ServerPasskeyService) http.HandlerFunc {
 	}
 }
 
-func handlePasskeyDelete(passkeys ServerPasskeyService) http.HandlerFunc {
+func handlePasskeyDelete(dependencies ServerDependencies, passkeys ServerPasskeyService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -223,6 +224,7 @@ func handlePasskeyDelete(passkeys ServerPasskeyService) http.HandlerFunc {
 			writeAuthRequired(w)
 			return
 		}
+		middleware.ReleaseRequestVaultLease(r.Context())
 		encodedID := strings.TrimPrefix(r.URL.Path, "/api/auth/passkeys/")
 		if encodedID == "" || strings.Contains(encodedID, "/") {
 			jsonError(w, "パスキーIDが無効です", http.StatusBadRequest)
@@ -234,11 +236,47 @@ func handlePasskeyDelete(passkeys ServerPasskeyService) http.HandlerFunc {
 			return
 		}
 		defer clear(credentialID)
+		if !revalidateServerRecentAuth(w, r) {
+			return
+		}
 		if err := passkeys.DeletePasskey(r.Context(), session.UserID, credentialID); err != nil {
 			writePasskeyError(w, err, false)
 			return
 		}
-		w.WriteHeader(http.StatusNoContent)
+		auditCredentialMutation("server_passkey_revoked", middleware.ClientIPFromRequest(r), session.UserID, session.UserID)
+		dependencies.Sessions.ClearSessionCookie(w, r)
+		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		// Revocation invalidates every session and drains the open vault. The
+		// client must authenticate again so no session derived from the revoked
+		// credential remains usable.
+		jsonResponse(w, map[string]interface{}{"success": true, "reauthentication_required": true}, http.StatusOK)
+	}
+}
+
+func handleAllPasskeysDelete(dependencies ServerDependencies, passkeys ServerPasskeyBulkService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		session, ok := middleware.SessionFromContext(r.Context())
+		if !ok || session.UserID == "" {
+			writeAuthRequired(w)
+			return
+		}
+		middleware.ReleaseRequestVaultLease(r.Context())
+		if !revalidateServerRecentAuth(w, r) {
+			return
+		}
+		removed, err := passkeys.DeleteAllPasskeys(r.Context(), session.UserID)
+		if err != nil {
+			writePasskeyError(w, err, false)
+			return
+		}
+		auditCredentialMutation("server_passkeys_revoked", middleware.ClientIPFromRequest(r), session.UserID, session.UserID)
+		dependencies.Sessions.ClearSessionCookie(w, r)
+		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		jsonResponse(w, map[string]interface{}{"success": true, "revoked_passkeys": removed, "reauthentication_required": true}, http.StatusOK)
 	}
 }
 

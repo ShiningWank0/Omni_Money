@@ -164,6 +164,8 @@ func requiresRecentAuthentication(r *http.Request) bool {
 		return true
 	case path == "/api/auth/logout-all" && method == http.MethodPost:
 		return true
+	case (path == "/api/auth/password" || path == "/api/auth/recovery-code") && method == http.MethodPost:
+		return true
 	case strings.HasPrefix(path, "/api/auth/passkeys/") && method == http.MethodDelete:
 		return true
 	case strings.HasPrefix(path, "/api/admin/") && isUnsafeMethod(method):

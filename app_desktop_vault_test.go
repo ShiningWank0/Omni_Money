@@ -191,6 +191,51 @@ func TestAppShutdownAndLockRaceDrainsBorrowedService(t *testing.T) {
 	}
 }
 
+func TestDesktopCredentialBindingsClearTemporarySecrets(t *testing.T) {
+	coordinator := &fakeDesktopCoordinator{status: desktopaccount.Status{Configured: true, Unlocked: true, Role: desktopaccount.RoleAdmin}}
+	app := newAppWithCoordinator(coordinator)
+	if _, err := app.ChangeDesktopVaultPassword("current-password", "replacement-password"); err != nil {
+		t.Fatal(err)
+	}
+	if !allZero(coordinator.changedCurrent) || !allZero(coordinator.changedNew) {
+		t.Fatal("Desktop password binding retained password bytes")
+	}
+	candidate := bytesOf(2, keyenvelope.RecoverySecretSize)
+	status, err := app.RotateDesktopVaultRecovery("current-password", base64.RawURLEncoding.EncodeToString(candidate))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Unlocked {
+		t.Fatalf("rotation status = %+v", status)
+	}
+	if !bytes.Equal(coordinator.rotatedSecretCopy, candidate) {
+		t.Fatal("Desktop recovery binding did not pass the exact client-generated candidate")
+	}
+	if !allZero(coordinator.rotatedPassword) || !allZero(coordinator.rotatedSecret) {
+		t.Fatal("Desktop recovery binding retained temporary credential bytes")
+	}
+}
+
+func TestDesktopRecoveryRotationRejectsMalformedCandidateBeforeCommit(t *testing.T) {
+	coordinator := &fakeDesktopCoordinator{status: desktopaccount.Status{Configured: true, Unlocked: true, Role: desktopaccount.RoleAdmin}}
+	app := newAppWithCoordinator(coordinator)
+	if _, err := app.RotateDesktopVaultRecovery("current-password", "not-a-recovery-code"); !errors.Is(err, keyenvelope.ErrInvalidRecoverySecret) {
+		t.Fatalf("malformed candidate error = %v", err)
+	}
+	if coordinator.rotatedSecretCopy != nil {
+		t.Fatal("malformed candidate reached the coordinator")
+	}
+}
+
+func allZero(value []byte) bool {
+	for _, item := range value {
+		if item != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func TestBackupToCSVFileRejectsLockBoundaryAcrossDialog(t *testing.T) {
 	coordinator := &fakeDesktopCoordinator{
 		status: desktopaccount.Status{Configured: true, Unlocked: true, Role: desktopaccount.RoleAdmin},
@@ -452,6 +497,11 @@ type fakeDesktopCoordinator struct {
 	lockStarted        chan struct{}
 	leaseRelease       <-chan struct{}
 	closeCalls         int
+	changedCurrent     []byte
+	changedNew         []byte
+	rotatedPassword    []byte
+	rotatedSecret      []byte
+	rotatedSecretCopy  []byte
 }
 
 func (c *fakeDesktopCoordinator) Status() desktopaccount.Status {
@@ -499,10 +549,17 @@ func (c *fakeDesktopCoordinator) Recover(secret, _ []byte) ([]byte, error) {
 	return append([]byte(nil), c.nextRecoverySecret...), nil
 }
 
-func (c *fakeDesktopCoordinator) ChangePassword([]byte, []byte) error { return nil }
+func (c *fakeDesktopCoordinator) ChangePassword(current, replacement []byte) error {
+	c.changedCurrent = current
+	c.changedNew = replacement
+	return nil
+}
 
-func (c *fakeDesktopCoordinator) RotateRecovery([]byte) ([]byte, error) {
-	return bytesOf(2, keyenvelope.RecoverySecretSize), nil
+func (c *fakeDesktopCoordinator) RotateRecovery(password, secret []byte) error {
+	c.rotatedPassword = password
+	c.rotatedSecret = secret
+	c.rotatedSecretCopy = append([]byte(nil), secret...)
+	return nil
 }
 
 func (c *fakeDesktopCoordinator) Service() (*desktopaccount.ServiceLease, error) {

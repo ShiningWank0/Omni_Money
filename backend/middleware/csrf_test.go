@@ -217,6 +217,9 @@ func TestRecentAuthenticationGuardsSensitiveRoutes(t *testing.T) {
 		{http.MethodPost, "/api/snapshots"},
 		{http.MethodPost, "/api/snapshots/restore"},
 		{http.MethodPost, "/api/auth/logout-all"},
+		{http.MethodPost, "/api/auth/password"},
+		{http.MethodPost, "/api/auth/recovery-code"},
+		{http.MethodDelete, "/api/auth/passkeys/all"},
 		{http.MethodPost, "/api/ai-console/transactions"},
 		{http.MethodPost, "/api/ai-console/analysis"},
 	}
@@ -330,6 +333,8 @@ func TestRecentAuthenticationDoesNotGuardOrdinaryOrWrongMethodRoutes(t *testing.
 		{http.MethodPost, "/api/snapshots/"},
 		{http.MethodPost, "/api/snapshots/restore/"},
 		{http.MethodPost, "/api/auth/logout-all/"},
+		{http.MethodPost, "/api/auth/password/"},
+		{http.MethodPost, "/api/auth/recovery-code/"},
 		{http.MethodPost, "/api/ai-console/transactions/"},
 		{http.MethodPost, "/api/ai-console/analysis/"},
 		{http.MethodDelete, "/api/transactions"},

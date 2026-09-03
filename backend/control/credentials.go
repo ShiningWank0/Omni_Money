@@ -89,37 +89,54 @@ func (s *Store) ReplacePasswordCredential(
 	replacement PasswordCredentialInput,
 	now time.Time,
 ) error {
+	_, err := s.ReplacePasswordCredentialWithPasskeyPolicy(ctx, userID, expected, replacement, false, now)
+	return err
+}
+
+// ReplacePasswordCredentialWithPasskeyPolicy changes the password envelope
+// and, when requested, revokes all passkeys in the same IMMEDIATE transaction.
+// This prevents a concurrent process from authenticating with a passkey in the
+// gap between a password change and an intended all-credential revocation.
+func (s *Store) ReplacePasswordCredentialWithPasskeyPolicy(
+	ctx context.Context,
+	userID string,
+	expected PasswordCredential,
+	replacement PasswordCredentialInput,
+	revokePasskeys bool,
+	now time.Time,
+) (int, error) {
 	userID, err := normalizeID(userID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if expected.UserID != userID {
-		return ErrCredentialConflict
+		return 0, ErrCredentialConflict
 	}
 	expectedJSON, err := encodeKeyEnvelope(expected.Envelope, keyenvelope.KindPassword)
 	if err != nil {
-		return fmt.Errorf("expected password credential: %w", err)
+		return 0, fmt.Errorf("expected password credential: %w", err)
 	}
 	replacementJSON, err := encodeKeyEnvelope(replacement.Envelope, keyenvelope.KindPassword)
 	if err != nil {
-		return fmt.Errorf("replacement password credential: %w", err)
+		return 0, fmt.Errorf("replacement password credential: %w", err)
 	}
 	if expectedJSON == replacementJSON {
-		return errors.New("replacement password credential must differ from the current credential")
+		return 0, errors.New("replacement password credential must differ from the current credential")
 	}
 	expectedUpdatedAt, err := validateOperationTime(expected.UpdatedAt)
 	if err != nil {
-		return fmt.Errorf("expected password credential revision: %w", err)
+		return 0, fmt.Errorf("expected password credential revision: %w", err)
 	}
 	now, err = validateOperationTime(now)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if now.UnixMilli() <= expectedUpdatedAt.UnixMilli() {
-		return fmt.Errorf("%w: replacement time must advance the credential revision", ErrCredentialConflict)
+		return 0, fmt.Errorf("%w: replacement time must advance the credential revision", ErrCredentialConflict)
 	}
 
-	return s.withImmediate(ctx, func(connection *sql.Conn) error {
+	revokedPasskeys := 0
+	err = s.withImmediate(ctx, func(connection *sql.Conn) error {
 		if err := requireActiveUser(ctx, connection, userID); err != nil {
 			return err
 		}
@@ -137,8 +154,20 @@ func (s *Store) ReplacePasswordCredential(
 		if updated != 1 {
 			return ErrCredentialConflict
 		}
+		if revokePasskeys {
+			deleted, err := connection.ExecContext(ctx, "DELETE FROM passkey_credentials WHERE user_id = ?", userID)
+			if err != nil {
+				return fmt.Errorf("revoke passkeys with password credential: %w", err)
+			}
+			count, err := deleted.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("count passkeys revoked with password credential: %w", err)
+			}
+			revokedPasskeys = int(count)
+		}
 		return advanceUserUpdatedAt(ctx, connection, userID, now)
 	})
+	return revokedPasskeys, err
 }
 
 // RotateRecoveryEnvelope atomically revokes the expected active envelope and

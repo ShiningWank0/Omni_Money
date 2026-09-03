@@ -52,6 +52,8 @@ Login begins after normalizing the supplied email so the server can send only th
 
 Control-plane listings expose only a base64url credential ID, user-chosen name, creation time, and last-use time. Public keys, PRF salts, counters, and wrapped Vault keys remain server-side. Password login remains available after registration, and recovery still requires the separately saved recovery code.
 
+Users can rotate their password or recovery code after proving the current password. Both operations unwrap the DEK only inside the authenticated account service and rewrap the unchanged DEK; the control store commits an exact-envelope/revision compare-and-swap. Password rotation explicitly chooses whether passkeys remain valid or are deleted in the same transaction. Successful credential revocation invalidates all sessions before the Vault manager begins draining that user's leases. Individual and bulk passkey revocation use the same session-and-vault shutdown boundary.
+
 ## Administration boundary
 
 The first server administrator is created only through an explicit bootstrap
@@ -69,10 +71,11 @@ key envelopes, vault paths, and financial metadata.
 The following invariants apply:
 
 - an administrator's normal financial APIs select only the administrator's own vault;
-- account disable and reset revoke sessions and close the affected vault;
-- the last active administrator cannot be disabled;
+- credential change, account disable, role change, and reset revoke sessions before closing the affected vault;
+- the last active administrator cannot be disabled or demoted;
 - an administrator cannot disable their own current account;
 - invitation and reset tokens are random, short-lived, single-use, and stored only as digests;
+- administrative token lists expose IDs, state, subject, and timestamps only; token values, digests, and envelopes are never returned;
 - a server request receives its database instance from the authenticated principal; financial APIs do not accept a caller-supplied user ID;
 - the control key, an administrator password, or an administrator session alone cannot open another user's vault.
 

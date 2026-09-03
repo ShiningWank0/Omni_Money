@@ -198,6 +198,28 @@ func (s *Store) DeletePasskeyCredential(ctx context.Context, userID string, cred
 	return nil
 }
 
+// DeleteAllPasskeyCredentials revokes every WebAuthn unlock path owned by one
+// user. It returns the number removed without exposing credential material.
+func (s *Store) DeleteAllPasskeyCredentials(ctx context.Context, userID string) (int, error) {
+	userID, err := normalizeID(userID)
+	if err != nil {
+		return 0, err
+	}
+	db, err := s.database()
+	if err != nil {
+		return 0, err
+	}
+	result, err := db.ExecContext(ctx, "DELETE FROM passkey_credentials WHERE user_id = ?", userID)
+	if err != nil {
+		return 0, fmt.Errorf("delete all passkey credentials: %w", err)
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count deleted passkey credentials: %w", err)
+	}
+	return int(removed), nil
+}
+
 func preparePasskeyCredential(input PasskeyCredentialInput) (PasskeyCredential, string, string, error) {
 	userID, err := normalizeID(input.UserID)
 	if err != nil {

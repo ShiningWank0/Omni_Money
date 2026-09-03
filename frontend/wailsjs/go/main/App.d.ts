@@ -80,7 +80,7 @@ export function RemoveTransactionTag(arg1:number,arg2:number):Promise<void>;
 
 export function RestoreSnapshot(arg1:string):Promise<void>;
 
-export function RotateDesktopVaultRecovery(arg1:string):Promise<main.DesktopVaultRecoveryResponse>;
+export function RotateDesktopVaultRecovery(arg1:string,arg2:string):Promise<desktopaccount.Status>;
 
 export function SaveBankAccountSettings(arg1:Array<string>):Promise<void>;
 

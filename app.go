@@ -32,7 +32,7 @@ type desktopVaultCoordinator interface {
 	Unlock(password []byte) error
 	Recover(recoverySecret, newPassword []byte) ([]byte, error)
 	ChangePassword(currentPassword, newPassword []byte) error
-	RotateRecovery(currentPassword []byte) ([]byte, error)
+	RotateRecovery(currentPassword, recoverySecret []byte) error
 	Service() (*desktopaccount.ServiceLease, error)
 	CreateSnapshot() (string, error)
 	ListSnapshots() ([]string, error)
@@ -245,17 +245,21 @@ func (a *App) ChangeDesktopVaultPassword(currentPassword, newPassword string) (d
 	return a.coordinator.Status(), nil
 }
 
-func (a *App) RotateDesktopVaultRecovery(currentPassword string) (DesktopVaultRecoveryResponse, error) {
+func (a *App) RotateDesktopVaultRecovery(currentPassword, recoveryCode string) (desktopaccount.Status, error) {
+	secret, err := base64.RawURLEncoding.Strict().DecodeString(recoveryCode)
+	if err != nil || len(secret) != keyenvelope.RecoverySecretSize {
+		clearBytes(secret)
+		return a.coordinator.Status(), keyenvelope.ErrInvalidRecoverySecret
+	}
+	defer clearBytes(secret)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	passwordBytes := []byte(currentPassword)
 	defer clearBytes(passwordBytes)
-	secret, err := a.coordinator.RotateRecovery(passwordBytes)
-	if err != nil {
-		return DesktopVaultRecoveryResponse{}, err
+	if err := a.coordinator.RotateRecovery(passwordBytes, secret); err != nil {
+		return a.coordinator.Status(), err
 	}
-	defer clearBytes(secret)
-	return recoveryResponse(a.coordinator.Status(), secret), nil
+	return a.coordinator.Status(), nil
 }
 
 // --- Accounts ---

@@ -242,10 +242,11 @@ func (s *Service) FinishPasskeyLogin(ctx context.Context, input FinishPasskeyLog
 	if !s.passkeysReady() {
 		return nil, ErrPasskeysUnavailable
 	}
-	user, vaultID, dek, err := s.validatePasskeyAssertion(ctx, "", passkeyCeremonyLogin, input, now, true)
+	user, vaultID, dek, unlock, err := s.validatePasskeyAssertion(ctx, "", passkeyCeremonyLogin, input, now, true)
 	if err != nil {
 		return nil, err
 	}
+	defer unlock()
 	defer clear(dek)
 	key, err := securedb.NewRawKey(dek)
 	if err != nil {
@@ -271,7 +272,10 @@ func (s *Service) FinishPasskeyReauthentication(
 	if !s.passkeysReady() {
 		return ErrPasskeysUnavailable
 	}
-	_, _, dek, err := s.validatePasskeyAssertion(ctx, userID, passkeyCeremonyReauth, input, now, false)
+	_, _, dek, unlock, err := s.validatePasskeyAssertion(ctx, userID, passkeyCeremonyReauth, input, now, false)
+	if unlock != nil {
+		defer unlock()
+	}
 	clear(dek)
 	return err
 }
@@ -282,30 +286,35 @@ func (s *Service) validatePasskeyAssertion(
 	input FinishPasskeyLoginInput,
 	now time.Time,
 	recordLogin bool,
-) (control.UserSummary, string, []byte, error) {
+) (control.UserSummary, string, []byte, func(), error) {
 	ceremony, err := s.takePasskeyCeremony(input.CeremonyID, kind, input.ClientKey)
 	if err != nil || len(input.PRFResult) != keyenvelope.PasskeySecretSize {
-		return control.UserSummary{}, "", nil, ErrInvalidCredentials
+		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
 	}
 	if expectedUserID != "" && ceremony.UserID != expectedUserID {
-		return control.UserSummary{}, "", nil, ErrInvalidCredentials
+		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
 	}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(input.CredentialJSON)
 	if err != nil {
-		return control.UserSummary{}, "", nil, ErrInvalidCredentials
+		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
 	}
 	unlock, err := s.lockAccount("user:" + ceremony.UserID)
 	if err != nil {
-		return control.UserSummary{}, "", nil, err
+		return control.UserSummary{}, "", nil, nil, err
 	}
-	defer unlock()
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			unlock()
+		}
+	}()
 	user, records, err := s.loadPasskeyUser(ctx, ceremony.UserID)
 	if err != nil || user.user.State != control.UserActive {
-		return control.UserSummary{}, "", nil, ErrInvalidCredentials
+		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
 	}
 	updated, err := s.webauthn.ValidateLogin(user, ceremony.Session, parsed)
 	if err != nil || updated == nil || updated.Authenticator.CloneWarning {
-		return control.UserSummary{}, "", nil, ErrInvalidCredentials
+		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
 	}
 	var expected *control.PasskeyCredential
 	for index := range records {
@@ -315,11 +324,11 @@ func (s *Service) validatePasskeyAssertion(
 		}
 	}
 	if expected == nil {
-		return control.UserSummary{}, "", nil, ErrInvalidCredentials
+		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
 	}
 	vaultID, err := s.store.LookupVaultID(ctx, ceremony.UserID)
 	if err != nil {
-		return control.UserSummary{}, "", nil, err
+		return control.UserSummary{}, "", nil, nil, err
 	}
 	dek, err := keyenvelope.UnwrapWithPasskey(
 		&expected.VaultEnvelope, input.PRFResult,
@@ -327,16 +336,17 @@ func (s *Service) validatePasskeyAssertion(
 	)
 	if err != nil {
 		clear(dek)
-		return control.UserSummary{}, "", nil, ErrInvalidCredentials
+		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
 	}
 	if err := s.passkeyStore.RecordSuccessfulPasskeyUse(ctx, *expected, *updated, now, recordLogin); err != nil {
 		clear(dek)
 		if errors.Is(err, control.ErrCredentialConflict) || errors.Is(err, control.ErrForbidden) {
-			return control.UserSummary{}, "", nil, ErrInvalidCredentials
+			return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
 		}
-		return control.UserSummary{}, "", nil, err
+		return control.UserSummary{}, "", nil, nil, err
 	}
-	return user.user, vaultID, dek, nil
+	succeeded = true
+	return user.user, vaultID, dek, unlock, nil
 }
 
 func (s *Service) ListPasskeys(ctx context.Context, userID string) ([]control.PasskeySummary, error) {
@@ -362,14 +372,48 @@ func (s *Service) DeletePasskey(ctx context.Context, userID string, credentialID
 	if err != nil {
 		return err
 	}
-	defer unlock()
-	return s.passkeyStore.DeletePasskeyCredential(ctx, userID, credentialID)
+	if err := s.passkeyStore.DeletePasskeyCredential(ctx, userID, credentialID); err != nil {
+		unlock()
+		return err
+	}
+	s.sessions.DeleteAllSessionsForUser(userID)
+	waitForDrain, _ := s.vaults.BeginUserDrain(userID)
+	unlock()
+	s.finishDrain(ctx, waitForDrain)
+	return nil
+}
+
+func (s *Service) DeleteAllPasskeys(ctx context.Context, userID string) (int, error) {
+	if !s.passkeysReady() {
+		return 0, ErrPasskeysUnavailable
+	}
+	unlock, err := s.lockAccount("user:" + userID)
+	if err != nil {
+		return 0, err
+	}
+	removed, err := s.passkeyStore.DeleteAllPasskeyCredentials(ctx, userID)
+	if err != nil {
+		unlock()
+		return 0, err
+	}
+	s.sessions.DeleteAllSessionsForUser(userID)
+	waitForDrain, _ := s.vaults.BeginUserDrain(userID)
+	unlock()
+	s.finishDrain(ctx, waitForDrain)
+	return removed, nil
 }
 
 func (s *Service) unwrapVaultWithPassword(ctx context.Context, userID string, password []byte) ([]byte, string, error) {
 	if validateNewPassword(password) != nil {
 		if err := s.runDummyPassword(ctx, password); err != nil {
 			return nil, "", err
+		}
+		return nil, "", ErrInvalidCredentials
+	}
+	user, err := s.store.GetUser(ctx, userID)
+	if err != nil || user.State != control.UserActive {
+		if dummyErr := s.runDummyPassword(ctx, password); dummyErr != nil {
+			return nil, "", dummyErr
 		}
 		return nil, "", ErrInvalidCredentials
 	}
