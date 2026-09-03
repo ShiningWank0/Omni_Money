@@ -13,6 +13,7 @@ const (
 	globalRateLimitPerMinute   = 120
 	loginRateLimitPerMinute    = 10
 	aiTxRateLimitPerMinute     = 30
+	snapshotRateLimitPerMinute = 10
 	rateLimitWindow            = time.Minute
 	rateLimitRetentionDuration = rateLimitWindow * 2
 	// A client IP is untrusted input. Bound the number of per-key windows so a
@@ -146,6 +147,8 @@ func resolveRateLimitBucket(req *http.Request) (bucket string, limit int) {
 		return "account-auth", loginRateLimitPerMinute
 	case req.Method == http.MethodPost && path == "/api/v1/ai/transactions":
 		return "ai-transactions", aiTxRateLimitPerMinute
+	case path == "/api/snapshots" || path == "/api/snapshots/restore":
+		return "snapshots", snapshotRateLimitPerMinute
 	default:
 		return "global", globalRateLimitPerMinute
 	}

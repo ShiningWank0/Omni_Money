@@ -229,7 +229,7 @@ func handleServerAuthStatus(dependencies ServerDependencies) http.HandlerFunc {
 		session, ok := dependencies.Sessions.GetSessionFromRequest(r)
 		if !ok || session.UserID == "" {
 			jsonResponse(w, map[string]interface{}{
-				"authenticated": false, "setup_required": !bootstrapped, "features": serverFeatureResponse(false, dependencies.Accounts),
+				"authenticated": false, "setup_required": !bootstrapped, "features": serverFeatureResponse(false, dependencies.Accounts, dependencies.Snapshots != nil),
 			}, http.StatusOK)
 			return
 		}
@@ -242,7 +242,7 @@ func handleServerAuthStatus(dependencies ServerDependencies) http.HandlerFunc {
 			dependencies.Sessions.DeleteAllSessionsForUser(session.UserID)
 			dependencies.Sessions.ClearSessionCookie(w, r)
 			jsonResponse(w, map[string]interface{}{
-				"authenticated": false, "setup_required": !bootstrapped, "features": serverFeatureResponse(false, dependencies.Accounts),
+				"authenticated": false, "setup_required": !bootstrapped, "features": serverFeatureResponse(false, dependencies.Accounts, dependencies.Snapshots != nil),
 			}, http.StatusOK)
 			return
 		}
@@ -250,15 +250,16 @@ func handleServerAuthStatus(dependencies ServerDependencies) http.HandlerFunc {
 			"authenticated": true, "setup_required": false, "user": serverUserResponse(user),
 			"expires_at": session.ExpiresAt.Format(time.RFC3339), "csrf_token": session.CSRFToken,
 			"idle_timeout_seconds": dependencies.Sessions.IdleTimeoutSeconds(),
-			"features":             serverFeatureResponse(user.Role == control.RoleAdmin, dependencies.Accounts),
+			"features":             serverFeatureResponse(user.Role == control.RoleAdmin, dependencies.Accounts, dependencies.Snapshots != nil),
 		}, http.StatusOK)
 	}
 }
 
-func serverFeatureResponse(admin bool, accounts ServerAccountService) map[string]bool {
+func serverFeatureResponse(admin bool, accounts ServerAccountService, snapshots ...bool) map[string]bool {
 	_, passkeys := accounts.(ServerPasskeyService)
+	snapshotFeature := len(snapshots) > 0 && snapshots[0]
 	return map[string]bool{
-		"admin": admin, "ai": false, "snapshots": false, "passkeys": passkeys,
+		"admin": admin, "ai": false, "snapshots": snapshotFeature, "passkeys": passkeys,
 	}
 }
 

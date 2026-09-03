@@ -230,6 +230,73 @@ func TestSlowVaultRootReleaseDoesNotHoldSessionManagerMutex(t *testing.T) {
 	}
 }
 
+func TestVaultSessionRegistrationIsLinearizedWithRestore(t *testing.T) {
+	manager := NewSessionManagerWithConfig(securityTestSessionConfig())
+	t.Cleanup(manager.Close)
+	user := testControlUser(testVaultSessionUserID)
+	restoreRoot := &sessionVaultRoot{
+		userID: user.ID,
+		beginRestore: func() (*vault.RestoreOperation, error) {
+			return &vault.RestoreOperation{}, nil
+		},
+	}
+	existing := createTestVaultSession(t, manager, user, restoreRoot)
+
+	validationStarted := make(chan struct{})
+	allowValidation := make(chan struct{})
+	candidateRoot := &sessionVaultRoot{
+		userID: user.ID,
+		validate: func() error {
+			close(validationStarted)
+			<-allowValidation
+			return nil
+		},
+	}
+	candidateDone := make(chan *Session, 1)
+	go func() {
+		candidate, err := manager.createSession(user.Email, &user, candidateRoot)
+		if err != nil {
+			candidateDone <- nil
+			return
+		}
+		candidateDone <- candidate
+	}()
+	select {
+	case <-validationStarted:
+	case <-time.After(time.Second):
+		t.Fatal("candidate session did not reach registration barrier")
+	}
+
+	restoreDone := make(chan struct{})
+	go func() {
+		op, _, err := manager.BeginRestore(existing.ID)
+		if err == nil && op != nil {
+			op.Release()
+		}
+		close(restoreDone)
+	}()
+	select {
+	case <-restoreDone:
+		t.Fatal("restore passed the session lock while registration was in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(allowValidation)
+	candidate := <-candidateDone
+	if candidate == nil {
+		t.Fatal("candidate session registration failed")
+	}
+	select {
+	case <-restoreDone:
+	case <-time.After(time.Second):
+		t.Fatal("restore did not linearize after candidate registration")
+	}
+	// The restore handler's subsequent DeleteAll operation sees the candidate
+	// because registration and BeginRestore used one SessionManager order.
+	if deleted := manager.DeleteAllSessionsForUser(user.ID); deleted != 2 {
+		t.Fatalf("sessions deleted after restore = %d, want existing and candidate", deleted)
+	}
+}
+
 type fakeCurrentUserStore struct {
 	mu    sync.Mutex
 	user  control.UserSummary

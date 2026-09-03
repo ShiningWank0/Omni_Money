@@ -46,6 +46,13 @@ async function desktopFinancialCall(invoke) {
 let csrfToken = null
 let pendingReauthentication = null
 
+// Restore revokes the server session. Callers must also discard this
+// in-memory bearer of the CSRF capability before navigating to login.
+export function clearSessionSecrets() {
+  csrfToken = null
+  pendingReauthentication = null
+}
+
 function rememberAuthToken(data) {
   if (typeof data?.csrf_token === 'string' && data.csrf_token.length > 0) {
     csrfToken = data.csrf_token

@@ -6,7 +6,31 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"omni_money/backend/fileprivacy"
 )
+
+func TestPreparePrivateDatabaseFileHardensBeforeFirstWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "new-database.db")
+	if err := preparePrivateDatabaseFile(path); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path) // #nosec G304 -- exact test-owned path.
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := fileprivacy.ValidatePrivateFile(file); err != nil {
+		t.Fatalf("database placeholder is not private before SQLite open: %v", err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("database placeholder size=%d, want zero before first write", info.Size())
+	}
+}
 
 func TestAITransactionSecurityTablesEnforceDigestAndQuotaConstraints(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ai-security.db")

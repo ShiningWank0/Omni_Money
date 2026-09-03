@@ -13,16 +13,19 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 
 	"omni_money/backend/core"
 	"omni_money/backend/database"
+	"omni_money/backend/fileprivacy"
 	"omni_money/backend/securedb"
 )
 
 var (
 	ErrClosed          = errors.New("vault manager is closed")
 	ErrDraining        = errors.New("user vault is being closed")
+	ErrRestoreInFlight = errors.New("user vault restore is already in progress")
 	ErrBindingMismatch = errors.New("vault binding or key does not match the open vault")
 	ErrInvalidIdentity = errors.New("invalid user or vault identifier")
 	ErrLeaseReleased   = errors.New("vault lease is already released or cannot be borrowed")
@@ -52,6 +55,7 @@ type entry struct {
 	idle           chan struct{}
 	closing        chan struct{}
 	closeErr       error
+	refChange      chan struct{}
 }
 
 // Lease keeps a user's vault open. A session or request owner must call
@@ -64,12 +68,26 @@ type Lease struct {
 	root    bool
 }
 
+// RestoreOperation is a root-only, manager-owned capability.  It holds one
+// internal reference while a restore drains all request/session references;
+// callers must invoke Release (RestoreSnapshot does this automatically).
+// No user, vault, path, or key lookup is possible through this capability.
+type RestoreOperation struct {
+	manager *Manager
+	entry   *entry
+	once    sync.Once
+}
+
 // leaseState is pointer-owned so even an accidental value copy of the
 // exported Lease shares exactly-once release and liveness state.
 type leaseState struct {
 	once     sync.Once
 	mu       sync.RWMutex
 	released bool
+	// releasedFlag is read by the SessionManager registration barrier while
+	// its own mutex is held. It avoids taking leaseState.mu in the opposite
+	// order from BeginRestore/Borrow/Release.
+	releasedFlag atomic.Bool
 }
 
 func newLease(manager *Manager, current *entry, root bool) *Lease {
@@ -254,6 +272,9 @@ func (m *Manager) addReferenceLocked(current *entry, root bool) {
 	if current.references == 0 {
 		current.idle = make(chan struct{})
 	}
+	if current.refChange == nil {
+		current.refChange = make(chan struct{})
+	}
 	current.references++
 	if root {
 		current.rootReferences++
@@ -279,6 +300,206 @@ func (l *Lease) Service() (*core.Service, error) {
 	instance := l.entry.instance
 	l.state.mu.RUnlock()
 	return core.NewGuardedService(instance, l.isLive)
+}
+
+// CreateSnapshot creates an encrypted snapshot through this lease's bound
+// instance.  It is deliberately a method on Lease, so callers cannot select
+// another user's database or supply an arbitrary snapshot directory.
+func (l *Lease) CreateSnapshot() (string, error) {
+	return l.CreateSnapshotContext(context.Background())
+}
+
+// CreateSnapshotContext preserves the caller's request lifetime through the
+// database backup and validation admission boundary.
+func (l *Lease) CreateSnapshotContext(ctx context.Context) (string, error) {
+	if l == nil || l.state == nil {
+		return "", ErrLeaseReleased
+	}
+	l.state.mu.RLock()
+	defer l.state.mu.RUnlock()
+	if l.state.released || l.manager == nil || l.entry == nil || l.entry.instance == nil {
+		return "", ErrLeaseReleased
+	}
+	return l.entry.instance.CreateSnapshotContext(ctx, "")
+}
+
+// ListSnapshots lists only this lease's default per-vault snapshot directory.
+func (l *Lease) ListSnapshots() ([]string, error) {
+	return l.ListSnapshotsContext(context.Background())
+}
+
+// ListSnapshotsContext keeps snapshot validation tied to the request
+// lifetime. It never accepts a caller-selected directory.
+func (l *Lease) ListSnapshotsContext(ctx context.Context) ([]string, error) {
+	if l == nil || l.state == nil {
+		return nil, ErrLeaseReleased
+	}
+	l.state.mu.RLock()
+	defer l.state.mu.RUnlock()
+	if l.state.released || l.manager == nil || l.entry == nil || l.entry.instance == nil {
+		return nil, ErrLeaseReleased
+	}
+	return l.entry.instance.ListSnapshotsContext(ctx, "")
+}
+
+// BeginRestore starts a root-only restore operation.  It atomically marks the
+// exact manager entry draining and reserves an internal reference before any
+// session is invalidated.  Existing children are allowed to finish; new
+// borrows/acquires are rejected immediately.
+func (l *Lease) BeginRestore() (*RestoreOperation, error) {
+	if l == nil || l.state == nil {
+		return nil, ErrLeaseReleased
+	}
+	l.state.mu.Lock()
+	defer l.state.mu.Unlock()
+	if l.state.released || !l.root || l.manager == nil || l.entry == nil {
+		return nil, ErrLeaseReleased
+	}
+	m := l.manager
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := m.entries[l.entry.userID]
+	if m.closing {
+		return nil, ErrClosed
+	}
+	if current != l.entry || current.ready != nil || current.instance == nil {
+		return nil, ErrDraining
+	}
+	if current.draining {
+		return nil, ErrRestoreInFlight
+	}
+	current.draining = true
+	m.addReferenceLocked(current, false)
+	return &RestoreOperation{manager: m, entry: current}, nil
+}
+
+// ValidateSessionRoot is the registration barrier used by SessionManager.
+// It performs the same manager-entry/liveness check as Borrow while taking no
+// reference. SessionManager holds its own mutex while calling this method;
+// this method separately takes the actual vault Manager mutex so Acquire and
+// entry publication cannot race.
+func (l *Lease) ValidateSessionRoot() error {
+	if l == nil || l.state == nil {
+		return ErrLeaseReleased
+	}
+	if l.state.releasedFlag.Load() || !l.root || l.manager == nil || l.entry == nil {
+		return ErrLeaseReleased
+	}
+	m := l.manager
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return l.validateSessionRootLocked()
+}
+
+// ValidateSessionRootLocked is retained for package compatibility. Callers
+// must hold the exact Manager mutex; SessionManager must use
+// ValidateSessionRoot because it does not hold that mutex.
+func (l *Lease) ValidateSessionRootLocked() error {
+	return l.validateSessionRootLocked()
+}
+
+func (l *Lease) validateSessionRootLocked() error {
+	if l == nil || l.state == nil || l.state.releasedFlag.Load() || !l.root || l.manager == nil || l.entry == nil {
+		return ErrLeaseReleased
+	}
+	m := l.manager
+	if m.closing {
+		return ErrClosed
+	}
+	current := m.entries[l.entry.userID]
+	if current != l.entry || current.draining || current.ready != nil || current.instance == nil {
+		return ErrDraining
+	}
+	return nil
+}
+
+// waitForReferences waits until the operation is the sole remaining reference
+// on its exact entry.  A context cancellation leaves the entry draining, but
+// releases the operation's internal reference so normal cleanup can complete.
+func (o *RestoreOperation) waitForReferences(ctx context.Context) error {
+	if o == nil || o.manager == nil || o.entry == nil {
+		return ErrLeaseReleased
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		o.manager.mu.Lock()
+		if o.manager.entries[o.entry.userID] != o.entry {
+			err := o.entry.closeErr
+			o.manager.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			return ErrLeaseReleased
+		}
+		if o.entry.references <= 1 && o.entry.ready == nil && o.entry.closing == nil {
+			o.manager.mu.Unlock()
+			return nil
+		}
+		changed := o.entry.refChange
+		o.manager.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// RestoreSnapshot drains the entry, restores from its own default snapshot
+// directory, and releases the internal reference exactly once.
+func (o *RestoreOperation) RestoreSnapshot(ctx context.Context, name string) error {
+	if o == nil {
+		return ErrLeaseReleased
+	}
+	defer o.Release()
+	if err := o.waitForReferences(ctx); err != nil {
+		return err
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	o.manager.mu.Lock()
+	if o.manager.entries[o.entry.userID] != o.entry || o.entry.instance == nil {
+		o.manager.mu.Unlock()
+		return ErrLeaseReleased
+	}
+	instance := o.entry.instance
+	o.manager.mu.Unlock()
+	return instance.RestoreSnapshotContext(ctx, "", name)
+}
+
+// Release abandons a restore operation.  Repeated calls are safe.  Once all
+// session/request references have gone, the normal entry close path destroys
+// the instance and SQLCipher DEK.
+func (o *RestoreOperation) Release() {
+	if o == nil || o.manager == nil || o.entry == nil {
+		return
+	}
+	o.once.Do(func() {
+		m := o.manager
+		m.mu.Lock()
+		current := m.entries[o.entry.userID]
+		autoClose := false
+		if current == o.entry && current.references > 0 {
+			current.references--
+			if current.refChange != nil {
+				close(current.refChange)
+				current.refChange = make(chan struct{})
+			}
+			if current.references == 0 {
+				close(current.idle)
+				autoClose = current.draining
+			}
+		}
+		m.mu.Unlock()
+		if autoClose {
+			_ = m.closeEntry(context.Background(), o.entry)
+		}
+	})
 }
 
 func (l *Lease) isLive() bool {
@@ -337,6 +558,7 @@ func (l *Lease) Release() {
 	l.state.once.Do(func() {
 		l.state.mu.Lock()
 		l.state.released = true
+		l.state.releasedFlag.Store(true)
 		m := l.manager
 		root := l.root
 		if m == nil || l.entry == nil {
@@ -349,6 +571,10 @@ func (l *Lease) Release() {
 		autoClose := false
 		if current == l.entry && current.references > 0 {
 			current.references--
+			if current.refChange != nil {
+				close(current.refChange)
+				current.refChange = make(chan struct{})
+			}
 			if root && current.rootReferences > 0 {
 				current.rootReferences--
 				if current.rootReferences == 0 && !current.draining {
@@ -560,7 +786,7 @@ func ensurePrivateDirectory(path string, create bool) error {
 		if err := os.MkdirAll(path, 0700); err != nil {
 			return fmt.Errorf("create private directory: %w", err)
 		}
-		if err := os.Chmod(path, 0700); err != nil { // #nosec G302 -- vault directories must be owner-only.
+		if err := fileprivacy.HardenDirectory(path); err != nil {
 			return fmt.Errorf("secure private directory: %w", err)
 		}
 		info, err = os.Lstat(path)
@@ -571,10 +797,7 @@ func ensurePrivateDirectory(path string, create bool) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return errors.New("vault directory must be a real directory")
 	}
-	if info.Mode().Perm() != 0700 {
-		return fmt.Errorf("vault directory permissions must be 0700, got %04o", info.Mode().Perm())
-	}
-	return nil
+	return fileprivacy.ValidateDirectory(path)
 }
 
 func validateContainedPath(root, candidate string) error {
