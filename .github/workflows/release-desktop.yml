@@ -4,7 +4,14 @@ on:
   pull_request:
     paths:
       - '**/*.go'
-      - 'frontend/**'
+      - 'frontend/src/**'
+      - 'frontend/wailsjs/**'
+      - 'frontend/public/**'
+      - 'frontend/index.html'
+      - 'frontend/vite.config.js'
+      - 'frontend/package.json'
+      - 'frontend/package-lock.json'
+      - 'build/**'
       - 'scripts/build-openssl-darwin.sh'
       - 'scripts/build-sqlcipher-*.sh'
       - 'go.mod'

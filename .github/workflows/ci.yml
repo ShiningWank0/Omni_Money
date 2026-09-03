@@ -119,14 +119,13 @@ jobs:
           bash -n scripts/safe-update.sh
           test -x scripts/safe-update_test.sh
           # Production refuses non-root before touching Docker or data. Run
-          # the critical legacy and parser-drift paths in isolation first so
-          # their diagnostics stay focused, then run the complete transaction
-          # matrix under the same root boundary. Fixture-only mocks remain
+          # the critical legacy and parser-drift paths in isolation so their
+          # diagnostics stay focused. The complete transaction matrix runs in
+          # the conditional safe-update job below. Fixture-only mocks remain
           # confined to each generated test path.
           sudo env "PATH=$PATH" SAFE_UPDATE_ONLY=legacy_archive_failure SAFE_UPDATE_EXPECTED=1 scripts/safe-update_test.sh
           sudo env "PATH=$PATH" SAFE_UPDATE_ONLY=jq_only_drift SAFE_UPDATE_EXPECTED=1 scripts/safe-update_test.sh
           sudo env "PATH=$PATH" SAFE_UPDATE_ONLY=candidate_ingress_health_failure SAFE_UPDATE_EXPECTED=1 scripts/safe-update_test.sh
-          sudo env "PATH=$PATH" scripts/safe-update_test.sh
 
       - name: Assert Pangolin network isolation
         env:
@@ -199,6 +198,96 @@ jobs:
             .secrets.omni_initial_admin_setup_token != null and
             ([.services["omni-money"].secrets[].source] | index("omni_initial_admin_setup_token")) != null
           ' "$bootstrap_config"
+
+  safe-update:
+    name: Safe-update full matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Determine full-matrix coverage
+        id: coverage
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          run_full=false
+          reason="event is outside the safe-update full-matrix policy"
+          sha_re='^[0-9a-f]{40}$'
+
+          if [ "$EVENT_NAME" = schedule ]; then
+            run_full=true
+            reason="weekly scheduled verification"
+          elif [ "$EVENT_NAME" = push ] && [ "$REF" = refs/heads/main ]; then
+            run_full=true
+            reason="push to main"
+          elif [ "$EVENT_NAME" = pull_request ]; then
+            # actions/checkout with fetch-depth 0 normally includes both PR
+            # commits. For fork PRs, fetch the immutable PR ref when the head
+            # object is not already present, and verify it matches the event
+            # payload before using it in the diff.
+            if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]] ||
+              [[ ! "$PR_BASE_SHA" =~ $sha_re ]] ||
+              [[ ! "$PR_HEAD_SHA" =~ $sha_re ]]; then
+              run_full=true
+              reason="PR base/head metadata could not be validated"
+            else
+              if ! git cat-file -e "${PR_BASE_SHA}^{commit}" 2>/dev/null; then
+                git fetch --no-tags --depth=1 origin "$PR_BASE_SHA" >/dev/null 2>&1 || true
+              fi
+              if ! git cat-file -e "${PR_HEAD_SHA}^{commit}" 2>/dev/null; then
+                git fetch --no-tags --depth=1 origin \
+                  "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr/${PR_NUMBER}/head" \
+                  >/dev/null 2>&1 || true
+              fi
+
+              if ! git cat-file -e "${PR_BASE_SHA}^{commit}" 2>/dev/null ||
+                ! git cat-file -e "${PR_HEAD_SHA}^{commit}" 2>/dev/null; then
+                run_full=true
+                reason="PR base/head commits could not be resolved"
+              else
+                changed_paths=""
+                if ! changed_paths="$(git diff --name-only --no-renames --diff-filter=ACDMRTUXB \
+                  "$PR_BASE_SHA" "$PR_HEAD_SHA")"; then
+                  run_full=true
+                  reason="PR diff could not be computed"
+                else
+                  while IFS= read -r path; do
+                    case "$path" in
+                      scripts/safe-update*|compose*.yaml|.env.example|Dockerfile|server.go|backend/api/router.go|backend/api/server_router.go|backend/config/server.go|.github/workflows/*.yml|.github/workflows/*.yaml)
+                        run_full=true
+                        reason="PR changes safe-update inputs or CI/release workflows"
+                        break
+                        ;;
+                    esac
+                  done <<< "$changed_paths"
+                fi
+              fi
+            fi
+          fi
+
+          echo "run_full=$run_full" >> "$GITHUB_OUTPUT"
+          echo "coverage decision: $run_full ($reason)"
+
+      - name: Run safe-update full matrix
+        if: steps.coverage.outputs.run_full == 'true'
+        run: sudo env "PATH=$PATH" scripts/safe-update_test.sh
+
+      - name: Skip safe-update full matrix
+        if: steps.coverage.outputs.run_full != 'true'
+        run: echo "safe-update full matrix is not required for this event"
 
   frontend:
     name: Frontend build
