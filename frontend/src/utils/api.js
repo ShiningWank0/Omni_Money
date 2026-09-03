@@ -166,7 +166,7 @@ async function throwIfNotOk(response, fallbackMessage) {
 }
 
 function expireClientSession(reason = 'session-expired') {
-	csrfToken = null
+	clearSessionSecrets()
 	const expiryEvent = new CustomEvent('omni-money:session-expired', {
 	  cancelable: true,
 	  detail: { reason }

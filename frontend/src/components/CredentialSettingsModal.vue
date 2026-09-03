@@ -111,12 +111,14 @@ function close() {
   if (recoveryCode.value && !recoverySaved.value && !window.confirm('新しい回復コードを保存せずに閉じますか？')) return
   const mustSignOut = serverRecoveryOutcomeUnknown
   clearSecrets()
-  emit(mustSignOut ? 'signed-out' : 'close')
+  if (mustSignOut) emit('signed-out', { outcomeUnknown: true })
+  else emit('close')
 }
 
 async function changePassword() {
   errorMessage.value = ''
   infoMessage.value = ''
+	let mutationAttempted = false
 	try {
 	  validatePasswordBytes(currentPassword.value)
 	  validateNewDesktopPassword(newPassword.value, newPasswordConfirmation.value)
@@ -126,15 +128,16 @@ async function changePassword() {
       await changeDesktopVaultPassword(currentPassword.value, newPassword.value)
       infoMessage.value = 'パスワードを変更しました'
     } else {
+	    mutationAttempted = true
       await changeServerPassword({ currentPassword: currentPassword.value, newPassword: newPassword.value, revokePasskeys: revokePasskeys.value })
       clearSecrets()
       emit('signed-out')
       return
     }
   } catch (error) {
-	  if (!isWailsMode && error?.definitiveResponse !== true) {
+	  if (!isWailsMode && mutationAttempted && error?.definitiveResponse !== true) {
 	    clearSecrets()
-	    emit('signed-out')
+	    emit('signed-out', { outcomeUnknown: true })
 	    return
 	  }
     errorMessage.value = error?.message || 'パスワードを変更できませんでした'

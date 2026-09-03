@@ -119,6 +119,7 @@ import {
 } from '../utils/recovery'
 
 const requestedMode = new URLSearchParams(window.location.search).get('mode')
+let forceLoginRequired = new URLSearchParams(window.location.search).get('force') === '1'
 const mode = ref(['invite', 'reset'].includes(requestedMode) ? requestedMode : 'login')
 const email = ref('')
 const password = ref('')
@@ -195,7 +196,7 @@ onMounted(async () => {
       mode.value = 'login'
       window.history.replaceState({}, '', '/login')
       prepareRecoveryCode()
-    } else if (status?.authenticated && mode.value === 'login') {
+    } else if (status?.authenticated && mode.value === 'login' && !forceLoginRequired) {
       window.location.href = '/'
       return
     } else if (mode.value !== 'login') {
@@ -283,6 +284,7 @@ async function handleSubmit() {
       return
     }
     await login(email.value, password.value)
+    forceLoginRequired = false
     completed = true
     window.location.href = '/'
   } catch (error) {
@@ -313,6 +315,7 @@ async function handlePasskeyLogin() {
   infoMessage.value = ''
   try {
     await loginWithPasskey(email.value.trim())
+    forceLoginRequired = false
     window.location.href = '/'
   } catch (error) {
     errorMessage.value = error?.message || 'パスキー認証に失敗しました'

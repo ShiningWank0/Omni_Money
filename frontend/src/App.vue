@@ -752,7 +752,33 @@ function openCredentialSettings() {
   showCredentialSettings.value = true
 }
 
-function handleCredentialSignedOut() {
+async function handleCredentialOutcomeUnknown() {
+  idleLockInProgress = true
+  // Cover the entire UI before clearing stores or waiting for the best-effort
+  // logout. The server may have committed the mutation even if its response
+  // was lost, so the next page must require an explicit login.
+  idleScreenLocked.value = true
+  clearSensitiveStateForIdle()
+
+  let timeoutID = null
+  try {
+    const timeout = new Promise(resolve => {
+      timeoutID = setTimeout(resolve, 750)
+    })
+    await Promise.race([apiLogout(), timeout])
+  } catch (error) {
+    console.warn('認証情報更新後のログアウトに失敗しました:', error)
+  } finally {
+    if (timeoutID !== null) clearTimeout(timeoutID)
+  }
+  window.location.replace('/login?reason=credential-outcome-unknown&force=1')
+}
+
+function handleCredentialSignedOut(outcome = {}) {
+  if (outcome?.outcomeUnknown === true) {
+    void handleCredentialOutcomeUnknown()
+    return
+  }
   showCredentialSettings.value = false
   clearSensitiveStateForIdle()
   window.location.replace('/login')
