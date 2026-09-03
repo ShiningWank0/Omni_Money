@@ -56,7 +56,7 @@ Go/Vueで構成された ledger を、利用者端末の Desktop と Docker/head
 ├── backend/               # Go言語 サーバー側（バックエンド）
 │   ├── api/               # APIの接続口定義、通信経路（ルーティング）
 │   ├── core/              # アプリケーションの主要な論理処理（ビジネスロジック）
-│   ├── database/          # SQLite接続、ledger、CSV、手動snapshot（自動server接続なし）
+│   ├── database/          # SQLite接続、ledger、CSV、snapshot lifecycle
 │   ├── control/           # server identity、role、session metadata、key envelope
 │   ├── desktopaccount/    # Desktop local password/recovery/lock lifecycle
 │   ├── keyenvelope/       # Argon2id、AES-GCM、password/recovery/passkey envelope
@@ -123,7 +123,7 @@ Go/Vueで構成された ledger を、利用者端末の Desktop と Docker/head
 
 ### 6.3. スナップショット（手動APIとmutation連動）
 
-Desktopとserverは手動create/list/restoreを提供し、財務mutation後にはbound vault instanceの自動snapshotを非同期作成する。burst中は最大1回のfollow-upへcoalesceし、自動作成後に30世代と `SNAPSHOT_MAX_TOTAL_BYTES` の範囲へpruneする。これは時刻schedulerではなく、時刻・retention policy・失敗通知の設定UIはない。serverの手動createは直後にpruneせず、次の自動作成時のretention処理まで持ち越す。server snapshotは認証済み本人のrequest leaseに束縛され、同じvault DEKの暗号文として扱う。application Admin/APIには他userの平文を開示しないが、同じservice UID、host root/operator、binary、process memoryはtrust boundary内である。snapshot単体はDR setではなく、control DB/key、vault/snapshot、volume recovery material、recovery codeを揃える。
+Desktopとserverは手動create/list/restoreを提供し、`core.Service` が公開するledger mutationの成功後にはbound vault instanceの自動snapshotを非同期作成する。burst中は最大1回のfollow-upへcoalesceする。手動・自動とも共通のcreate処理が返却前に30世代と `SNAPSHOT_MAX_TOTAL_BYTES` の範囲へpruneし、自動workerも追加cleanupを行う。これは時刻schedulerではなく、時刻・retention policy・失敗通知の設定UIはない。server snapshotは認証済み本人のrequest leaseに束縛され、同じvault DEKの暗号文として扱う。application Admin/APIには他userの平文を開示しないが、同じservice UID、host root/operator、binary、process memoryはtrust boundary内である。snapshot単体はDR setではなく、control DB/key、vault/snapshot、volume recovery material、recovery codeを揃える。
 
 ### 6.4. AI向けAPI（廃止済み・将来設計）
 

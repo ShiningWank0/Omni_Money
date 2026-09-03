@@ -126,16 +126,16 @@ path, or directory and return basenames only. Each snapshot is made with the
 same per-vault SQLCipher DEK as `ledger.db`; it is ciphertext suitable for an
 off-host encrypted backup, not a plaintext export.
 
-Every financial mutation uses its vault-bound `core.Service` to schedule an
-asynchronous snapshot. Bursts are coalesced into at most one follow-up run, and
-each automatic run prunes to 30 generations and `SNAPSHOT_MAX_TOTAL_BYTES`.
-This is mutation-triggered automation, not a configurable wall-clock schedule;
-there is no product UI for timing, retention policy, or failure notification.
-The server's manual create API does not immediately run retention cleanup, so
-its generations are pruned by the next automatic run. An application Admin/API
-cannot list, decrypt, or restore another user's plaintext snapshots, but the
-same service UID, host root/operator, replaceable binary, and process memory
-remain inside the hosting trust boundary.
+Successful ledger mutation paths exposed through the vault-bound `core.Service`
+schedule an asynchronous snapshot. Bursts are coalesced into at most one
+follow-up run. The common manual/automatic create path prunes to 30 generations
+and `SNAPSHOT_MAX_TOTAL_BYTES` before returning, and the automatic worker also
+runs a follow-up cleanup. This is mutation-triggered automation, not a
+configurable wall-clock schedule; there is no product UI for timing, retention
+policy, or failure notification. An application Admin/API cannot list, decrypt,
+or restore another user's plaintext snapshots, but the same service UID, host
+root/operator, replaceable binary, and process memory remain inside the hosting
+trust boundary.
 
 Restore is a high-impact operation requiring CSRF and recent reauthentication.
 The exact restore route first authenticates the current user without borrowing
