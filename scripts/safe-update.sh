@@ -1262,29 +1262,27 @@ validate_secret_sources() {
   done
 }
 
-write_runtime_contract() {
-  local id="$1" output="$2" raw env_json operator_environment item name value digest
-  raw="$pin_dir/runtime.$$.${id}.raw.json"
-  create_exclusive_file "$raw" || return 1
-  if ! docker_cli inspect --format '{{json .}}' "$id" > "$raw"; then
-    rm -f -- "$raw"
-    return 1
-  fi
-  jq -e 'type == "object"' "$raw" >/dev/null || { rm -f -- "$raw"; return 1; }
-  env_json="$(jq -j '.Config.Env[]? | (. + "\u0000")' "$raw" |
+build_runtime_contract_from_raw() {
+  local raw="$1" output="$2" env_json operator_environment item name value digest
+  jq -e 'type == "object"' "$raw" >/dev/null || return 1
+  if ! env_json="$(jq -j '.Config.Env[]? | (. + "\u0000")' "$raw" |
   while IFS= read -r -d '' item; do
     name="${item%%=*}"
     value="${item#*=}"
-    digest="$(printf '%s' "$value" | sha256sum | sed -E 's/[[:space:]].*$//')"
-    jq -cn --arg name "$name" --arg digest "$digest" '{name:$name,sha256:$digest}'
-  done | jq -s 'sort_by(.name)')" || return 1
+    digest="$(printf '%s' "$value" | sha256sum)" || return 1
+    digest="$(printf '%s\n' "$digest" | sed -E 's/[[:space:]].*$//')" || return 1
+    [[ "$digest" =~ ^[0-9a-fA-F]{64}$ ]] || return 1
+    jq -cn --arg name "$name" --arg digest "$digest" '{name:$name,sha256:$digest}' || return 1
+  done | jq -s 'sort_by(.name)')"; then
+    return 1
+  fi
   operator_environment="$(jq -c '
     .services["omni-money"].environment // {} |
     if type == "object" then keys
     elif type == "array" then map(strings | split("=")[0])
     else [] end
   ' "$compose_snapshot")" || return 1
-  if ! jq -c --argjson environment "$env_json" --argjson operator_environment "$operator_environment" '
+  jq -c --argjson environment "$env_json" --argjson operator_environment "$operator_environment" '
     {
       config: {
         user: (.Config.User // ""),
@@ -1338,11 +1336,25 @@ write_runtime_contract() {
         map({name:.key, aliases:(.value.Aliases // [] | sort), ip:(.value.IPAddress // ""), ipv6:(.value.GlobalIPv6Address // ""), ipam:(.value.IPAMConfig // null)}) |
         sort_by(.name))
     }
-  ' "$raw" > "$output"; then
-    rm -f -- "$raw"
+  ' "$raw" > "$output"
+}
+
+write_runtime_contract() {
+  local id="$1" output="$2" raw status=0
+  raw="$pin_dir/runtime.$$.${id}.raw.json"
+  create_exclusive_file "$raw" || return 1
+  docker_cli inspect --format '{{json .}}' "$id" > "$raw" || status=$?
+  if [ "$status" -eq 0 ]; then
+    build_runtime_contract_from_raw "$raw" "$output" || status=$?
+  fi
+  if ! rm -f -- "$raw"; then
+    rm -f -- "$output"
     return 1
   fi
-  rm -f -- "$raw" || return 1
+  if [ "$status" -ne 0 ]; then
+    rm -f -- "$output"
+    return "$status"
+  fi
   validate_existing_file "$output" "runtime contract" || return 1
   runtime_contract_hash="$(sha256_file "$output")" || return 1
 }
@@ -1527,7 +1539,8 @@ validate_single_network_ip() {
 
 disconnect_all_networks() {
   local id="$1" networks network
-  networks="$(container_networks "$id")"
+  networks="$(container_networks "$id")" || return 1
+  jq -e 'type == "object"' <<< "$networks" >/dev/null || return 1
   jq -r 'keys[]' <<< "$networks" |
     while IFS= read -r network; do
       [ -n "$network" ] || continue
@@ -1536,8 +1549,8 @@ disconnect_all_networks() {
         return 1
       fi
     done || return 1
-  networks="$(container_networks "$id")"
-  jq -e 'length == 0' <<< "$networks" >/dev/null || { fail "container retained a network after isolation"; return 1; }
+  networks="$(container_networks "$id")" || return 1
+  jq -e 'type == "object" and length == 0' <<< "$networks" >/dev/null || { fail "container retained a network after isolation"; return 1; }
 }
 
 disconnect_candidate_ingress() {

@@ -27,6 +27,28 @@ assert_rejected_with() {
   grep -Eq "$pattern" <<< "$output" || { printf 'FAIL: %s failed for the wrong reason: %s\n' "$label" "$output" >&2; exit 1; }
 }
 
+assert_runtime_builder_rejected() {
+  local label="$1" mode="$2"
+  if (
+    case "$mode" in
+      sha256sum)
+        sha256sum() { printf '%s  -\n' "$runtime_valid_digest"; return 41; }
+        ;;
+      sed)
+        sed() { printf '%s\n' "$runtime_valid_digest"; return 42; }
+        ;;
+      digest)
+        sha256sum() { printf '%s  -\n' invalid; }
+        ;;
+    esac
+    build_runtime_contract_from_raw "$runtime_contract_raw" "$runtime_contract_output"
+  ); then
+    printf 'FAIL: %s was accepted\n' "$label" >&2
+    exit 1
+  fi
+  rm -f -- "$runtime_contract_output"
+}
+
 # Production is deliberately not sourceable. Generate a test-only library copy
 # with the direct-execution guard removed by an exact-cardinality transformer.
 source_test_copy="$test_root/safe-update-source-test.sh"
@@ -108,6 +130,45 @@ validate_source_tree "$pin_dir/source-tree" "nested source tree"
 ln "$pin_dir/source-tree/nested/file" "$pin_dir/source-tree/hardlink"
 assert_rejected "hard-linked source-tree file" validate_source_tree "$pin_dir/source-tree" "hardlink source tree"
 data_uid="10001"; data_gid="10001"
+
+# Runtime environment values are plaintext only in the short-lived raw Docker
+# inspect file. A tool that emits plausible output and then fails must not be
+# accepted, and serializer failure must remove both raw and partial output.
+runtime_valid_digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+runtime_contract_raw="$pin_dir/runtime-contract-input.json"
+runtime_contract_output="$pin_dir/runtime-contract-output.json"
+runtime_real_jq="$(command -v jq)"
+printf '%s\n' '{"Config":{"Env":["SECRET_VALUE=runtime-plaintext-secret"]}}' > "$runtime_contract_raw"
+printf '%s\n' '{"services":{"omni-money":{"environment":{}}}}' > "$pin_dir/runtime-compose.json"
+compose_snapshot="$pin_dir/runtime-compose.json"
+assert_runtime_builder_rejected "sha256sum valid-looking output with failure" sha256sum
+assert_runtime_builder_rejected "sed valid-looking output with failure" sed
+assert_runtime_builder_rejected "non-hex runtime digest" digest
+runtime_cleanup_raw="$pin_dir/runtime.$$.failure-injection.raw.json"
+runtime_cleanup_output="$pin_dir/runtime-cleanup-output.json"
+if (
+  jq() {
+    if [ "${1:-}" = -cn ]; then
+      printf '{"name":"SECRET_VALUE","sha256":"%s"}\n' "$runtime_valid_digest"
+      return 43
+    fi
+    "$runtime_real_jq" "$@"
+  }
+  docker_cli() { printf '%s\n' '{"Config":{"Env":["SECRET_VALUE=runtime-plaintext-secret"]}}'; }
+  write_runtime_contract failure-injection "$runtime_cleanup_output"
+); then
+  echo "FAIL: jq valid-looking output with failure was accepted" >&2; exit 1
+fi
+[ ! -e "$runtime_cleanup_raw" ] && [ ! -e "$runtime_cleanup_output" ] || {
+  echo "FAIL: runtime serialization failure retained plaintext or partial output" >&2; exit 1
+}
+
+if (
+  container_networks() { printf '%s\n' '[]'; }
+  disconnect_all_networks test-container
+); then
+  echo "FAIL: non-object container network state was accepted" >&2; exit 1
+fi
 
 # Realistic util-linux JSON may retain children even when callers request a
 # list. Both a foreign filesystem and a same-device bind can therefore hide
@@ -308,6 +369,10 @@ get() { [ -f "$state_dir/$1" ] && cat "$state_dir/$1" || true; }
 put() { printf '%s' "$2" > "$state_dir/$1"; }
 container_state() { local value; case "$1" in current) value="$(get current_state)";; candidate) value="$(get candidate_state)";; rollback) value="$(get rollback_state)";; *) value=missing;; esac; [ "$value" = absent ] && return 1; printf '%s' "$value"; }
 container_networks() {
+  if [ "$scenario" = network_reinspect_failure ] && [ "$1" = candidate ] && [ "$(get net_$1)" = none ]; then
+    echo '{}'
+    return 31
+  fi
   case "$1:$(get net_$1)" in
     current:connected|candidate:connected|rollback:connected) echo '{"omni-money-pangolin":{"NetworkID":"network-123","IPAddress":"172.30.240.2"}}' ;;
     candidate:extra) echo '{"omni-money-pangolin":{"NetworkID":"network-123","IPAddress":"172.30.240.2"},"unexpected":{}}' ;;
@@ -868,6 +933,7 @@ run_case signal_term 130
 run_case network_reconnect_failure 25
 run_case candidate_ingress_health_failure 1
 run_case network_disconnect_failure 1
+run_case network_reinspect_failure 1
 run_case rollback_failure 1
 run_case rollback_tag_mutation 1
 run_case rollback_journal_failure 1
