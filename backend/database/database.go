@@ -6,6 +6,7 @@ import (
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -870,11 +871,13 @@ func validateCurrentTransactionImagesContext(ctx context.Context, target schemaQ
 		ctx = context.Background()
 	}
 	var definition sql.NullString
-	if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&definition); err != nil || !definition.Valid {
-		return errors.New("current transaction_images definition is unavailable")
+	if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&definition); err != nil {
+		return markSchemaNoRows(err)
+	} else if !definition.Valid {
+		return schemaMismatchf("current transaction_images definition is unavailable")
 	}
 	if canonicalDDL(definition.String) != expectedLedgerTableDefinitions()["transaction_images"] {
-		return errors.New("transaction_images definition is not the current allowlisted DDL")
+		return schemaMismatchf("transaction_images definition is not the current allowlisted DDL")
 	}
 	wantColumns := []expectedColumnDefinition{
 		{name: "id", columnType: "INTEGER", primaryKey: 1},
@@ -894,25 +897,22 @@ func validateCurrentTransactionImagesContext(ctx context.Context, target schemaQ
 		var name, columnType string
 		var defaultValue any
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			_ = rows.Close()
-			return err
+			return errors.Join(err, rows.Close())
 		}
 		if index >= len(wantColumns) {
-			_ = rows.Close()
-			return errors.New("transaction_images has unexpected extra columns")
+			return schemaMismatchRows(schemaMismatchf("transaction_images has unexpected extra columns"), rows)
 		}
 		want := wantColumns[index]
 		if cid != index || name != want.name || strings.ToUpper(columnType) != want.columnType || notNull != want.notNull || primaryKey != want.primaryKey || normalizeColumnDefault(defaultValue) != want.defaultValue {
-			_ = rows.Close()
-			return fmt.Errorf("transaction_images.%s column definition is not current", name)
+			return schemaMismatchRows(schemaMismatchf("transaction_images.%s column definition is not current", name), rows)
 		}
 		index++
 	}
-	if err := rows.Close(); err != nil {
+	if err := closeSchemaRows(rows); err != nil {
 		return err
 	}
 	if index != len(wantColumns) {
-		return errors.New("transaction_images is missing current columns")
+		return schemaMismatchf("transaction_images is missing current columns")
 	}
 
 	rows, err = target.QueryContext(ctx, "PRAGMA foreign_key_list(transaction_images)")
@@ -924,35 +924,56 @@ func validateCurrentTransactionImagesContext(ctx context.Context, target schemaQ
 		var id, seq int
 		var referenced, from, to, onUpdate, onDelete, match string
 		if err := rows.Scan(&id, &seq, &referenced, &from, &to, &onUpdate, &onDelete, &match); err != nil {
-			_ = rows.Close()
-			return err
+			return errors.Join(err, rows.Close())
 		}
 		foreignKeyCount++
 		if foreignKeyCount != 1 || referenced != "transactions" || from != "transaction_id" || to != "id" || strings.ToUpper(onUpdate) != "NO ACTION" || strings.ToUpper(onDelete) != "CASCADE" {
-			_ = rows.Close()
-			return errors.New("transaction_images foreign key definition is not current")
+			return schemaMismatchRows(schemaMismatchf("transaction_images foreign key definition is not current"), rows)
 		}
 	}
-	if err := rows.Close(); err != nil {
+	if err := closeSchemaRows(rows); err != nil {
 		return err
 	}
 	if foreignKeyCount != 1 {
-		return errors.New("transaction_images current foreign key is missing")
+		return schemaMismatchf("transaction_images current foreign key is missing")
 	}
 	rows, err = target.QueryContext(ctx, "PRAGMA foreign_key_check")
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	if rows.Next() {
-		return errors.New("foreign_key_check reported an orphan row")
+		return schemaMismatchRows(schemaMismatchf("foreign_key_check reported an orphan row"), rows)
 	}
-	return rows.Err()
+	iterationErr := rows.Err()
+	closeErr := rows.Close()
+	return errors.Join(iterationErr, closeErr)
 }
 
 type schemaQueryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// closeSchemaRows preserves both an iteration failure and a driver's close
+// failure. database/sql can surface context/I/O failures only from Rows.Err or
+// Rows.Close, so schema checks must not discard either result.
+func closeSchemaRows(rows *sql.Rows) error {
+	if rows == nil {
+		return nil
+	}
+	return errors.Join(rows.Err(), rows.Close())
+}
+
+func schemaMismatchRows(err error, rows *sql.Rows) error {
+	if rows == nil {
+		return markSchemaMismatch(err)
+	}
+	iterationErr := rows.Err()
+	closeErr := rows.Close()
+	if iterationErr != nil || closeErr != nil {
+		return errors.Join(iterationErr, closeErr)
+	}
+	return markSchemaMismatch(err)
 }
 
 func validateCriticalSchema(target schemaQueryer) error {
@@ -987,12 +1008,11 @@ func validateCriticalSchemaContext(ctx context.Context, target schemaQueryer) er
 			var notNull, primaryKey int
 			var defaultValue interface{}
 			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-				_ = rows.Close()
-				return fmt.Errorf("必須列検査スキャンエラー (%s): %w", table, err)
+				return errors.Join(fmt.Errorf("必須列検査スキャンエラー (%s): %w", table, err), rows.Close())
 			}
 			found[name] = struct{}{}
 		}
-		if err := rows.Close(); err != nil {
+		if err := closeSchemaRows(rows); err != nil {
 			return fmt.Errorf("必須列検査クローズエラー (%s): %w", table, err)
 		}
 		for _, name := range required {
@@ -1063,25 +1083,25 @@ func validateLedgerSchemaContextInternal(ctx context.Context, target schemaQuery
 		return err
 	}
 	if version < 0 || version > ledgerSchemaVersion {
-		return fmt.Errorf("unsupported ledger schema version %d", version)
+		return schemaMismatchf("unsupported ledger schema version %d", version)
 	}
 	var identity int64
 	if err := target.QueryRowContext(ctx, "PRAGMA application_id").Scan(&identity); err != nil {
 		return fmt.Errorf("read ledger identity: %w", err)
 	}
 	if identity != 0 && identity != ledgerSchemaIdentity {
-		return fmt.Errorf("database identity %08x is not an Omni Money ledger", identity)
+		return schemaMismatchf("database identity %08x is not an Omni Money ledger", identity)
 	}
 	var userTables int
 	if err := validateInternalSQLiteTablesContext(ctx, target); err != nil {
 		return fmt.Errorf("SQLite internal table validation failed: %w", err)
 	}
 	if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "+sqliteUserTablePredicate).Scan(&userTables); err != nil {
-		return err
+		return markSchemaNoRows(err)
 	}
 	if userTables == 0 {
 		if requireCurrent && version != 0 {
-			return fmt.Errorf("empty database has schema version %d", version)
+			return schemaMismatchf("empty database has schema version %d", version)
 		}
 		return nil
 	}
@@ -1109,7 +1129,7 @@ func validateLedgerSchemaContextInternal(ctx context.Context, target schemaQuery
 		return nil
 	}
 	if version != ledgerSchemaVersion {
-		return fmt.Errorf("schema version %d was not migrated", version)
+		return schemaMismatchf("schema version %d was not migrated", version)
 	}
 	return validateFullLedgerSchemaContext(ctx, target, strictCurrent)
 }
@@ -1332,6 +1352,9 @@ func isSupportedLegacyCurrentLayoutContext(ctx context.Context, target schemaQue
 	}
 	var markerCount int
 	if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE name='omni_legacy_schema_compat'").Scan(&markerCount); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
 		return false, err
 	}
 	if markerCount != 0 {
@@ -1358,13 +1381,23 @@ func isSupportedLegacyCurrentLayoutContext(ctx context.Context, target schemaQue
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
 	var transactionDefinition, imageDefinition sql.NullString
-	if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").Scan(&transactionDefinition); err != nil || !transactionDefinition.Valid {
+	if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").Scan(&transactionDefinition); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	} else if !transactionDefinition.Valid {
 		return false, nil
 	}
 	if canonicalDDL(transactionDefinition.String) != legacyTransactionDefinition {
 		return false, nil
 	}
-	if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&imageDefinition); err != nil || !imageDefinition.Valid {
+	if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&imageDefinition); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	} else if !imageDefinition.Valid {
 		return false, nil
 	}
 	currentImageDefinition := expectedLedgerTableDefinitions()["transaction_images"]
@@ -1387,8 +1420,13 @@ func isSupportedLegacyCurrentLayoutContext(ctx context.Context, target schemaQue
 	// version-2 image whose old transaction tables remain unchanged.
 	for _, table := range []string{"transactions", "transaction_images"} {
 		var count int
-		if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 1 {
+		if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return false, nil
+			}
 			return false, err
+		} else if count != 1 {
+			return false, nil
 		}
 	}
 	return true, nil
@@ -1409,15 +1447,24 @@ func isSupportedLegacyPreMigrationLayoutContext(ctx context.Context, target sche
 	}
 	var extraTables, extraObjects int
 	if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "+sqliteUserTablePredicate+" AND name NOT IN ('transactions', 'transaction_images')").Scan(&extraTables); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
 		return false, err
 	}
 	if err := target.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM sqlite_master
 		WHERE type IN ('index', 'trigger', 'view')
 		  AND (type != 'index' OR sql IS NOT NULL)`).Scan(&extraObjects); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
 		return false, err
 	}
-	return extraTables == 0 && extraObjects == 0, nil
+	if extraTables != 0 || extraObjects != 0 {
+		return false, nil
+	}
+	return true, nil
 }
 
 func isLegacyTransactionImagesLayout(target schemaQueryer) (bool, error) {
@@ -1426,7 +1473,12 @@ func isLegacyTransactionImagesLayout(target schemaQueryer) (bool, error) {
 
 func isLegacyTransactionImagesLayoutContext(ctx context.Context, target schemaQueryer) (bool, error) {
 	var definition sql.NullString
-	if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&definition); err != nil || !definition.Valid {
+	if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='transaction_images'").Scan(&definition); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	} else if !definition.Valid {
 		return false, nil
 	}
 	expected := canonicalDDL(`CREATE TABLE transaction_images (
@@ -1437,7 +1489,10 @@ func isLegacyTransactionImagesLayoutContext(ctx context.Context, target schemaQu
 		mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
-	return canonicalDDL(definition.String) == expected, nil
+	if canonicalDDL(definition.String) != expected {
+		return false, nil
+	}
+	return true, nil
 }
 
 func validateInternalSQLiteTables(target schemaQueryer) error {
@@ -1454,19 +1509,18 @@ func validateInternalSQLiteTablesContext(ctx context.Context, target schemaQuery
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var name string
 		var definition sql.NullString
 		if err := rows.Scan(&name, &definition); err != nil {
-			return err
+			return errors.Join(err, rows.Close())
 		}
 		want, ok := expected[name]
 		if !ok || !definition.Valid || canonicalDDL(definition.String) != want {
-			return fmt.Errorf("unexpected SQLite internal table %s", name)
+			return schemaMismatchRows(schemaMismatchf("unexpected SQLite internal table %s", name), rows)
 		}
 	}
-	return rows.Err()
+	return closeSchemaRows(rows)
 }
 
 func requireColumns(target schemaQueryer, table string, required []string) error {
@@ -1484,17 +1538,16 @@ func requireColumnsContext(ctx context.Context, target schemaQueryer, table stri
 		var name, columnType string
 		var defaultValue any
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			_ = rows.Close()
-			return err
+			return errors.Join(err, rows.Close())
 		}
 		found[name] = true
 	}
-	if err := rows.Close(); err != nil {
+	if err := closeSchemaRows(rows); err != nil {
 		return err
 	}
 	for _, column := range required {
 		if !found[column] {
-			return fmt.Errorf("missing %s.%s", table, column)
+			return schemaMismatchf("missing %s.%s", table, column)
 		}
 	}
 	return nil
@@ -1518,20 +1571,18 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			_ = rows.Close()
-			return err
+			return errors.Join(err, rows.Close())
 		}
 		if !allowedTables[name] {
-			_ = rows.Close()
-			return fmt.Errorf("unexpected ledger table %s", name)
+			return schemaMismatchRows(schemaMismatchf("unexpected ledger table %s", name), rows)
 		}
 		delete(allowedTables, name)
 	}
-	if err := rows.Close(); err != nil {
+	if err := closeSchemaRows(rows); err != nil {
 		return err
 	}
 	if len(allowedTables) != 0 {
-		return errors.New("ledger is missing one or more required tables")
+		return schemaMismatchf("ledger is missing one or more required tables")
 	}
 	requiredColumns := map[string][]string{
 		"transactions":                {"id", "account", "date", "item", "type", "amount", "balance", "memo"},
@@ -1581,24 +1632,22 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 	for persistentRows.Next() {
 		var typ, name string
 		if err := persistentRows.Scan(&typ, &name); err != nil {
-			_ = persistentRows.Close()
-			return err
+			return errors.Join(err, persistentRows.Close())
 		}
 		if _, ok := allowedPersistentObjects[typ+"\x00"+name]; !ok {
-			_ = persistentRows.Close()
-			return fmt.Errorf("unexpected ledger persistent object %s %s", typ, name)
+			return schemaMismatchRows(schemaMismatchf("unexpected ledger persistent object %s %s", typ, name), persistentRows)
 		}
 	}
-	if err := persistentRows.Close(); err != nil {
+	if err := closeSchemaRows(persistentRows); err != nil {
 		return err
 	}
 	for _, object := range objects {
 		var count int
 		if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?", object.typ, object.name).Scan(&count); err != nil {
-			return err
+			return markSchemaNoRows(err)
 		}
 		if count != 1 {
-			return fmt.Errorf("missing required %s %s", object.typ, object.name)
+			return schemaMismatchf("missing required %s %s", object.typ, object.name)
 		}
 	}
 	for table, indexes := range map[string][]string{
@@ -1613,8 +1662,10 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 	} {
 		for _, index := range indexes {
 			var tableName string
-			if err := target.QueryRowContext(ctx, "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?", index).Scan(&tableName); err != nil || tableName != table {
-				return fmt.Errorf("index %s is not attached to %s", index, table)
+			if err := target.QueryRowContext(ctx, "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?", index).Scan(&tableName); err != nil {
+				return markSchemaNoRows(err)
+			} else if tableName != table {
+				return schemaMismatchf("index %s is not attached to %s", index, table)
 			}
 		}
 	}
@@ -1640,11 +1691,13 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 			continue
 		}
 		var definition sql.NullString
-		if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&definition); err != nil || !definition.Valid {
-			return fmt.Errorf("missing definition for %s: %w", table, err)
+		if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&definition); err != nil {
+			return markSchemaNoRows(err)
+		} else if !definition.Valid {
+			return schemaMismatchf("missing definition for %s", table)
 		}
 		if got := canonicalDDL(definition.String); got != expected {
-			return fmt.Errorf("%s definition is not the current allowlisted DDL", table)
+			return schemaMismatchf("%s definition is not the current allowlisted DDL", table)
 		}
 	}
 	type expectedForeignKey struct {
@@ -1685,16 +1738,15 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 			var id, seq int
 			var referenced, from, to, onUpdate, onDelete, match string
 			if err := rows.Scan(&id, &seq, &referenced, &from, &to, &onUpdate, &onDelete, &match); err != nil {
-				_ = rows.Close()
-				return err
+				return errors.Join(err, rows.Close())
 			}
 			actual = append(actual, expectedForeignKey{referenced: referenced, from: from, to: to, onUpdate: strings.ToUpper(onUpdate), onDelete: strings.ToUpper(onDelete)})
 		}
-		if err := rows.Close(); err != nil {
+		if err := closeSchemaRows(rows); err != nil {
 			return err
 		}
 		if len(actual) != len(expected) {
-			return fmt.Errorf("%s has %d expected foreign keys, found %d", table, len(expected), len(actual))
+			return schemaMismatchf("%s has %d expected foreign keys, found %d", table, len(expected), len(actual))
 		}
 		for _, want := range expected {
 			found := false
@@ -1705,7 +1757,7 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 				}
 			}
 			if !found {
-				return fmt.Errorf("%s has an unexpected foreign key", table)
+				return schemaMismatchf("%s has an unexpected foreign key", table)
 			}
 		}
 	}
@@ -1713,11 +1765,10 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	if rows.Next() {
-		return errors.New("foreign_key_check reported an orphan row")
+		return schemaMismatchRows(schemaMismatchf("foreign_key_check reported an orphan row"), rows)
 	}
-	return rows.Err()
+	return closeSchemaRows(rows)
 }
 
 type expectedColumnDefinition struct {
@@ -1809,25 +1860,22 @@ func validateCurrentColumnDefinitionsContext(ctx context.Context, target schemaQ
 			var name, columnType string
 			var defaultValue any
 			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-				_ = rows.Close()
-				return err
+				return errors.Join(err, rows.Close())
 			}
 			if index >= len(want) {
-				_ = rows.Close()
-				return fmt.Errorf("%s has unexpected extra columns", table)
+				return schemaMismatchRows(schemaMismatchf("%s has unexpected extra columns", table), rows)
 			}
 			definition := want[index]
 			if cid != index || name != definition.name || strings.ToUpper(columnType) != definition.columnType || notNull != definition.notNull || primaryKey != definition.primaryKey || normalizeColumnDefault(defaultValue) != definition.defaultValue {
-				_ = rows.Close()
-				return fmt.Errorf("%s.%s column definition is not current", table, name)
+				return schemaMismatchRows(schemaMismatchf("%s.%s column definition is not current", table, name), rows)
 			}
 			index++
 		}
-		if err := rows.Close(); err != nil {
+		if err := closeSchemaRows(rows); err != nil {
 			return err
 		}
 		if index != len(want) {
-			return fmt.Errorf("%s is missing current columns", table)
+			return schemaMismatchf("%s is missing current columns", table)
 		}
 	}
 	return nil
@@ -1910,11 +1958,13 @@ func validateTriggerDefinitionsContext(ctx context.Context, target schemaQueryer
 	}
 	for name, expectedDDL := range expected {
 		var definition sql.NullString
-		if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", name).Scan(&definition); err != nil || !definition.Valid {
-			return fmt.Errorf("trigger %s definition is unavailable: %w", name, err)
+		if err := target.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", name).Scan(&definition); err != nil {
+			return markSchemaNoRows(err)
+		} else if !definition.Valid {
+			return schemaMismatchf("trigger %s definition is unavailable", name)
 		}
 		if got := canonicalDDL(definition.String); got != expectedDDL {
-			return fmt.Errorf("trigger %s definition is not the current allowlisted DDL", name)
+			return schemaMismatchf("trigger %s definition is not the current allowlisted DDL", name)
 		}
 	}
 	return nil
@@ -2004,13 +2054,13 @@ func validateIndexShapesContext(ctx context.Context, target schemaQueryer) error
 		var tableName string
 		var definition sql.NullString
 		if err := target.QueryRowContext(ctx, "SELECT tbl_name, sql FROM sqlite_master WHERE type='index' AND name=?", name).Scan(&tableName, &definition); err != nil {
-			return fmt.Errorf("index %s definition is unavailable: %w", name, err)
+			return markSchemaNoRows(err)
 		}
 		if tableName != want.table {
-			return fmt.Errorf("index %s is attached to %s, want %s", name, tableName, want.table)
+			return schemaMismatchf("index %s is attached to %s, want %s", name, tableName, want.table)
 		}
 		if !definition.Valid || canonicalDDL(definition.String) != canonicalDDL(want.ddl) {
-			return fmt.Errorf("index %s DDL is not the current allowlisted definition", name)
+			return schemaMismatchf("index %s DDL is not the current allowlisted definition", name)
 		}
 		rows, err := target.QueryContext(ctx, "PRAGMA index_list("+want.table+")")
 		if err != nil {
@@ -2021,18 +2071,17 @@ func validateIndexShapesContext(ctx context.Context, target schemaQueryer) error
 			var seq, unique, partial int
 			var indexName, origin string
 			if err := rows.Scan(&seq, &indexName, &unique, &origin, &partial); err != nil {
-				_ = rows.Close()
-				return err
+				return errors.Join(err, rows.Close())
 			}
 			if indexName == name {
 				found = unique == boolToInt(want.unique) && partial == boolToInt(want.partial)
 			}
 		}
-		if err := rows.Close(); err != nil {
+		if err := closeSchemaRows(rows); err != nil {
 			return err
 		}
 		if !found {
-			return fmt.Errorf("index %s has unexpected uniqueness", name)
+			return schemaMismatchf("index %s has unexpected uniqueness", name)
 		}
 		rows, err = target.QueryContext(ctx, "PRAGMA index_xinfo("+strconv.Quote(name)+")")
 		if err != nil {
@@ -2043,27 +2092,25 @@ func validateIndexShapesContext(ctx context.Context, target schemaQueryer) error
 			var seq, cid, descending, key int
 			var column, collation sql.NullString
 			if err := rows.Scan(&seq, &cid, &column, &descending, &collation, &key); err != nil {
-				_ = rows.Close()
-				return err
+				return errors.Join(err, rows.Close())
 			}
 			if key == 0 {
 				continue
 			}
 			if seq != len(columns) || descending != 0 || !column.Valid || !collation.Valid || !strings.EqualFold(collation.String, "BINARY") {
-				_ = rows.Close()
-				return fmt.Errorf("index %s has unexpected collation or sort order", name)
+				return schemaMismatchRows(schemaMismatchf("index %s has unexpected collation or sort order", name), rows)
 			}
 			columns = append(columns, column.String)
 		}
-		if err := rows.Close(); err != nil {
+		if err := closeSchemaRows(rows); err != nil {
 			return err
 		}
 		if len(columns) != len(want.cols) {
-			return fmt.Errorf("index %s has unexpected column count", name)
+			return schemaMismatchf("index %s has unexpected column count", name)
 		}
 		for index := range want.cols {
 			if columns[index] != want.cols[index] {
-				return fmt.Errorf("index %s column order is invalid", name)
+				return schemaMismatchf("index %s column order is invalid", name)
 			}
 		}
 	}
@@ -2091,14 +2138,14 @@ func validateRootTagIndexContext(ctx context.Context, target schemaQueryer) erro
 	if err := target.QueryRowContext(ctx, `
 		SELECT type, tbl_name, sql FROM sqlite_master
 		WHERE type = 'index' AND name = 'idx_tags_root_name_unique'`).Scan(&objectType, &tableName, &definition); err != nil {
-		return fmt.Errorf("rootタグ一意index定義の検査に失敗しました: %w", err)
+		return markSchemaNoRows(err)
 	}
 	if objectType != "index" || tableName != "tags" || !definition.Valid {
-		return fmt.Errorf("rootタグ一意indexの対象が不正です")
+		return schemaMismatchf("rootタグ一意indexの対象が不正です")
 	}
 	canonicalDefinition := canonicalDDL(definition.String)
 	if canonicalDefinition != canonicalDDL("create unique index idx_tags_root_name_unique on tags(name) where parent_id is null and legacy_duplicate = 0") {
-		return fmt.Errorf("rootタグ一意indexの定義が不正です: %q", definition.String)
+		return schemaMismatchf("rootタグ一意indexの定義が不正です: %q", definition.String)
 	}
 
 	rows, err := target.QueryContext(ctx, "PRAGMA index_list(tags)")
@@ -2110,22 +2157,20 @@ func validateRootTagIndexContext(ctx context.Context, target schemaQueryer) erro
 		var seq, unique, partial int
 		var name, origin string
 		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("rootタグ一意index属性の読み取りに失敗しました: %w", err)
+			return errors.Join(fmt.Errorf("rootタグ一意index属性の読み取りに失敗しました: %w", err), rows.Close())
 		}
 		if name == "idx_tags_root_name_unique" {
 			if unique != 1 || partial != 1 {
-				_ = rows.Close()
-				return fmt.Errorf("rootタグ一意indexはunique partialでなければなりません")
+				return schemaMismatchRows(schemaMismatchf("rootタグ一意indexはunique partialでなければなりません"), rows)
 			}
 			found = true
 		}
 	}
-	if err := rows.Close(); err != nil {
+	if err := closeSchemaRows(rows); err != nil {
 		return fmt.Errorf("rootタグ一意index属性の終了に失敗しました: %w", err)
 	}
 	if !found {
-		return fmt.Errorf("rootタグ一意indexがindex_listにありません")
+		return schemaMismatchf("rootタグ一意indexがindex_listにありません")
 	}
 
 	rows, err = target.QueryContext(ctx, `PRAGMA index_info("idx_tags_root_name_unique")`)
@@ -2137,20 +2182,18 @@ func validateRootTagIndexContext(ctx context.Context, target schemaQueryer) erro
 		var seq, cid int
 		var column string
 		if err := rows.Scan(&seq, &cid, &column); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("rootタグ一意index列の読み取りに失敗しました: %w", err)
+			return errors.Join(fmt.Errorf("rootタグ一意index列の読み取りに失敗しました: %w", err), rows.Close())
 		}
 		columns++
 		if columns != 1 || column != "name" {
-			_ = rows.Close()
-			return fmt.Errorf("rootタグ一意indexの列がnameではありません")
+			return schemaMismatchRows(schemaMismatchf("rootタグ一意indexの列がnameではありません"), rows)
 		}
 	}
-	if err := rows.Close(); err != nil {
+	if err := closeSchemaRows(rows); err != nil {
 		return fmt.Errorf("rootタグ一意index列の終了に失敗しました: %w", err)
 	}
 	if columns != 1 {
-		return fmt.Errorf("rootタグ一意indexの列数が不正です: %d", columns)
+		return schemaMismatchf("rootタグ一意indexの列数が不正です: %d", columns)
 	}
 	return nil
 }
@@ -2844,6 +2887,56 @@ func invalidSnapshotContentError(err error) bool {
 
 var errInvalidSnapshotContent = errors.New("invalid snapshot content")
 
+// schemaMismatchError marks a deterministic schema/content mismatch without
+// classifying arbitrary database-driver failures as invalid snapshot data.
+// Its cause is retained so callers can still inspect sql.ErrNoRows or a
+// concrete driver error when validation is used outside snapshot listing.
+type schemaMismatchError struct {
+	cause error
+}
+
+func (e *schemaMismatchError) Error() string { return e.cause.Error() }
+func (e *schemaMismatchError) Unwrap() error { return e.cause }
+
+func markSchemaMismatch(err error) error {
+	if err == nil {
+		return nil
+	}
+	var mismatch *schemaMismatchError
+	if errors.As(err, &mismatch) {
+		return err
+	}
+	return &schemaMismatchError{cause: err}
+}
+
+func schemaMismatchf(format string, args ...any) error {
+	return markSchemaMismatch(fmt.Errorf(format, args...))
+}
+
+func markSchemaNoRows(err error) error {
+	if errors.Is(err, sql.ErrNoRows) {
+		return markSchemaMismatch(err)
+	}
+	return err
+}
+
+func snapshotSchemaInvalidContent(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, sql.ErrNoRows) || func() bool {
+		var mismatch *schemaMismatchError
+		return errors.As(err, &mismatch)
+	}()
+}
+
+func wrapInvalidSnapshotContent(err error) error {
+	if err == nil {
+		return errInvalidSnapshotContent
+	}
+	return fmt.Errorf("%w: %w", errInvalidSnapshotContent, err)
+}
+
 func sameSnapshotInfo(a, b os.FileInfo) bool {
 	return a != nil && b != nil && os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime()) && a.Mode().Perm() == b.Mode().Perm()
 }
@@ -2909,22 +3002,22 @@ func (i *Instance) validateSnapshotDatabaseContextHeaderValidated(ctx context.Co
 	}
 	if err := i.checkIntegrityContext(ctx, target); err != nil {
 		if snapshotValidationInfrastructureError(err) {
-			return err
+			return fmt.Errorf("snapshot integrity validation: %w", err)
 		}
-		return fmt.Errorf("%w: integrity: %v", errInvalidSnapshotContent, err)
+		return wrapInvalidSnapshotContent(fmt.Errorf("integrity: %w", err))
 	}
 	var userTables int
 	if err := validateInternalSQLiteTablesContext(ctx, target); err != nil {
-		if snapshotValidationInfrastructureError(err) {
-			return fmt.Errorf("SQLite internal table validation failed: %w", err)
+		if snapshotSchemaInvalidContent(err) {
+			return wrapInvalidSnapshotContent(fmt.Errorf("SQLite internal table validation: %w", err))
 		}
-		return fmt.Errorf("%w: SQLite internal table validation failed: %v", errInvalidSnapshotContent, err)
+		return fmt.Errorf("SQLite internal table validation failed: %w", err)
 	}
 	if err := target.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "+sqliteUserTablePredicate).Scan(&userTables); err != nil {
-		if snapshotValidationInfrastructureError(err) {
-			return err
+		if errors.Is(err, sql.ErrNoRows) {
+			return wrapInvalidSnapshotContent(err)
 		}
-		return fmt.Errorf("%w: table count: %v", errInvalidSnapshotContent, err)
+		return fmt.Errorf("snapshot table count validation: %w", err)
 	}
 	if userTables == 0 {
 		return fmt.Errorf("%w: empty database is not a ledger snapshot", errInvalidSnapshotContent)
@@ -2933,10 +3026,10 @@ func (i *Instance) validateSnapshotDatabaseContextHeaderValidated(ctx context.Co
 		return err
 	}
 	if err := validateLedgerSchemaContext(ctx, target, false); err != nil {
-		if snapshotValidationInfrastructureError(err) {
-			return err
+		if snapshotSchemaInvalidContent(err) {
+			return wrapInvalidSnapshotContent(fmt.Errorf("ledger schema: %w", err))
 		}
-		return fmt.Errorf("%w: ledger schema: %v", errInvalidSnapshotContent, err)
+		return fmt.Errorf("ledger schema validation failed: %w", err)
 	}
 	return nil
 }
@@ -2945,7 +3038,7 @@ func snapshotValidationInfrastructureError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, driver.ErrBadConn) {
 		return true
 	}
 	var sqliteErr sqlite3.Error

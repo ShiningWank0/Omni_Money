@@ -134,6 +134,9 @@ This design protects stopped databases, snapshots, copied files, and the product
 application-level administrator boundary. It also prevents accidental cross-user
 database selection in normal server handlers.
 
+The snapshot threat model assumes a single writer per service and UID. Ciphertext
+replay or replacement by that same service UID is outside this boundary.
+
 It cannot protect an unlocked vault from an operating-system administrator or
 malware that can replace the server binary, inspect process memory, inject code,
 or capture a user's password. Defending against a malicious hosting operator
