@@ -13,9 +13,10 @@ export function isValidDesktopIdleMinutes(value) {
     value <= DESKTOP_IDLE_MAX_MINUTES
 }
 
-export function loadDesktopIdleMinutes(storage = globalThis.localStorage) {
+export function loadDesktopIdleMinutes(storage) {
   try {
-    const parsed = JSON.parse(storage.getItem(DESKTOP_IDLE_STORAGE_KEY))
+    const resolvedStorage = storage === undefined ? globalThis.localStorage : storage
+    const parsed = JSON.parse(resolvedStorage.getItem(DESKTOP_IDLE_STORAGE_KEY))
     if (parsed?.version === STORAGE_VERSION && isValidDesktopIdleMinutes(parsed.minutes)) {
       return parsed.minutes
     }
@@ -26,10 +27,11 @@ export function loadDesktopIdleMinutes(storage = globalThis.localStorage) {
   return DESKTOP_IDLE_DEFAULT_MINUTES
 }
 
-export function saveDesktopIdleMinutes(minutes, storage = globalThis.localStorage) {
+export function saveDesktopIdleMinutes(minutes, storage) {
   if (!isValidDesktopIdleMinutes(minutes)) return false
   try {
-    storage.setItem(DESKTOP_IDLE_STORAGE_KEY, JSON.stringify({
+    const resolvedStorage = storage === undefined ? globalThis.localStorage : storage
+    resolvedStorage.setItem(DESKTOP_IDLE_STORAGE_KEY, JSON.stringify({
       version: STORAGE_VERSION,
       minutes
     }))

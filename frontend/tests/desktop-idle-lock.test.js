@@ -55,6 +55,19 @@ function harness() {
   }
 }
 
+function withThrowingLocalStorage(callback) {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    get() { throw new Error('denied') }
+  })
+  try {
+    return callback()
+  } finally {
+    Object.defineProperty(globalThis, 'localStorage', descriptor)
+  }
+}
+
 test('desktop idle preference accepts only integer minutes from 5 through 120', () => {
   for (const value of [5, 15, 120]) assert.equal(isValidDesktopIdleMinutes(value), true)
   for (const value of [4, 121, 5.5, '15', null]) assert.equal(isValidDesktopIdleMinutes(value), false)
@@ -77,6 +90,17 @@ test('preference is versioned and invalid or unreadable storage falls back to 15
   const unavailable = { getItem() { throw new Error('denied') }, setItem() { throw new Error('denied') } }
   assert.equal(loadDesktopIdleMinutes(unavailable), DESKTOP_IDLE_DEFAULT_MINUTES)
   assert.equal(saveDesktopIdleMinutes(15, unavailable), false)
+})
+
+test('loading falls back when the default localStorage getter throws', () => {
+  assert.equal(
+    withThrowingLocalStorage(() => loadDesktopIdleMinutes()),
+    DESKTOP_IDLE_DEFAULT_MINUTES
+  )
+})
+
+test('saving fails when the default localStorage getter throws', () => {
+  assert.equal(withThrowingLocalStorage(() => saveDesktopIdleMinutes(15)), false)
 })
 
 test('only visible trusted allowed events refresh activity and movement is leading-throttled', () => {
