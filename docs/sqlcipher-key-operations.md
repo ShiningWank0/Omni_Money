@@ -12,10 +12,11 @@ control database用に32 byteのランダム鍵を16進数またはBase64で秘�
 umask 077
 mkdir -p secrets
 openssl rand -hex 32 > secrets/control-database.key
-chmod 600 secrets/control-database.key
+sudo chown root:10001 secrets/control-database.key
+sudo chmod 440 secrets/control-database.key
 ```
 
-Composeでは `.env` の `OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE` をホスト側secretへ設定します。コンテナ内の標準mount先は `/run/secrets/omni_control_database_key` です。native Linuxのbind mountでは固定service UID/GID `10001:10001`所有・`0400`にして、container以外の一般userから読めないようにします。
+Composeでは `.env` の `OMNI_CONTROL_DB_ENCRYPTION_KEY_FILE` をホスト側secretへ設定します。コンテナ内の標準mount先は `/run/secrets/omni_control_database_key` です。native Linuxのbind mountでは root所有・service group `10001`・`0440`（`root:10001`）にして、containerの固定service UID/GIDだけが読めるようにします。safe-updateはこのowner/modeとdevice/inode/link count/hashを固定します。
 
 ```yaml
 services:

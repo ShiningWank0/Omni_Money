@@ -222,22 +222,24 @@ Colima、LAN 公開、TrueNAS Custom App の手順は[利用ガイド](docs/how-
 
 ```bash
 cp .env.example .env
-# .env の ALLOWED_HOSTS、TRUSTED_PROXIES、OMNI_DATA_DIR、attestation、
+# .env の ALLOWED_HOSTS、TRUSTED_PROXIES、OMNI_DATA_DIR、at-rest/update attestation、
 # control key、initial-admin setup tokenのpathを編集
 umask 077
 mkdir -p ./data ./secrets
 test -s ./secrets/control-database.key || openssl rand -hex 32 > ./secrets/control-database.key
 test -s ./secrets/initial-admin-setup.token || \
   openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n' > ./secrets/initial-admin-setup.token
-sudo chown 10001:10001 ./data ./secrets/control-database.key ./secrets/initial-admin-setup.token
+sudo chown 10001:10001 ./data ./secrets/initial-admin-setup.token
+sudo chown root:10001 ./secrets/control-database.key
 sudo chown root:root ./secrets/omni_data_at_rest.json
 sudo chmod 700 ./data
-sudo chmod 400 ./secrets/control-database.key ./secrets/initial-admin-setup.token
+sudo chmod 440 ./secrets/control-database.key
+sudo chmod 400 ./secrets/initial-admin-setup.token
 sudo chmod 444 ./secrets/omni_data_at_rest.json
 docker compose -f compose.yaml -f compose.bootstrap.yaml up -d --build
 ```
 
-ネイティブLinuxでbind mountを使う場合、初回起動前に`./data`と秘密ファイルをコンテナの固定UID/GID `10001:10001`へ設定してください。dataは`0700`、control keyとsetup tokenは`0400`にします。非秘密のattestationはroot所有`0444`にします。TrueNASでは同等のACLを設定します。`chmod 777`やPrivileged modeは使いません。
+ネイティブLinuxでbind mountを使う場合、初回起動前に`./data`を固定UID/GID `10001:10001`へ設定し、control keyは`root:10001`・`0440`、setup tokenは`10001:10001`・`0400`、非秘密のattestationは`root:root`・`0444`にします。safe-updateのhost secret contractもこのowner/modeとdevice/inode/hashを固定し、差替えを拒否します。TrueNASでは同等のACLを設定します。`chmod 777`やPrivileged modeは使いません。
 
 ローカル端末だけから試す場合は、閉じたbase構成にloopback公開を重ねます。
 
@@ -253,7 +255,7 @@ docker compose -f compose.yaml -f compose.local.yaml up -d --force-recreate
 
 Composeはコンテナのroot filesystemをread-onlyにし、Linux capabilityをすべて削除して、権限昇格を禁止します。永続的に書き込めるアプリ領域は `/app/data` だけです。SQLiteの一時ファイルには再起動で消える `/tmp` tmpfsを使い、CPU・memory・PIDにも上限を設定します。既定値は `.env.example` の `OMNI_CPU_LIMIT`、`OMNI_MEMORY_LIMIT`、`OMNI_PIDS_LIMIT`、`OMNI_TMPFS_SIZE` で調整できます。上限を下げる場合は、最大サイズの画像処理やCSV取込を実データ量で検証してください。
 
-本番更新では固定version imageと[safe update手順](docs/safe-update.md)を使用してください。更新前のoffline checkpoint、ingressから隔離したhealthcheck、更新失敗時だけの旧data/image復元を自動化しています。`latest`を直接deployしたり、`down -v`を使ったりしないでください。
+本番更新では固定version imageと[safe update手順](docs/safe-update.md)を使用してください。更新前のoffline checkpoint、ingressから隔離したhealthcheck、更新失敗時だけの旧data/image復元を自動化しています。checkpoint rootはattested data mountから導出した固定pathへ限定し、Compose env fileも更新処理と完全に一致させます。`latest`を直接deployしたり、`down -v`を使ったりしないでください。
 
 TrueNAS Custom Appでは `compose.yaml` 相当の設定を使い、次を守ってください。
 
