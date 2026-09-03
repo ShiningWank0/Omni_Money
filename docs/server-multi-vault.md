@@ -5,6 +5,12 @@ An application administrator can manage accounts, invitations, disabled state, a
 server settings, but does not receive another user's vault key and cannot use an
 administration API to open another user's ledger.
 
+Both Desktop and multi-user server production modes currently provide no AI
+capability. The production server returns 404 for `/api/v1/ai/*` and
+`/api/ai-console/*`, and rejects legacy AI environment variables at startup.
+Per-user AI is Stage 4 planned/unshipped; dormant source packages are not a
+production feature.
+
 ## Storage layout
 
 ```text
@@ -118,8 +124,18 @@ Per-user snapshots are exposed only through the authenticated user's bound
 request lease. `GET` and `POST /api/snapshots` never accept a user ID, vault ID,
 path, or directory and return basenames only. Each snapshot is made with the
 same per-vault SQLCipher DEK as `ledger.db`; it is ciphertext suitable for an
-off-host encrypted backup, not a plaintext export. Retention is bounded by 30
-generations and `SNAPSHOT_MAX_TOTAL_BYTES`.
+off-host encrypted backup, not a plaintext export.
+
+Successful ledger mutation paths exposed through the vault-bound `core.Service`
+schedule an asynchronous snapshot. Bursts are coalesced into at most one
+follow-up run. The common manual/automatic create path prunes to 30 generations
+and `SNAPSHOT_MAX_TOTAL_BYTES` before returning, and the automatic worker also
+runs a follow-up cleanup. This is mutation-triggered automation, not a
+configurable wall-clock schedule; there is no product UI for timing, retention
+policy, or failure notification. An application Admin/API cannot list, decrypt,
+or restore another user's plaintext snapshots, but the same service UID, host
+root/operator, replaceable binary, and process memory remain inside the hosting
+trust boundary.
 
 Restore is a high-impact operation requiring CSRF and recent reauthentication.
 The exact restore route first authenticates the current user without borrowing
@@ -129,7 +145,7 @@ atomically validates and swaps the candidate database, and closes/zeroizes the
 instance. A restore never affects another user's vault. The browser is forced
 to log in again after either a successful restore or a failed restore attempt.
 An application administrator may manage accounts, but cannot list, decrypt, or
-restore another user's snapshots.
+restore another user's snapshots through the application boundary.
 
 ## Threat boundary
 
@@ -156,14 +172,17 @@ The multi-vault change is intentionally split into reviewable stages:
    session/request vault lease ownership;
 3. first-admin HTTP bootstrap, invitations, login/recovery/reset, production
    route selection, account-only admin UI, and authenticated per-user snapshots;
-4. per-user AI credentials bound cryptographically to their owner vault;
+4. per-user AI credentials bound cryptographically to their owner vault
+   (planned/unshipped; production AI remains disabled);
 5. the desktop single-user vault setup, unlock, recovery, and lock lifecycle.
 
 ## Snapshot restore drill
 
-Back up only the encrypted `snapshots/` files to an off-host encrypted backup
-system. During a drill, copy the ciphertext and the user's recovery material
-to an isolated data root, start the server without exposing it, and verify a
+An encrypted snapshot alone is not a DR set. Back up the control DB and control
+key, each vault and its encrypted snapshots, volume key/recovery material and
+attestation/restore procedure, and each user's recovery code to separate safe
+locations. During a drill, copy the complete set to an isolated data root,
+start the server without exposing it, and verify a
 known transaction, image, tag, `PRAGMA integrity_check`, current schema
 migration, and critical indexes/triggers. Exercise a corrupt file, a wrong-key
 file, and a rollback failure. Keep the original snapshot unchanged. After a

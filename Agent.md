@@ -1,10 +1,27 @@
-# Agent.md: Server Money (Next Gen) 開発仕様書
+# Agent.md: Omni Money 開発・運用仕様（現行契約）
 
-本資料は、家計簿アプリケーション「Server Money」の次世代版である「Omni Money」を開発するためのAIエージェント向け詳細仕様書である。本仕様書に記載された設計方針、機能要件、およびフォルダ構成に厳密に従って、自律的に実装を進めること。
+本資料は Omni Money の現行実装と運用境界を示す。実装の真実は Go/Vue ソース、`compose.yaml`、`.env.example`、Dockerfile、CI workflow とする。旧設計と `legacy_reference/` は参照専用であり、production capability ではない。
+
+### 現行モード契約
+
+| Capability | Desktop | multi-user server |
+| --- | --- | --- |
+| Ledger / credential lifecycle | Wails、roleなしの単一 local vault、password/recovery、idle lock | Docker/headless、control DBとuser vault分離、Argon2id envelope、invite/reset、role、passkey、session/vault lease |
+| CSV v3 | transactions/images/tags/links/ledger settingsを含む平文full ledger | 同左。auth/control/key、snapshot、volume recoveryは含まない |
+| Snapshot | local vaultの手動create/list/restore API。SQLCipher暗号文 | 本人のrequest leaseに束縛された手動create/list/restore API。同じvault DEKの暗号文 |
+| Automatic snapshot | `core.Service`のledger mutation成功後に非同期作成。burst coalesce、30世代/容量上限。時刻・retention設定/失敗通知UIなし | 同左。user vault単位で作成 |
+| AI | production 非提供 | production 非提供。旧AI設定は列挙分を起動拒否 |
+| Schema / legacy migration | schema migrationと明示的な旧root DB移行 | schema migrationのみ。旧single-DB serverからmulti-userへの自動移行は非提供、CSV v3による手動移行が必要 |
+| safe-update | server用safe-update対象外。固定artifactをrelease workflowで検証 | project `omni-money` のcompose/env/digestを固定検証し、固定imageをatomic更新 |
+
+server の金融 API は authenticated principal に束縛された vault lease のみを受け取り、Desktop/global DBへfallbackしない。`/api/v1/ai/*` と `/api/ai-console/*` はproductionで404、feature statusのAIはfalseである。
+
+現行の責務は `backend/api`（router/CSV/snapshot）、`backend/control`（identity/role/envelope metadata）、`backend/core`（vault-bound service）、`backend/database`（ledger/CSV/snapshot lifecycle）、`backend/desktopaccount`（local lifecycle）、`backend/keyenvelope`（Argon2id/AES-GCM）、`backend/serverauth`、`backend/securedb`、`backend/vault`（lease/drain）に分かれる。`frontend/src` はUIとDesktop idle-lock、`scripts` は固定SQLCipherとsafe-update、`legacy_reference` は非実行参照、`compose*.yaml` と `Dockerfile` はserver配備を担当する。
+
+`core.Service` は各Desktop/server vault instanceの `StartAutoSnapshot` に束縛され、財務mutation成功後に非同期snapshotを作成する。これはwall-clock schedulerではなく、時刻・retention policy・失敗通知を利用者が設定する製品機能はない。
 
 ## 1. プロジェクト概要
-既存のPythonを基盤としたWeb家計簿アプリを、Go言語およびVue.jsを用いて完全に書き換える。
-利用者の端末上で動く「デスクトップアプリケーション」としての動作と、Dockerコンテナを用いた「サーバー単独（ヘッドレス）動作」の両立を目的とする。
+Go/Vueで構成された ledger を、利用者端末の Desktop と Docker/headless の multi-user server の2モードで提供する。旧Python版は `legacy_reference/` の参照資料に限る。
 
 * **画面側（フロントエンド）**: Vue.js 3 (Composition API)
 * **サーバー側（バックエンド）**: Go
@@ -16,9 +33,9 @@
 本計画は、主軸のコードを破壊しないよう、以下の手順に従って安全に開発を進めること。
 
 1. **複数作業領域（git worktree）の活用**: AIエージェントの自律的な開発や検証においては、`git worktree` を積極的に使用すること。これにより、主軸（`main` ブランチ）の作業状態を汚染することなく、複数の分岐（ブランチ）での作業を安全に並行して進める。
-2. **分岐（ブランチ）の作成**: 機能ごと、または課題（Issue）ごとに `feature/xxx` ブランチを作成する（必要に応じて `git worktree add` を使用）。`gh`コマンドはインストール済み。
+2. **分岐（ブランチ）の作成**: 利用者が指定したworktree/branchだけを使用する。勝手なbranch作成・自動merge・GitHub操作は行わず、`gh`を前提にしない。
 3. **実装**: 仕様に基づきプログラムを作成する。
-4. **変更要求（Pull Request / PR）の作成**: 実装が完了したら `main` ブランチに対して変更要求を作成する。
+4. **変更要求（Pull Request / PR）の作成**: 利用者から明示的に依頼された場合だけ、指定のGitHub連携手段で行う。
 5. **確認（レビュー）と修正**: 人間による確認を受け、必要に応じて修正を行う。
 6. **統合（マージ）**: 承認後、`main` ブランチに統合する。
 * **注意**: 直接 `main` ブランチへ変更を確定（コミット）してはならない。必ず変更要求を経由すること。
@@ -26,13 +43,8 @@
 ## 3. 構造と動作方式（アーキテクチャと動作モード）
 一つのソースコード群から、以下の2つの動作方式を構築できるように設計すること。
 
-1. **デスクトップアプリモード (Wails)**
-   - Wailsの機能を利用し、OS標準のウィンドウでVue.jsの画面を描画する。
-   - アプリケーション起動時に、使用端末内のSQLiteデータベースに接続する。
-2. **サーバーモード (Docker / Headless)**
-   - Wailsの画面表示（GUI）機能は無効化し、Goの標準機能を用いたWebサーバーとして動作させる。
-   - Vue.jsの構築成果物（静的ファイル）を配信し、ブラウザからの接続を受け付ける。
-   - RESTful APIを提供し、ブラウザからの操作を受け付ける。
+1. **Desktop (Wails)**: OS標準windowでVue UIを表示する。single local vaultとして起動時はlocked、password/recoveryとidle-lockでvaultを開く。
+2. **multi-user server (Docker/headless)**: Wailsを使わずVue静的成果物とHTTP APIを配信する。control DB、user vault、session/vault leaseを分離し、全金融APIをauthenticated principalへ束縛する。
 
 ## 4. フォルダ構成
 役割を明確に分離し、既存の参照用コードと混同しないよう、以下の構成を厳守して実装すること。
@@ -44,9 +56,15 @@
 ├── backend/               # Go言語 サーバー側（バックエンド）
 │   ├── api/               # APIの接続口定義、通信経路（ルーティング）
 │   ├── core/              # アプリケーションの主要な論理処理（ビジネスロジック）
-│   ├── database/          # SQLite接続、初期化、状態保存（スナップショット）自動作成処理
+│   ├── database/          # SQLite接続、ledger、CSV、snapshot lifecycle
+│   ├── control/           # server identity、role、session metadata、key envelope
+│   ├── desktopaccount/    # Desktop local password/recovery/lock lifecycle
+│   ├── keyenvelope/       # Argon2id、AES-GCM、password/recovery/passkey envelope
+│   ├── serverauth/        # server password/passkey/invite/reset authentication
+│   ├── securedb/          # SQLCipher open/validation
+│   ├── vault/             # per-user vault manager、lease、drain、zeroize
 │   ├── models/            # データベースの構造定義（ORMモデル）
-│   └── middleware/        # 認証、AI用APIの接続制御
+│   └── middleware/        # session、CSRF、proxy、rate/security boundary
 ├── frontend/              # Vue.js 画面側（フロントエンド）
 │   ├── src/
 │   │   ├── assets/        # 既存アプリから引き継ぐCSS、画像
@@ -55,14 +73,14 @@
 │   │   ├── store/         # 状態管理（口座選択状態などの保持）
 │   │   └── utils/         # 通信処理などの補助機能
 │   └── package.json
-├── legacy_reference/      # 【参照専用】旧アプリのソースコード（ここから既存の仕様を解析する）
+├── legacy_reference/      # 参照専用。productionに組み込まない
 ├── build/                 # Wails用のアイコン等 構築用資材
 ├── Dockerfile             # サーバーモード用のコンテナ定義
 ├── VERSION                # アプリバージョン（セマンティックバージョニング、CI/CDトリガー）
 ├── main.go                # Wailsアプリ用の起動地点
 ├── server.go              # サーバーモード（Docker）用の起動地点
 ├── wails.json             # Wails設定ファイル
-└── Agent.md               # 本仕様書
+└── Agent.md               # 現行仕様
 
 ```
 
@@ -89,7 +107,7 @@
 
 * **クレジットカード機能**: クレジットカードとして登録した項目は、残高計算およびグラフ表示から除外する機能を維持すること。
 * **取引記録**: 日時、項目、金額、種別（収入・支出）の正確な記録と保持。
-* **データ管理**: 取引履歴の検索（項目名およびメモの両方を対象とする）、手動でのCSV形式の控え作成（バックアップ）および取り込み（インポート）機能。旧アプリのバックアップCSV（`id,account,date,item,type,amount,balance`）は取り込み可能とし、`id` と `balance` は現行DB側で採番・再計算する。
+* **データ管理**: 取引履歴の検索、手動CSV v3 full-ledger export/importを維持する。v3はtransactions/images/tags/links/ledger settingsを含むが常に平文で、auth/control/key、snapshot、volume recovery materialは含まない。v1/v2はappend互換のみで、replaceは拒否する。
 * **複数口座管理**: 金融項目を複数登録し、画面上で任意の個数を選択して表示・合算する機能。
 
 ### 6.2. 新規追加機能
@@ -103,32 +121,15 @@
   * 銀行口座項目は紐付け候補の分類にのみ使い、クレジットカード項目のように残高計算・残高推移から除外してはならない。
   * 取引更新や設定変更により既存の紐付けがこの条件を満たさなくなった場合は、不正な紐付けを削除して整合性を維持する。
 
-* **自動状態保存（スナップショット）機能**:
-  * `backend/database/` 内に定期実行処理を実装する。
-  * 1日1回など、定期的にSQLiteファイルの控えを自動で作成し、世代管理（例：過去30日分を残す）を行う。
-  * 画面上に「スナップショット管理」画面を設け、過去の状態へデータを復元（ロールバック）できるようにする。
+### 6.3. スナップショット（手動APIとmutation連動）
 
+Desktopとserverは手動create/list/restoreを提供し、`core.Service` が公開するledger mutationの成功後にはbound vault instanceの自動snapshotを非同期作成する。burst中は最大1回のfollow-upへcoalesceする。手動・自動とも共通のcreate処理が返却前に30世代と `SNAPSHOT_MAX_TOTAL_BYTES` の範囲へpruneし、自動workerも追加cleanupを行う。これは時刻schedulerではなく、時刻・retention policy・失敗通知の設定UIはない。server snapshotは認証済み本人のrequest leaseに束縛され、同じvault DEKの暗号文として扱う。application Admin/APIには他userの平文を開示しないが、同じservice UID、host root/operator、binary、process memoryはtrust boundary内である。snapshot単体はDR setではなく、control DB/key、vault/snapshot、volume recovery material、recovery codeを揃える。
 
+### 6.4. AI向けAPI（廃止済み・将来設計）
 
-### 6.3. AI向けAPI（安全対策必須）
+Desktop と multi-user server の両 production mode では AI を提供しない。`/api/v1/ai/*` と `/api/ai-console/*` は 404 であり、旧AI環境変数を設定すると server の起動を拒否する。以下の旧API・資格情報・listener案は dormant legacy と、将来 user-vault-bound に再設計する Stage 4（planned/unshipped）の資料であり、現行機能として実装・文書化してはならない。詳細は [AI連携ロードマップ](docs/ai-integration-roadmap.md) を参照する。
 
-AIエージェントが外部から記帳を自動化し、データを統合的に分析するためのAPIを実装する。
-
-* **書き込みAPI**（`POST /api/v1/ai/transactions`）: AIエージェントが取引を新規追加するためのエンドポイント。画像添付にも対応する（Base64エンコード形式）。16〜128文字の `Idempotency-Key` を必須とし、同一資格情報・同一key・同一正規化本文の再送は取引と日次クォータを重複させず同じ結果を返す。keyを異なる本文へ再利用した場合は409を返す。
-* **分析API**（`POST /api/v1/ai/analysis`）: AIエージェントが取引データを読み取り、統合的に分析するためのエンドポイント。期間・口座・タグ等の条件をPOSTリクエストのボディで指定し、集計結果を返す。
-* **厳格な権限管理**:
-  * AI用資格情報は最大90日で失効し、操作scope、許可口座、許可タグID、分析可能な固定日付範囲、1リクエストの最大分析期間、最大明細件数、UTC日次の取引作成件数を個別に制限する。許可タグIDが空ならタグ付与・タグ指定分析を拒否する。保存ファイルにはトークンのSHA-256ハッシュだけを記録する。
-  * idempotency claim、日次クォータ加算、取引・画像・タグ・残高更新は同一SQLite transactionで確定し、失敗時はすべてrollbackする。raw `Idempotency-Key` とリクエスト本文はidempotency metadataへ保存しない。
-  * 既存データの「変更（PUT）・削除（DELETE）」は、中間処理（ミドルウェア）で即座に遮断（HTTP 403）すること。
-  * 取引の編集・削除は人間がGUI経由でのみ行えるものとし、AIエージェントには一切許可しない。
-* **公開Webとのネットワーク分離**:
-  * 公開Web用HTTPリスナーにはAI APIのルートを登録しない。
-  * AI APIは別のHTTPリスナーで提供し、既定では `127.0.0.1:4001` のみで待ち受ける。
-  * `AI_CREDENTIALS_FILE` が未設定の場合は、AI専用リスナー自体を起動しない。
-  * 非ループバック待受は明示許可に加えてTLS 1.3とクライアント証明書認証（mTLS）を必須とし、Dockerホスト側は `127.0.0.1` に限定してポート公開する。
-  * AI専用リスナーには通常API、ユーザー認証API、静的ファイルを登録しない。
-
-Discordレシート登録、AI Transaction Managerの別プロセス化、画像受け渡し、context/validate APIの段階計画は `docs/ai-integration-roadmap.md` を参照すること。
+旧AIのAPI、credential scope、専用listener、Discord連携案は retired legacy であり、ここでは仕様として実装しない。将来に再設計する場合も user/vault binding、明示的なscope、検証、audit、private transportを満たす Stage 4 の検討事項として [AI連携ロードマップ](docs/ai-integration-roadmap.md) を更新する。
 
 ### 6.5. 画像添付機能
 
@@ -139,7 +140,7 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
   * ファイル選択ダイアログからの画像ファイル選択
   * ドラッグ&ドロップによる画像ファイルの添付
   * 添付済み画像はサムネイルプレビューで表示し、個別に削除可能とする。
-* **AI API対応**: AI用APIからの取引追加時にも画像を添付可能とする。画像データはBase64エンコード形式でリクエストボディに含める。
+* **AI API対応**: 現行 production のAI APIは提供しない。画像の手動添付は通常のDesktop/server ledger UIだけで行う。
 * **対応形式**: JPEG, PNG, GIF, WebP を許容する。
 
 ### 6.6. タグシステム
@@ -156,99 +157,35 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
 
 ### 6.7. セキュリティ・認証基盤（サーバーモード外部公開対応）
 
-本アプリケーションは将来的に独自ドメインを取得し、自宅サーバーから外部ネットワーク（インターネット）へ公開することを前提とする。そのため、サーバーモード（Docker / Headless）において以下のセキュリティ機能を `backend/middleware/` に実装すること。デスクトップアプリモード（Wails）ではこれらの機能は不要であり、サーバーモードのみに適用すること。
+HTTP middleware（session、CSRF、proxy、security headers、CORS、rate limit）は server mode にだけ適用する。ただし Desktop も HTTP middlewareを使わない local vault auth として password、recovery、idle-lock を持つ。外部公開時の詳細な実装契約は現行 source と [server model](docs/server-multi-vault.md) に従い、未実装の旧設計を追加しない。
 
-#### 6.4.1. ユーザー認証とセッション管理
+#### 6.7.1. ユーザー認証とセッション管理（現行 server は multi-user）
 
-旧アプリ（`legacy_reference/auth.py`）の認証機能を移植・強化し、サーバーモードの全APIエンドポイント（AI用APIを除く）に認証を必須とする。
+現行 server は control DB の user identity と vault-bound session を使い、全API（明示された公開 account route と静的配信を除く）に認証を必須とする。旧 single-user 認証の説明は互換性参照用である。
 
 * **認証方式**: セッションベース認証を基本とする。Cookieにセッション識別子を格納し、サーバー側でセッション状態を管理する。
-* **パスワード**: bcryptハッシュにより保管すること。平文での保存は絶対に行わない。パスワードの初期設定は環境変数 `AUTH_PASSWORD_HASH` で bcrypt ハッシュ値を渡す形とする。
-* **ログイン試行制限**: 同一IPアドレスからのログイン試行を制限する。5回連続失敗で15分間のロックアウトを実施すること（旧アプリの `check_login_attempts` / `record_login_attempt` の移植）。
-* **セッション有効期限**: セッションにはサーバー側で絶対有効期限（既定: 8時間）とsliding無操作有効期限（既定: 15分）を設定する。認証済みAPI操作は無操作時刻を更新するが、絶対期限は延長しない。可視タブで実際に操作している間は、フロントエンドが最大4分間隔（操作停止後は30秒以内に末尾送信）の`POST /api/auth/keepalive`を送ってサーバー側の無操作時刻と画面ロックを整合させる。非表示タブや操作のない状態から送信してはならない。通常の閲覧・CRUDは有効なセッションで継続し、CSV入出力、手動スナップショット作成・復元、AI操作、全セッションログアウト等の高影響操作だけが直近5分以内のOmni Moneyパスワード再確認を要求する。環境変数で安全な範囲内に調整可能とする。
-* **任意の第2要素**: `AUTH_TOTP_SECRET_FILE`が未設定ならpassword-only、設定した場合は新しいセッションへのログインでOmni Money専用TOTPを必須とする。有効なセッション内の高影響操作はパスワードだけで再確認し、無操作・絶対期限・サーバー再起動後のログインではTOTPを再度要求する。Pangolinとはseedを共有しない。
-* **認証不要の例外パス**:
-  - `POST /api/auth/login` — ログイン処理自体
-  - `GET /api/auth/status` — 認証状態の確認
-  - `GET /` および静的ファイル（`/assets/*` 等） — フロントエンドの配信
+* **パスワード**: 現行は固定 Argon2id profile と暗号化 envelope を使用し、`AUTH_PASSWORD_HASH`（bcrypt）は受け付けない。旧設定は値が存在すれば production 起動を拒否する。
+* **セッション**: server-side session、CSRF、recent reauthentication、idle/absolute expiry、session concurrency は `backend/middleware/session.go` と関連テストを source of truth とする。高影響操作には現行実装が要求する再認証を適用し、AI操作という未提供機能を追加しない。
+* **passkey**: WebAuthn PRF の鍵で vault DEK を別 envelope に包む。旧 `AUTH_TOTP_SECRET_FILE` / `AUTH_REQUIRE_TOTP` は現行仕様外で、値が存在すれば production 起動を拒否する。
+* **公開 allowlist**: unauthenticated route は `backend/middleware/session.go` の exact allowlist と server router を source of truth とする。代表例は静的配信、login/status、初回 bootstrap、passkey login options/finish、invite acceptance、password-reset completion であり、その他の API は認証必須である。allowlistを文書で再実装しない。
 
-* **実装の技術的詳細**:
-  - `backend/middleware/session.go` にセッション管理ミドルウェアを実装する。
-  - セッション格納先はインメモリとし、lookup/touch/delete/rotationを同一mutex下で原子的に処理する（SQLiteへの永続化は不要）。
-  - セッション識別子は `crypto/rand` で生成した32バイト以上のランダム値を16進数文字列に変換して使用する。
-  - Cookie属性: `HttpOnly: true`, `SameSite: Strict`, `Secure: true`（HTTPS環境下）, `Path: /`。
-  - `backend/middleware/auth_session.go` にログイン試行制限ロジックを実装する。
-  - `backend/api/auth_routes.go` にログイン・ログアウト・認証状態確認のルートを実装する。
-  - フロントエンド側に `frontend/src/views/LoginView.vue` ログイン画面を追加し、未認証時にリダイレクトする処理を `frontend/src/utils/api.js` に追加する。ログイン画面のCSSは既存の `style.css` のモーダルデザインに準拠すること。
+#### 6.7.2. HTTPS / TLS およびリバースプロキシ対応
 
-#### 6.4.2. HTTPS / TLS およびリバースプロキシ対応
+TLS、trusted proxy、host allowlist、直接TLS終端の挙動は `backend/middleware/proxy.go`、`backend/middleware/security.go`、`backend/config/server.go` と関連テストを source of truth とする。公開構成では固定 trusted proxy と `ALLOWED_HOSTS` を設定し、任意の forwarded header や Host を信頼しない。未実装の数値・header契約をここで追加しない。
 
-外部公開時はリバースプロキシ（Nginx, Caddy等）の背後で動作し、TLS終端はリバースプロキシ側で行うことを前提とする。
+#### 6.7.3. レート制限（Rate Limiting）
 
-* **リバースプロキシ信頼ヘッダー**: `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Real-IP` は、接続元が`TRUSTED_PROXIES`の固定IPまたは十分に狭いCIDRに一致する場合だけ採用する。`X-Forwarded-For` は右から左へ辿り、最初の非信頼ホップをクライアントIPとして採用する。解決後は全転送系ヘッダーを下流へ残さない。
-* **HTTPS強制リダイレクト**: 環境変数 `FORCE_HTTPS=true` が設定されている場合、`X-Forwarded-Proto` が `http` のリクエストを `https` にリダイレクト（HTTP 301）する。リダイレクト先ホストは `HTTPS_REDIRECT_HOST` または `ALLOWED_HOSTS` で明示的に許可されたホストに限定し、任意の `Host` ヘッダーをそのまま使用してはならない。
-* **Go側でのTLS直接終端**: リバースプロキシなしで直接TLSを終端する場合に備え、環境変数 `TLS_CERT_FILE` と `TLS_KEY_FILE` が指定されていれば `http.ListenAndServeTLS` で起動する機能を `server.go` に追加する。
-* **実装の技術的詳細**:
-  - `backend/middleware/proxy.go` にリバースプロキシ信頼ヘッダー処理とHTTPSリダイレクトミドルウェアを実装する。
-  - `server.go` の起動処理で TLS_CERT_FILE / TLS_KEY_FILE の有無を確認し、存在すれば `ListenAndServeTLS` を使用する分岐を追加する。
+外部公開時のrate limitは現行 `backend/middleware/` 実装とテストを source of truth とする。ログイン等の認証境界を弱めず、AI用の未提供 endpoint や旧数値契約を追加しない。
 
-#### 6.4.3. レート制限（Rate Limiting）
+#### 6.7.4. セキュリティヘッダーとCORS
 
-外部公開時のブルートフォース攻撃やDoS攻撃を緩和するため、APIエンドポイントにレート制限を実装する。
+security headers と CORS は `backend/middleware/security.go` と server router の現行実装・テストを source of truth とする。認証付きAPIで wildcard を許可せず、headers/CORS の未検証の固定値をこの文書に複製しない。
 
-* **全体レート制限**: 同一IPアドレスからのリクエストを1分間あたり最大120回に制限する。超過した場合は HTTP 429（Too Many Requests）を返す。
-* **ログインエンドポイント強化**: `POST /api/auth/login` は1分間あたり最大10回に制限する。
-* **AI APIレート制限**: `/api/v1/ai/transactions` は1分間あたり最大30回に制限する。
-* **実装の技術的詳細**:
-  - `backend/middleware/ratelimit.go` にトークンバケットアルゴリズムまたはスライディングウィンドウ方式のレート制限ミドルウェアを実装する。
-  - IPアドレスごとにリクエスト数をインメモリで管理し、古いエントリは自動でGC（ガベージコレクション）する。
-  - `golang.org/x/time/rate` パッケージの `rate.Limiter` を活用してもよい。
-  - レスポンスヘッダーに `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` を含める。
+#### 6.7.5. サーバーモード起動時の環境変数一覧（詳細はsource of truthへリンク）
 
-#### 6.4.4. セキュリティヘッダーとCORS
+server環境変数の完全な source of truth は [`.env.example`](.env.example) と [利用ガイド](docs/how-to-use.md) である。主要な必須値は `CONTROL_DB_PATH`、`CONTROL_DB_ENCRYPTION_KEY_FILE`、`VAULT_ROOT`、`DATA_AT_REST_MODE`、`DATA_AT_REST_ATTESTATION_FILE`、`ALLOWED_HOSTS` とする。control key はattested data root外、vault rootはattested data root内の専用領域に置く。
 
-* **セキュリティヘッダー**: 全レスポンスに以下のHTTPヘッダーを付与するミドルウェアを `backend/middleware/security.go` に実装する。
-  - `X-Content-Type-Options: nosniff`
-  - `X-Frame-Options: DENY`
-  - `X-XSS-Protection: 1; mode=block`
-  - `Referrer-Policy: strict-origin-when-cross-origin`
-  - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:`
-* **CORS（オリジン間リソース共有）**: サーバーモードでは同一オリジンからのアクセスが基本となるが、開発時やリバースプロキシ経由での別ドメインからのアクセスに対応するため、環境変数 `CORS_ALLOWED_ORIGINS`（カンマ区切り、例: `https://money.example.com,http://localhost:5173`）で許可オリジンを設定可能とする。未設定時は同一オリジンのみ許可とすること。ワイルドカード `*` は認証付きAPIでは使用禁止とする。
-
-#### 6.4.5. サーバーモード起動時の環境変数一覧
-
-以下の環境変数でサーバーモードの動作を制御できるようにすること。
-
-| 環境変数 | 必須 | 既定値 | 説明 |
-|---------|------|--------|------|
-| `DB_PATH` | 任意 | `omni_money.db` | SQLiteデータベースファイルのパス |
-| `HOST_IP` | 任意 | `0.0.0.0` | 待受アドレス |
-| `PORT` | 任意 | `4000` | 待受ポート |
-| `AUTH_PASSWORD_HASH` | サーバーモード時必須 | なし | ログインパスワードのbcryptハッシュ |
-| `SESSION_MAX_AGE_HOURS` | 任意 | `8` | セッションの絶対有効期間（時間） |
-| `SESSION_IDLE_TIMEOUT_MINUTES` | 任意 | `15` | 無操作セッション有効期間（分） |
-| `SESSION_REAUTH_MAX_AGE_MINUTES` | 任意 | `5` | 高影響操作で許容する直近パスワード再確認時間（分） |
-| `SESSION_MAX_CONCURRENT` | 任意 | `3` | 同一ユーザーの同時セッション上限 |
-| `AUTH_TOTP_SECRET_FILE` | 任意 | なし | 設定時だけ有効になるOmni Money専用TOTP秘密ファイル |
-| `AUTH_REQUIRE_TOTP` | 任意 | `false` | `true`時は秘密ファイルの設定漏れを起動エラーにするassertion |
-| `AI_CREDENTIALS_FILE` | 任意 | なし | scope・口座・期限を持つAI資格情報JSON |
-| `AI_CONSOLE_TOKEN_FILE` | 任意 | なし | 管理画面中継用AIトークンsecret |
-| `AI_HOST_IP` | 任意 | `127.0.0.1` | AI専用リスナーの待受アドレス |
-| `AI_PORT` | 任意 | `4001` | AI専用リスナーのポート |
-| `AI_ALLOW_REMOTE` | 任意 | `false` | AI専用リスナーを非ループバックで待受する明示許可 |
-| `AI_TLS_CERT_FILE` / `AI_TLS_KEY_FILE` | 非ループバックAI時必須 | なし | AIサーバー証明書と秘密鍵 |
-| `AI_TLS_CLIENT_CA_FILE` | 非ループバックAI時必須 | なし | mTLSクライアントCA |
-| `AI_TLS_CA_FILE` | 管理画面TLS中継時必須 | なし | AIサーバー証明書を検証するCA |
-| `AI_TLS_CLIENT_CERT_FILE` / `AI_TLS_CLIENT_KEY_FILE` | mTLS中継時必須 | なし | 管理画面中継用クライアント証明書と鍵 |
-| `AI_TLS_SERVER_NAME` | TLS中継時必須 | なし | 証明書の検証名 |
-| `TRUSTED_PROXIES` | 任意 | なし | 信頼するプロキシIP（カンマ区切り） |
-| `FORCE_HTTPS` | 任意 | `false` | HTTPSリダイレクトの有効化 |
-| `HTTPS_REDIRECT_HOST` | `FORCE_HTTPS=true` 時は推奨 | なし | HTTPSリダイレクト先の固定ホスト |
-| `ALLOWED_HOSTS` | 必須 | なし | 全リクエストで許可する正確なHostヘッダー（カンマ区切り） |
-| `ALLOW_INSECURE_HTTP` | 任意 | `false` | 非loopback平文HTTPの明示許可。loopbackだけへpublishするローカル構成以外は禁止 |
-| `TLS_CERT_FILE` | 任意 | なし | TLS証明書ファイルパス |
-| `TLS_KEY_FILE` | 任意 | なし | TLS秘密鍵ファイルパス |
-| `CORS_ALLOWED_ORIGINS` | 任意 | なし | 許可オリジン（カンマ区切り） |
+旧 `DB_PATH`、`DB_ENCRYPTION_KEY_FILE`、`AUTH_PASSWORD_HASH`、`AUTH_REQUIRE_TOTP`、`AUTH_TOTP_SECRET_FILE` および `AI_API_TOKEN`、`AI_CREDENTIALS_FILE`、`AI_CONSOLE_TOKEN_FILE`、`AI_AUDIT_HMAC_KEYRING_FILE`、`AI_HOST_IP`、`AI_PORT`、`AI_ALLOW_REMOTE`、`AI_TLS_CERT_FILE`、`AI_TLS_KEY_FILE`、`AI_TLS_CLIENT_CA_FILE`、`AI_TLS_CA_FILE`、`AI_TLS_CLIENT_CERT_FILE`、`AI_TLS_CLIENT_KEY_FILE`は設定時に production 起動を拒否する。文書で旧名を紹介するときは廃止設定であることを明記する。
 
 
 ## 7. データベース設計（SQLite）
@@ -282,7 +219,8 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
   * `name`: タグ名
   * `parent_id`: 親タグID（NULLの場合はトップレベル）
   * `level`: 階層レベル（1: タグ、2: サブタグ、3: サブサブタグ）
-  * UNIQUE制約: `(name, parent_id)` の組み合わせで一意
+  * childは `(name, parent_id)` の組み合わせをUNIQUE制約で一意にする。
+  * active rootは `parent_id IS NULL AND legacy_duplicate = 0` を条件とする partial unique index `idx_tags_root_name_unique` で一意にする。legacy duplicateはarchive-only markerとして保持する。
 
 * **TransactionTags（取引タグ紐付け）**
   * `transaction_id`: 取引ID（外部キー）
@@ -290,13 +228,13 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
   * 複合主キー: `(transaction_id, tag_id)`
 
 * **Settings（設定情報）**
-  * 既存のJSONファイルによる管理（クレジットカード設定など）は、堅牢性向上のため、この設定表内の鍵・値（キー・バリュー）形式に統合する。
+  * ledger設定はschema migrationと現行database実装に従う。
 
 
 
 ## 8. 自動構築（CI/CD）の要件
 
-**重要方針**: アプリケーション（デスクトップ版・Docker版）の正式なビルドは **GitHub Actions のみ** で行う。開発者のローカル環境での `wails build` はあくまで動作確認用であり、配布用のビルドは全て CI/CD 経由で実行すること。
+**重要方針**: 正式な配布 build は workflow の固定 toolchain で行う。Desktop は固定 Wails v2.11.0 と固定 SQLCipher、server は Dockerfile または固定 SQLCipher と `server libsqlite3 sqlite_omit_load_extension` tags を使う。latest tag、bare Wails、未固定 tag は使わない。
 
 ### 8.1. バージョン管理とリリーストリガー
 
@@ -308,56 +246,30 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
   - `PATCH`（例: 0.1.0 → 0.1.1）: バグ修正、軽微な改修
   - `MINOR`（例: 0.1.1 → 0.2.0）: 機能追加、画面変更
   - `MAJOR`（例: 0.2.0 → 1.0.0）: 破壊的変更、大規模刷新
-* **CI/CDトリガー条件**: GitHub Actionsのワークフローは `main` ブランチへのプッシュ時に `VERSION` ファイルが変更されている場合にのみ起動する。これにより、ドキュメントのみの変更やリファクタリングではビルドが走らない。
+* **CI/CDトリガー条件**: `VERSION` 起点の release workflow と、PR/push/schedule の検証 workflow を分ける。Desktop releaseは関連pathを変更したPRでbuild検証し、`main`では`VERSION`またはrelease workflow自体の変更時にpublishする。
 
 ### 8.2. GitHub Actions ワークフロー構成
 
-`.github/workflows/` に以下の2つのワークフロー定義ファイルを作成すること。
+`.github/workflows/` の既存 workflow を source of truth とする。CI は security、SQLCipher fail-closed、safe-update、Compose boundary、docs contract を検証する。
 
 #### 8.2.1. デスクトップ用構築（`release-desktop.yml`）
 
-* **トリガー**: `main` ブランチへの `push` イベントで、`paths` フィルターにより `VERSION` ファイルが変更された場合のみ実行する。
-  ```yaml
-  on:
-    push:
-      branches: [main]
-      paths: ['VERSION']
-  ```
-* **バージョン読み取り**: ワークフロー冒頭で `VERSION` ファイルの内容を読み取り、環境変数 `APP_VERSION` に格納する。
-  ```yaml
-  - name: Read version
-    run: echo "APP_VERSION=$(cat VERSION)" >> $GITHUB_ENV
-  ```
-* **ビルドマトリクス**: macOS（`macos-latest`）、Windows（`windows-latest`）、Linux（`ubuntu-latest`）の3プラットフォームで並列ビルドする。各プラットフォームで `wails build` を実行し、成果物を生成する。
-* **Wails CLIの導入**: 各プラットフォームのランナー上で `go install github.com/wailsapp/wails/v2/cmd/wails@latest` を実行してWails CLIを導入する。
-* **バージョンの埋め込み**: ビルド時に `-ldflags "-X main.version=${{ env.APP_VERSION }}"` を用いてバイナリにバージョン情報を埋め込む。
-* **GitHub Releasesへの発行**: ビルド完了後、`softprops/action-gh-release` アクション等を用いて `v${{ env.APP_VERSION }}` タグのGitHub Releaseを作成し、各プラットフォームの実行可能ファイルをアップロードする。
-* **重複リリース防止**: 同一バージョンのReleaseが既に存在する場合はスキップする。
+* **PR**: build設定・実行可能コードに関係するpathの変更時に、release workflowが4 artifactのbuild検証を行う。PR buildは配布Releaseやversion tagを作成しない。
+* **main**: `VERSION`またはrelease workflow自体の変更時に、固定Wails v2.11.0・固定SQLCipher・固定tags/CGO設定でmacOS Intel (`darwin/amd64`)、macOS Apple Silicon (`darwin/arm64`)、Windows (`windows/amd64`)、Linux (`linux/amd64`) の4 artifactをbuildし、version releaseを公開する。
+* **source of truth**: path filter、version埋め込み、固定action、重複release防止は `release-desktop.yml` を参照する。
 
 #### 8.2.2. コンテナ用構築（`release-docker.yml`）
 
-* **トリガー**: デスクトップ用と同一（`main` ブランチの `VERSION` 変更時）。`release-desktop.yml` と同時に実行されるか、`needs` で依存関係を設定してもよい。
-* **Dockerイメージの構築**: サーバーモード用の `Dockerfile` を用いてコンテナイメージを構築する。ビルド引数でバージョンを渡す。
-  ```yaml
-  - name: Build and push Docker image
-    uses: docker/build-push-action@v5
-    with:
-      push: true
-      tags: |
-        ghcr.io/${{ github.repository }}:${{ env.APP_VERSION }}
-        ghcr.io/${{ github.repository }}:latest
-      build-args: |
-        VERSION=${{ env.APP_VERSION }}
-  ```
-* **登録先**: GitHub Container Registry（`ghcr.io`）にプッシュする。イメージタグはバージョン番号付き（`ghcr.io/shiningwank0/omni_money:0.1.0`）と `latest` の両方を付与する。
-* **マルチアーキテクチャ**: `docker/setup-buildx-action` と `--platform linux/amd64,linux/arm64` で AMD64 / ARM64 の両方のイメージを構築する。
+* **トリガー**: `main` の `VERSION`変更時に、Dockerfileと固定SQLCipher buildを使って実行する。PRのDesktop artifact buildとは別のserver image releaseである。
+* **マルチアーキテクチャ**: linux/amd64 と linux/arm64 の両方を構築し、version tagを公開する。`latest`はstable releaseに限って更新する。
+* **source of truth**: image action、権限、tag、push条件は `release-docker.yml` を参照し、無条件のlatest例を文書へ複製しない。
 
 ### 8.3. バージョンのアプリへの埋め込み
 
-`VERSION` ファイルの値を実行時に参照できるようにするため、以下の仕組みを実装すること。
+`VERSION` ファイルの値を実行時に参照する仕組みは、現行の `main.go`、frontend build設定、Dockerfile、release workflowをsource of truthとして維持・検証する。
 
 * **Go側**: `main.go` にパッケージ変数 `var version = "dev"` を定義する。CI/CDでのビルド時に `-ldflags` でこの変数を上書きする。ローカル開発時は `"dev"` のまま動作する。
-* **フロントエンド側**: ビルド時に `VITE_APP_VERSION` 環境変数として渡し、Vue.jsから `import.meta.env.VITE_APP_VERSION` で参照可能にする。画面のフッターやバージョン情報画面で表示する。
+* **フロントエンド側**: ビルド時に `VITE_APP_VERSION` を渡し、Vue.jsから `import.meta.env.VITE_APP_VERSION` で表示する。
 * **Docker**: `Dockerfile` 内で `ARG VERSION=dev` を定義し、 ビルド時の `--build-arg` で渡す。環境変数として実行時にも参照可能にする。
 
 
@@ -366,7 +278,7 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
 
 1. **Go言語 (`go`)**
    - **用途**: サーバー側の開発、およびWailsを介したデスクトップアプリの構築。
-   - **使用方法**: `go mod init` や `go mod tidy` による依存関係の解決、サーバー単独での動作確認（`go run server.go`）などに使用すること。
+   - **使用方法**: 依存関係の解決とGo検証に使用する。server確認はDockerfile、または固定SQLCipherと`server libsqlite3 sqlite_omit_load_extension` tags/CGO設定で行い、通常SQLiteのserver起動は行わない。
 
 2. **Node.js および npm (`node`, `npm`)**
    - **用途**: 画面側（Vue.js）の構成部品の取得、および静的ファイルの構築。
@@ -374,27 +286,20 @@ Discordレシート登録、AI Transaction Managerの別プロセス化、画像
 
 3. **C言語翻訳プログラム（Xcode Command Line Tools / `clang` または `gcc`）**
    - **用途**: SQLiteデータベースをGoで動かすための仕組み（cgo）の利用、およびMac向けWailsアプリの画面描画処理の構築に必須となる。
-   - **使用方法**: エージェントが直接呼び出す必要はないが、SQLiteの導入時（`github.com/mattn/go-sqlite3` など）や `wails build` 実行時に暗黙的に使用されることを前提とすること。
+   - **使用方法**: 固定SQLCipher build script と workflow の固定 tags/CGO 設定から利用する。通常SQLiteへのfallbackはしない。
 
-4. **Wails基本命令群 (`wails`)**
-   - **用途**: デスクトップアプリモードの開発時における動作確認や、最終的な実行可能ファイルの構築。
-   - **使用方法**: 画面側とサーバー側を連動させた開発時の検証には `wails dev` を用い、最終的な実行可能ファイルの生成には `wails build` を使用すること。
+4. **Wails v2.11.0**
+   - **用途**: Desktop 4 artifactの固定版build。
+   - **使用方法**: release workflowと同じ固定版・SQLCipher・build tagsを使う。latest tagやbare CLIを使わない。
 
 5. **Docker仮想化環境（OrbStack / `docker`）**
    - **用途**: サーバーモード（Dockerコンテナ）の動作確認およびイメージ構築。
    - **使用方法**: 端末はApple Silicon（M4 Pro）であるため、ARM構造（`linux/arm64`）での動作を基本とすること。`Dockerfile` の動作検証として `docker build` や `docker run` を適宜実行し、サーバー単独での正常動作を確認すること。
 
 
-## 10. AIエージェントへの実装指示（ステップ）
+## 10. 今後の変更時のguardrails
 
-開発は必ず以下の順序で進めること。
-
-* **ステップ1**: 基礎となるフォルダ構成の作成と、WailsおよびVue.jsの初期化。同時に `legacy_reference/` 内の既存コード全体を読み込み、内部の論理処理と画面構造を把握すること。
-* **ステップ2**: 既存の画面部品（CSS、画像等）の `frontend/src/assets` への移行と解析。
-* **ステップ3**: データベースの構造定義と、SQLiteの初期化・接続処理（`backend/database`）の実装。
-* **ステップ4**: サーバー側のAPIおよび主要な論理処理（取引の追加、計算、紐付け等）の実装。
-* **ステップ5**: 画面側（Vue.js）の構築。既存のCSSやHTML構造をVue構成部品（コンポーネント）に正確に移植する。
-* **ステップ6**: AI用API、自動状態保存機能などの付加機能の実装。
-* **ステップ7**: サーバー単独稼働用のコンテナ定義（`Dockerfile`）の作成およびサーバーモード起動処理（`server.go`）の整備。
-* **ステップ8**: GitHub Actionsを用いた自動構築（CI/CD）定義ファイルの作成。
-* **ステップ9**: セキュリティ・認証基盤の実装。§6.4 に基づき、セッション認証、レート制限、セキュリティヘッダー、リバースプロキシ対応を `backend/middleware/` に実装し、`server.go` およびフロントエンドに統合する。
+- mode、auth、vault、CSV、snapshot、AI、releaseの変更は、先に現行 source/test とこの文書の capability matrixを照合する。
+- Desktop は roleのない local vault、server は control/vault分離を維持する。旧 single-DB server、bcrypt/TOTP、旧AI envを復活させない。
+- production AIは現状非提供である。自動server snapshotはmutation連動で提供済みだが、時刻schedule・可変retention・失敗通知を追加する場合は、既存のuser-vault bindingと暗号化境界を保ち、別設計、明示的な承認、security testを必須にする。
+- 配布は固定SQLCipher/Wails/Docker workflowを使い、通常Go/Nodeテスト、frontend build、security tests、actionlint、`git diff --check`を通す。
