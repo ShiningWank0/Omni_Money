@@ -6,8 +6,8 @@ import {
     getCreditCardSettings,
     getBankAccountSettings,
     getItems
-} from '../utils/api'
-import { exactInteger } from '../utils/exactAmount'
+} from '../utils/api.js'
+import { exactInteger } from '../utils/exactAmount.js'
 
 export const useAppStore = defineStore('app', () => {
     // 口座関連
@@ -66,7 +66,7 @@ export const useAppStore = defineStore('app', () => {
     })
 
     // 口座リストを取得
-    async function fetchAccounts() {
+    async function fetchAccounts({ throwOnError = false } = {}) {
         try {
             const result = await getAccounts()
             accounts.value = result || []
@@ -76,11 +76,12 @@ export const useAppStore = defineStore('app', () => {
             }
         } catch (e) {
             console.error('口座リスト取得エラー:', e)
+            if (throwOnError) throw e
         }
     }
 
     // 取引履歴を取得
-    async function fetchTransactions() {
+    async function fetchTransactions({ throwOnError = false } = {}) {
         const requestId = ++transactionRequestId
         const selectedAccounts = [...selectedFundItems.value]
         const search = searchQuery.value
@@ -106,6 +107,7 @@ export const useAppStore = defineStore('app', () => {
             if (requestId === transactionRequestId) {
                 console.error('取引履歴取得エラー:', e)
             }
+            if (throwOnError) throw e
         } finally {
             if (requestId === transactionRequestId) {
                 loading.value = false
@@ -114,32 +116,35 @@ export const useAppStore = defineStore('app', () => {
     }
 
     // クレジットカード設定を取得
-    async function fetchCreditCardSettings() {
+    async function fetchCreditCardSettings({ throwOnError = false } = {}) {
         try {
             const result = await getCreditCardSettings()
             creditCardItems.value = result || []
         } catch (e) {
             console.error('クレジットカード設定取得エラー:', e)
+            if (throwOnError) throw e
         }
     }
 
     // 銀行口座設定を取得
-    async function fetchBankAccountSettings() {
+    async function fetchBankAccountSettings({ throwOnError = false } = {}) {
         try {
             const result = await getBankAccountSettings()
             bankAccountItems.value = result || []
         } catch (e) {
             console.error('銀行口座設定取得エラー:', e)
+            if (throwOnError) throw e
         }
     }
 
     // 項目名リストを取得
-    async function fetchItems(account = '') {
+    async function fetchItems(account = '', { throwOnError = false } = {}) {
         try {
             const result = await getItems(account)
             itemNames.value = result || []
         } catch (e) {
             console.error('項目リスト取得エラー:', e)
+            if (throwOnError) throw e
         }
     }
 
