@@ -18,7 +18,7 @@
 ## Verification
 
 - Go変更後は原則 `go test ./...` を実行する。
-- サーバーモード変更後は `go build -tags server -o /private/tmp/omni_money_server ./server.go` を実行する。
+- サーバーモード変更後は、可能なら Dockerfile の production build を検証する。Docker を使えない場合は、`scripts/build-sqlcipher-*.sh` で固定 SQLCipher を作成し、`server libsqlite3 sqlite_omit_load_extension` tags と同じ CGO 設定で build/test する。
 - フロントエンド変更後は `frontend` で `npm run build` を実行する。
 - UI変更は可能ならローカルブラウザで主要モーダルやメニューの表示崩れを確認する。
 

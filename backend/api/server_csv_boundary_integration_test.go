@@ -230,7 +230,8 @@ func TestProductionServerCSVStaysInsideAuthenticatedVault(t *testing.T) {
 			want int
 		}{
 			"snapshots unavailable": {path: "/api/snapshots", want: http.StatusServiceUnavailable},
-			"AI absent":             {path: "/api/ai-console/transactions", want: http.StatusNotFound},
+			"AI console absent":     {path: "/api/ai-console/transactions", want: http.StatusNotFound},
+			"AI transaction absent": {path: "/api/v1/ai/transactions", want: http.StatusNotFound},
 		} {
 			t.Run(name, func(t *testing.T) {
 				response := serveServerCSVRequest(t, handler, sessionA, http.MethodGet, test.path, nil)

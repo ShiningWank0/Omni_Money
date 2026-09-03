@@ -88,6 +88,28 @@ jobs:
       - name: Lint GitHub Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -no-color
 
+      - name: Assert documentation contracts
+        run: |
+          set -euo pipefail
+          test -f Agent.md
+          for file in README.md Agent.md docs/ai-integration-roadmap.md; do
+            rg -q 'AI.*(非提供|未提供)|production.*AI.*非提供' "$file"
+          done
+          for file in README.md Agent.md; do
+            rg -q 'CSV.*v3|CSV v3' "$file"
+          done
+          for file in README.md Agent.md docs/how-to-use.md docs/server-multi-vault.md; do
+            rg -q 'snapshot.*(DR|DR set)|DR.*snapshot' "$file"
+          done
+          if rg -n '^\|.*(DB_PATH|AUTH_PASSWORD_HASH|AUTH_TOTP|AI_)' Agent.md README.md; then
+            echo 'legacy environment names must not reappear as current documentation table rows' >&2
+            exit 1
+          fi
+          if rg -n 'wails@latest|go install .*wails.*@latest|(^|[[:space:]])wails (dev|build)([[:space:]]|$)' README.md Agent.md docs AGENT_WORKFLOW.md; then
+            echo 'documentation must not prescribe an unpinned or bare Wails command' >&2
+            exit 1
+          fi
+
       - name: Run Go race tests
         run: go test -race ./...
 
