@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"omni_money/backend/desktopaccount"
 	"omni_money/backend/keyenvelope"
@@ -97,6 +98,96 @@ func TestLockedFinancialBindingsFailClosed(t *testing.T) {
 				t.Fatalf("got %v, want desktopaccount.ErrLocked", err)
 			}
 		})
+	}
+}
+
+func TestAppLockWaitsForBorrowedServiceBeforeReportingLocked(t *testing.T) {
+	leaseRelease := make(chan struct{})
+	coordinator := &fakeDesktopCoordinator{
+		status:       desktopaccount.Status{Configured: true, Unlocked: true, Role: desktopaccount.RoleAdmin},
+		lockStarted:  make(chan struct{}),
+		leaseRelease: leaseRelease,
+	}
+	app := newAppWithCoordinator(coordinator)
+
+	done := make(chan error, 1)
+	go func() {
+		_, lockErr := app.LockDesktopVault()
+		done <- lockErr
+	}()
+	select {
+	case <-coordinator.lockStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("coordinator lock did not begin")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("LockDesktopVault returned before lease release: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(leaseRelease)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("LockDesktopVault: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("LockDesktopVault did not finish after lease release")
+	}
+	if status := app.GetDesktopVaultStatus(); status.Unlocked {
+		t.Fatalf("status remained unlocked: %+v", status)
+	}
+}
+
+func TestAppShutdownAndLockRaceDrainsBorrowedService(t *testing.T) {
+	leaseRelease := make(chan struct{})
+	coordinator := &fakeDesktopCoordinator{
+		status:       desktopaccount.Status{Configured: true, Unlocked: true, Role: desktopaccount.RoleAdmin},
+		lockStarted:  make(chan struct{}),
+		leaseRelease: leaseRelease,
+	}
+	app := newAppWithCoordinator(coordinator)
+
+	lockDone := make(chan error, 1)
+	shutdownDone := make(chan struct{}, 1)
+	go func() {
+		_, lockErr := app.LockDesktopVault()
+		lockDone <- lockErr
+	}()
+	select {
+	case <-coordinator.lockStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("coordinator lock did not begin")
+	}
+	go func() {
+		app.shutdown(context.Background())
+		shutdownDone <- struct{}{}
+	}()
+	select {
+	case <-lockDone:
+		t.Fatal("lock returned before the borrowed service was released")
+	case <-shutdownDone:
+		t.Fatal("shutdown returned before the borrowed service was released")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(leaseRelease)
+	select {
+	case err := <-lockDone:
+		if err != nil {
+			t.Fatalf("LockDesktopVault race error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("lock did not finish after lease release")
+	}
+	select {
+	case <-shutdownDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not finish after lease release")
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	if coordinator.closeCalls != 1 {
+		t.Fatalf("coordinator Close calls = %d, want 1", coordinator.closeCalls)
 	}
 }
 
@@ -358,6 +449,9 @@ type fakeDesktopCoordinator struct {
 	migratedPassword   []byte
 	acknowledgeCalls   int
 	nextRecoverySecret []byte
+	lockStarted        chan struct{}
+	leaseRelease       <-chan struct{}
+	closeCalls         int
 }
 
 func (c *fakeDesktopCoordinator) Status() desktopaccount.Status {
@@ -429,10 +523,21 @@ func (c *fakeDesktopCoordinator) ListSnapshots() ([]string, error) {
 func (c *fakeDesktopCoordinator) RestoreSnapshot(string) error { return desktopaccount.ErrLocked }
 
 func (c *fakeDesktopCoordinator) Lock() error {
+	if c.lockStarted != nil {
+		close(c.lockStarted)
+	}
+	if c.leaseRelease != nil {
+		<-c.leaseRelease
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.status.Unlocked = false
 	return nil
 }
 
-func (c *fakeDesktopCoordinator) Close() error { return nil }
+func (c *fakeDesktopCoordinator) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closeCalls++
+	return nil
+}

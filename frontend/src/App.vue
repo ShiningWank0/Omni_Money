@@ -9,7 +9,7 @@
     />
     <template v-else>
     <div v-if="idleScreenLocked" class="idle-lock-curtain" role="status" aria-live="polite">
-      <div class="idle-lock-message">無操作タイムアウトのため画面をロックしました</div>
+      <div class="idle-lock-message">{{ isWailsMode ? '保管庫を保護しています…' : '無操作タイムアウトのため画面をロックしました' }}</div>
     </div>
     <!-- ヘッダーエリア -->
     <div class="card header">
@@ -87,6 +87,7 @@
         <button class="menu-btn" @click="openTagChart">タグ別分析</button>
         <button class="menu-btn" @click="openTagManager">タグ管理</button>
         <button v-if="serverFeatures.snapshots" class="menu-btn menu-group-start" @click="openSnapshotManager">スナップショット管理</button>
+        <button v-if="isWailsMode" class="menu-btn menu-group-start" @click="openDesktopIdleSettings">自動ロック設定</button>
         <button v-if="!isWailsMode && serverFeatures.passkeys" class="menu-btn menu-group-start" @click="openPasskeySettings">パスキー設定</button>
         <button v-if="serverFeatures.admin" class="menu-btn menu-group-start" @click="openServerAccountAdmin">サーバーユーザー管理</button>
         <button v-if="isWailsMode" class="menu-btn logout-btn" @click="lockDesktopVaultNow">保管庫をロック</button>
@@ -237,6 +238,29 @@
       @close="showPasskeySettings = false"
     />
 
+    <div v-if="showDesktopIdleSettings" class="reauth-overlay" @click.self="closeDesktopIdleSettings">
+      <form class="reauth-card" role="dialog" aria-modal="true" aria-labelledby="desktop-idle-title" @submit.prevent="saveDesktopIdleSettings">
+        <h3 id="desktop-idle-title">Desktop 自動ロック</h3>
+        <p class="reauth-description">操作がない状態が続いたときに、暗号化保管庫を自動的にロックします。</p>
+        <label class="reauth-label" for="desktop-idle-minutes">無操作時間（5〜120分）</label>
+        <input
+          id="desktop-idle-minutes"
+          v-model.number="desktopIdleDraftMinutes"
+          class="reauth-input"
+          type="number"
+          min="5"
+          max="120"
+          step="1"
+          required
+        >
+        <div v-if="desktopIdleSettingsError" class="reauth-error" role="alert">{{ desktopIdleSettingsError }}</div>
+        <div class="reauth-actions">
+          <button type="button" class="reauth-cancel" @click="closeDesktopIdleSettings">キャンセル</button>
+          <button type="submit" class="reauth-submit">保存</button>
+        </div>
+      </form>
+    </div>
+
     <!-- 最近の認証が必要な操作用の再認証ダイアログ -->
     <div v-if="showReauthModal" class="reauth-overlay" @click.self="cancelReauthentication">
       <div class="reauth-card" role="dialog" aria-modal="true" aria-labelledby="reauth-title">
@@ -294,6 +318,13 @@ import TransactionModal from './components/TransactionModal.vue'
 import DesktopVaultGate from './components/DesktopVaultGate.vue'
 import { csvExportWarning } from './utils/csvSafety'
 import { isDesktopVaultUnlocked } from './utils/desktopVaultSafety'
+import {
+  createDesktopIdleLock,
+  createDesktopVaultLockRequest,
+  isValidDesktopIdleMinutes,
+  loadDesktopIdleMinutes,
+  saveDesktopIdleMinutes
+} from './utils/desktopIdleLock'
 import { passkeysSupported } from './utils/passkeys'
 import { formatExactCurrency } from './utils/exactAmount'
 
@@ -320,6 +351,8 @@ import {
   getAuthStatus,
   getDesktopVaultStatus,
   lockDesktopVault,
+  enableDesktopFinancialCalls,
+  invalidateDesktopFinancialCalls,
   reauthenticate,
   reauthenticateWithPasskey,
   keepAlive,
@@ -343,6 +376,10 @@ const tagManagerTags = ref([])
 const showAIAPIConsole = ref(false)
 const showServerAccountAdmin = ref(false)
 const showPasskeySettings = ref(false)
+const showDesktopIdleSettings = ref(false)
+const desktopIdleMinutes = ref(loadDesktopIdleMinutes())
+const desktopIdleDraftMinutes = ref(desktopIdleMinutes.value)
+const desktopIdleSettingsError = ref('')
 const showReauthModal = ref(false)
 const reauthLoading = ref(false)
 const reauthPassword = ref('')
@@ -371,6 +408,8 @@ let heartbeatPending = false
 let heartbeatRecheckInFlight = false
 let lastHeartbeatAttemptAt = 0
 let componentMounted = false
+let desktopIdleController = null
+let desktopLockRequest = null
 const heartbeatIntervalMs = 4 * 60 * 1000
 const heartbeatTrailingMs = 30 * 1000
 const heartbeatFailureRecheckDelaysMs = [500, 1500]
@@ -668,6 +707,34 @@ function openPasskeySettings() {
   showPasskeySettings.value = true
 }
 
+function openDesktopIdleSettings() {
+  showMenu.value = false
+  desktopIdleDraftMinutes.value = desktopIdleMinutes.value
+  desktopIdleSettingsError.value = ''
+  showDesktopIdleSettings.value = true
+}
+
+function closeDesktopIdleSettings() {
+  showDesktopIdleSettings.value = false
+  desktopIdleSettingsError.value = ''
+}
+
+function saveDesktopIdleSettings() {
+  const minutes = desktopIdleDraftMinutes.value
+  if (!isValidDesktopIdleMinutes(minutes)) {
+    desktopIdleSettingsError.value = '5〜120の整数で指定してください'
+    return
+  }
+  if (!saveDesktopIdleMinutes(minutes)) {
+    desktopIdleSettingsError.value = '設定を保存できませんでした'
+    return
+  }
+  desktopIdleMinutes.value = minutes
+  closeDesktopIdleSettings()
+  if (desktopVaultUnlocked.value) desktopIdleController?.start(minutes)
+  showToast(`自動ロックを${minutes}分に設定しました`)
+}
+
 async function logout() {
   showMenu.value = false
   try {
@@ -722,6 +789,7 @@ function stopIdleLock() {
 // component-local form state.
 function clearSensitiveStateForIdle() {
   stopIdleLock()
+  desktopIdleController?.stop()
   store.resetState()
   showMenu.value = false
   showAccountDropdown.value = false
@@ -737,6 +805,8 @@ function clearSensitiveStateForIdle() {
   showAIAPIConsole.value = false
   showServerAccountAdmin.value = false
   showPasskeySettings.value = false
+  showDesktopIdleSettings.value = false
+  desktopIdleSettingsError.value = ''
   showReauthModal.value = false
   reauthLoading.value = false
   reauthPassword.value = ''
@@ -753,7 +823,7 @@ function clearSensitiveStateForIdle() {
   toastTimer = null
   clearTimeout(searchTimeout)
   searchTimeout = null
-  localStorage.removeItem('snapshot_restored')
+  try { localStorage.removeItem('snapshot_restored') } catch { /* storage may be unavailable */ }
   if (reauthRequest?.reject) {
     reauthRequest.reject(new Error('セッションが無操作タイムアウトになりました'))
   }
@@ -761,48 +831,78 @@ function clearSensitiveStateForIdle() {
 }
 
 async function fetchPrivateData() {
-  await store.fetchAccounts()
-  await store.fetchCreditCardSettings()
-  await store.fetchBankAccountSettings()
-  await store.fetchTransactions()
+  await store.fetchAccounts({ throwOnError: true })
+  await Promise.all([
+    store.fetchCreditCardSettings({ throwOnError: true }),
+    store.fetchBankAccountSettings({ throwOnError: true }),
+    store.fetchTransactions({ throwOnError: true })
+  ])
 }
 
 async function handleDesktopVaultUnlocked() {
   if (!isWailsMode) return
   desktopVaultLoading.value = true
+  idleScreenLocked.value = true
   desktopVaultError.value = ''
   try {
     const confirmed = await getDesktopVaultStatus()
     if (!isDesktopVaultUnlocked(confirmed)) {
       throw new Error('保管庫のロック解除を確認できませんでした')
     }
-    desktopVaultStatus.value = confirmed
+    enableDesktopFinancialCalls()
     await fetchPrivateData()
+    desktopVaultStatus.value = confirmed
     isInitialLoading.value = false
+    desktopIdleController?.start(desktopIdleMinutes.value)
+    await nextTick()
+    if (document.visibilityState === 'visible') idleScreenLocked.value = false
   } catch (error) {
-    clearSensitiveStateForIdle()
-    desktopVaultStatus.value = { state: 'locked', configured: true, unlocked: false }
-    desktopVaultError.value = error?.message || '保管庫を安全に開けませんでした'
+    await requestDesktopVaultLock('unlock-failure')
+    if (!desktopVaultError.value) {
+      desktopVaultError.value = error?.message || '保管庫を安全に開けませんでした'
+    }
   } finally {
     desktopVaultLoading.value = false
   }
 }
 
-async function lockDesktopVaultNow() {
-  if (!isWailsMode) return
-  showMenu.value = false
-  isInitialLoading.value = true
-  desktopVaultError.value = ''
-  desktopVaultStatus.value = { ...(desktopVaultStatus.value || {}), state: 'locked', configured: true, unlocked: false }
-  clearSensitiveStateForIdle()
-  // Let Vue replace the ledger with the lock gate before waiting for DB close.
-  await nextTick()
-  try {
-    await lockDesktopVault()
-    desktopVaultStatus.value = await getDesktopVaultStatus()
-  } catch (error) {
-    desktopVaultError.value = error?.message || '保管庫を安全にロックできませんでした'
+function requestDesktopVaultLock(reason) {
+  if (!isWailsMode) return Promise.resolve()
+  if (!desktopLockRequest) {
+    desktopLockRequest = createDesktopVaultLockRequest({
+      showCurtain() {
+        showMenu.value = false
+        isInitialLoading.value = true
+        desktopVaultError.value = ''
+        idleScreenLocked.value = true
+      },
+      invalidateResponses: invalidateDesktopFinancialCalls,
+      nextTick,
+      purge: clearSensitiveStateForIdle,
+      lock: lockDesktopVault,
+      setLockedStatus(status) {
+        if (!status || isDesktopVaultUnlocked(status)) {
+          throw new Error('保管庫のロック完了を確認できませんでした')
+        }
+        desktopVaultStatus.value = status
+      },
+      onFailure(error, failedReason) {
+        // Never restore the ledger after a failed lock attempt. The backend
+        // may already have destroyed its key even when returning an error.
+        desktopVaultStatus.value = { state: 'locked', configured: true, unlocked: false }
+        desktopVaultError.value = error?.message || `保管庫を安全にロックできませんでした (${failedReason})`
+      },
+      onSettled() {
+        desktopVaultLoading.value = false
+        idleScreenLocked.value = false
+      }
+    })
   }
+  return desktopLockRequest(reason)
+}
+
+function lockDesktopVaultNow() {
+  return requestDesktopVaultLock('manual')
 }
 
 function applyServerAuthStatus(status) {
@@ -1141,12 +1241,20 @@ onMounted(async () => {
   window.addEventListener('pageshow', handlePageShow)
   reauthListenerRegistered = true
   if (isWailsMode) {
+    desktopIdleController = createDesktopIdleLock({
+      document,
+      onCurtainChange: visible => { idleScreenLocked.value = visible },
+      onExpired: reason => { void requestDesktopVaultLock(reason) }
+    })
     try {
-      desktopVaultStatus.value = await getDesktopVaultStatus()
-      if (desktopVaultUnlocked.value) {
-        await fetchPrivateData()
+      const status = await getDesktopVaultStatus()
+      if (isDesktopVaultUnlocked(status)) {
+        await handleDesktopVaultUnlocked()
+      } else {
+        desktopVaultStatus.value = status
       }
     } catch (error) {
+      invalidateDesktopFinancialCalls()
       clearSensitiveStateForIdle()
       desktopVaultError.value = error?.message || '保管庫の状態を安全に確認できませんでした'
       desktopVaultStatus.value = { state: 'error', configured: true, unlocked: false }
@@ -1190,6 +1298,7 @@ onBeforeUnmount(() => {
   clearTimeout(searchTimeout)
   clearTimeout(toastTimer)
   stopIdleLock()
+  desktopIdleController?.stop()
   if (reauthListenerRegistered) {
     window.removeEventListener('omni-money:reauth-required', handleReauthRequired)
     window.removeEventListener('omni-money:session-expired', handleSessionExpired)
