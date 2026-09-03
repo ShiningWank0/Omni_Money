@@ -183,7 +183,7 @@ test('snapshot restore source contracts keep close guarded and post-restore wiri
   const wailsBranch = handler.match(/if \(isWailsMode\) \{[\s\S]*?\n\t\}/)?.[0] || ''
   assert.ok(wailsBranch.length > 0)
   const lockIndex = wailsBranch.indexOf('await lockDesktopVaultNow()')
-  const reloadIndex = wailsBranch.indexOf('window.location.reload()')
+  const reloadIndex = wailsBranch.indexOf('reloadLocation()')
   assert.ok(lockIndex >= 0)
   assert.ok(reloadIndex >= 0)
   assert.ok(lockIndex < reloadIndex)

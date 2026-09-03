@@ -340,6 +340,7 @@ import {
 import { passkeysSupported } from './utils/passkeys'
 import { validatePasswordBytes } from './utils/passwordPolicy'
 import { formatExactCurrency } from './utils/exactAmount'
+import { reloadLocation, replaceLocation } from './utils/navigation'
 
 // 初期表示に不要な管理・分析モーダルは、開いた時だけ読み込む。
 const CSVImportModal = defineAsyncComponent(() => import('./components/CSVImportModal.vue'))
@@ -1119,7 +1120,7 @@ function expireSessionAndRedirect(reason) {
   idleLockInProgress = true
   idleScreenLocked.value = true
   clearSensitiveStateForIdle()
-  window.location.replace(`/login?reason=${encodeURIComponent(reason)}`)
+  replaceLocation(`/login?reason=${encodeURIComponent(reason)}`)
 }
 
 function scheduleActivityHeartbeat() {
@@ -1270,7 +1271,7 @@ async function handleSnapshotRestored() {
 		// The desktop restore has no server session to expire. Purge all mounted
 		// state, lock the vault, then reload into the normal unlock gate.
 		await lockDesktopVaultNow()
-		window.location.reload()
+		reloadLocation()
 		return
 	}
 	// 全状態をリセットしてから再取得
@@ -1284,7 +1285,7 @@ async function handleSnapshotRestored() {
   } catch (e) {
     console.error('復元後のデータ再取得エラー:', e)
     // 再取得に失敗した場合はページリロードで確実に反映
-    window.location.reload()
+    reloadLocation()
   }
 }
 
