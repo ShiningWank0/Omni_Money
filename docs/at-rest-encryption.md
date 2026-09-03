@@ -61,6 +61,31 @@ docker compose up -d --build
 
 Composeを使わないserver modeでは`DATA_AT_REST_MODE=external-encrypted-volume`と`DATA_AT_REST_ATTESTATION_FILE`も設定します。
 
+## safe-update用host attestation
+
+`DATA_AT_REST_ATTESTATION_FILE`はserver processが読むcontainer側のattestationであり、
+safe-updateがrollback先を決めるtrust rootには使いません。host側のencrypted volume、
+実際のbind source、固定checkpoint siblingをroot operatorが別のowner-only/read-only
+fileへ記録します。
+
+```json
+{
+  "version": 1,
+  "protection": "external-encrypted-volume",
+  "encrypted_volume_root": "/srv/omni-money",
+  "data_root": "/srv/omni-money/data",
+  "checkpoint_root": "/srv/omni-money/omni-money-update-checkpoints"
+}
+```
+
+`OMNI_UPDATE_ATTESTATION_FILE`でComposeのhost-only extensionへ渡し、root所有・mode `0400`/`0440`/`0444`、
+symlinkなし、書込み不可のparentを守ります。safe-updateはこの3 pathをresolved Composeの
+host sourceと突合し、encrypted rootの境界、data/checkpointのcontained sibling、同じ
+filesystem/device、固定checkpoint名を検証します。`OMNI_UPDATE_CHECKPOINT_DIR`の任意指定
+は廃止しました。v1.1.0以前から移行する場合は、既存attestationの`data_root=/app/data`
+をhost pathへ置き換えず、実mountのhost pathを調査してこのhost schemaを新規作成し、
+restore試験後にsafe-updateを有効化してください。
+
 ## 復旧試験とrotation
 
 本番data rootを直接変更せず、暗号化backupの複製を別の隔離volumeでunlockします。control DBとuser vaultを復元し、外部公開せず起動して`PRAGMA integrity_check`、代表的な残高・画像・tag、user本人のrecovery codeによるvault復旧を確認します。multi-user serverのsnapshot routeは現在無効なので、snapshot restoreを復旧手順に含めません。試験用copyを廃棄した実施時刻だけを`recovery_tested_at`へ記録します。

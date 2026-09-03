@@ -1,9 +1,18 @@
+name: omni-money
+
 services:
   omni-money:
     build:
       context: .
     image: "${OMNI_IMAGE:-omni-money:local}"
     container_name: omni-money
+    # Pin the kernel credential numerically. A named USER is resolved from the
+    # candidate image's /etc/passwd and therefore is not a host-side security
+    # boundary during safe-update.
+    user: "10001:10001"
+    # Do not allow a daemon-level alternative runtime to reinterpret the
+    # container isolation contract.
+    runtime: runc
     restart: unless-stopped
     # The Pangolin deployment is intentionally HTTPS-at-the-edge only. The
     # trusted Newt address below is fixed on the private network so an
@@ -80,6 +89,9 @@ services:
       pangolin_target:
         ipv4_address: "${OMNI_MONEY_IP:-172.30.240.2}"
 
+# Compose resolves this host-only extension into the updater's config snapshot;
+# it is deliberately not a service secret or container mount.
+x-omni-update-attestation-file: "${OMNI_UPDATE_ATTESTATION_FILE:?OMNI_UPDATE_ATTESTATION_FILE is required}"
 secrets:
   omni_data_at_rest_attestation:
     file: "${OMNI_AT_REST_ATTESTATION_FILE:?OMNI_AT_REST_ATTESTATION_FILE is required}"
