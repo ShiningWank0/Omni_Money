@@ -5,13 +5,24 @@ import test from 'node:test'
 
 import {
   clearSnapshotRestoreMarker,
-  notifySnapshotRestoreCompletion
+  executeSnapshotRestore
 } from '../src/utils/snapshotRestore.js'
 
 const snapshotManagerSource = readFileSync(
   resolve(import.meta.dirname, '../src/components/SnapshotManager.vue'),
   'utf8'
 )
+const appSource = readFileSync(resolve(import.meta.dirname, '../src/App.vue'), 'utf8')
+
+function deferred() {
+  let resolvePromise
+  let rejectPromise
+  const promise = new Promise((resolve, reject) => {
+    resolvePromise = resolve
+    rejectPromise = reject
+  })
+  return { promise, resolve: resolvePromise, reject: rejectPromise }
+}
 
 function withLocalStorage(value, callback) {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
@@ -30,48 +41,111 @@ function withLocalStorage(value, callback) {
   }
 }
 
-test('restore completion stays observable while a pending restore settles', async () => {
+test('desktop restore completion survives a pending resolve or reject', async () => {
   for (const failed of [false, true]) {
+    const pending = deferred()
     const events = []
-    let restoring = true
-    let settle
-    const pendingRestore = new Promise((resolve, reject) => {
-      settle = failed ? () => reject(new Error('restore failed')) : resolve
-    })
-    const requestClose = () => {
-      if (restoring) return
-      events.push(['close'])
-    }
-
-    requestClose()
-    assert.deepEqual(events, [])
-
-    const settled = pendingRestore.then(
-      () => {
-        restoring = false
-        notifySnapshotRestoreCompletion((...event) => events.push(event))
+    const restore = executeSnapshotRestore({
+      name: 'snapshot.db',
+      restore: name => {
+        events.push(['restore', name])
+        return pending.promise
       },
-      () => {
-        restoring = false
-        notifySnapshotRestoreCompletion((...event) => events.push(event), true)
-      }
-    )
-    settle()
-    await settled
+      isDesktop: true,
+      setRestoring: value => events.push(['restoring', value]),
+      clearMessage: () => events.push(['message']),
+      clearSecrets: () => events.push(['secrets']),
+      purgeState: () => events.push(['purge']),
+      clearMarker: () => events.push(['marker']),
+      emit: (...event) => events.push(event),
+      createSessionExpiredEvent: () => { throw new Error('desktop must not expire a server session') },
+      dispatchSessionExpired: () => { throw new Error('desktop must not dispatch a server session event') },
+      isOnLoginPage: () => false,
+      redirectToLogin: () => { throw new Error('desktop must not redirect') }
+    })
+
+    await Promise.resolve()
+    assert.deepEqual(events, [
+      ['restoring', true],
+      ['message'],
+      ['restore', 'snapshot.db']
+    ])
+
+    if (failed) pending.reject(new Error('restore failed'))
+    else pending.resolve()
+    await restore
 
     assert.deepEqual(events, failed
-      ? [['restored', { failed: true }], ['close']]
-      : [['restored'], ['close']])
+      ? [
+          ['restoring', true],
+          ['message'],
+          ['restore', 'snapshot.db'],
+          ['secrets'],
+          ['purge'],
+          ['restoring', false],
+          ['restored', { failed: true }],
+          ['close']
+        ]
+      : [
+          ['restoring', true],
+          ['message'],
+          ['restore', 'snapshot.db'],
+          ['purge'],
+          ['restoring', false],
+          ['restored'],
+          ['close']
+        ])
   }
 })
 
-test('restore UI cannot close while restoration is pending', () => {
-  assert.match(snapshotManagerSource, /class="modal-overlay" @click="closeSnapshotManager"/)
-  assert.match(snapshotManagerSource, /class="close-btn" @click="closeSnapshotManager" :disabled="isRestoring"/)
-  assert.match(
-    snapshotManagerSource,
-    /function closeSnapshotManager\(\) \{\s*if \(isRestoring\.value\) return\s*emit\('close'\)/
-  )
+test('server restore purges secrets, survives marker cleanup failure, and expires in order', async () => {
+  for (const { failed, preventDefault } of [
+    { failed: false, preventDefault: false },
+    { failed: true, preventDefault: true }
+  ]) {
+    const events = []
+    const event = { defaultPrevented: preventDefault }
+    const restore = executeSnapshotRestore({
+      name: 'snapshot.db',
+      restore: failed ? async () => { throw new Error('restore failed') } : async () => {},
+      isDesktop: false,
+      setRestoring: value => events.push(['restoring', value]),
+      clearMessage: () => events.push(['message']),
+      clearSecrets: () => events.push(['secrets']),
+      purgeState: () => events.push(['purge']),
+      clearMarker: () => {
+        events.push(['marker'])
+        throw new Error('storage denied')
+      },
+      emit: (...emitted) => events.push(emitted),
+      createSessionExpiredEvent: reason => {
+        events.push(['event:create', reason])
+        return event
+      },
+      dispatchSessionExpired: dispatched => {
+        assert.equal(dispatched, event)
+        events.push(['event:dispatch'])
+      },
+      isOnLoginPage: () => false,
+      redirectToLogin: reason => events.push(['redirect', reason])
+    })
+    await restore
+
+    const reason = failed ? 'snapshot-restore-failed' : 'snapshot-restored'
+    const expected = [
+      ['restoring', true],
+      ['message'],
+      ['secrets'],
+      ['marker'],
+      ['purge'],
+      ['restoring', false],
+      ['close'],
+      ['event:create', reason],
+      ['event:dispatch']
+    ]
+    if (!preventDefault) expected.push(['redirect', reason])
+    assert.deepEqual(events, expected)
+  }
 })
 
 test('snapshot restore marker cleanup survives a throwing localStorage getter', () => {
@@ -89,8 +163,20 @@ test('snapshot restore marker cleanup survives a throwing removeItem', () => {
   assert.equal(clearSnapshotRestoreMarker(storage), false)
 })
 
-test('snapshot restore marker cleanup removes the marker when storage is available', () => {
-  const removed = []
-  assert.equal(clearSnapshotRestoreMarker({ removeItem: key => removed.push(key) }), true)
-  assert.deepEqual(removed, ['snapshot_restored'])
+test('snapshot restore source contracts keep close guarded and post-restore wiring intact', () => {
+  assert.equal((snapshotManagerSource.match(/@click="closeSnapshotManager"/g) || []).length, 2)
+  assert.match(snapshotManagerSource, /class="close-btn" @click="closeSnapshotManager" :disabled="isRestoring"/)
+  assert.match(
+    snapshotManagerSource,
+    /function closeSnapshotManager\(\) \{\s*if \(isRestoring\.value\) return\s*emit\('close'\)/
+  )
+  assert.doesNotMatch(snapshotManagerSource, /@click="\$emit\('close'\)"/)
+  assert.match(snapshotManagerSource, /return executeSnapshotRestore\(\{\s*name,/)
+  assert.match(snapshotManagerSource, /restore: apiRestoreSnapshot/)
+  assert.match(appSource, /@restored="handleSnapshotRestored"/)
+
+  const handlerStart = appSource.indexOf('async function handleSnapshotRestored()')
+  const handlerEnd = appSource.indexOf('\n}\n', handlerStart) + 2
+  const handler = appSource.slice(handlerStart, handlerEnd)
+  assert.ok(handler.indexOf('await lockDesktopVaultNow()') < handler.indexOf('window.location.reload()'))
 })

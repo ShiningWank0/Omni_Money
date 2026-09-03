@@ -55,7 +55,7 @@ import {
 } from '../utils/api'
 import {
   clearSnapshotRestoreMarker,
-  notifySnapshotRestoreCompletion
+  executeSnapshotRestore
 } from '../utils/snapshotRestore'
 
 const emit = defineEmits(['close', 'restored'])
@@ -91,60 +91,28 @@ async function fetchSnapshots() {
 }
 
 async function executeRestore(name) {
-  isRestoring.value = true
-  message.value = ''
-  try {
-    await apiRestoreSnapshot(name)
-    if (isWailsMode) {
-      // Desktop keeps its established Wails flow: notify the shell so it can
-      // purge/reload/lock the vault. Do not route a desktop restore through
-      // the server login-expiry path.
+  return executeSnapshotRestore({
+    name,
+    restore: apiRestoreSnapshot,
+    isDesktop: isWailsMode,
+    setRestoring: value => { isRestoring.value = value },
+    clearMessage: () => { message.value = '' },
+    clearSecrets: clearSessionSecrets,
+    purgeState: () => {
       snapshots.value = []
       confirmingSnapshot.value = null
-      isRestoring.value = false
-      notifySnapshotRestoreCompletion(emit)
-      return
-    }
-    finishRestoreAndRequireLogin('snapshot-restored')
-  } catch (e) {
-    if (isWailsMode) {
-      // Desktop closes and destroys the vault on every restore failure. Drop
-      // all browser-held secrets and let the shell reload into the password
-      // gate; keeping this modal mounted would retain financial state while
-      // the backend is already fail-closed.
-      clearSessionSecrets()
-      snapshots.value = []
-      isRestoring.value = false
-      confirmingSnapshot.value = null
-      notifySnapshotRestoreCompletion(emit, true)
-      return
-    }
-    // The server drains sessions before attempting disk restore, so a failed
-    // restore still requires a fresh login and must not leave a stale
-    // modal/store visible in the browser.
-    finishRestoreAndRequireLogin('snapshot-restore-failed')
-  }
-}
-
-function finishRestoreAndRequireLogin(reason) {
-  clearSessionSecrets()
-  clearSnapshotRestoreMarker()
-  snapshots.value = []
-  confirmingSnapshot.value = null
-  message.value = ''
-  isRestoring.value = false
-  emit('close')
-  const event = new CustomEvent('omni-money:session-expired', {
-    cancelable: true,
-    detail: { reason }
+      message.value = ''
+    },
+    clearMarker: clearSnapshotRestoreMarker,
+    emit,
+    createSessionExpiredEvent: reason => new CustomEvent('omni-money:session-expired', {
+      cancelable: true,
+      detail: { reason }
+    }),
+    dispatchSessionExpired: event => window.dispatchEvent(event),
+    isOnLoginPage: () => window.location.pathname === '/login',
+    redirectToLogin: reason => window.location.replace(`/login?reason=${encodeURIComponent(reason)}`)
   })
-  window.dispatchEvent(event)
-  // App.vue handles the event synchronously and clears its financial store and
-  // all mounted modal state before navigation. Keep a fallback for an
-  // embedded component without the shell listener.
-  if (!event.defaultPrevented && window.location.pathname !== '/login') {
-    window.location.replace(`/login?reason=${encodeURIComponent(reason)}`)
-  }
 }
 
 onMounted(fetchSnapshots)
