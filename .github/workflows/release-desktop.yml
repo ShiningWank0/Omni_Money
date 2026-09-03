@@ -138,6 +138,7 @@ jobs:
       contents: read
     env:
       APP_VERSION: ${{ needs.prepare.outputs.version }}
+      VITE_APP_VERSION: ${{ needs.prepare.outputs.version }}
       BUILD_PLATFORM: ${{ matrix.platform }}
       ARTIFACT_NAME: ${{ matrix.artifact_name }}
     strategy:

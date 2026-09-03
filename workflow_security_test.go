@@ -68,6 +68,7 @@ func TestDesktopReleaseUsesLeastPrivilegeAndReproducibleTools(t *testing.T) {
 		"actions: read",
 		"contents: write",
 		"WAILS_VERSION: v2.11.0",
+		"VITE_APP_VERSION: ${{ needs.prepare.outputs.version }}",
 		"github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION",
 		"SHA256SUMS",
 		"actions/attest@",
@@ -82,6 +83,45 @@ func TestDesktopReleaseUsesLeastPrivilegeAndReproducibleTools(t *testing.T) {
 	for _, forbidden := range []string{"cmd/wails@latest", `xattr -cr`} {
 		if strings.Contains(workflow, forbidden) {
 			t.Errorf("release workflow contains forbidden pattern %q", forbidden)
+		}
+	}
+}
+
+func TestDockerReleasePassesVersionBuildArg(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join(".github", "workflows", "release-docker.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(contents)
+	for _, required := range []string{
+		`--build-arg "VERSION=$APP_VERSION"`,
+		"build-args: VERSION=${{ env.APP_VERSION }}",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("Docker release workflow is missing version propagation %q", required)
+		}
+	}
+}
+
+func TestDesktopReleaseSharesPreparedVersionWithWails(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join(".github", "workflows", "release-desktop.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(contents)
+	buildStart := strings.Index(workflow, "\n  build:\n")
+	attestStart := strings.Index(workflow, "\n  attest:\n")
+	if buildStart < 0 || attestStart <= buildStart {
+		t.Fatal("release workflow build job is missing or out of order")
+	}
+	buildJob := workflow[buildStart:attestStart]
+	for _, required := range []string{
+		"APP_VERSION: ${{ needs.prepare.outputs.version }}",
+		"VITE_APP_VERSION: ${{ needs.prepare.outputs.version }}",
+		`-ldflags "-X main.version=${APP_VERSION}"`,
+	} {
+		if !strings.Contains(buildJob, required) {
+			t.Errorf("desktop build job is missing shared prepared version wiring %q", required)
 		}
 	}
 }
