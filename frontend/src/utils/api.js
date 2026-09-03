@@ -7,6 +7,39 @@ import { authenticatePasskey, createPasskey } from './passkeys.js'
 export const isWailsMode = typeof window.go !== 'undefined'
 const isWails = isWailsMode
 
+let desktopFinancialGeneration = 0
+let desktopFinancialCallsEnabled = false
+
+export class DesktopVaultResponseInvalidatedError extends Error {
+  constructor() {
+    super('保管庫のロック状態が変わったため、応答を破棄しました')
+    this.name = 'DesktopVaultResponseInvalidatedError'
+  }
+}
+
+// Lifecycle calls intentionally bypass this gate. Financial calls capture the
+// current unlocked generation and may publish their response only while that
+// exact generation is still enabled.
+export function enableDesktopFinancialCalls() {
+  desktopFinancialGeneration++
+  desktopFinancialCallsEnabled = true
+}
+
+export function invalidateDesktopFinancialCalls() {
+  desktopFinancialGeneration++
+  desktopFinancialCallsEnabled = false
+}
+
+async function desktopFinancialCall(invoke) {
+  if (!desktopFinancialCallsEnabled) throw new DesktopVaultResponseInvalidatedError()
+  const generation = desktopFinancialGeneration
+  const result = await invoke()
+  if (!desktopFinancialCallsEnabled || generation !== desktopFinancialGeneration) {
+    throw new DesktopVaultResponseInvalidatedError()
+  }
+  return result
+}
+
 // CSRF tokens are deliberately kept in memory only.  They are issued by the
 // server after authentication and are never persisted in localStorage or a
 // cookie that JavaScript can read.
@@ -504,7 +537,7 @@ export async function createServerPasswordReset(userID, expiresInSeconds = 900) 
  */
 export async function getAccounts() {
   if (isWails) {
-    return await window.go.main.App.GetAccounts()
+    return await desktopFinancialCall(() => window.go.main.App.GetAccounts())
   }
   const res = await apiFetch('/api/accounts')
   return await res.json()
@@ -517,7 +550,7 @@ export async function getAccounts() {
  */
 export async function getItems(account = '') {
   if (isWails) {
-    return await window.go.main.App.GetItems(account)
+    return await desktopFinancialCall(() => window.go.main.App.GetItems(account))
   }
   const params = account ? `?account=${encodeURIComponent(account)}` : ''
   const res = await apiFetch(`/api/items${params}`)
@@ -532,7 +565,7 @@ export async function getItems(account = '') {
  */
 export async function getTransactions(account = '', search = '') {
   if (isWails) {
-    return await window.go.main.App.GetTransactions(account, search)
+    return await desktopFinancialCall(() => window.go.main.App.GetTransactions(account, search))
   }
   const params = new URLSearchParams()
   if (account) params.set('account', account)
@@ -549,7 +582,7 @@ export async function getTransactions(account = '', search = '') {
  */
 export async function addTransaction(data) {
   if (isWails) {
-    return await window.go.main.App.AddTransaction(data)
+    return await desktopFinancialCall(() => window.go.main.App.AddTransaction(data))
   }
   const res = await apiFetch('/api/transactions', {
     method: 'POST',
@@ -568,7 +601,7 @@ export async function addTransaction(data) {
  */
 export async function updateTransaction(id, data) {
   if (isWails) {
-    return await window.go.main.App.UpdateTransaction(id, data)
+    return await desktopFinancialCall(() => window.go.main.App.UpdateTransaction(id, data))
   }
   const res = await apiFetch(`/api/transactions/${id}`, {
     method: 'PUT',
@@ -586,7 +619,7 @@ export async function updateTransaction(id, data) {
  */
 export async function deleteTransaction(id) {
   if (isWails) {
-    return await window.go.main.App.DeleteTransaction(id)
+    return await desktopFinancialCall(() => window.go.main.App.DeleteTransaction(id))
   }
   await apiFetch(`/api/transactions/${id}`, { method: 'DELETE' })
 }
@@ -597,7 +630,7 @@ export async function deleteTransaction(id) {
  */
 export async function getBalanceHistory() {
   if (isWails) {
-    return await window.go.main.App.GetBalanceHistory()
+    return await desktopFinancialCall(() => window.go.main.App.GetBalanceHistory())
   }
   const res = await apiFetch('/api/balance_history')
   return await res.json()
@@ -610,7 +643,7 @@ export async function getBalanceHistory() {
  */
 export async function getBalanceHistoryFiltered(fundItems) {
   if (isWails) {
-    return await window.go.main.App.GetBalanceHistoryFiltered(fundItems)
+    return await desktopFinancialCall(() => window.go.main.App.GetBalanceHistoryFiltered(fundItems))
   }
   const params = fundItems.map(i => `fund_items=${encodeURIComponent(i)}`).join('&')
   const res = await apiFetch(`/api/balance_history_filtered?${params}`)
@@ -623,7 +656,7 @@ export async function getBalanceHistoryFiltered(fundItems) {
  */
 export async function getCreditCardSettings() {
   if (isWails) {
-    return await window.go.main.App.GetCreditCardSettings()
+    return await desktopFinancialCall(() => window.go.main.App.GetCreditCardSettings())
   }
   const res = await apiFetch('/api/credit_card_settings')
   return await res.json()
@@ -636,7 +669,7 @@ export async function getCreditCardSettings() {
  */
 export async function saveCreditCardSettings(items) {
   if (isWails) {
-    return await window.go.main.App.SaveCreditCardSettings(items)
+    return await desktopFinancialCall(() => window.go.main.App.SaveCreditCardSettings(items))
   }
   await apiFetch('/api/credit_card_settings', {
     method: 'POST',
@@ -651,7 +684,7 @@ export async function saveCreditCardSettings(items) {
  */
 export async function getBankAccountSettings() {
   if (isWails) {
-    return await window.go.main.App.GetBankAccountSettings()
+    return await desktopFinancialCall(() => window.go.main.App.GetBankAccountSettings())
   }
   const res = await apiFetch('/api/bank_account_settings')
   return await res.json()
@@ -664,7 +697,7 @@ export async function getBankAccountSettings() {
  */
 export async function saveBankAccountSettings(items) {
   if (isWails) {
-    return await window.go.main.App.SaveBankAccountSettings(items)
+    return await desktopFinancialCall(() => window.go.main.App.SaveBankAccountSettings(items))
   }
   await apiFetch('/api/bank_account_settings', {
     method: 'POST',
@@ -743,7 +776,7 @@ async function readBoundedCSVText(response, maxBytes) {
  */
 export async function backupToCSVFile() {
   if (isWails) {
-    return await window.go.main.App.BackupToCSVFile()
+    return await desktopFinancialCall(() => window.go.main.App.BackupToCSVFile())
   }
   const downloadName = `transactions_backup_${new Date().toISOString().slice(0, 10)}.csv`
 	// showSaveFilePicker requires transient user activation. Acquire the file
@@ -903,7 +936,7 @@ export async function importCSV(content, mode = 'append') {
     // The native binding owns the file descriptor and OS picker.  Keep the
     // string call below solely for older Wails clients that have no file API.
     if (content == null && typeof window.go.main.App.ImportCSVFile === 'function') {
-      return await window.go.main.App.ImportCSVFile(mode)
+      return await desktopFinancialCall(() => window.go.main.App.ImportCSVFile(mode))
     }
     let text
     if (typeof content === 'string') {
@@ -916,7 +949,7 @@ export async function importCSV(content, mode = 'append') {
         throw new Error('CSVファイルは有効なUTF-8で指定してください')
       }
     }
-    return await window.go.main.App.ImportCSV(text, mode)
+    return await desktopFinancialCall(() => window.go.main.App.ImportCSV(text, mode))
   }
   if (content instanceof Blob) {
     const maxCSVBytes = 512 * 1024 * 1024
@@ -954,7 +987,7 @@ export async function importCSV(content, mode = 'append') {
  */
 export async function createSnapshot() {
   if (isWails) {
-    return await window.go.main.App.CreateSnapshot()
+    return await desktopFinancialCall(() => window.go.main.App.CreateSnapshot())
   }
   const res = await apiFetch('/api/snapshots', { method: 'POST' })
   const data = await res.json()
@@ -968,7 +1001,7 @@ export async function createSnapshot() {
  */
 export async function listSnapshots() {
   if (isWails) {
-    return await window.go.main.App.ListSnapshots()
+    return await desktopFinancialCall(() => window.go.main.App.ListSnapshots())
   }
   const res = await apiFetch('/api/snapshots')
   return await res.json()
@@ -981,7 +1014,7 @@ export async function listSnapshots() {
  */
 export async function restoreSnapshot(name) {
   if (isWails) {
-    return await window.go.main.App.RestoreSnapshot(name)
+    return await desktopFinancialCall(() => window.go.main.App.RestoreSnapshot(name))
   }
   const res = await apiFetch(`/api/snapshots/restore`, {
     method: 'POST',
@@ -1002,7 +1035,7 @@ export async function restoreSnapshot(name) {
  */
 export async function addTransactionImage(transactionId, imageData) {
   if (isWails) {
-    return await window.go.main.App.AddTransactionImage(transactionId, imageData)
+    return await desktopFinancialCall(() => window.go.main.App.AddTransactionImage(transactionId, imageData))
   }
   const res = await apiFetch(`/api/transaction_images/${transactionId}`, {
     method: 'POST',
@@ -1044,7 +1077,7 @@ export async function getTransactionImages(transactionId) {
  */
 export async function getTransactionImagesPage(transactionId, cursor = '', limit = 2) {
   if (isWails) {
-    return await window.go.main.App.GetTransactionImagesPage(transactionId, cursor, limit)
+    return await desktopFinancialCall(() => window.go.main.App.GetTransactionImagesPage(transactionId, cursor, limit))
   }
   const params = new URLSearchParams({ paged: '1', limit: String(limit) })
   if (cursor) params.set('cursor', cursor)
@@ -1061,7 +1094,7 @@ export async function getTransactionImagesPage(transactionId, cursor = '', limit
  */
 export async function deleteTransactionImage(transactionId, imageId) {
   if (isWails) {
-    return await window.go.main.App.DeleteTransactionImage(imageId)
+    return await desktopFinancialCall(() => window.go.main.App.DeleteTransactionImage(imageId))
   }
   await apiFetch(`/api/transaction_images/${transactionId}/${imageId}`, { method: 'DELETE' })
 }
@@ -1074,7 +1107,7 @@ export async function deleteTransactionImage(transactionId, imageId) {
  */
 export async function getTags() {
   if (isWails) {
-    return await window.go.main.App.GetTags()
+    return await desktopFinancialCall(() => window.go.main.App.GetTags())
   }
   const res = await apiFetch('/api/tags')
   await throwIfNotOk(res, 'タグ一覧の取得に失敗しました')
@@ -1089,7 +1122,7 @@ export async function getTags() {
  */
 export async function createTag(name, parentId = null) {
   if (isWails) {
-    return await window.go.main.App.CreateTag(name, parentId)
+    return await desktopFinancialCall(() => window.go.main.App.CreateTag(name, parentId))
   }
   const res = await apiFetch('/api/tags', {
     method: 'POST',
@@ -1107,7 +1140,7 @@ export async function createTag(name, parentId = null) {
  */
 export async function createTagByPath(path) {
   if (isWails) {
-    return await window.go.main.App.CreateTagByPath(path)
+    return await desktopFinancialCall(() => window.go.main.App.CreateTagByPath(path))
   }
   const res = await apiFetch('/api/tags/path', {
     method: 'POST',
@@ -1126,7 +1159,7 @@ export async function createTagByPath(path) {
  */
 export async function updateTag(id, name) {
   if (isWails) {
-    return await window.go.main.App.UpdateTag(id, name)
+    return await desktopFinancialCall(() => window.go.main.App.UpdateTag(id, name))
   }
   const res = await apiFetch(`/api/tags/${id}`, {
     method: 'PUT',
@@ -1143,7 +1176,7 @@ export async function updateTag(id, name) {
  */
 export async function deleteTag(id) {
   if (isWails) {
-    return await window.go.main.App.DeleteTag(id)
+    return await desktopFinancialCall(() => window.go.main.App.DeleteTag(id))
   }
   const res = await apiFetch(`/api/tags/${id}`, { method: 'DELETE' })
   await throwIfNotOk(res, 'タグの削除に失敗しました')
@@ -1156,7 +1189,7 @@ export async function deleteTag(id) {
  */
 export async function getTagDeleteImpact(id) {
   if (isWails) {
-    return await window.go.main.App.GetTagDeleteImpact(id)
+    return await desktopFinancialCall(() => window.go.main.App.GetTagDeleteImpact(id))
   }
   const res = await apiFetch(`/api/tags/${id}/impact`)
   await throwIfNotOk(res, 'タグ削除の影響確認に失敗しました')
@@ -1170,7 +1203,7 @@ export async function getTagDeleteImpact(id) {
  */
 export async function getTransactionTags(transactionId) {
   if (isWails) {
-    return await window.go.main.App.GetTransactionTags(transactionId)
+    return await desktopFinancialCall(() => window.go.main.App.GetTransactionTags(transactionId))
   }
   const res = await apiFetch(`/api/transaction_tags/${transactionId}`)
   return await res.json()
@@ -1184,7 +1217,7 @@ export async function getTransactionTags(transactionId) {
  */
 export async function addTransactionTags(transactionId, tagIds) {
   if (isWails) {
-    return await window.go.main.App.AddTransactionTags(transactionId, tagIds)
+    return await desktopFinancialCall(() => window.go.main.App.AddTransactionTags(transactionId, tagIds))
   }
   await apiFetch(`/api/transaction_tags/${transactionId}`, {
     method: 'POST',
@@ -1201,7 +1234,7 @@ export async function addTransactionTags(transactionId, tagIds) {
  */
 export async function removeTransactionTag(transactionId, tagId) {
   if (isWails) {
-    return await window.go.main.App.RemoveTransactionTag(transactionId, tagId)
+    return await desktopFinancialCall(() => window.go.main.App.RemoveTransactionTag(transactionId, tagId))
   }
   await apiFetch(`/api/transaction_tags/${transactionId}/${tagId}`, { method: 'DELETE' })
 }
@@ -1215,7 +1248,7 @@ export async function removeTransactionTag(transactionId, tagId) {
  */
 export async function getTagSummary(type = '', startDate = '', endDate = '') {
   if (isWails) {
-    return await window.go.main.App.GetTagSummary(type, startDate, endDate)
+    return await desktopFinancialCall(() => window.go.main.App.GetTagSummary(type, startDate, endDate))
   }
   const params = new URLSearchParams()
   if (type) params.set('type', type)
@@ -1235,7 +1268,7 @@ export async function getTagSummary(type = '', startDate = '', endDate = '') {
  */
 export async function getTransactionLinks(transactionId) {
   if (isWails) {
-    return await window.go.main.App.GetTransactionLinks(transactionId)
+    return await desktopFinancialCall(() => window.go.main.App.GetTransactionLinks(transactionId))
   }
   const res = await apiFetch(`/api/transaction_links/${transactionId}`)
   return await res.json()
@@ -1249,7 +1282,7 @@ export async function getTransactionLinks(transactionId) {
  */
 export async function addTransactionLink(transactionId, linkedId) {
   if (isWails) {
-    return await window.go.main.App.AddTransactionLink(transactionId, linkedId)
+    return await desktopFinancialCall(() => window.go.main.App.AddTransactionLink(transactionId, linkedId))
   }
   const res = await apiFetch(`/api/transaction_links/${transactionId}`, {
     method: 'POST',
@@ -1267,7 +1300,7 @@ export async function addTransactionLink(transactionId, linkedId) {
  */
 export async function removeTransactionLink(transactionId, linkedId) {
   if (isWails) {
-    return await window.go.main.App.RemoveTransactionLink(transactionId, linkedId)
+    return await desktopFinancialCall(() => window.go.main.App.RemoveTransactionLink(transactionId, linkedId))
   }
   const res = await apiFetch(`/api/transaction_links/${transactionId}/${linkedId}`, { method: 'DELETE' })
   await throwIfNotOk(res, '紐付け解除に失敗しました')
