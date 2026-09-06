@@ -52,12 +52,12 @@
         <p>token本体やhashは一覧へ表示しません。pendingのtokenだけを必要に応じて取り消せます。</p>
         <h4>招待</h4>
         <ul class="capability-list">
-          <li v-for="item in invitations" :key="item.id"><span>{{ item.email }} / {{ stateLabel(item.state) }} / 期限 {{ formatDate(item.expires_at) }}</span><button v-if="item.state === 'pending'" type="button" class="danger" :disabled="busy" @click="revokeInvitation(item)">取消</button></li>
+          <li v-for="item in invitations" :key="item.id"><span>{{ item.email }} / {{ stateLabel(item.state) }} / 期限 {{ formatDate(item.expires_at) }}</span><button v-if="item.state === 'pending'" type="button" class="danger" :disabled="busy || Boolean(issuedToken)" @click="revokeInvitation(item)">取消</button></li>
           <li v-if="!invitations.length">発行済みの招待はありません</li>
         </ul>
         <h4>パスワード再設定</h4>
         <ul class="capability-list">
-          <li v-for="item in passwordResets" :key="item.id"><span>{{ userName(item.user_id) }} / {{ stateLabel(item.state) }} / 期限 {{ formatDate(item.expires_at) }}</span><button v-if="item.state === 'pending'" type="button" class="danger" :disabled="busy" @click="revokePasswordReset(item)">取消</button></li>
+          <li v-for="item in passwordResets" :key="item.id"><span>{{ userName(item.user_id) }} / {{ stateLabel(item.state) }} / 期限 {{ formatDate(item.expires_at) }}</span><button v-if="item.state === 'pending'" type="button" class="danger" :disabled="busy || Boolean(issuedToken)" @click="revokePasswordReset(item)">取消</button></li>
           <li v-if="!passwordResets.length">発行済みの再設定tokenはありません</li>
         </ul>
       </section>
@@ -77,7 +77,7 @@
             <tbody>
               <tr v-for="user in users" :key="user.id">
                 <td><strong>{{ user.display_name }}</strong><span>{{ user.email }}</span></td>
-				<td><select :value="user.role" :disabled="busy || user.state !== 'active'" @change="changeRole(user, $event.target.value)"><option value="user">一般</option><option value="admin">管理者</option></select></td>
+                <td><select :value="user.role" :disabled="busy || Boolean(issuedToken) || user.state !== 'active'" @change="changeRole(user, $event.target.value)"><option value="user">一般</option><option value="admin">管理者</option></select></td>
                 <td>{{ user.state === 'active' ? '有効' : '無効' }}</td>
                 <td>{{ formatDate(user.last_login_at) }}</td>
                 <td class="user-actions">
@@ -88,7 +88,7 @@
                     :disabled="busy || Boolean(issuedToken) || user.state !== 'active' || user.id === currentUserId"
                     @click="disableUser(user)"
                   >無効化</button>
-				  <button v-if="user.state === 'disabled'" type="button" :disabled="busy" @click="enableUser(user)">再有効化</button>
+				  <button v-if="user.state === 'disabled'" type="button" :disabled="busy || Boolean(issuedToken)" @click="enableUser(user)">再有効化</button>
                 </td>
               </tr>
               <tr v-if="users.length === 0"><td colspan="5">ユーザーはいません</td></tr>

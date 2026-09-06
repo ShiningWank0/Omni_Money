@@ -62,6 +62,7 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { deleteAllPasskeys, deletePasskey, listPasskeys, registerPasskey } from '../utils/api'
+import { replaceLocation } from '../utils/navigation'
 import { passkeysSupported } from '../utils/passkeys'
 import { validatePasswordBytes } from '../utils/passwordPolicy'
 
@@ -132,7 +133,7 @@ async function remove(passkey) {
   infoMessage.value = ''
   try {
     await deletePasskey(passkey.id)
-	    window.location.replace('/login')
+    replaceLocation('/login')
   } catch (error) {
     errorMessage.value = error?.message || 'パスキーを削除できませんでした'
   } finally {
@@ -144,7 +145,7 @@ async function remove(passkey) {
 async function removeAll() {
   if (!window.confirm('登録済みパスキーをすべて失効し、全端末からログアウトしますか？ パスワードは変更されません。')) return
   deleting.value = true; busy.value = true; errorMessage.value = ''; infoMessage.value = ''
-  try { await deleteAllPasskeys(); window.location.replace('/login') }
+  try { await deleteAllPasskeys(); replaceLocation('/login') }
   catch (error) { errorMessage.value = error?.message || 'パスキーを一括失効できませんでした' }
   finally { deleting.value = false; busy.value = registering.value }
 }
