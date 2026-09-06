@@ -4,6 +4,7 @@ import { afterEach, beforeEach, vi } from 'vitest'
 enableAutoUnmount(afterEach)
 
 let listenerCleanup = []
+let timerCleanup = []
 
 function trackGlobalListeners(target) {
   const add = target.addEventListener.bind(target)
@@ -29,8 +30,45 @@ function trackGlobalListeners(target) {
   }
 }
 
+function trackGlobalTimers(target) {
+  const setTimeout = target.setTimeout.bind(target)
+  const clearTimeout = target.clearTimeout.bind(target)
+  const setInterval = target.setInterval.bind(target)
+  const clearInterval = target.clearInterval.bind(target)
+  const timeouts = new Set()
+  const intervals = new Set()
+
+  vi.spyOn(target, 'setTimeout').mockImplementation((...args) => {
+    const handle = setTimeout(...args)
+    timeouts.add(handle)
+    return handle
+  })
+  vi.spyOn(target, 'clearTimeout').mockImplementation(handle => {
+    timeouts.delete(handle)
+    clearTimeout(handle)
+  })
+  vi.spyOn(target, 'setInterval').mockImplementation((...args) => {
+    const handle = setInterval(...args)
+    intervals.add(handle)
+    return handle
+  })
+  vi.spyOn(target, 'clearInterval').mockImplementation(handle => {
+    intervals.delete(handle)
+    clearInterval(handle)
+  })
+
+  return () => {
+    for (const handle of timeouts) clearTimeout(handle)
+    for (const handle of intervals) clearInterval(handle)
+    timeouts.clear()
+    intervals.clear()
+  }
+}
+
 beforeEach(() => {
   listenerCleanup = [trackGlobalListeners(window), trackGlobalListeners(document)]
+  timerCleanup = [trackGlobalTimers(globalThis)]
+  if (window !== globalThis) timerCleanup.push(trackGlobalTimers(window))
   vi.stubGlobal('fetch', vi.fn(async input => {
     throw new Error(`Unexpected network request in component test: ${String(input)}`)
   }))
@@ -39,6 +77,7 @@ beforeEach(() => {
 afterEach(() => {
   for (const cleanup of listenerCleanup.splice(0)) cleanup()
   vi.useRealTimers()
+  for (const cleanup of timerCleanup.splice(0)) cleanup()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   vi.unstubAllEnvs()
