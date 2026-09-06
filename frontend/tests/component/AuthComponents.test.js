@@ -68,6 +68,13 @@ async function issueInvitation(wrapper) {
   await flushPromises()
 }
 
+async function issuePasswordReset(wrapper) {
+  const button = wrapper.findAll('button').find(candidate => candidate.text() === '再設定token')
+  expect(button).toBeDefined()
+  await button.trigger('click')
+  await flushPromises()
+}
+
 async function mountPasskey() {
   const wrapper = mount(PasskeySettingsModal)
   await flushPromises()
@@ -137,6 +144,25 @@ describe('ServerAccountAdminModal', () => {
     expect(wrapper.get('[role="alert"]').text()).toContain('invitation service unavailable')
   })
 
+  it('fails closed when password reset returns no token or fails', async () => {
+    api.createServerPasswordReset.mockResolvedValueOnce({})
+    const missingToken = await mountAdmin()
+
+    await issuePasswordReset(missingToken)
+
+    expect(missingToken.find('.token-panel').exists()).toBe(false)
+    expect(missingToken.get('[role="alert"]').text()).toContain('再設定tokenを受け取れませんでした')
+    missingToken.unmount()
+
+    api.createServerPasswordReset.mockRejectedValueOnce(new Error('password reset service unavailable'))
+    const failedRequest = await mountAdmin()
+
+    await issuePasswordReset(failedRequest)
+
+    expect(failedRequest.find('.token-panel').exists()).toBe(false)
+    expect(failedRequest.get('[role="alert"]').text()).toContain('password reset service unavailable')
+  })
+
   it('emits signed-out only after a successful self role change', async () => {
     const wrapper = await mountAdmin({ currentUserId: activeUser.id })
     const role = wrapper.get('.users-section tbody select')
@@ -185,6 +211,25 @@ describe('PasskeySettingsModal', () => {
 
     expect(password.element.value).toBe('')
     expect(wrapper.get('[role="alert"]').text()).toContain('passkey registration failed')
+  })
+
+  it('clears the registration password before the post-registration list refresh completes', async () => {
+    const refresh = deferred()
+    api.listPasskeys.mockResolvedValueOnce([])
+    api.listPasskeys.mockReturnValueOnce(refresh.promise)
+    const wrapper = await mountPasskey()
+    const password = wrapper.get('input[type="password"]')
+    await wrapper.get('input[type="text"]').setValue('MacBook')
+    await password.setValue('correct horse battery staple')
+
+    await wrapper.get('.registration-form').trigger('submit')
+    await flushPromises()
+
+    expect(api.listPasskeys).toHaveBeenCalledTimes(2)
+    expect(password.element.value).toBe('')
+
+    refresh.resolve([])
+    await flushPromises()
   })
 
   it('prevents close while registration is pending', async () => {

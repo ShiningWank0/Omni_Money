@@ -113,6 +113,7 @@ async function register() {
 	try {
 	  validatePasswordBytes(password.value)
 	  await registerPasskey({ name: name.value, password: password.value })
+    clearPassword()
     name.value = ''
     infoMessage.value = 'パスキーを登録しました。次回からパスワードまたはパスキーでログインできます'
     passkeys.value = await listPasskeys()
