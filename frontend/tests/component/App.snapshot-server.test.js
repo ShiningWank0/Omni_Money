@@ -156,3 +156,141 @@ it('unmounts the CSV modal and refreshes Pinia only after a successful imported 
   expect(wrapper.find('.csv-import-modal').exists()).toBe(false)
   expect(store.accounts).toEqual(['after-import'])
 })
+
+const existingTransaction = {
+  id: 7,
+  date: '2026-01-03',
+  account: 'cash',
+  item: 'lunch',
+  type: 'expense',
+  amount: 500,
+  balance: 500
+}
+
+async function mountTransactionApp(transactions = []) {
+  api.getTransactions.mockResolvedValue(transactions)
+  api.getTags.mockResolvedValue([])
+  api.getTransactionLinks.mockResolvedValue([])
+  const pinia = createPinia()
+  const wrapper = mount(App, { global: { plugins: [pinia] } })
+  await flushPromises()
+  return wrapper
+}
+
+it('keeps a new transaction draft and skips refresh when add fails', async () => {
+  const wrapper = await mountTransactionApp()
+  await wrapper.get('.header-add-btn .add-btn').trigger('click')
+  await flushPromises()
+  const accountsCalls = api.getAccounts.mock.calls.length
+  const transactionsCalls = api.getTransactions.mock.calls.length
+
+  await wrapper.get('input[placeholder="資金項目名を入力または選択"]').setValue('cash')
+  await wrapper.get('input[placeholder="例: 給与、食費、交通費"]').setValue('groceries')
+  await wrapper.get('input[inputmode="numeric"]').setValue('500')
+  api.addTransaction.mockRejectedValueOnce(new Error('add failed'))
+  await wrapper.get('.transaction-modal form').trigger('submit')
+  await flushPromises()
+
+  expect(wrapper.find('.transaction-modal').exists()).toBe(true)
+  expect(wrapper.get('input[placeholder="例: 給与、食費、交通費"]').element.value).toBe('groceries')
+  expect(api.getAccounts.mock.calls.length).toBe(accountsCalls)
+  expect(api.getTransactions.mock.calls.length).toBe(transactionsCalls)
+  expect(wrapper.get('[role="alert"]').text()).toContain('add failed')
+})
+
+it('keeps the edited transaction and skips refresh when update fails', async () => {
+  const wrapper = await mountTransactionApp([existingTransaction])
+  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
+  await flushPromises()
+  const accountsCalls = api.getAccounts.mock.calls.length
+  const transactionsCalls = api.getTransactions.mock.calls.length
+
+  await wrapper.get('input[placeholder="例: 給与、食費、交通費"]').setValue('dinner')
+  api.updateTransaction.mockRejectedValueOnce(new Error('update failed'))
+  await wrapper.get('.transaction-modal form').trigger('submit')
+  await flushPromises()
+
+  expect(wrapper.find('.transaction-modal').exists()).toBe(true)
+  expect(wrapper.get('input[placeholder="例: 給与、食費、交通費"]').element.value).toBe('dinner')
+  expect(api.getAccounts.mock.calls.length).toBe(accountsCalls)
+  expect(api.getTransactions.mock.calls.length).toBe(transactionsCalls)
+  expect(wrapper.get('[role="alert"]').text()).toContain('update failed')
+})
+
+it('keeps the edited transaction and skips refresh when delete fails', async () => {
+  const wrapper = await mountTransactionApp([existingTransaction])
+  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
+  await flushPromises()
+  const accountsCalls = api.getAccounts.mock.calls.length
+  const transactionsCalls = api.getTransactions.mock.calls.length
+
+  api.deleteTransaction.mockRejectedValueOnce(new Error('delete failed'))
+  await wrapper.get('.transaction-modal .delete-btn').trigger('click')
+  await wrapper.get('.transaction-modal .delete-confirm-yes').trigger('click')
+  await flushPromises()
+
+  expect(wrapper.find('.transaction-modal').exists()).toBe(true)
+  expect(wrapper.get('input[placeholder="例: 給与、食費、交通費"]').element.value).toBe('lunch')
+  expect(api.getAccounts.mock.calls.length).toBe(accountsCalls)
+  expect(api.getTransactions.mock.calls.length).toBe(transactionsCalls)
+  expect(wrapper.get('[role="alert"]').text()).toContain('delete failed')
+})
+
+it('closes the modal and refreshes after adding a transaction succeeds', async () => {
+  const wrapper = await mountTransactionApp()
+  await wrapper.get('.header-add-btn .add-btn').trigger('click')
+  await flushPromises()
+  const accountsCalls = api.getAccounts.mock.calls.length
+  const transactionsCalls = api.getTransactions.mock.calls.length
+
+  await wrapper.get('input[placeholder="資金項目名を入力または選択"]').setValue('cash')
+  await wrapper.get('input[placeholder="例: 給与、食費、交通費"]').setValue('groceries')
+  await wrapper.get('input[inputmode="numeric"]').setValue('500')
+  api.addTransaction.mockResolvedValueOnce({ id: 8 })
+  api.getAccounts.mockResolvedValueOnce(['cash', 'savings'])
+  api.getTransactions.mockResolvedValueOnce([])
+  await wrapper.get('.transaction-modal form').trigger('submit')
+  await flushPromises()
+
+  expect(wrapper.find('.transaction-modal').exists()).toBe(false)
+  expect(api.getAccounts.mock.calls.length).toBe(accountsCalls + 1)
+  expect(api.getTransactions.mock.calls.length).toBe(transactionsCalls + 1)
+})
+
+it('closes the modal and refreshes after updating a transaction succeeds', async () => {
+  const wrapper = await mountTransactionApp([existingTransaction])
+  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
+  await flushPromises()
+  const accountsCalls = api.getAccounts.mock.calls.length
+  const transactionsCalls = api.getTransactions.mock.calls.length
+
+  api.updateTransaction.mockResolvedValueOnce({ ...existingTransaction, item: 'dinner' })
+  api.getAccounts.mockResolvedValueOnce(['cash', 'savings'])
+  api.getTransactions.mockResolvedValueOnce([])
+  await wrapper.get('.transaction-modal form').trigger('submit')
+  await flushPromises()
+
+  expect(wrapper.find('.transaction-modal').exists()).toBe(false)
+  expect(api.getAccounts.mock.calls.length).toBe(accountsCalls + 1)
+  expect(api.getTransactions.mock.calls.length).toBe(transactionsCalls + 1)
+})
+
+it('closes the modal and refreshes after deleting a transaction succeeds', async () => {
+  const wrapper = await mountTransactionApp([existingTransaction])
+  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
+  await flushPromises()
+  const accountsCalls = api.getAccounts.mock.calls.length
+  const transactionsCalls = api.getTransactions.mock.calls.length
+
+  api.deleteTransaction.mockResolvedValueOnce(undefined)
+  api.getAccounts.mockResolvedValueOnce(['cash'])
+  api.getTransactions.mockResolvedValueOnce([])
+  await wrapper.get('.transaction-modal .delete-btn').trigger('click')
+  await wrapper.get('.transaction-modal .delete-confirm-yes').trigger('click')
+  await flushPromises()
+
+  expect(api.deleteTransaction).toHaveBeenCalledWith(existingTransaction.id)
+  expect(wrapper.find('.transaction-modal').exists()).toBe(false)
+  expect(api.getAccounts.mock.calls.length).toBe(accountsCalls + 1)
+  expect(api.getTransactions.mock.calls.length).toBe(transactionsCalls + 1)
+})
