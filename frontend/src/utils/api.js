@@ -751,7 +751,8 @@ export async function deleteTransaction(id) {
   if (isWails) {
     return await desktopFinancialCall(() => window.go.main.App.DeleteTransaction(id))
   }
-  await apiFetch(`/api/transactions/${id}`, { method: 'DELETE' })
+  const res = await apiFetch(`/api/transactions/${id}`, { method: 'DELETE' })
+  await throwIfNotOk(res, '取引の削除に失敗しました')
 }
 
 /**
