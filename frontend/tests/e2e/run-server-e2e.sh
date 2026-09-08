@@ -44,10 +44,13 @@ tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/omni-server-e2e.XXXXXX")"
 container_id=""
 cleanup() {
   local status=$?
+  set +e
   if [ -n "$container_id" ]; then
     docker rm -f "$container_id" >/dev/null 2>&1 || true
   fi
-  rm -rf -- "$tmp_dir"
+  # On Linux the data dir is owned by UID 10001 (mode 0700), so a plain rm
+  # fails for the runner user and would abort the trap with exit 1.
+  rm -rf -- "$tmp_dir" 2>/dev/null || sudo rm -rf -- "$tmp_dir"
   exit "$status"
 }
 trap cleanup EXIT
@@ -114,6 +117,7 @@ PY
 
 start_container() {
   local host_port="$1"
+  local error_file="$2"
   docker run -d \
     --read-only \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
@@ -135,11 +139,12 @@ start_container() {
     --env DATA_AT_REST_ATTESTATION_FILE=/run/secrets/omni_data_at_rest_attestation.json \
     --env HOST_IP=0.0.0.0 \
     --env PORT=4000 \
+    --env WEB_EXTERNAL_HOST=localhost \
     --env FORCE_HTTPS=false \
     --env ALLOW_INSECURE_HTTP=true \
     --env ALLOWED_HOSTS="localhost:$host_port,127.0.0.1:$host_port" \
     --publish "127.0.0.1:$host_port:4000" \
-    "$IMAGE"
+    "$IMAGE" 2>"$error_file"
 }
 
 wait_until_healthy() {
@@ -161,11 +166,14 @@ wait_until_healthy() {
 }
 
 base_url=""
+docker_run_error="$tmp_dir/docker_run_error"
 for attempt in 1 2 3 4 5; do
   host_port="$(pick_free_port)"
   echo "server-e2e: starting hardened container (attempt $attempt, dynamic loopback port)"
-  if ! container_id="$(start_container "$host_port")"; then
+  if ! container_id="$(start_container "$host_port" "$docker_run_error")"; then
     container_id=""
+    echo "server-e2e: docker run failed (attempt $attempt)" >&2
+    cat "$docker_run_error" >&2 || true
     continue
   fi
   if wait_until_healthy "$container_id"; then
@@ -196,6 +204,8 @@ fi
 
 playwright_status=0
 npx playwright test || playwright_status=$?
+# Playwright may leave an empty artifacts dir behind; keep the worktree clean.
+rm -rf "$FRONTEND_DIR/test-results" "$FRONTEND_DIR/playwright-report"
 if [ "$playwright_status" -ne 0 ]; then
   echo "server-e2e: playwright failed; last container log lines:" >&2
   docker logs "$container_id" 2>&1 | tail -n 200 >&2 || true
@@ -203,11 +213,14 @@ if [ "$playwright_status" -ne 0 ]; then
 fi
 
 # --- encryption-at-rest inspection (same as the CI smoke test) ----------------
+control_db="$data_dir/control/omni_control.db"
 db_header_read() {
-  if [ -r "$data_dir/control/omni_control.db" ]; then
-    head -c 16 "$data_dir/control/omni_control.db"
+  if [ -r "$control_db" ]; then
+    head -c 16 "$control_db"
+  elif sudo test -f "$control_db" 2>/dev/null; then
+    sudo head -c 16 "$control_db"
   else
-    sudo head -c 16 "$data_dir/control/omni_control.db"
+    fail "control database not found at the expected data root path"
   fi
 }
 if db_header_read | LC_ALL=C grep -q "SQLite format 3"; then

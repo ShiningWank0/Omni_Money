@@ -85,10 +85,13 @@ test('server round trip: bootstrap admin, persist a transaction, CSV v3 export a
   await page.locator('.confirmation-label input[type="checkbox"]').check()
   await page.locator('.login-button').click()
   await page.waitForURL('/')
-  await expect(page.locator('.header-add-btn .add-btn')).toBeVisible()
+  // On the desktop viewport only the header-search variant of the add button
+  // is visible (.header-add-btn is display:none above 768px).
+  const addBtn = page.locator('.add-btn.add-btn-desktop')
+  await expect(addBtn).toBeVisible()
 
   // 3. Add one transaction through the modal.
-  await page.locator('.header-add-btn .add-btn').click()
+  await addBtn.click()
   const modal = page.locator('.transaction-modal')
   await expect(modal).toBeVisible()
   await modal.locator('input[placeholder="資金項目名を入力または選択"]').fill(ACCOUNT_NAME)
