@@ -12,6 +12,7 @@
     "test": "npm run test:unit && npm run test:component",
     "test:unit": "node --test tests/*.test.js",
     "test:component": "vitest run",
+    "test:e2e": "playwright test",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -21,6 +22,7 @@
     "vue-chartjs": "^5.3.3"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@vitejs/plugin-vue": "^6.0.8",
     "@vue/test-utils": "^2.5.0",
     "jsdom": "^30.0.1",
