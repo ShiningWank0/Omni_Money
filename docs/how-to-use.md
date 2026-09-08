@@ -154,6 +154,8 @@ snapshot単体はDR setではありません。次の全てを別々の安全な
 
 backup取得だけでは不十分です。本番とは隔離した環境で定期的に復旧し、control DB/key、vault/snapshot、volume recovery material、recovery codeが揃ってcontrol DBが開くこと、user本人のrecovery codeで対象vaultだけが開くこと、別userやAdminからは開けないことを確認します。元snapshotは変更しません。
 
+server全体の冷間backupは `sudo bash scripts/backup-data-root.sh` で取得できます（service停止中のdata root全体tar、member/sha256/平文header検査、manifest付与、`--verify` モード付き）。取得手順、archiveと鍵materialの分離保管、restore手順、復元演習の詳細は [Disaster Recovery runbook](disaster-recovery.md) を参照してください。
+
 ## 6. よくある起動エラー
 
 | 症状 | 確認箇所 |
