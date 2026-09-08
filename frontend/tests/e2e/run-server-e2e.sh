@@ -49,8 +49,11 @@ cleanup() {
     docker rm -f "$container_id" >/dev/null 2>&1 || true
   fi
   # On Linux the data dir is owned by UID 10001 (mode 0700), so a plain rm
-  # fails for the runner user and would abort the trap with exit 1.
-  rm -rf -- "$tmp_dir" 2>/dev/null || sudo rm -rf -- "$tmp_dir"
+  # fails for the runner user. Never block the exit on a dev machine without
+  # passwordless sudo; warn about the leftover path instead.
+  rm -rf -- "$tmp_dir" 2>/dev/null \
+    || sudo -n rm -rf -- "$tmp_dir" 2>/dev/null \
+    || echo "server-e2e: warning: could not remove $tmp_dir" >&2
   exit "$status"
 }
 trap cleanup EXIT
@@ -217,18 +220,21 @@ control_db="$data_dir/control/omni_control.db"
 db_header_read() {
   if [ -r "$control_db" ]; then
     head -c 16 "$control_db"
-  elif sudo test -f "$control_db" 2>/dev/null; then
-    sudo head -c 16 "$control_db"
+  elif sudo -n test -f "$control_db" 2>/dev/null; then
+    sudo -n head -c 16 "$control_db"
   else
     fail "control database not found at the expected data root path"
   fi
 }
-if db_header_read | LC_ALL=C grep -q "SQLite format 3"; then
+# Capture outside the pipeline so a missing control DB aborts the script
+# (a fail() inside a pipeline subshell would only kill the subshell).
+db_header="$(db_header_read)"
+if printf '%s' "$db_header" | LC_ALL=C grep -q "SQLite format 3"; then
   fail "control database retained a plaintext SQLite header"
 fi
 if [ -d "$data_dir/vaults" ]; then
   :
-elif sudo test -d "$data_dir/vaults" 2>/dev/null; then
+elif sudo -n test -d "$data_dir/vaults" 2>/dev/null; then
   :
 else
   fail "per-user vault directory was not created under the data root"
