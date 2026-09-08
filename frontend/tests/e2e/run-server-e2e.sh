@@ -17,7 +17,8 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FRONTEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# The script lives in frontend/tests/e2e, so the frontend root is two levels up.
+FRONTEND_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 IMAGE="${OMNI_E2E_IMAGE:-omni-money:ci}"
 INSTALL_WITH_DEPS=0
 for arg in "$@"; do
