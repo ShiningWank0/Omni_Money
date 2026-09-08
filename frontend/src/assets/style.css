@@ -1525,6 +1525,14 @@ body {
 }
 
 /* CSVインポートモーダル専用スタイル */
+/* The replace-mode warning and format notes make this modal taller than the
+   100vh-4rem cap on short viewports; unlike the transaction modal it has no
+   inner scroll container, so scroll the modal itself to keep the action
+   buttons reachable instead of letting them overflow below the screen. */
+.modal-content.csv-import-modal {
+    overflow-y: auto;
+}
+
 .csv-import-modal .graph-filter-row {
     margin-bottom: 12px;
     display: flex;
