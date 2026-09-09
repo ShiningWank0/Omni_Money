@@ -51,7 +51,7 @@ URL.createObjectURL = blob => {
 }
 URL.revokeObjectURL = value => domState.revoked.push(value)
 
-const { backupToCSVFile, importCSV } = await import('../src/utils/api.js')
+const { backupToCSVFile, importCSV, previewCSVImport } = await import('../src/utils/api.js')
 const { canStartCSVImport, csvExportWarning } = await import('../src/utils/csvSafety.js')
 
 beforeEach(() => {
@@ -291,4 +291,30 @@ test('replace import and export warnings stay fail-closed', () => {
 process.on('exit', () => {
   URL.createObjectURL = originalCreateObjectURL
   URL.revokeObjectURL = originalRevokeObjectURL
+})
+
+
+test('CSV preview validates the selected mode and complete replace impact', async () => {
+  const valid = { mode: 'replace', source_digest: 'a'.repeat(64), target_digest: 'b'.repeat(64),
+    new_count: 1, duplicate_count: 0, conflict_count: 0,
+    replace_impact: { transactions: 1, images: 0, tags: 0, transaction_tags: 0, transaction_links: 0, ledger_settings: 0 } }
+  for (const data of [{ ...valid, mode: 'append' }, { ...valid, replace_impact: null }, { ...valid, new_count: -1 }]) {
+    globalThis.fetch = async () => Response.json(data)
+    await assert.rejects(previewCSVImport(new Blob(['csv']), 'replace'), /応答が不正/)
+  }
+  globalThis.fetch = async () => Response.json(valid)
+  assert.deepEqual(await previewCSVImport(new Blob(['csv']), 'replace'), valid)
+})
+
+test('CSV file apply carries preview pins and surfaces stale-preview rejection', async () => {
+  const file = new Blob(['csv'])
+  const pins = { sourceDigest: 'a'.repeat(64), targetDigest: 'b'.repeat(64) }
+  globalThis.fetch = async (url, options) => {
+    const params = new URL(url, window.location.origin).searchParams
+    assert.equal(params.get('preview_source_digest'), pins.sourceDigest)
+    assert.equal(params.get('preview_target_digest'), pins.targetDigest)
+    assert.equal(options.body, file)
+    return Response.json({ error: 'プレビューを取り直してください' }, { status: 409 })
+  }
+  await assert.rejects(importCSV(file, 'append', pins), /プレビューを取り直し/)
 })
