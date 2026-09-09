@@ -24,6 +24,7 @@ import (
 	"omni_money/backend/core"
 	"omni_money/backend/database"
 	"omni_money/backend/fileprivacy"
+	"omni_money/backend/httpjson"
 	"omni_money/backend/middleware"
 	"omni_money/backend/models"
 )
@@ -89,6 +90,8 @@ func NewRouterWithError() (http.Handler, error) {
 	mux.HandleFunc("/login", handleLoginPage)
 	mux.HandleFunc("/login/", handleLoginPage)
 	mux.Handle("/", http.FileServer(http.Dir("frontend/dist")))
+	mux.HandleFunc("/api/", httpjson.NotFound)
+	mux.HandleFunc("/api", httpjson.NotFound)
 
 	// 認証API（Agent.md §6.4.1）
 	mux.HandleFunc("/api/auth/login", handleAuthLogin(authManager))
@@ -111,7 +114,7 @@ func NewRouterWithError() (http.Handler, error) {
 	mux.HandleFunc("/api/snapshots/restore", methodGuard(http.MethodPost, handleSnapshotRestore))
 
 	// 公開WebポートではAI APIを提供しない。認証済みセッションからアクセスしても404。
-	mux.HandleFunc("/api/v1/ai/", http.NotFound)
+	mux.HandleFunc("/api/v1/ai/", httpjson.NotFound)
 
 	// Docker等の死活監視用。家計簿データは返さない。
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -902,9 +905,35 @@ func handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
 // --- ヘルパー ---
 
 func jsonResponse(w http.ResponseWriter, data interface{}, status int) {
+	if status >= 400 {
+		message := http.StatusText(status)
+		flags := map[string]any{}
+		switch value := data.(type) {
+		case map[string]string:
+			if value["error"] != "" {
+				message = value["error"]
+			}
+		case map[string]interface{}:
+			flags = value
+			if text, ok := value["error"].(string); ok {
+				message = text
+			}
+		}
+		httpjson.WriteError(w, message, status, flags)
+		return
+	}
+	if status == http.StatusNoContent {
+		w.WriteHeader(status)
+		return
+	}
+	body, err := json.Marshal(data)
+	if err != nil {
+		httpjson.WriteError(w, "", http.StatusInternalServerError, nil)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	_, _ = w.Write(append(body, '\n'))
 }
 
 func jsonError(w http.ResponseWriter, message string, status int) {

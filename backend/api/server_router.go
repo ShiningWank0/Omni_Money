@@ -10,6 +10,8 @@ import (
 	"omni_money/backend/middleware"
 	"omni_money/backend/serverauth"
 	"omni_money/backend/vault"
+
+	"omni_money/backend/httpjson"
 )
 
 // ServerAccountService is the account-plane capability exposed to the HTTP
@@ -108,6 +110,8 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 	mux.HandleFunc("/login", handleLoginPage)
 	mux.HandleFunc("/login/", handleLoginPage)
 	mux.Handle("/", http.FileServer(http.Dir("frontend/dist")))
+	mux.HandleFunc("/api/", httpjson.NotFound)
+	mux.HandleFunc("/api", httpjson.NotFound)
 
 	mux.HandleFunc("/api/auth/setup", handleServerBootstrap(dependencies))
 	mux.HandleFunc("/api/auth/login", handleServerLogin(dependencies))
@@ -157,8 +161,8 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 	}
 	// Static AI credentials are not bound to a UserID/VaultID/DEK. The
 	// multi-user server keeps both the console relay and AI listener absent.
-	mux.HandleFunc("/api/ai-console/", http.NotFound)
-	mux.HandleFunc("/api/v1/ai/", http.NotFound)
+	mux.HandleFunc("/api/ai-console/", httpjson.NotFound)
+	mux.HandleFunc("/api/v1/ai/", httpjson.NotFound)
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if _, err := dependencies.Control.IsBootstrapped(r.Context()); err != nil {

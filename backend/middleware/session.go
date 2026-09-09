@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,6 +18,8 @@ import (
 	"omni_money/backend/control"
 	"omni_money/backend/core"
 	"omni_money/backend/vault"
+
+	"omni_money/backend/httpjson"
 )
 
 const (
@@ -1054,12 +1055,7 @@ func isSnapshotRestoreRequest(r *http.Request) bool {
 }
 
 func writeVaultRoutingUnavailable(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusServiceUnavailable)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"error": "ユーザーデータを安全に開けません",
-	})
+	httpjson.WriteError(w, "ユーザーデータを安全に開けません", http.StatusServiceUnavailable, map[string]any{})
 }
 
 func requiresSessionAuth(r *http.Request) bool {
@@ -1098,11 +1094,7 @@ func isPublicServerAuthRequest(r *http.Request) bool {
 }
 
 func writeAuthRequired(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusUnauthorized)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"error":          "認証が必要です",
+	httpjson.WriteError(w, "認証が必要です", http.StatusUnauthorized, map[string]any{
 		"login_required": true,
 	})
 }
