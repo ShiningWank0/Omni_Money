@@ -233,6 +233,10 @@ func writeFinancialError(w http.ResponseWriter, err error, status int) {
 		jsonError(w, "旧形式のCSVはappendで取り込めます。完全置換にはCSV v3を使用してください", status)
 		return
 	}
+	if errors.Is(err, core.ErrCSVPreviewConflict) {
+		jsonError(w, "CSV importの対象データが変更されました。プレビューを取り直してください", http.StatusConflict)
+		return
+	}
 	if errors.Is(err, core.ErrServiceUnavailable) {
 		jsonError(w, financialServiceUnavailableMessage, http.StatusServiceUnavailable)
 		return
@@ -567,12 +571,35 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "この操作には再認証が必要です", http.StatusPreconditionRequired)
 			return
 		}
-		count, err := service.ImportCSVReaderContext(r.Context(), r.Body, mode)
+		if r.URL.Query().Get("preview") == "1" {
+			preview, err := service.PreviewCSVImportReaderContext(r.Context(), r.Body, mode)
+			if err != nil {
+				writeFinancialError(w, err, http.StatusBadRequest)
+				return
+			}
+			jsonResponse(w, preview, http.StatusOK)
+			return
+		}
+		var pins *core.CSVImportPins
+		if r.URL.Query().Get("preview_source_digest") != "" || r.URL.Query().Get("preview_target_digest") != "" {
+			sourceParam := r.URL.Query().Get("preview_source_digest")
+			targetParam := r.URL.Query().Get("preview_target_digest")
+			if !core.ValidCSVImportDigest(sourceParam) || !core.ValidCSVImportDigest(targetParam) {
+				jsonError(w, "preview digestが不正です。プレビューを取り直してください", http.StatusBadRequest)
+				return
+			}
+			pins = &core.CSVImportPins{SourceDigest: sourceParam, TargetDigest: targetParam}
+		}
+		count, digests, err := service.ImportCSVReaderContextWithDigests(r.Context(), r.Body, mode, pins)
 		if err != nil {
 			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
-		jsonResponse(w, map[string]int{"imported_count": count}, http.StatusOK)
+		jsonResponse(w, map[string]interface{}{
+			"imported_count": count,
+			"source_digest":  digests.SourceDigest,
+			"target_digest":  digests.TargetDigest,
+		}, http.StatusOK)
 		return
 	}
 	if mediaType != "application/json" {
@@ -597,6 +624,22 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	if checked, recent := middleware.RevalidateRecentAuthentication(r.Context()); checked && !recent {
 		jsonError(w, "この操作には再認証が必要です", http.StatusPreconditionRequired)
+		return
+	}
+	if r.URL.Query().Get("preview") == "1" {
+		preview, err := service.PreviewCSVImportReaderContext(r.Context(), strings.NewReader(body.Content), body.Mode)
+		if err != nil {
+			writeFinancialError(w, err, http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, preview, http.StatusOK)
+		return
+	}
+	if r.URL.Query().Get("preview_source_digest") != "" || r.URL.Query().Get("preview_target_digest") != "" {
+		// The strict JSON envelope stays free of preview pins; file uploads are
+		// the only apply path that pins a preview, so a stale pin can never be
+		// smuggled through the compatibility string path.
+		jsonError(w, "JSON経由のimportではpreview digestを指定できません", http.StatusBadRequest)
 		return
 	}
 

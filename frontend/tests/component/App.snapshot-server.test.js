@@ -38,7 +38,8 @@ const api = vi.hoisted(() => ({
   listSnapshots: vi.fn(),
   restoreSnapshot: vi.fn(),
   clearSessionSecrets: vi.fn(),
-  importCSV: vi.fn()
+  importCSV: vi.fn(),
+  previewCSVImport: vi.fn()
 }))
 
 vi.mock('../../src/utils/api', () => ({ ...api, isWailsMode: false }))
@@ -78,6 +79,17 @@ beforeEach(() => {
   api.getItems.mockResolvedValue([])
   api.listSnapshots.mockResolvedValue(['omni_money_20260102_030405.db'])
   api.importCSV.mockResolvedValue(1)
+  api.previewCSVImportSourceDigest = 'a'.repeat(64)
+  api.previewCSVImportTargetDigest = 'b'.repeat(64)
+  api.previewCSVImport.mockResolvedValue({
+    mode: 'append',
+    source_digest: api.previewCSVImportSourceDigest,
+    target_digest: api.previewCSVImportTargetDigest,
+    new_count: 1,
+    duplicate_count: 0,
+    conflict_count: 0,
+    replace_impact: null
+  })
 })
 
 it('routes a server restore through App session expiry and rejects late private data', async () => {
@@ -143,12 +155,17 @@ it('unmounts the CSV modal and refreshes Pinia only after a successful imported 
     'account,date,item,type,amount\ncash,2026-01-01,lunch,expense,500\n'
   ], 'legacy-v1.csv', { type: 'text/csv' })
   await selectCSVFile(wrapper, legacy)
+  await wrapper.get('.csv-import-modal .preview-btn').trigger('click')
+  await flushPromises()
   api.getAccounts.mockResolvedValue(['after-import'])
   vi.useFakeTimers()
   await wrapper.get('.csv-import-modal .ok-btn').trigger('click')
   await flushPromises()
 
-  expect(api.importCSV).toHaveBeenCalledWith(legacy, 'append')
+  expect(api.importCSV).toHaveBeenCalledWith(legacy, 'append', {
+    sourceDigest: api.previewCSVImportSourceDigest,
+    targetDigest: api.previewCSVImportTargetDigest
+  })
   expect(wrapper.find('.csv-import-modal').exists()).toBe(true)
   await vi.advanceTimersByTimeAsync(1500)
   await flushPromises()

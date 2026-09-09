@@ -1060,9 +1060,10 @@ export async function backupToCSVFile() {
  * CSVインポート（旧v1/v2 transactions-only形式と、完全なv3形式に対応）
  * @param {string|Blob} content - string is the bounded Wails/JSON compatibility path; Blob streams as raw CSV.
  * @param {string} mode
+ * @param {{sourceDigest: string, targetDigest: string}|null} pins - file uploads pin a prior preview; a stale pin is rejected with 409.
  * @returns {Promise<number>}
  */
-export async function importCSV(content, mode = 'append') {
+export async function importCSV(content, mode = 'append', pins = null) {
   if (isWails) {
     // The native binding owns the file descriptor and OS picker.  Keep the
     // string call below solely for older Wails clients that have no file API.
@@ -1087,7 +1088,12 @@ export async function importCSV(content, mode = 'append') {
     if (content.size > maxCSVBytes) {
       throw new Error('CSVファイルが大きすぎます')
     }
-    const res = await apiFetch(`/api/import_csv?mode=${encodeURIComponent(mode)}`, {
+    const params = new URLSearchParams({ mode })
+    if (pins && typeof pins.sourceDigest === 'string' && typeof pins.targetDigest === 'string') {
+      params.set('preview_source_digest', pins.sourceDigest)
+      params.set('preview_target_digest', pins.targetDigest)
+    }
+    const res = await apiFetch(`/api/import_csv?${params.toString()}`, {
       method: 'POST',
       headers: { 'Content-Type': 'text/csv' },
       body: content
@@ -1110,6 +1116,52 @@ export async function importCSV(content, mode = 'append') {
     throw new Error('CSVインポートの応答が不正です')
   }
   return data.imported_count
+}
+
+/**
+ * CSVインポートのdry-run preview。適用は行わず、分類とreplace影響、
+ * apply時に提示するdigest pinを返す。
+ * @param {string|Blob} content - Blob streams as raw CSV; string uses the bounded JSON envelope.
+ * @param {string} mode
+ * @returns {Promise<{mode: string, source_digest: string, target_digest: string, new_count: number, duplicate_count: number, conflict_count: number, replace_impact: object|null}>}
+ */
+export async function previewCSVImport(content, mode = 'append') {
+  if (isWails) {
+    throw new Error('Desktopではpreviewに対応していません')
+  }
+  let res
+  if (content instanceof Blob) {
+    const maxCSVBytes = 512 * 1024 * 1024
+    if (content.size > maxCSVBytes) {
+      throw new Error('CSVファイルが大きすぎます')
+    }
+    res = await apiFetch(`/api/import_csv?mode=${encodeURIComponent(mode)}&preview=1`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/csv' },
+      body: content
+    })
+  } else {
+    res = await apiFetch(`/api/import_csv?mode=${encodeURIComponent(mode)}&preview=1`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, mode })
+    })
+  }
+  await throwIfNotOk(res, 'CSVプレビューに失敗しました')
+  const data = await res.json()
+  const digest = data?.source_digest
+  const target = data?.target_digest
+  const counts = [data?.new_count, data?.duplicate_count, data?.conflict_count]
+  const digestOk = (v) => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v)
+  const validCount = (n) => Number.isSafeInteger(n) && n >= 0
+  const impactKeys = ['transactions', 'images', 'tags', 'transaction_tags', 'transaction_links', 'ledger_settings']
+  const impactOk = mode === 'replace'
+    ? impactKeys.every((key) => validCount(data?.replace_impact?.[key]))
+    : data?.replace_impact == null
+  if (data?.mode !== mode || !impactOk || !digestOk(digest) || !digestOk(target) || counts.some((n) => !validCount(n))) {
+    throw new Error('CSVプレビューの応答が不正です')
+  }
+  return data
 }
 
 /**
