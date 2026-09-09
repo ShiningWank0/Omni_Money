@@ -57,7 +57,7 @@ sudo bash scripts/backup-data-root.sh --no-start # 停止したまま維持（�
 4. `tar --one-file-system --numeric-owner -cpf` で取得し、member名/型を検証して
    （symlink・device・FIFO等はfail closed）、atomic renameで `data.tar` を公開、
    `data.tar.sha256` sidecarを作成し `sha256sum --check` で自己検証する
-5. **平文SQLite header検査**: archive内のcontrol DBと全ledger.dbが
+5. **平文SQLite header検査**: archive内のcontrol DB・全ledger.db・全snapshotが
    `SQLite format 3` で始まらないことを確認する（暗号化契約の逸脱をfail closed）
 6. `manifest.json`（archive hash・source identity・vault inventory・外部素材一覧）を
    作成し、`--verify` 相当の自己検証を通したgenerationだけを成果物とみなす

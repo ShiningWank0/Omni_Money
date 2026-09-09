@@ -71,7 +71,11 @@ USAGE
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dest) [ "$#" -ge 2 ] || { usage; exit 2; }; DEST_ROOT="$2"; shift 2 ;;
-    --keep) [ "$#" -ge 2 ] || { usage; exit 2; }; KEEP_GENERATIONS="$2"; shift 2 ;;
+    --keep)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      case "$2" in ''|*[!0-9]*) usage; echo "backup-data-root: --keep requires a non-negative integer" >&2; exit 2 ;; esac
+      KEEP_GENERATIONS="$2"; shift 2
+      ;;
     --no-start) NO_START=1; shift ;;
     --project-dir) [ "$#" -ge 2 ] || { usage; exit 2; }; PROJECT_DIR="$2"; shift 2 ;;
     --project-name) [ "$#" -ge 2 ] || { usage; exit 2; }; PROJECT_NAME="$2"; shift 2 ;;
@@ -86,7 +90,6 @@ fail() {
   exit 1
 }
 
-command -v docker >/dev/null 2>&1 || fail "docker is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
 command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
 command -v find >/dev/null 2>&1 || fail "find is required"
@@ -265,34 +268,44 @@ wait_until_healthy() {
   return 1
 }
 
-# A database member must not carry the plaintext SQLite header; every ledger
-# and the control DB are SQLCipher ciphertext by contract.
+# A database member must not carry the plaintext SQLite header; the control
+# DB, every ledger and every snapshot are SQLCipher ciphertext by contract.
 assert_member_not_plaintext() {
   local archive="$1" member="$2" label="$3" first16
-  first16="$(tar -xOf "$archive" "$member" 2>/dev/null | head -c 16)" \
+  # Disable pipefail inside the substitution: head exits after 16 bytes, so
+  # tar would die on EPIPE for any member larger than the pipe buffer and a
+  # member that cannot be read must still fail closed via the empty check.
+  first16="$(set +o pipefail; tar -xOf "$archive" "$member" 2>/dev/null | head -c 16)" \
     || fail "archived $label could not be read for the encryption check"
+  [ -n "$first16" ] || fail "archived $label could not be read for the encryption check"
   [ "$first16" = "SQLite format 3" ] \
     && fail "archived $label carries a plaintext SQLite header; the encryption contract is violated"
   return 0
 }
 
 prune_generations() {
-  local dest="$1" keep="$2" generation count=0 skipped=0
+  local dest="$1" keep="$2" current="$3" generation count=0
   [ -d "$dest" ] || return 0
   local -a generations=()
   while IFS= read -r generation; do
     [ -n "$generation" ] || continue
     generations+=("$generation")
   done < <(ls -1 "$dest" 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}Z$' | sort -r || true)
+  # --keep N counts every generation including the one just created; the
+  # current generation itself is never a deletion candidate even if a
+  # future-dated directory sorts ahead of it.
   for generation in "${generations[@]:-$}"; do
     [ "$generation" = "$" ] && continue
     count=$((count + 1))
     [ "$count" -le "$keep" ] && continue
-    case "$generation" in *[!0-9TZ]*) skipped=$((skipped + 1)); continue ;; esac
+    [ "$generation" = "$current" ] && continue
     rm -rf -- "$dest/$generation"
   done
-  [ "$skipped" -eq 0 ] || echo "backup-data-root: skipped $skipped unexpected entries during retention"
 }
+
+# Global so both the verify-mode trap and the backup-mode cleanup can remove
+# the temporary members listing even when a fail() aborts mid-verification.
+VERIFY_TMP=""
 
 verify_generation() {
   local dir="$1" archive checksum manifest recorded_hash computed_hash member line vault_id
@@ -307,7 +320,8 @@ verify_generation() {
   done
   (cd "$dir" && sha256sum --check --strict data.tar.sha256 >/dev/null) \
     || fail "archive checksum verification failed"
-  members="$(mktemp "${TMPDIR:-/tmp}/backup-verify-members.XXXXXX")"
+  VERIFY_TMP="$(mktemp "${TMPDIR:-/tmp}/backup-verify-members.XXXXXX")"
+  members="$VERIFY_TMP"
   validate_tar_members "$archive" "$members"
   grep -qx "./$CONTROL_DB_REL" "$members" || fail "archive is missing the control database member"
   # tar lists directory members with a trailing slash
@@ -322,6 +336,10 @@ verify_generation() {
     [ -n "$member" ] || continue
     assert_member_not_plaintext "$archive" "$member" "vault ledger ($member)"
   done < <(grep -E '^\./vaults/[^/]+/ledger\.db$' "$members" || true)
+  while IFS= read -r member; do
+    [ -n "$member" ] || continue
+    assert_member_not_plaintext "$archive" "$member" "vault snapshot ($member)"
+  done < <(grep -E '^\./vaults/[^/]+/snapshots/[^/]+\.db$' "$members" || true)
   while IFS= read -r vault_id; do
     [ -n "$vault_id" ] || continue
     grep -qx "./$VAULTS_REL/$vault_id/ledger.db" "$members" \
@@ -330,17 +348,23 @@ verify_generation() {
     | sed -E 's/^"vault_ids"[[:space:]]*:\[//; s/\]$//' | tr ',' '\n' \
     | sed -E 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//' || true)
   rm -f -- "$members"
+  VERIFY_TMP=""
   echo "backup-data-root: verification OK: $dir"
 }
 
 # ---------------------------------------------------------------- verify mode
 if [ "$MODE" = "verify" ]; then
   [ -n "$VERIFY_DIR" ] || { usage; exit 2; }
+  # capture the triggering status first: rm must not mask a verification failure
+  trap 'status=$?; rm -f -- "$VERIFY_TMP" 2>/dev/null; exit "$status"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   verify_generation "$VERIFY_DIR"
   exit 0
 fi
 
 # --------------------------------------------------------------- backup mode
+command -v docker >/dev/null 2>&1 || fail "docker is required"
 [ -d "$PROJECT_DIR" ] || fail "Compose project directory does not exist: $PROJECT_DIR"
 [ -f "$PROJECT_DIR/compose.yaml" ] || fail "compose.yaml not found in: $PROJECT_DIR"
 
@@ -364,11 +388,11 @@ case "$id_count" in
 esac
 
 # Mount sources are parsed from a single-line "=" template instead of JSON so
-# the script has no jq dependency. A source path containing "=" cannot be
-# represented; such a deployment fails the data-root validation below.
+# the script has no jq dependency. sub() keeps everything after the first "="
+# so a source path containing "=" is preserved rather than silently truncated.
 mounts_output="$(docker inspect --format '{{range .Mounts}}{{.Destination}}={{.Source}}{{"\n"}}{{end}}' "$container_id")" \
   || fail "container mounts could not be inspected"
-data_dir="$(printf '%s\n' "$mounts_output" | awk -F= -v want="$APP_DATA_MOUNT" '$1 == want {print $2}' | head -n 1)"
+data_dir="$(printf '%s\n' "$mounts_output" | awk -F= -v want="$APP_DATA_MOUNT" '$1 == want {sub(/^[^=]*=/, ""); print}' | head -n 1)"
 mount_count="$(printf '%s\n' "$mounts_output" | awk -F= -v want="$APP_DATA_MOUNT" '$1 == want {found++} END {print found+0}')"
 [ -n "$data_dir" ] && [ "$mount_count" = "1" ] \
   || fail "container must have exactly one $APP_DATA_MOUNT mount"
@@ -401,17 +425,16 @@ required_kb=$((data_kb * 2 + 65536))
 (( available_kb >= required_kb )) || fail "insufficient free space at $DEST_ROOT: need at least ${required_kb}KiB, have ${available_kb}KiB"
 
 # Exclusive lock so two operators (or cron and a human) cannot interleave.
+# Arm the EXIT/INT/TERM traps BEFORE the lock exists so an abort can never
+# leak the lock file and block every future backup.
 lock_file="$DEST_ROOT/.backup.lock"
-create_exclusive_file "$lock_file" || fail "another backup appears to be running ($lock_file exists)"
-printf '%s\n' "$$" > "$lock_file"
-lock_held=1
+lock_held=0
 container_stopped=0
-restarted=0
 tmp_files=()
 cleanup() {
   local status=$?
   set +e
-  if [ "${container_stopped:-0}" -eq 1 ] && [ "${restarted:-0}" -eq 0 ] && [ -n "${container_id:-}" ]; then
+  if [ "${container_stopped:-0}" -eq 1 ] && [ -n "${container_id:-}" ]; then
     echo "backup-data-root: restarting interrupted service container" >&2
     docker start "$container_id" >/dev/null 2>&1 \
       || echo "backup-data-root: WARNING: automatic restart failed; run: docker start $container_id" >&2
@@ -419,12 +442,16 @@ cleanup() {
   for f in "${tmp_files[@]:-}"; do
     [ -n "$f" ] && rm -f -- "$f"
   done
+  [ -n "$VERIFY_TMP" ] && rm -f -- "$VERIFY_TMP"
   [ "${lock_held:-0}" -eq 1 ] && rm -f -- "$lock_file"
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+create_exclusive_file "$lock_file" || fail "another backup appears to be running ($lock_file exists)"
+printf '%s\n' "$$" > "$lock_file"
+lock_held=1
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup_dir="$DEST_ROOT/$timestamp"
@@ -457,12 +484,14 @@ validate_tar_members "$archive_tmp" "$members_file"
 fsync_path "$archive_tmp" || fail "archive staging fsync failed"
 archive_path="$backup_dir/data.tar"
 move_exclusive_file "$archive_tmp" "$archive_path" || fail "archive could not be published atomically"
+chmod 600 "$archive_path"
 
 checksum_tmp="$backup_dir/.data.tar.sha256.tmp"
 printf '%s  data.tar\n' "$(sha256_file "$archive_path")" > "$checksum_tmp"
 fsync_path "$checksum_tmp" || fail "checksum sidecar fsync failed"
 checksum_path="$backup_dir/data.tar.sha256"
 move_exclusive_file "$checksum_tmp" "$checksum_path" || fail "checksum sidecar could not be published"
+chmod 600 "$checksum_path"
 ( cd "$backup_dir" && sha256sum --check --strict data.tar.sha256 >/dev/null ) \
   || fail "archive checksum self-verification failed"
 
@@ -475,13 +504,21 @@ while IFS= read -r member; do
   ledger_count=$((ledger_count + 1))
 done < <(grep -E '^\./vaults/[^/]+/ledger\.db$' "$members_file" || true)
 (( ledger_count >= 1 )) || fail "no vault ledger was captured in the archive"
+while IFS= read -r member; do
+  [ -n "$member" ] || continue
+  assert_member_not_plaintext "$archive_path" "$member" "vault snapshot ($member)"
+done < <(grep -E '^\./vaults/[^/]+/snapshots/[^/]+\.db$' "$members_file" || true)
 
 vault_ids=""
 vault_count=0
 while IFS= read -r vault_dir; do
   [ -n "$vault_dir" ] || continue
   vault_id="${vault_dir##*/}"
-  validate_json_scalar "vault id" "$vault_id"
+  case "$vault_id" in
+    ''|*[!A-Za-z0-9._-]*)
+      fail "vault directory name is outside the supported charset; refusing to record it in the manifest: $vault_id"
+      ;;
+  esac
   grep -qx "./$VAULTS_REL/$vault_id/ledger.db" "$members_file" \
     || fail "vault directory has no archived ledger: $vault_id"
   if [ -n "$vault_ids" ]; then vault_ids="$vault_ids, "; fi
@@ -526,7 +563,7 @@ fsync_path "$backup_dir" || true
 verify_generation "$backup_dir" >/dev/null || fail "published backup failed self-verification"
 
 if [ "$KEEP_GENERATIONS" -ge 1 ]; then
-  prune_generations "$DEST_ROOT" "$KEEP_GENERATIONS"
+  prune_generations "$DEST_ROOT" "$KEEP_GENERATIONS" "$timestamp"
 fi
 
 if [ "$NO_START" -eq 1 ]; then
@@ -535,9 +572,9 @@ if [ "$NO_START" -eq 1 ]; then
 else
   echo "backup-data-root: starting service container"
   docker start "$container_id" >/dev/null || fail "service container could not be started; run: docker start $container_id"
+  container_stopped=0
   if wait_until_healthy "$container_id"; then
-    restarted=1
-    container_stopped=0
+    :
   else
     fail "archive is durable but the service did not return healthy within ${HEALTH_WAIT_SECONDS}s; inspect: docker logs $container_id"
   fi

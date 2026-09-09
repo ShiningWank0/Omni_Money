@@ -30,15 +30,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP_SCRIPT="$SCRIPT_DIR/backup-data-root.sh"
 [ -x "$BACKUP_SCRIPT" ] || { echo "backup-data-root_test: $BACKUP_SCRIPT is not executable" >&2; exit 1; }
 
+FAILURES=0
+
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/.omni-backup-test.XXXXXX")"
 trap 'status=$?; if [ "$FAILURES" -eq 0 ]; then rm -rf -- "$test_root"; else echo "backup-data-root_test: fixtures kept at $test_root" >&2; fi; exit $status' EXIT
 
 # resolve the real host binaries before the mock bin shadows PATH
 REAL_STAT="$(command -v stat)"
 REAL_TAR="$(command -v tar)"
-REAL_DOCKER="$(command -v docker || true)"
-
-FAILURES=0
 
 timeout_wrap() {
   local seconds="$1"
@@ -212,6 +211,10 @@ scenario_success() {
   mkdir -p "$MOCK_DATA/vaults/VaultLedger02"
   { printf '\005\006'; head -c 62 /dev/urandom; } > "$MOCK_DATA/vaults/VaultLedger02/ledger.db"
   chmod 600 "$MOCK_DATA/vaults/VaultLedger02/ledger.db"
+  # Regression: a ledger larger than the pipe buffer must not break the
+  # plaintext-header check with a tar SIGPIPE under pipefail (256KB > 64KB).
+  { printf '\007\010'; head -c 262142 /dev/urandom; } > "$MOCK_DATA/vaults/VaultLedger01/ledger.db"
+  chmod 600 "$MOCK_DATA/vaults/VaultLedger01/ledger.db"
 }
 
 post_success() {
