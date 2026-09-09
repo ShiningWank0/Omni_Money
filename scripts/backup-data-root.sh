@@ -74,6 +74,7 @@ while [ "$#" -gt 0 ]; do
     --keep)
       [ "$#" -ge 2 ] || { usage; exit 2; }
       case "$2" in ''|*[!0-9]*) usage; echo "backup-data-root: --keep requires a non-negative integer" >&2; exit 2 ;; esac
+      [ "${#2}" -le 9 ] || { usage; echo "backup-data-root: --keep value is unreasonably large" >&2; exit 2; }
       KEEP_GENERATIONS="$2"; shift 2
       ;;
     --no-start) NO_START=1; shift ;;
@@ -443,7 +444,8 @@ cleanup() {
     [ -n "$f" ] && rm -f -- "$f"
   done
   [ -n "$VERIFY_TMP" ] && rm -f -- "$VERIFY_TMP"
-  [ "${lock_held:-0}" -eq 1 ] && rm -f -- "$lock_file"
+  [ "${lock_held:-0}" -eq 1 ] && [ "$(cat "$lock_file" 2>/dev/null)" = "$$" ] \
+    && rm -f -- "$lock_file"
   exit "$status"
 }
 trap cleanup EXIT

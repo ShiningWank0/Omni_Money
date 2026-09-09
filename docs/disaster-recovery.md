@@ -48,6 +48,9 @@ sudo bash scripts/backup-data-root.sh --dest /mnt/encrypted-backups/omni-money -
 sudo bash scripts/backup-data-root.sh --no-start # 停止したまま維持（メンテナンス併用時）
 ```
 
+`--keep N` は作成した世代を含めて新しい順にN世代を残し、それより古い世代を削除する
+（`--keep 0` は全保持と同じ。現在作成中のgenerationは削除対象にならない）。
+
 動作:
 
 1. Compose projectの `omni-money` service containerを一意に解決する（複数/ゼロは中断）
