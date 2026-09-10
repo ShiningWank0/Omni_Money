@@ -24,6 +24,24 @@ export const useAppStore = defineStore('app', () => {
     // UI状態
     const loading = ref(false)
     let transactionRequestId = 0
+    const readRequestIds = { accounts: 0, creditCards: 0, bankAccounts: 0, items: 0 }
+    const loadErrors = ref({})
+    const loadError = computed(() => Object.values(loadErrors.value).filter(Boolean).join(' '))
+
+    async function readList(key, read, apply, label, throwOnError) {
+        const requestId = ++readRequestIds[key]
+        try {
+            const result = await read()
+            if (requestId !== readRequestIds[key]) return
+            apply(result || [])
+            loadErrors.value[key] = ''
+        } catch (error) {
+            if (requestId === readRequestIds[key]) {
+                loadErrors.value[key] = `${label}を読み込めませんでした。`
+            }
+            if (throwOnError) throw error
+        }
+    }
 
     // 選択中の口座に含まれない口座を除いた実際の口座一覧
     const actualFundItems = computed(() => accounts.value)
@@ -67,17 +85,12 @@ export const useAppStore = defineStore('app', () => {
 
     // 口座リストを取得
     async function fetchAccounts({ throwOnError = false } = {}) {
-        try {
-            const result = await getAccounts()
-            accounts.value = result || []
-            // 初回は全選択
+        await readList('accounts', getAccounts, result => {
+            accounts.value = result
             if (selectedFundItems.value.length === 0 && accounts.value.length > 0) {
                 selectedFundItems.value = [...accounts.value]
             }
-        } catch (e) {
-            console.error('口座リスト取得エラー:', e)
-            if (throwOnError) throw e
-        }
+        }, '口座一覧', throwOnError)
     }
 
     // 取引履歴を取得
@@ -102,10 +115,11 @@ export const useAppStore = defineStore('app', () => {
             // 検索入力や口座選択の連打で、古いレスポンスが最新結果を上書きしないようにする。
             if (requestId === transactionRequestId) {
                 transactions.value = allTransactions || []
+                loadErrors.value.transactions = ''
             }
         } catch (e) {
             if (requestId === transactionRequestId) {
-                console.error('取引履歴取得エラー:', e)
+                loadErrors.value.transactions = '取引履歴を読み込めませんでした。'
             }
             if (throwOnError) throw e
         } finally {
@@ -117,35 +131,23 @@ export const useAppStore = defineStore('app', () => {
 
     // クレジットカード設定を取得
     async function fetchCreditCardSettings({ throwOnError = false } = {}) {
-        try {
-            const result = await getCreditCardSettings()
-            creditCardItems.value = result || []
-        } catch (e) {
-            console.error('クレジットカード設定取得エラー:', e)
-            if (throwOnError) throw e
-        }
+        await readList('creditCards', () => getCreditCardSettings(), result => {
+            creditCardItems.value = result
+        }, 'クレジットカード設定', throwOnError)
     }
 
     // 銀行口座設定を取得
     async function fetchBankAccountSettings({ throwOnError = false } = {}) {
-        try {
-            const result = await getBankAccountSettings()
-            bankAccountItems.value = result || []
-        } catch (e) {
-            console.error('銀行口座設定取得エラー:', e)
-            if (throwOnError) throw e
-        }
+        await readList('bankAccounts', () => getBankAccountSettings(), result => {
+            bankAccountItems.value = result
+        }, '銀行口座設定', throwOnError)
     }
 
     // 項目名リストを取得
     async function fetchItems(account = '', { throwOnError = false } = {}) {
-        try {
-            const result = await getItems(account)
-            itemNames.value = result || []
-        } catch (e) {
-            console.error('項目リスト取得エラー:', e)
-            if (throwOnError) throw e
-        }
+        await readList('items', () => getItems(account), result => {
+            itemNames.value = result
+        }, '項目一覧', throwOnError)
     }
 
     // 口座選択トグル
@@ -170,6 +172,8 @@ export const useAppStore = defineStore('app', () => {
     // 全状態をリセット（スナップショット復元後などに使用）
     function resetState() {
         transactionRequestId++
+        for (const key of Object.keys(readRequestIds)) readRequestIds[key]++
+        loadErrors.value = {}
         accounts.value = []
         selectedFundItems.value = []
         creditCardItems.value = []
@@ -189,6 +193,8 @@ export const useAppStore = defineStore('app', () => {
         transactions,
         searchQuery,
         loading,
+        loadErrors,
+        loadError,
         actualFundItems,
         selectedFundItemDisplay,
         currentBalance,
