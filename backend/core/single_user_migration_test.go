@@ -59,6 +59,15 @@ func TestSingleUserMigrationReadOnlyCopyToIndependentLedger(t *testing.T) {
 	if _, err := source.DB().Exec("INSERT INTO settings VALUES ('legacy_auth_secret', 'never-transfer')"); err != nil {
 		t.Fatal(err)
 	}
+	// Seed AI-only state as well: without a real row the "AI settings are not
+	// migrated" assertion would hold vacuously even if a regression started
+	// exporting it. A 32-byte key/request pair satisfies the table CHECK.
+	if _, err := source.DB().Exec(`INSERT INTO ai_transaction_idempotency
+		(credential_id, idempotency_key_sha256, request_sha256, transaction_id, response_account, response_date, created_at)
+		VALUES ('legacy-ai-cred', ?, ?, NULL, NULL, NULL, '2026-01-01T00:00:00Z')`,
+		make([]byte, 32), make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
 	if err := source.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -90,6 +99,9 @@ func TestSingleUserMigrationReadOnlyCopyToIndependentLedger(t *testing.T) {
 	}
 	if strings.Contains(content, "never-transfer") {
 		t.Fatal("legacy auth setting escaped into CSV")
+	}
+	if strings.Contains(content, "legacy-ai-cred") {
+		t.Fatal("legacy AI idempotency state escaped into CSV")
 	}
 	target, targetService := openCoreTestService(t, "new-user-vault")
 	for attempt := 0; attempt < 2; attempt++ {

@@ -26,7 +26,7 @@ Issue #148は、既存のDesktop移行とCSV v3を使うoperator runbookに範�
 1. 元環境と同じversionを外部公開しない複製環境で起動し、対応していればCSV v3を出力します。旧認証・AI設定を現行serverへ持ち込みません。
 2. 平文旧DBのDesktop経由変換では、既存Desktopデータのない専用OSアカウントを使用します。そのアカウントのapplication data directoryに作業用複製だけを配置し、現行Desktopの移行案内に従います。元データをこのdirectoryへ移動してはいけません。Desktop移行は作業用複製の平文を整理・削除し、journalで中断復旧します。passwordとrecovery code保存確認を完了してCSV v3を出力します。
 3. 別のdata rootと新しいcontrol keyを持つ現行serverを起動します。新Adminのsetup、移行先userの招待・password・recovery code保存を行います。共有旧ledgerを誰が所有するかを先に決め、移行する本人でloginします。Adminが他人のvaultへ代理注入する手順はありません。
-4. 空の移行先vaultへCSV v3を「置換」で取り込みます。プレビュー機能が利用できるversionでは分類・削除対象を確認してから同意します。途中エラーでは全体がrollbackします。appendで再試行すると重複するため使用しません。
+4. 空の移行先vaultへCSV v3を「置換」で取り込みます。置換警告（プレビュー対応版では分類・削除件数の事前確認）に同意してから実行します。途中エラーでは全体がrollbackします。appendで再試行すると重複するため使用しません。
 5. 取引・金額・残高・メモ、画像内容、タグ階層と紐付け、カード/銀行リンク、2種類のledger設定を照合します。IDは再採番されるためIDそのものでは比較しません。別userとAdminのsessionから移行先取引が見えないことも確認します。
 6. 新vaultのsnapshotを作成し、隔離環境で復元を試します。restore後は再loginが必要です。旧snapshotは新DEKで開けないため新vaultへ直接コピーせず、旧環境の保全セットに残します。
 
@@ -51,6 +51,6 @@ importの応答が不明な場合は先に対象vaultを確認し、無条件に
 - `backend/core/single_user_migration_test.go`: 停止済み原本のhash不変、読取り専用複製からv3出力、別ledgerへの拡張データ移行、replace再実行、認証・AI設定の非移行。
 - `backend/database/schema_migration_test.go`: 複数旧schema、archive sidecar、未知schemaの拒否。
 - `backend/desktopaccount/migration_test.go`: journal、中断再開、置換された入力、権限とリンク等の拒否。暗号化境界は同packageのSQLCipher integration testで検証します。
-- `backend/api/server_csv_boundary_integration_test.go`: 本人vaultへの束縛、別userからの分離、CSVによるID再採番。
+- `backend/api/server_csv_boundary_integration_test.go`: 本人vaultへの束縛、別userからの分離、CSVによるID再採番。ID再採番後も関連が保たれることは `single_user_migration_test.go` のreplace再実行でも確認します。
 
 これらはoperatorの停電・媒体故障・容量計画まで保証しません。実際の元version・platformで上記予行演習を行い、結果を記録してから切り替えてください。
