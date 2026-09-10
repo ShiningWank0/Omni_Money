@@ -16,6 +16,8 @@ import (
 
 	"omni_money/backend/aicredentials"
 	"omni_money/backend/audithmac"
+
+	"omni_money/backend/httpjson"
 )
 
 const (
@@ -245,7 +247,7 @@ func newAIAPIMiddleware(
 
 		failedAuthenticationKey := "authentication-failed\x00" + remoteIP
 		if auditStore == nil || auditStore.CurrentKeyID() == "" {
-			writeJSONError(w, "AI監査設定が利用できません", http.StatusServiceUnavailable)
+			httpjson.WriteSafeError(w, "AI監査設定が利用できません", http.StatusServiceUnavailable, nil)
 			audit(false, http.StatusServiceUnavailable, "audit_key_unavailable")
 			return
 		}
@@ -410,7 +412,5 @@ func (w *auditResponseWriter) Write(body []byte) (int, error) {
 
 // writeJSONError はJSON形式のエラーレスポンスを返す。
 func writeJSONError(w http.ResponseWriter, message string, status int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+	httpjson.WriteError(w, message, status, nil)
 }
