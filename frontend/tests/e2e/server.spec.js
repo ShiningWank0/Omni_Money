@@ -97,6 +97,16 @@ test('server round trip: bootstrap admin, persist a transaction, CSV v3 export a
   await modal.locator('input[placeholder="資金項目名を入力または選択"]').fill(ACCOUNT_NAME)
   await modal.locator('input[placeholder="例: 給与、食費、交通費"]').fill(ITEM_NAME)
   await modal.locator('input[inputmode="numeric"]').fill(AMOUNT)
+  // Failed mutations preserve the draft and may be retried explicitly.
+  await page.route('**/api/transactions', async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'E2E一時停止', code: 'temporarily_unavailable' }) })
+  })
+  await modal.locator('.ok-btn').click()
+  await expect(page.getByRole('alert')).toContainText('E2E一時停止')
+  await expect(modal).toBeVisible()
+  await expect(modal.locator('input[placeholder="例: 給与、食費、交通費"]')).toHaveValue(ITEM_NAME)
+  await page.unroute('**/api/transactions')
   await modal.locator('.ok-btn').click()
   await expect(modal).toBeHidden()
   const transactionRow = page
@@ -107,6 +117,21 @@ test('server round trip: bootstrap admin, persist a transaction, CSV v3 export a
   // 4. The transaction survives a full page reload (server persistence).
   await page.reload()
   await expect(transactionRow).toHaveCount(1)
+
+  await page.locator('.hamburger-menu').click()
+  await page.locator('#side-menu').getByRole('button', { name: 'クレジットカード設定', exact: true }).click()
+  const settings = page.locator('.cc-settings-modal')
+  await expect(settings).toBeVisible()
+  await settings.locator('.select-button').click()
+  await settings.locator('input[type="checkbox"]').check()
+  await settings.locator('.select-button').click()
+  await page.route('**/api/credit_card_settings', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'E2E設定停止', code: 'temporarily_unavailable' }) }))
+  await settings.locator('.ok-btn').click()
+  await expect(settings.getByRole('alert')).toContainText('E2E設定停止')
+  await expect(settings.locator('.select-button')).toContainText(ACCOUNT_NAME)
+  await page.unroute('**/api/credit_card_settings')
+  await settings.locator('.delete-btn').click()
+  await expect(settings).toBeHidden()
 
   // 5. Export CSV v3 through the side menu and verify the official header and
   //    the manifest row.
