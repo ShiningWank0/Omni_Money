@@ -1,3 +1,5 @@
+import { ApiError, responseError, checkStatus, expectJSON, expectList, expectVoid, schema, validateData, isObject } from './apiResponse.js'
+export { ApiError } from './apiResponse.js'
 import { authenticatePasskey, createPasskey } from './passkeys.js'
 
 // Wailsバインディングへのラッパー関数
@@ -116,12 +118,17 @@ export async function apiFetch(url, options = {}, config = {}) {
     headers.set('X-CSRF-Token', csrfToken)
   }
 
-  const response = await fetch(url, {
-    credentials: 'include',
-    ...options,
-    cache: 'no-store',
-    headers
-  })
+  let response
+  try {
+    response = await fetch(url, {
+      credentials: 'include',
+      ...options,
+      cache: 'no-store',
+      headers
+    })
+  } catch (cause) {
+    throw new ApiError('通信に失敗しました', { code: 'network_error', cause })
+  }
 
   const path = getPathname(url)
 
@@ -129,7 +136,7 @@ export async function apiFetch(url, options = {}, config = {}) {
       !['/api/auth/login', '/api/auth/reauth', '/api/auth/status'].includes(path)) {
     await requestReauthentication()
     // The original request body is retained in `options` (all current API
-    // callers use replayable strings).  Retry exactly once after fresh auth.
+    // callers use replayable strings or Blobs).  Retry exactly once after fresh auth.
     return await apiFetch(url, options, { ...config, skipReauth: true })
   }
 
@@ -144,26 +151,13 @@ export async function apiFetch(url, options = {}, config = {}) {
     if (!skipPaths.has(path) && window.location.pathname !== '/login') {
       expireClientSession()
     }
-    throw new Error('認証が必要です')
+    throw responseError(response, null, '認証が必要です')
   }
 
   return response
 }
 
-async function parseError(response, fallbackMessage) {
-  try {
-    const data = await response.json()
-    return data?.error || fallbackMessage
-  } catch {
-    return fallbackMessage
-  }
-}
-
-async function throwIfNotOk(response, fallbackMessage) {
-  if (!response.ok) {
-    throw new Error(await parseError(response, fallbackMessage))
-  }
-}
+const throwIfNotOk = checkStatus
 
 function expireClientSession(reason = 'session-expired') {
 	clearSessionSecrets()
@@ -188,13 +182,13 @@ async function readJSONOnce(response) {
 function throwCredentialResponseError(response, data, fallbackMessage) {
 	if (response.status === 401 && data?.login_required === true) {
 	  expireClientSession()
-	  const error = new Error('セッションの有効期限が切れました')
+	  const error = responseError(response, data, 'セッションの有効期限が切れました')
 	  error.loginRequired = true
 	  error.definitiveResponse = true
 	  throw error
 	}
 	if (!response.ok) {
-	  const error = new Error(data?.error || fallbackMessage)
+	  const error = responseError(response, data, fallbackMessage)
 	  error.definitiveResponse = response.status < 500
 	  throw error
 	}
@@ -212,7 +206,7 @@ export async function getAuthStatus() {
   }
 
   const res = await apiFetch('/api/auth/status', {}, { skipAuthRedirect: true })
-  const data = await res.json()
+  const data = await expectJSON(res, schema.auth)
   rememberAuthToken(data)
   return data
 }
@@ -279,10 +273,7 @@ export async function login(email, password) {
     body: JSON.stringify({ email, password_b64: textToBase64(password) })
   }, { skipAuthRedirect: true })
 
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data?.error || 'ログインに失敗しました')
-  }
+  const data = await expectJSON(res, schema.authenticated)
   rememberAuthToken(data)
   return data
 }
@@ -295,7 +286,7 @@ export async function loginWithPasskey(email) {
     body: JSON.stringify({ email })
   }, { skipAuthRedirect: true, skipReauth: true })
   await throwIfNotOk(begin, 'パスキー認証を開始できませんでした')
-  const ceremony = await begin.json()
+  const ceremony = await expectJSON(begin, schema.ceremony)
   const assertion = await authenticatePasskey(ceremony.options)
   try {
     const finish = await apiFetch('/api/auth/passkeys/login/finish', {
@@ -307,8 +298,9 @@ export async function loginWithPasskey(email) {
         prf_result_b64: bytesToBase64(assertion.prfResult)
       })
     }, { skipAuthRedirect: true, skipReauth: true })
-    const data = await finish.json()
-    if (!finish.ok) throw new Error(data?.error || 'パスキー認証に失敗しました')
+    const data = await readJSONOnce(finish)
+    if (!finish.ok) throw responseError(finish, data, 'パスキー認証に失敗しました')
+    validateData(data, schema.authenticated, finish)
     rememberAuthToken(data)
     return data
   } finally {
@@ -321,14 +313,15 @@ export async function listPasskeys() {
 	const response = await apiFetch('/api/auth/passkeys', {}, { skipAuthRedirect: true })
 	const data = await readJSONOnce(response)
 	throwCredentialResponseError(response, data, 'パスキー一覧を取得できませんでした')
-	return Array.isArray(data?.passkeys) ? data.passkeys : []
+	validateData(data, value => schema.object(value) && (value.passkeys === null || schema.records(value.passkeys)), response)
+  return data.passkeys ?? []
 }
 
 export async function registerPasskey({ name, password }) {
   if (isWails) throw new Error('パスキー登録はサーバーモード専用です')
   const begin = await apiFetch('/api/auth/passkeys/register/begin', { method: 'POST' })
   await throwIfNotOk(begin, 'パスキー登録を開始できませんでした')
-  const ceremony = await begin.json()
+  const ceremony = await expectJSON(begin, schema.ceremony)
   const created = await createPasskey(ceremony.options)
   try {
     const finish = await apiFetch('/api/auth/passkeys/register/finish', {
@@ -343,7 +336,7 @@ export async function registerPasskey({ name, password }) {
       })
     }, { skipReauth: true })
     await throwIfNotOk(finish, 'パスキーを登録できませんでした')
-    return await finish.json()
+    return await expectJSON(finish, schema.passkey)
   } finally {
     created.prfResult.fill(0)
   }
@@ -354,7 +347,8 @@ export async function deletePasskey(id) {
 	const response = await apiFetch(`/api/auth/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' }, { skipAuthRedirect: true })
 	const data = await readJSONOnce(response)
 	throwCredentialResponseError(response, data, 'パスキーを削除できませんでした')
-	csrfToken = null
+	validateData(data, schema.success, response)
+  csrfToken = null
 	return data
 }
 
@@ -363,6 +357,7 @@ export async function deleteAllPasskeys() {
 	const response = await apiFetch('/api/auth/passkeys/all', { method: 'DELETE' }, { skipAuthRedirect: true })
 	const data = await readJSONOnce(response)
 	throwCredentialResponseError(response, data, 'パスキーを一括失効できませんでした')
+  validateData(data, schema.success, response)
   csrfToken = null
   return data
 }
@@ -379,6 +374,7 @@ export async function changeServerPassword({ currentPassword, newPassword, revok
 	}, { skipAuthRedirect: true })
 	const data = await readJSONOnce(response)
 	throwCredentialResponseError(response, data, 'パスワードを変更できませんでした')
+  validateData(data, schema.success, response)
   csrfToken = null
   return data
 }
@@ -388,7 +384,7 @@ export async function listServerCredentials() {
 	const response = await apiFetch('/api/auth/credentials', {}, { skipAuthRedirect: true })
 	const data = await readJSONOnce(response)
 	throwCredentialResponseError(response, data, '認証情報の一覧を取得できませんでした')
-	return data
+	return validateData(data, value => schema.object(value) && isObject(value.password) && isObject(value.recovery) && (value.passkeys === null || schema.records(value.passkeys)), response)
 }
 
 export async function rotateServerRecoveryCode({ currentPassword, newRecoverySecret }) {
@@ -402,6 +398,7 @@ export async function rotateServerRecoveryCode({ currentPassword, newRecoverySec
 	}, { skipAuthRedirect: true })
 	const data = await readJSONOnce(response)
 	throwCredentialResponseError(response, data, '回復コードを更新できませんでした')
+  validateData(data, schema.success, response)
   csrfToken = null
   return data
 }
@@ -425,10 +422,7 @@ export async function setupInitialAdmin({ setupToken, email, displayName, passwo
     })
   }, { skipAuthRedirect: true, skipReauth: true })
 
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data?.error || '初期管理者の作成に失敗しました')
-  }
+  const data = await expectJSON(res, schema.user)
   return data
 }
 
@@ -445,7 +439,7 @@ export async function reauthenticate(password) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ password_b64: textToBase64(password) })
   }, { skipAuthRedirect: true, skipReauth: true })
-  const data = await res.json()
+  const data = await readJSONOnce(res)
   // A wrong password should keep the confirmation dialog open, but the
   // session can expire while that dialog is displayed. In that case the
   // server marks the 401 explicitly and there is no session left to confirm;
@@ -454,11 +448,12 @@ export async function reauthenticate(password) {
   // synchronously to purge sensitive state before navigation.
   if (res.status === 401 && data?.login_required) {
     expireClientSession()
-    throw new Error('セッションの有効期限が切れました')
+    throw responseError(res, data, 'セッションの有効期限が切れました')
   }
   if (!res.ok) {
-    throw new Error(data?.error || '再認証に失敗しました')
+    throw responseError(res, data, '再認証に失敗しました')
   }
+  validateData(data, schema.authenticated, res)
   rememberAuthToken(data)
   return data
 }
@@ -469,7 +464,7 @@ export async function reauthenticateWithPasskey() {
     method: 'POST'
   }, { skipAuthRedirect: true, skipReauth: true })
   await throwIfNotOk(begin, 'パスキー再認証を開始できませんでした')
-  const ceremony = await begin.json()
+  const ceremony = await expectJSON(begin, schema.ceremony)
   const assertion = await authenticatePasskey(ceremony.options)
   try {
     const finish = await apiFetch('/api/auth/passkeys/reauth/finish', {
@@ -481,12 +476,13 @@ export async function reauthenticateWithPasskey() {
         prf_result_b64: bytesToBase64(assertion.prfResult)
       })
     }, { skipAuthRedirect: true, skipReauth: true })
-    const data = await finish.json()
+    const data = await readJSONOnce(finish)
     if (finish.status === 401 && data?.login_required) {
       expireClientSession()
-      throw new Error('セッションの有効期限が切れました')
+      throw responseError(finish, data, 'セッションの有効期限が切れました')
     }
-    if (!finish.ok) throw new Error(data?.error || 'パスキー再認証に失敗しました')
+    if (!finish.ok) throw responseError(finish, data, 'パスキー再認証に失敗しました')
+    validateData(data, schema.authenticated, finish)
     rememberAuthToken(data)
     return data
   } finally {
@@ -506,6 +502,7 @@ export async function keepAlive() {
   const res = await apiFetch('/api/auth/keepalive', {
     method: 'POST'
   }, { skipAuthRedirect: true, skipReauth: true })
+  await expectVoid(res, () => false)
   return res.status
 }
 
@@ -519,9 +516,7 @@ export async function logout() {
   const res = await apiFetch('/api/auth/logout', {
     method: 'POST'
   }, { skipAuthRedirect: true })
-  if (!res.ok) {
-    throw new Error(await parseError(res, 'ログアウトに失敗しました'))
-  }
+  await expectVoid(res, schema.success)
   csrfToken = null
 }
 
@@ -535,9 +530,7 @@ export async function logoutAll() {
   const res = await apiFetch('/api/auth/logout-all', {
     method: 'POST'
   }, { skipAuthRedirect: true })
-  if (!res.ok) {
-    throw new Error(await parseError(res, '全セッションのログアウトに失敗しました'))
-  }
+  await expectVoid(res, schema.success)
   csrfToken = null
 }
 
@@ -558,7 +551,7 @@ export async function acceptServerInvitation({ token, displayName, password, rec
     })
   }, { skipAuthRedirect: true, skipReauth: true })
   await throwIfNotOk(res, '招待を受諾できませんでした')
-  return await res.json()
+  return await expectJSON(res, schema.user)
 }
 
 /**
@@ -578,21 +571,22 @@ export async function completeServerPasswordReset({ token, recoverySecret, newPa
     })
   }, { skipAuthRedirect: true, skipReauth: true })
   await throwIfNotOk(res, 'パスワードを再設定できませんでした')
-  return await res.json()
+  return await expectJSON(res, schema.passwordReset)
 }
 
 export async function listServerUsers() {
   if (isWails) return []
   const res = await apiFetch('/api/admin/users')
   await throwIfNotOk(res, 'ユーザー一覧を取得できませんでした')
-  const data = await res.json()
-  return Array.isArray(data?.users) ? data.users : []
+  const data = await expectJSON(res, value => schema.object(value) && (value.users === null || schema.records(value.users)))
+  return data.users ?? []
 }
 
 export async function enableServerUser(userID) {
   if (isWails) throw new Error('この操作はサーバーモード専用です')
   const res = await apiFetch(`/api/admin/users/${encodeURIComponent(userID)}/enable`, { method: 'POST' })
   await throwIfNotOk(res, 'ユーザーを再有効化できませんでした')
+  await expectVoid(res, schema.success)
 }
 
 export async function setServerUserRole(userID, role) {
@@ -601,34 +595,37 @@ export async function setServerUserRole(userID, role) {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role })
   })
   await throwIfNotOk(res, 'ユーザー権限を変更できませんでした')
+  await expectVoid(res, schema.success)
 }
 
 export async function listServerInvitations() {
   if (isWails) return []
   const res = await apiFetch('/api/admin/invitations')
   await throwIfNotOk(res, '招待一覧を取得できませんでした')
-  const data = await res.json()
-  return Array.isArray(data?.invitations) ? data.invitations : []
+  const data = await expectJSON(res, value => schema.object(value) && (value.invitations === null || schema.records(value.invitations)))
+  return data.invitations ?? []
 }
 
 export async function revokeServerInvitation(id) {
   if (isWails) throw new Error('この操作はサーバーモード専用です')
   const res = await apiFetch(`/api/admin/invitations/${encodeURIComponent(id)}`, { method: 'DELETE' })
   await throwIfNotOk(res, '招待を取り消せませんでした')
+  await expectVoid(res, schema.success)
 }
 
 export async function listServerPasswordResets() {
   if (isWails) return []
   const res = await apiFetch('/api/admin/password-resets')
   await throwIfNotOk(res, '再設定token一覧を取得できませんでした')
-  const data = await res.json()
-  return Array.isArray(data?.password_resets) ? data.password_resets : []
+  const data = await expectJSON(res, value => schema.object(value) && (value.password_resets === null || schema.records(value.password_resets)))
+  return data.password_resets ?? []
 }
 
 export async function revokeServerPasswordReset(id) {
   if (isWails) throw new Error('この操作はサーバーモード専用です')
   const res = await apiFetch(`/api/admin/password-resets/${encodeURIComponent(id)}`, { method: 'DELETE' })
   await throwIfNotOk(res, '再設定tokenを取り消せませんでした')
+  await expectVoid(res, schema.success)
 }
 
 export async function createServerInvitation({ email, role = 'user', expiresInSeconds = 86400 }) {
@@ -639,7 +636,7 @@ export async function createServerInvitation({ email, role = 'user', expiresInSe
     body: JSON.stringify({ email, role, expires_in_seconds: expiresInSeconds })
   })
   await throwIfNotOk(res, '招待を作成できませんでした')
-  return await res.json()
+  return await expectJSON(res, schema.invitation)
 }
 
 export async function disableServerUser(userID) {
@@ -648,6 +645,7 @@ export async function disableServerUser(userID) {
     method: 'POST'
   })
   await throwIfNotOk(res, 'ユーザーを無効化できませんでした')
+  await expectVoid(res, schema.success)
 }
 
 export async function createServerPasswordReset(userID, expiresInSeconds = 900) {
@@ -658,7 +656,7 @@ export async function createServerPasswordReset(userID, expiresInSeconds = 900) 
     body: JSON.stringify({ target_user_id: userID, expires_in_seconds: expiresInSeconds })
   })
   await throwIfNotOk(res, 'パスワード再設定を開始できませんでした')
-  return await res.json()
+  return await expectJSON(res, schema.resetToken)
 }
 
 /**
@@ -670,7 +668,7 @@ export async function getAccounts() {
     return await desktopFinancialCall(() => window.go.main.App.GetAccounts())
   }
   const res = await apiFetch('/api/accounts')
-  return await res.json()
+  return await expectList(res, schema.strings)
 }
 
 /**
@@ -684,7 +682,7 @@ export async function getItems(account = '') {
   }
   const params = account ? `?account=${encodeURIComponent(account)}` : ''
   const res = await apiFetch(`/api/items${params}`)
-  return await res.json()
+  return await expectList(res, schema.strings)
 }
 
 /**
@@ -702,7 +700,7 @@ export async function getTransactions(account = '', search = '') {
   if (search) params.set('search', search)
   const query = params.toString() ? `?${params.toString()}` : ''
   const res = await apiFetch(`/api/transactions${query}`)
-  return await res.json()
+  return await expectList(res, schema.transactions)
 }
 
 /**
@@ -720,7 +718,7 @@ export async function addTransaction(data) {
     body: JSON.stringify(data)
   })
   await throwIfNotOk(res, '取引の追加に失敗しました')
-  return await res.json()
+  return await expectJSON(res, schema.transactionResult)
 }
 
 /**
@@ -739,7 +737,7 @@ export async function updateTransaction(id, data) {
     body: JSON.stringify(data)
   })
   await throwIfNotOk(res, '取引の更新に失敗しました')
-  return await res.json()
+  return await expectJSON(res, schema.transactionResult)
 }
 
 /**
@@ -753,6 +751,7 @@ export async function deleteTransaction(id) {
   }
   const res = await apiFetch(`/api/transactions/${id}`, { method: 'DELETE' })
   await throwIfNotOk(res, '取引の削除に失敗しました')
+  await expectVoid(res, schema.message)
 }
 
 /**
@@ -764,7 +763,8 @@ export async function getBalanceHistory() {
     return await desktopFinancialCall(() => window.go.main.App.GetBalanceHistory())
   }
   const res = await apiFetch('/api/balance_history')
-  return await res.json()
+  const data = await expectJSON(res, schema.balance)
+  return { ...data, accounts: data.accounts ?? [], dates: data.dates ?? [] }
 }
 
 /**
@@ -778,7 +778,8 @@ export async function getBalanceHistoryFiltered(fundItems) {
   }
   const params = fundItems.map(i => `fund_items=${encodeURIComponent(i)}`).join('&')
   const res = await apiFetch(`/api/balance_history_filtered?${params}`)
-  return await res.json()
+  const data = await expectJSON(res, schema.balance)
+  return { ...data, accounts: data.accounts ?? [], dates: data.dates ?? [] }
 }
 
 /**
@@ -790,7 +791,7 @@ export async function getCreditCardSettings() {
     return await desktopFinancialCall(() => window.go.main.App.GetCreditCardSettings())
   }
   const res = await apiFetch('/api/credit_card_settings')
-  return await res.json()
+  return await expectList(res, schema.strings)
 }
 
 /**
@@ -802,11 +803,12 @@ export async function saveCreditCardSettings(items) {
   if (isWails) {
     return await desktopFinancialCall(() => window.go.main.App.SaveCreditCardSettings(items))
   }
-  await apiFetch('/api/credit_card_settings', {
+  const res = await apiFetch('/api/credit_card_settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ credit_card_items: items })
   })
+  await expectVoid(res, value => schema.object(value) && Array.isArray(value.credit_card_items))
 }
 
 /**
@@ -818,7 +820,7 @@ export async function getBankAccountSettings() {
     return await desktopFinancialCall(() => window.go.main.App.GetBankAccountSettings())
   }
   const res = await apiFetch('/api/bank_account_settings')
-  return await res.json()
+  return await expectList(res, schema.strings)
 }
 
 /**
@@ -830,11 +832,12 @@ export async function saveBankAccountSettings(items) {
   if (isWails) {
     return await desktopFinancialCall(() => window.go.main.App.SaveBankAccountSettings(items))
   }
-  await apiFetch('/api/bank_account_settings', {
+  const res = await apiFetch('/api/bank_account_settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ bank_account_items: items })
   })
+  await expectVoid(res, value => schema.object(value) && Array.isArray(value.bank_account_items))
 }
 
 /**
@@ -1099,7 +1102,7 @@ export async function importCSV(content, mode = 'append', pins = null) {
       body: content
     })
     await throwIfNotOk(res, 'CSVインポートに失敗しました')
-    const data = await res.json()
+    const data = await expectJSON(res, schema.imported)
     if (!Number.isInteger(data?.imported_count) || data.imported_count < 0) {
       throw new Error('CSVインポートの応答が不正です')
     }
@@ -1111,7 +1114,7 @@ export async function importCSV(content, mode = 'append', pins = null) {
     body: JSON.stringify({ content, mode })
   })
   await throwIfNotOk(res, 'CSVインポートに失敗しました')
-  const data = await res.json()
+  const data = await expectJSON(res, schema.imported)
   if (!Number.isInteger(data?.imported_count) || data.imported_count < 0) {
     throw new Error('CSVインポートの応答が不正です')
   }
@@ -1148,7 +1151,7 @@ export async function previewCSVImport(content, mode = 'append') {
     })
   }
   await throwIfNotOk(res, 'CSVプレビューに失敗しました')
-  const data = await res.json()
+  const data = await expectJSON(res, schema.object)
   const digest = data?.source_digest
   const target = data?.target_digest
   const counts = [data?.new_count, data?.duplicate_count, data?.conflict_count]
@@ -1159,7 +1162,7 @@ export async function previewCSVImport(content, mode = 'append') {
     ? impactKeys.every((key) => validCount(data?.replace_impact?.[key]))
     : data?.replace_impact == null
   if (data?.mode !== mode || !impactOk || !digestOk(digest) || !digestOk(target) || counts.some((n) => !validCount(n))) {
-    throw new Error('CSVプレビューの応答が不正です')
+    throw new ApiError('CSVプレビューの応答が不正です', { status: res.status, code: 'invalid_response' })
   }
   return data
 }
@@ -1173,8 +1176,7 @@ export async function createSnapshot() {
     return await desktopFinancialCall(() => window.go.main.App.CreateSnapshot())
   }
   const res = await apiFetch('/api/snapshots', { method: 'POST' })
-  const data = await res.json()
-  if (data.error) throw new Error(data.error)
+  const data = await expectJSON(res, schema.snapshot)
   return data.path
 }
 
@@ -1187,7 +1189,7 @@ export async function listSnapshots() {
     return await desktopFinancialCall(() => window.go.main.App.ListSnapshots())
   }
   const res = await apiFetch('/api/snapshots')
-  return await res.json()
+  return await expectList(res, schema.strings)
 }
 
 /**
@@ -1204,8 +1206,7 @@ export async function restoreSnapshot(name) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name })
   })
-  const data = await res.json()
-  if (data.error) throw new Error(data.error)
+  await expectVoid(res, value => schema.object(value) && (value.success === true || typeof value.message === 'string'))
 }
 
 // --- 画像関連 (Agent.md §6.5) ---
@@ -1226,7 +1227,7 @@ export async function addTransactionImage(transactionId, imageData) {
     body: JSON.stringify(imageData)
   })
   await throwIfNotOk(res, '画像の追加に失敗しました')
-  return await res.json()
+  return await expectJSON(res, schema.image)
 }
 
 /**
@@ -1266,7 +1267,7 @@ export async function getTransactionImagesPage(transactionId, cursor = '', limit
   if (cursor) params.set('cursor', cursor)
   const res = await apiFetch(`/api/transaction_images/${transactionId}?${params.toString()}`)
   await throwIfNotOk(res, '画像一覧の取得に失敗しました')
-  return await res.json()
+  return await expectJSON(res, schema.images)
 }
 
 /**
@@ -1279,7 +1280,8 @@ export async function deleteTransactionImage(transactionId, imageId) {
   if (isWails) {
     return await desktopFinancialCall(() => window.go.main.App.DeleteTransactionImage(imageId))
   }
-  await apiFetch(`/api/transaction_images/${transactionId}/${imageId}`, { method: 'DELETE' })
+  const res = await apiFetch(`/api/transaction_images/${transactionId}/${imageId}`, { method: 'DELETE' })
+  await expectVoid(res, schema.message)
 }
 
 // --- タグ関連 (Agent.md §6.6) ---
@@ -1294,7 +1296,7 @@ export async function getTags() {
   }
   const res = await apiFetch('/api/tags')
   await throwIfNotOk(res, 'タグ一覧の取得に失敗しました')
-  return await res.json()
+  return await expectList(res, schema.tags)
 }
 
 /**
@@ -1313,7 +1315,7 @@ export async function createTag(name, parentId = null) {
     body: JSON.stringify({ name, parent_id: parentId })
   })
   await throwIfNotOk(res, 'タグの作成に失敗しました')
-  return await res.json()
+  return await expectJSON(res, schema.tag)
 }
 
 /**
@@ -1331,7 +1333,7 @@ export async function createTagByPath(path) {
     body: JSON.stringify({ path })
   })
   await throwIfNotOk(res, 'タグ階層の作成に失敗しました')
-  return await res.json()
+  return await expectJSON(res, schema.tag)
 }
 
 /**
@@ -1350,6 +1352,7 @@ export async function updateTag(id, name) {
     body: JSON.stringify({ name })
   })
   await throwIfNotOk(res, 'タグ名の変更に失敗しました')
+  await expectVoid(res, schema.message)
 }
 
 /**
@@ -1363,6 +1366,7 @@ export async function deleteTag(id) {
   }
   const res = await apiFetch(`/api/tags/${id}`, { method: 'DELETE' })
   await throwIfNotOk(res, 'タグの削除に失敗しました')
+  await expectVoid(res, schema.message)
 }
 
 /**
@@ -1376,7 +1380,7 @@ export async function getTagDeleteImpact(id) {
   }
   const res = await apiFetch(`/api/tags/${id}/impact`)
   await throwIfNotOk(res, 'タグ削除の影響確認に失敗しました')
-  return await res.json()
+  return await expectJSON(res, schema.impact)
 }
 
 /**
@@ -1389,7 +1393,7 @@ export async function getTransactionTags(transactionId) {
     return await desktopFinancialCall(() => window.go.main.App.GetTransactionTags(transactionId))
   }
   const res = await apiFetch(`/api/transaction_tags/${transactionId}`)
-  return await res.json()
+  return await expectList(res, schema.tags)
 }
 
 /**
@@ -1402,11 +1406,12 @@ export async function addTransactionTags(transactionId, tagIds) {
   if (isWails) {
     return await desktopFinancialCall(() => window.go.main.App.AddTransactionTags(transactionId, tagIds))
   }
-  await apiFetch(`/api/transaction_tags/${transactionId}`, {
+  const res = await apiFetch(`/api/transaction_tags/${transactionId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ tag_ids: tagIds })
   })
+  await expectVoid(res, schema.message)
 }
 
 /**
@@ -1419,7 +1424,8 @@ export async function removeTransactionTag(transactionId, tagId) {
   if (isWails) {
     return await desktopFinancialCall(() => window.go.main.App.RemoveTransactionTag(transactionId, tagId))
   }
-  await apiFetch(`/api/transaction_tags/${transactionId}/${tagId}`, { method: 'DELETE' })
+  const res = await apiFetch(`/api/transaction_tags/${transactionId}/${tagId}`, { method: 'DELETE' })
+  await expectVoid(res, schema.message)
 }
 
 /**
@@ -1439,7 +1445,7 @@ export async function getTagSummary(type = '', startDate = '', endDate = '') {
   if (endDate) params.set('end_date', endDate)
   const query = params.toString() ? `?${params.toString()}` : ''
   const res = await apiFetch(`/api/tags/summary${query}`)
-  return await res.json()
+  return await expectList(res, schema.summary)
 }
 
 // --- 取引紐付け (Agent.md §6.2) ---
@@ -1454,7 +1460,7 @@ export async function getTransactionLinks(transactionId) {
     return await desktopFinancialCall(() => window.go.main.App.GetTransactionLinks(transactionId))
   }
   const res = await apiFetch(`/api/transaction_links/${transactionId}`)
-  return await res.json()
+  return await expectList(res, schema.transactions)
 }
 
 /**
@@ -1473,6 +1479,7 @@ export async function addTransactionLink(transactionId, linkedId) {
     body: JSON.stringify({ linked_id: linkedId })
   })
   await throwIfNotOk(res, '紐付けに失敗しました')
+  await expectVoid(res, schema.message)
 }
 
 /**
@@ -1487,4 +1494,5 @@ export async function removeTransactionLink(transactionId, linkedId) {
   }
   const res = await apiFetch(`/api/transaction_links/${transactionId}/${linkedId}`, { method: 'DELETE' })
   await throwIfNotOk(res, '紐付け解除に失敗しました')
+  await expectVoid(res, schema.message)
 }
