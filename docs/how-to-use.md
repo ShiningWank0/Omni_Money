@@ -22,8 +22,6 @@ Desktop版はroleを持たない単一local vault運用です。初回起動でp
 
 メイン画面から収入・支出を登録し、資金項目、検索、タグ、画像、取引リンクを管理できます。CSV出力前には平文であることを確認する警告が表示されます。CSV出力は常にv3で、画像、タグ階層・取引タグ、カード引落しリンク、ledger設定を正規化して含み、復元時に関連IDが安全に再採番されます。旧v1/v2 CSVはappendでインポートできますが、旧クライアント向けのtransactions-only v2出力は明示的な互換APIに限られ、完全バックアップではありません。拡張データを表現できない旧形式のreplaceは安全のため拒否されます。完全置換にはCSV v3を使用してください。v3 exportの末尾manifestには全record typeの件数とcanonical digestが含まれ、replaceは公式完全ヘッダーとmanifestが一致しない入力をDB変更前に拒否します。CSV v3のreplaceは全体を1つのtransactionで適用し、検証・画像処理・関連付けのどこで失敗しても元データへrollbackします。appendは既存の取引関連データ・ledger設定を保持し、CSV設定が既存値と競合する場合はatomicに中止します。既存リンクは自動削除されません。CSV入力はストリーミングraw CSVが512 MiB、解析済みテキストが64 MiBまでです。後方互換のWails/JSON文字列経路は64 MiBまでなので、完全バックアップにはDesktopのファイルダイアログまたはserverのraw CSV uploadを使用してください。必ず暗号化済みvolumeへ直接保存し、不要になったcopyを残さないでください。browserは保存完了や保存先の暗号化を検証できず、SSD上のfile削除も完全消去を保証しません。
 
-旧single-user serverからの移行は[移行runbook](single-user-migration.md)に従い、元データの保全と隔離環境での予行演習を行ってください。
-
 ## 2. Multi-user serverの安全モデル
 
 serverは次の領域を分離します。
@@ -36,6 +34,8 @@ serverは次の領域を分離します。
 Adminはuserの追加・無効化等を管理できますが、userのpasswordまたはrecovery codeなしにuser vaultの中身を復号できません。serverのsnapshot APIも本人のrequest leaseに束縛されるため、application Admin/APIでも他user vaultの平文を列挙・復号・復元できません。ただし同じservice UID、host root/operator、差し替え可能なbinary、process memoryはtrust boundary内です。手動APIに加え、`core.Service`経由のledger mutation成功後にuser vault単位の自動snapshotを非同期作成します。自動処理はburstをcoalesceして30世代と容量上限を維持しますが、時刻schedule・retention policy・失敗通知を管理する製品UIはありません。snapshot restore後は全sessionが失効し、再ログインが必要です。
 
 詳細は[server multi-vault security model](server-multi-vault.md)、[SQLCipher鍵の運用](sqlcipher-key-operations.md)、[保存時暗号化volumeの運用contract](at-rest-encryption.md)を参照してください。
+
+旧single-user serverからの移行は[移行runbook](single-user-migration.md)に従い、元データの保全と隔離環境での予行演習を行ってください。
 
 AIはDesktop/serverのproductionで提供していません。user-vault-bound AIはStage 4のplanned/unshipped設計であり、旧AI packageや追加portを運用へ持ち込まないでください。
 
