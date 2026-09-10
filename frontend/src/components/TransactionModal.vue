@@ -568,7 +568,17 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.transaction-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
+.transaction-fields {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 /* タグセレクター */
 .tag-selector {
   display: flex;
