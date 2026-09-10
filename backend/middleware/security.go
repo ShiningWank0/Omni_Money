@@ -13,6 +13,7 @@ import (
 
 	"omni_money/backend/core"
 	"omni_money/backend/fileprivacy"
+	"omni_money/backend/httpjson"
 )
 
 func cleanupCSVSpoolFile(temp *fileprivacy.PrivateTempFile) {
@@ -110,7 +111,7 @@ func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 			// bounded private disk space but cannot hold the processing slot.
 			temp, err := fileprivacy.CreatePrivateTempFile("omni-money-csv-upload-")
 			if err != nil {
-				jsonError(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage)
+				httpjson.WriteSafeError(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage, nil)
 				return
 			}
 			tmp := temp.File
@@ -120,7 +121,7 @@ func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 			info, statErr := tmp.Stat()
 			if statErr != nil || !fileprivacy.IsPrivate(tmp, info) {
 				cleanup()
-				jsonError(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage)
+				httpjson.WriteSafeError(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage, nil)
 				return
 			}
 			written, copyErr := io.Copy(tmp, r.Body)
@@ -135,12 +136,12 @@ func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 			}
 			if err := tmp.Sync(); err != nil {
 				cleanup()
-				jsonError(w, "CSV upload spool failed", http.StatusInsufficientStorage)
+				httpjson.WriteSafeError(w, "CSV upload spool failed", http.StatusInsufficientStorage, nil)
 				return
 			}
 			if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 				cleanup()
-				jsonError(w, "CSV upload spool failed", http.StatusInsufficientStorage)
+				httpjson.WriteSafeError(w, "CSV upload spool failed", http.StatusInsufficientStorage, nil)
 				return
 			}
 			oldBody := r.Body

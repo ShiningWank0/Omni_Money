@@ -243,7 +243,7 @@ func ProxyMiddleware(config *ProxyConfig, next http.Handler) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if config.configErr != nil {
-			jsonError(w, "Proxy configuration is invalid", http.StatusServiceUnavailable)
+			httpjson.WriteSafeError(w, "Proxy configuration is invalid", http.StatusServiceUnavailable, nil)
 			return
 		}
 

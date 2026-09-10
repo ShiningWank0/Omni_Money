@@ -60,12 +60,12 @@ func handleAIConsoleProxy(aiPath string) http.HandlerFunc {
 		}()
 		w.Header().Set("Cache-Control", "no-store")
 		if !isAllowedAIConsolePath(aiPath) {
-			jsonError(w, "AI専用APIの中継先が無効です", http.StatusInternalServerError)
+			jsonSafeError(w, "AI専用APIの中継先が無効です", http.StatusInternalServerError)
 			return
 		}
 		token, err := readAIConsoleToken()
 		if err != nil {
-			jsonError(w, "AI専用APIが有効化されていません", http.StatusServiceUnavailable)
+			jsonSafeError(w, "AI専用APIが有効化されていません", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -75,7 +75,7 @@ func handleAIConsoleProxy(aiPath string) http.HandlerFunc {
 		}
 		portNumber, err := strconv.Atoi(port)
 		if err != nil || portNumber < 1 || portNumber > 65535 {
-			jsonError(w, "AI専用APIのポート設定が無効です", http.StatusInternalServerError)
+			jsonSafeError(w, "AI専用APIのポート設定が無効です", http.StatusInternalServerError)
 			return
 		}
 
@@ -85,7 +85,7 @@ func handleAIConsoleProxy(aiPath string) http.HandlerFunc {
 			scheme = "https"
 			client, err = newAIConsoleTLSClient()
 			if err != nil {
-				jsonError(w, "AI専用APIのTLSクライアント設定が無効です", http.StatusServiceUnavailable)
+				jsonSafeError(w, "AI専用APIのTLSクライアント設定が無効です", http.StatusServiceUnavailable)
 				return
 			}
 		}
@@ -174,7 +174,7 @@ func aiConsoleRelayHost() string {
 func forwardAIConsoleRequest(w http.ResponseWriter, r *http.Request, targetURL, token string, client *http.Client) {
 	validatedTarget, err := validateAIConsoleTarget(targetURL)
 	if err != nil {
-		jsonError(w, "AI専用APIの中継先が無効です", http.StatusInternalServerError)
+		jsonSafeError(w, "AI専用APIの中継先が無効です", http.StatusInternalServerError)
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -187,7 +187,7 @@ func forwardAIConsoleRequest(w http.ResponseWriter, r *http.Request, targetURL, 
 	// port, and one of the two fixed AI endpoint paths.
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, validatedTarget, bytes.NewReader(body))
 	if err != nil {
-		jsonError(w, "AI専用APIリクエストの作成に失敗しました", http.StatusInternalServerError)
+		jsonSafeError(w, "AI専用APIリクエストの作成に失敗しました", http.StatusInternalServerError)
 		return
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
@@ -202,18 +202,18 @@ func forwardAIConsoleRequest(w http.ResponseWriter, r *http.Request, targetURL, 
 	response, err := client.Do(request)
 	if err != nil {
 		log.Printf("AI console loopback relay failed: %v", err)
-		jsonError(w, "AI専用APIへ接続できません", http.StatusBadGateway)
+		jsonSafeError(w, "AI専用APIへ接続できません", http.StatusBadGateway)
 		return
 	}
 	defer response.Body.Close()
 
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxAIConsoleResponseSize+1))
 	if err != nil {
-		jsonError(w, "AI専用APIレスポンスの読み取りに失敗しました", http.StatusBadGateway)
+		jsonSafeError(w, "AI専用APIレスポンスの読み取りに失敗しました", http.StatusBadGateway)
 		return
 	}
 	if len(responseBody) > maxAIConsoleResponseSize {
-		jsonError(w, "AI専用APIレスポンスが大きすぎます", http.StatusBadGateway)
+		jsonSafeError(w, "AI専用APIレスポンスが大きすぎます", http.StatusBadGateway)
 		return
 	}
 

@@ -826,7 +826,7 @@ func writeServerAccountError(w http.ResponseWriter, err error, operation serverO
 		jsonError(w, "現在のアカウント状態では操作できません", http.StatusConflict)
 	case errors.Is(err, serverauth.ErrServiceUnavailable) || errors.Is(err, control.ErrStoreClosed) ||
 		errors.Is(err, vault.ErrClosed) || errors.Is(err, vault.ErrDraining):
-		jsonError(w, "アカウントサービスを利用できません", http.StatusServiceUnavailable)
+		jsonSafeError(w, "アカウントサービスを利用できません", http.StatusServiceUnavailable)
 	default:
 		log.Printf("security_event=server_account_operation_failed operation=%d", operation)
 		jsonError(w, "リクエストを処理できませんでした", http.StatusInternalServerError)

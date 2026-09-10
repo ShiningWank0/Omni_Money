@@ -27,7 +27,7 @@ func TestWriteAIAnalysisErrorMapsContextFailures(t *testing.T) {
 			name:        "deadline exceeded",
 			err:         fmt.Errorf("internal query detail: %w", context.DeadlineExceeded),
 			wantStatus:  http.StatusGatewayTimeout,
-			wantMessage: "サーバー内部でエラーが発生しました",
+			wantMessage: "AI分析がタイムアウトしました",
 		},
 		{
 			name:        "canceled",
