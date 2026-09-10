@@ -26,3 +26,30 @@ func TestErrorContractRedactsInternalDetailsAndKeepsLifecycleFlags(t *testing.T)
 		}
 	}
 }
+
+func TestWriteSafeErrorPreservesExplicitMessage(t *testing.T) {
+	w := httptest.NewRecorder()
+	WriteSafeError(w, "ユーザーデータを安全に開けません", 503, map[string]any{"retry_after_seconds": 12})
+	var data map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &data); err != nil {
+		t.Fatal(err)
+	}
+	if data["error"] != "ユーザーデータを安全に開けません" || data["code"] != "service_unavailable" {
+		t.Fatalf("safe 5xx envelope = %v", data)
+	}
+	if data["retry_after_seconds"] != float64(12) {
+		t.Fatalf("safe 5xx dropped the retry hint: %v", data)
+	}
+}
+
+func TestRetryHintSurvivesTheEnvelope(t *testing.T) {
+	w := httptest.NewRecorder()
+	WriteError(w, "認証試行が多すぎます", 429, map[string]any{"retry_after_seconds": 5})
+	var data map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &data); err != nil {
+		t.Fatal(err)
+	}
+	if data["error"] != "認証試行が多すぎます" || data["retry_after_seconds"] != float64(5) || data["code"] != "rate_limited" {
+		t.Fatalf("429 envelope = %v", data)
+	}
+}

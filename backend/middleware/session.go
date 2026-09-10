@@ -1055,7 +1055,7 @@ func isSnapshotRestoreRequest(r *http.Request) bool {
 }
 
 func writeVaultRoutingUnavailable(w http.ResponseWriter) {
-	httpjson.WriteError(w, "ユーザーデータを安全に開けません", http.StatusServiceUnavailable, map[string]any{})
+	httpjson.WriteSafeError(w, "ユーザーデータを安全に開けません", http.StatusServiceUnavailable, map[string]any{})
 }
 
 func requiresSessionAuth(r *http.Request) bool {
