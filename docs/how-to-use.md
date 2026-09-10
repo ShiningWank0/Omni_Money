@@ -35,6 +35,8 @@ Adminはuserの追加・無効化等を管理できますが、userのpassword�
 
 詳細は[server multi-vault security model](server-multi-vault.md)、[SQLCipher鍵の運用](sqlcipher-key-operations.md)、[保存時暗号化volumeの運用contract](at-rest-encryption.md)を参照してください。
 
+旧single-user serverからの移行は[移行runbook](single-user-migration.md)に従い、元データの保全と隔離環境での予行演習を行ってください。
+
 AIはDesktop/serverのproductionで提供していません。user-vault-bound AIはStage 4のplanned/unshipped設計であり、旧AI packageや追加portを運用へ持ち込まないでください。
 
 ## 3. Docker Composeでローカル確認
