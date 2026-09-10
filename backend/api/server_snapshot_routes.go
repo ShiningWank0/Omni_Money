@@ -109,7 +109,7 @@ func handleServerSnapshotRestore(dependencies ServerDependencies) http.HandlerFu
 		err = operation.RestoreSnapshot(r.Context(), request.Name)
 		if err != nil {
 			log.Printf("security_event=snapshot_restore result=error")
-			jsonResponse(w, map[string]interface{}{
+			jsonSafeResponse(w, map[string]interface{}{
 				"error": "スナップショットを復元できません", "login_required": true,
 			}, http.StatusInternalServerError)
 			return

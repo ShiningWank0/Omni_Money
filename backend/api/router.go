@@ -873,7 +873,7 @@ func handleSnapshots(w http.ResponseWriter, r *http.Request) {
 		// Manual snapshots use the same bounded retention as automatic ones so
 		// an authenticated browser cannot consume storage without limit.
 		if err := database.CleanOldSnapshots("", 30); err != nil {
-			jsonError(w, "スナップショットの世代管理に失敗しました", http.StatusInternalServerError)
+			jsonSafeError(w, "スナップショットの世代管理に失敗しました", http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, map[string]string{"path": path, "message": "スナップショットを作成しました"}, http.StatusCreated)
