@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -165,11 +166,19 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 	mux.HandleFunc("/api/v1/ai/", httpjson.NotFound)
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		// Health monitoring consumes the status body directly; it is not an
+		// application error envelope, so it must not be funneled through the
+		// shared redacting error writer.
+		status := http.StatusOK
+		body := map[string]string{"status": "ok"}
 		if _, err := dependencies.Control.IsBootstrapped(r.Context()); err != nil {
-			jsonResponse(w, map[string]string{"status": "unavailable"}, http.StatusServiceUnavailable)
-			return
+			status = http.StatusServiceUnavailable
+			body["status"] = "unavailable"
 		}
-		jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(body)
 	})
 
 	var handler http.Handler = mux
@@ -190,5 +199,5 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 }
 
 func handleServerFeatureUnavailable(w http.ResponseWriter, _ *http.Request) {
-	jsonError(w, "この機能はサーバーモードではまだ利用できません", http.StatusServiceUnavailable)
+	jsonSafeError(w, "この機能はサーバーモードではまだ利用できません", http.StatusServiceUnavailable)
 }

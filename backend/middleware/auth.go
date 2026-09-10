@@ -247,7 +247,7 @@ func newAIAPIMiddleware(
 
 		failedAuthenticationKey := "authentication-failed\x00" + remoteIP
 		if auditStore == nil || auditStore.CurrentKeyID() == "" {
-			writeJSONError(w, "AI監査設定が利用できません", http.StatusServiceUnavailable)
+			httpjson.WriteSafeError(w, "AI監査設定が利用できません", http.StatusServiceUnavailable, nil)
 			audit(false, http.StatusServiceUnavailable, "audit_key_unavailable")
 			return
 		}
