@@ -23,6 +23,13 @@
 #   restart_unhealthy       unhealthy restart keeps the archive and fails loudly
 #   concurrent_lock         an existing lock blocks a second backup
 #   keep_prunes_oldest      --keep N removes the oldest generations only
+#   mount_scan_success      Linux mount inspection accepts the root and unrelated mounts
+#   mount_scan_failure      failed mount inspection rejects even partial output before stop
+#   mount_scan_empty        empty mount inspection fails before stop
+#   mount_scan_invalid      malformed mount inspection fails before stop
+#   mount_scan_nested       a nested mount fails before stop
+#   mount_scan_stopped_failure failed post-stop inspection restarts without publishing
+#   mount_scan_stopped_empty empty post-stop inspection restarts without publishing
 
 set -Eeuo pipefail
 
@@ -38,6 +45,7 @@ trap 'status=$?; if [ "$FAILURES" -eq 0 ]; then rm -rf -- "$test_root"; else ech
 # resolve the real host binaries before the mock bin shadows PATH
 REAL_STAT="$(command -v stat)"
 REAL_TAR="$(command -v tar)"
+REAL_UNAME="$(command -v uname)"
 
 timeout_wrap() {
   local seconds="$1"
@@ -121,6 +129,7 @@ case "\$*" in
     cat "\$state/health"
     ;;
   stop*)
+    printf 'stop\n' >> "\$state/actions"
     if [ "\${MOCK_SCENARIO:-}" = "stop_failure" ]; then
       echo "mock docker stop failure" >&2
       exit 1
@@ -129,6 +138,7 @@ case "\$*" in
     printf 'exited\n' > "\$state/status"
     ;;
   start*)
+    printf 'start\n' >> "\$state/actions"
     printf 'mock\n'
     printf 'running\n' > "\$state/status"
     ;;
@@ -156,8 +166,33 @@ exit 0
 MOCK_SYNC
   cat > "$mock_bin/findmnt" <<'MOCK_FINDMNT'
 #!/usr/bin/env bash
-printf '/\n'
+case "${MOCK_SCENARIO:-}" in
+  mount_scan_failure)
+    printf '/\n'
+    exit 1
+    ;;
+  mount_scan_empty) exit 0 ;;
+  mount_scan_invalid) printf 'unparseable mount target\n'; exit 0 ;;
+  mount_scan_nested) printf '/\n%s/nested\n' "$MOCK_DATA"; exit 0 ;;
+  mount_scan_stopped_failure|mount_scan_stopped_empty)
+    if [ "$(cat "$MOCK_STATE_DIR/status")" = exited ]; then
+      [ "$MOCK_SCENARIO" = mount_scan_stopped_empty ] && exit 0
+      printf '/\n'
+      exit 1
+    fi
+    ;;
+esac
+printf '/\n%s\n/unrelated-mount\n' "$MOCK_DATA"
 MOCK_FINDMNT
+  # Exercise Linux-only mount checks on macOS as well, without touching the
+  # real mount table or requiring privileges.
+  cat > "$mock_bin/uname" <<MOCK_UNAME
+#!/usr/bin/env bash
+case "\${MOCK_SCENARIO:-}" in
+  mount_scan_*) printf 'Linux\n' ;;
+  *) exec "$REAL_UNAME" "\$@" ;;
+esac
+MOCK_UNAME
   cat > "$mock_bin/tar" <<MOCK_TAR
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -167,7 +202,7 @@ if [ "\${1:-}" = "--version" ]; then
 fi
 exec "$REAL_TAR" "\$@"
 MOCK_TAR
-  chmod +x "$mock_bin/docker" "$mock_bin/stat" "$mock_bin/sync" "$mock_bin/findmnt" "$mock_bin/tar"
+  chmod +x "$mock_bin/docker" "$mock_bin/stat" "$mock_bin/sync" "$mock_bin/findmnt" "$mock_bin/uname" "$mock_bin/tar"
 }
 
 newest_generation() {
@@ -369,6 +404,52 @@ post_keep_prunes_oldest() {
   assert_eq "generation count after retention" "2" "$count"
 }
 
+scenario_mount_scan_success() { new_fixture mount_scan_success; build_mocks; }
+scenario_mount_scan_failure() { new_fixture mount_scan_failure; build_mocks; }
+scenario_mount_scan_empty() { new_fixture mount_scan_empty; build_mocks; }
+scenario_mount_scan_invalid() { new_fixture mount_scan_invalid; build_mocks; }
+scenario_mount_scan_nested() { new_fixture mount_scan_nested; build_mocks; }
+scenario_mount_scan_stopped_failure() { new_fixture mount_scan_stopped_failure; build_mocks; }
+scenario_mount_scan_stopped_empty() { new_fixture mount_scan_stopped_empty; build_mocks; }
+
+post_mount_scan_success() {
+  local generation
+  generation="$(newest_generation "$fixture_root/omni-money-backups")"
+  assert_file "$fixture_root/omni-money-backups/$generation/manifest.json"
+  assert_eq "successful Linux backup stops and restarts once" $'stop\nstart' "$(cat "$mock_state/actions")"
+  assert_eq "service restarted after successful mount checks" running "$(cat "$mock_state/status")"
+}
+
+assert_mount_scan_rejected_before_stop() {
+  assert_no_file "$mock_state/actions"
+  assert_no_file "$fixture_root/omni-money-backups"
+  assert_eq "service untouched after mount rejection" running "$(cat "$mock_state/status")"
+  grep -q "$1" "$fixture_root/stderr.log" \
+    || { echo "FAIL: missing mount rejection diagnostic" >&2; FAILURES=$((FAILURES + 1)); }
+}
+
+post_mount_scan_failure() { assert_mount_scan_rejected_before_stop 'mount table could not be read'; }
+post_mount_scan_empty() { assert_mount_scan_rejected_before_stop 'mount table is empty'; }
+post_mount_scan_invalid() { assert_mount_scan_rejected_before_stop 'mount table contains an invalid target'; }
+post_mount_scan_nested() { assert_mount_scan_rejected_before_stop 'contains a nested mount'; }
+
+assert_mount_scan_rejected_after_stop() {
+  local generation dir
+  generation="$(newest_generation "$fixture_root/omni-money-backups")"
+  [ -n "$generation" ] || { echo "FAIL: post-stop fixture never reached backup staging" >&2; FAILURES=$((FAILURES + 1)); return 1; }
+  dir="$fixture_root/omni-money-backups/$generation"
+  assert_no_file "$dir/data.tar"
+  assert_no_file "$dir/manifest.json"
+  assert_no_file "$fixture_root/omni-money-backups/.backup.lock"
+  assert_eq "post-stop rejection triggers one restart" $'stop\nstart' "$(cat "$mock_state/actions")"
+  assert_eq "service restarted after mount rejection" running "$(cat "$mock_state/status")"
+  grep -q "$1" "$fixture_root/stderr.log" \
+    || { echo "FAIL: missing post-stop mount rejection diagnostic" >&2; FAILURES=$((FAILURES + 1)); }
+}
+
+post_mount_scan_stopped_failure() { assert_mount_scan_rejected_after_stop 'mount table could not be read'; }
+post_mount_scan_stopped_empty() { assert_mount_scan_rejected_after_stop 'mount table is empty'; }
+
 # ------------------------------------------------------------------ dispatch
 
 requested="${BACKUP_ONLY:-}"
@@ -383,11 +464,18 @@ for scenario_name in \
   stop_failure \
   restart_unhealthy \
   concurrent_lock \
-  keep_prunes_oldest; do
+  keep_prunes_oldest \
+  mount_scan_success \
+  mount_scan_failure \
+  mount_scan_empty \
+  mount_scan_invalid \
+  mount_scan_nested \
+  mount_scan_stopped_failure \
+  mount_scan_stopped_empty; do
   if [ "$run_all" -eq 1 ] || [ "$requested" = "$scenario_name" ]; then
     # fail-closed scenarios must exit 1; success paths must exit 0
     case "$scenario_name" in
-      success|verify_detects_tamper|keep_prunes_oldest) default_expected=0 ;;
+      success|verify_detects_tamper|keep_prunes_oldest|mount_scan_success) default_expected=0 ;;
       *) default_expected=1 ;;
     esac
     expected="$default_expected"

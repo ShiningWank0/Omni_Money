@@ -205,18 +205,27 @@ validate_data_entry() {
 }
 
 validate_nested_mounts() {
-  local root="$1" label="$2" target
+  local root="$1" label="$2" target mounts
   # find -xdev alone misses same-device bind mounts; on Linux cross-check the
   # kernel mount table for anything mounted inside the data root.
   if [ "$(uname -s)" != Linux ]; then return 0; fi
   command -v findmnt >/dev/null 2>&1 || fail "findmnt is required on Linux"
+  # Capture the status before parsing: process substitution does not propagate
+  # findmnt failures, and partial output cannot establish the mount boundary.
+  mounts="$(findmnt -rn --output TARGET 2>/dev/null)" \
+    || fail "$label mount table could not be read"
+  [ -n "$mounts" ] || fail "$label mount table is empty"
   while IFS= read -r target; do
     [ -n "$target" ] || continue
+    case "$target" in
+      /*) ;;
+      *) fail "$label mount table contains an invalid target" ;;
+    esac
     [ "$target" = "$root" ] && continue
     case "$target" in
       "$root"|"$root"/*) fail "$label contains a nested mount: $target" ;;
     esac
-  done < <(findmnt -rn --output TARGET 2>/dev/null || true)
+  done <<< "$mounts"
 }
 
 validate_source_tree() {
