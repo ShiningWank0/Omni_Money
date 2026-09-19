@@ -161,6 +161,11 @@ jobs:
           sudo env "PATH=$PATH" SAFE_UPDATE_ONLY=legacy_archive_failure SAFE_UPDATE_EXPECTED=1 scripts/safe-update_test.sh
           sudo env "PATH=$PATH" SAFE_UPDATE_ONLY=jq_only_drift SAFE_UPDATE_EXPECTED=1 scripts/safe-update_test.sh
           sudo env "PATH=$PATH" SAFE_UPDATE_ONLY=candidate_ingress_health_failure SAFE_UPDATE_EXPECTED=1 scripts/safe-update_test.sh
+          test -x scripts/backup-data-root.sh
+          bash -n scripts/backup-data-root.sh
+          test -x scripts/backup-data-root_test.sh
+          bash -n scripts/backup-data-root_test.sh
+          scripts/backup-data-root_test.sh
 
       - name: Assert Pangolin network isolation
         env:

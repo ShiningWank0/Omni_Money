@@ -161,6 +161,8 @@ multi-user serverのsnapshot APIは認証済み本人のvaultだけに束縛さ�
 
 snapshot単体はDR setではありません。control DBとcontrol key、各user vaultと暗号化snapshot、volumeのkey/recovery material・attestation/復旧手順、各userのrecovery codeを別々に保管し、隔離環境でrestore drillを行います。
 
+`scripts/backup-data-root.sh` がservice停止中のwhole data-root冷間archive（member検証、sha256 sidecar、平文SQLite header検査、manifest付与、`--verify` モード）を提供します。保管先のtrust model、restore手順、復元演習は[Disaster Recovery runbook](docs/disaster-recovery.md)を参照してください。
+
 serverの環境変数は [.env.example](.env.example) を唯一の雛形とし、詳細な必須条件とsecret/owner/modeは[利用ガイド](docs/how-to-use.md)を参照してください。旧 single-DB、bcrypt/TOTP、旧AI envは設定時に起動を拒否します。
 
 ## Docker で起動
