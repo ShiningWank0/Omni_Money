@@ -2,10 +2,11 @@ package middleware
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"omni_money/backend/httpjson"
 )
 
 type recentAuthCheckContextKey struct{}
@@ -106,11 +107,7 @@ func validBrowserRequestBoundary(r *http.Request) bool {
 }
 
 func writeCSRFRejected(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusForbidden)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"error":         "リクエストの検証に失敗しました",
+	httpjson.WriteError(w, "リクエストの検証に失敗しました", http.StatusForbidden, map[string]any{
 		"csrf_rejected": true,
 	})
 }
@@ -141,11 +138,7 @@ func RecentAuthMiddleware(sessionManager *SessionManager, next http.Handler) htt
 }
 
 func writeRecentAuthRequired(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusPreconditionRequired)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"error":                "この操作には再認証が必要です",
+	httpjson.WriteError(w, "この操作には再認証が必要です", http.StatusPreconditionRequired, map[string]any{
 		"recent_auth_required": true,
 	})
 }
