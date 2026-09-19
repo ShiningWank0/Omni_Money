@@ -181,7 +181,11 @@ The multi-vault change is intentionally split into reviewable stages:
 An encrypted snapshot alone is not a DR set. Back up the control DB and control
 key, each vault and its encrypted snapshots, volume key/recovery material and
 attestation/restore procedure, and each user's recovery code to separate safe
-locations. During a drill, copy the complete set to an isolated data root,
+locations. `scripts/backup-data-root.sh` automates the cold whole-data-root
+archive (tree contract validation, member validation, sha256 sidecar,
+plaintext-header rejection, manifest, `--verify` mode); see
+[disaster-recovery.md](disaster-recovery.md) for the storage trust model,
+restore procedure, and drill steps. During a drill, copy the complete set to an isolated data root,
 start the server without exposing it, and verify a
 known transaction, image, tag, `PRAGMA integrity_check`, current schema
 migration, and critical indexes/triggers. Exercise a corrupt file, a wrong-key
