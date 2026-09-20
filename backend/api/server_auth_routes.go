@@ -15,6 +15,8 @@ import (
 	"omni_money/backend/middleware"
 	"omni_money/backend/serverauth"
 	"omni_money/backend/vault"
+
+	"omni_money/backend/httpjson"
 )
 
 const (
@@ -560,7 +562,7 @@ func handleServerUserAction(dependencies ServerDependencies) http.HandlerFunc {
 		path := strings.TrimPrefix(r.URL.Path, "/api/admin/users/")
 		parts := strings.Split(path, "/")
 		if len(parts) != 2 || parts[0] == "" {
-			http.NotFound(w, r)
+			httpjson.NotFound(w, r)
 			return
 		}
 		lifecycle, _ := dependencies.Accounts.(ServerAdminLifecycleService)
@@ -576,7 +578,7 @@ func handleServerUserAction(dependencies ServerDependencies) http.HandlerFunc {
 			}
 			requestedRole = request.Role
 		default:
-			http.NotFound(w, r)
+			httpjson.NotFound(w, r)
 			return
 		}
 		if !revalidateServerRecentAuth(w, r) {
@@ -620,7 +622,7 @@ func handleServerInvitationAction(dependencies ServerDependencies) http.HandlerF
 		}
 		id := strings.TrimPrefix(r.URL.Path, "/api/admin/invitations/")
 		if id == "" || strings.Contains(id, "/") {
-			http.NotFound(w, r)
+			httpjson.NotFound(w, r)
 			return
 		}
 		lifecycle, ok := dependencies.Accounts.(ServerAdminLifecycleService)
@@ -652,7 +654,7 @@ func handleServerPasswordResetAction(dependencies ServerDependencies) http.Handl
 		}
 		id := strings.TrimPrefix(r.URL.Path, "/api/admin/password-resets/")
 		if id == "" || strings.Contains(id, "/") {
-			http.NotFound(w, r)
+			httpjson.NotFound(w, r)
 			return
 		}
 		lifecycle, ok := dependencies.Accounts.(ServerAdminLifecycleService)
@@ -824,7 +826,7 @@ func writeServerAccountError(w http.ResponseWriter, err error, operation serverO
 		jsonError(w, "現在のアカウント状態では操作できません", http.StatusConflict)
 	case errors.Is(err, serverauth.ErrServiceUnavailable) || errors.Is(err, control.ErrStoreClosed) ||
 		errors.Is(err, vault.ErrClosed) || errors.Is(err, vault.ErrDraining):
-		jsonError(w, "アカウントサービスを利用できません", http.StatusServiceUnavailable)
+		jsonSafeError(w, "アカウントサービスを利用できません", http.StatusServiceUnavailable)
 	default:
 		log.Printf("security_event=server_account_operation_failed operation=%d", operation)
 		jsonError(w, "リクエストを処理できませんでした", http.StatusInternalServerError)

@@ -24,6 +24,7 @@ import (
 	"omni_money/backend/core"
 	"omni_money/backend/database"
 	"omni_money/backend/fileprivacy"
+	"omni_money/backend/httpjson"
 	"omni_money/backend/middleware"
 	"omni_money/backend/models"
 )
@@ -55,7 +56,7 @@ func NewRouter() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		jsonError(w, "サーバーのセキュリティ設定が無効です", http.StatusServiceUnavailable)
+		jsonSafeError(w, "サーバーのセキュリティ設定が無効です", http.StatusServiceUnavailable)
 	})
 }
 
@@ -89,6 +90,8 @@ func NewRouterWithError() (http.Handler, error) {
 	mux.HandleFunc("/login", handleLoginPage)
 	mux.HandleFunc("/login/", handleLoginPage)
 	mux.Handle("/", http.FileServer(http.Dir("frontend/dist")))
+	mux.HandleFunc("/api/", httpjson.NotFound)
+	mux.HandleFunc("/api", httpjson.NotFound)
 
 	// 認証API（Agent.md §6.4.1）
 	mux.HandleFunc("/api/auth/login", handleAuthLogin(authManager))
@@ -111,7 +114,7 @@ func NewRouterWithError() (http.Handler, error) {
 	mux.HandleFunc("/api/snapshots/restore", methodGuard(http.MethodPost, handleSnapshotRestore))
 
 	// 公開WebポートではAI APIを提供しない。認証済みセッションからアクセスしても404。
-	mux.HandleFunc("/api/v1/ai/", http.NotFound)
+	mux.HandleFunc("/api/v1/ai/", httpjson.NotFound)
 
 	// Docker等の死活監視用。家計簿データは返さない。
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -220,7 +223,7 @@ const (
 func financialService(w http.ResponseWriter, r *http.Request) (*core.Service, bool) {
 	service, ok := middleware.CoreServiceFromContext(r.Context())
 	if !ok {
-		jsonError(w, financialServiceUnavailableMessage, http.StatusServiceUnavailable)
+		jsonSafeError(w, financialServiceUnavailableMessage, http.StatusServiceUnavailable)
 		return nil, false
 	}
 	return service, true
@@ -233,8 +236,12 @@ func writeFinancialError(w http.ResponseWriter, err error, status int) {
 		jsonError(w, "旧形式のCSVはappendで取り込めます。完全置換にはCSV v3を使用してください", status)
 		return
 	}
+	if errors.Is(err, core.ErrCSVPreviewConflict) {
+		jsonError(w, "CSV importの対象データが変更されました。プレビューを取り直してください", http.StatusConflict)
+		return
+	}
 	if errors.Is(err, core.ErrServiceUnavailable) {
-		jsonError(w, financialServiceUnavailableMessage, http.StatusServiceUnavailable)
+		jsonSafeError(w, financialServiceUnavailableMessage, http.StatusServiceUnavailable)
 		return
 	}
 	if status >= http.StatusInternalServerError {
@@ -567,12 +574,35 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "この操作には再認証が必要です", http.StatusPreconditionRequired)
 			return
 		}
-		count, err := service.ImportCSVReaderContext(r.Context(), r.Body, mode)
+		if r.URL.Query().Get("preview") == "1" {
+			preview, err := service.PreviewCSVImportReaderContext(r.Context(), r.Body, mode)
+			if err != nil {
+				writeFinancialError(w, err, http.StatusBadRequest)
+				return
+			}
+			jsonResponse(w, preview, http.StatusOK)
+			return
+		}
+		var pins *core.CSVImportPins
+		if r.URL.Query().Get("preview_source_digest") != "" || r.URL.Query().Get("preview_target_digest") != "" {
+			sourceParam := r.URL.Query().Get("preview_source_digest")
+			targetParam := r.URL.Query().Get("preview_target_digest")
+			if !core.ValidCSVImportDigest(sourceParam) || !core.ValidCSVImportDigest(targetParam) {
+				jsonError(w, "preview digestが不正です。プレビューを取り直してください", http.StatusBadRequest)
+				return
+			}
+			pins = &core.CSVImportPins{SourceDigest: sourceParam, TargetDigest: targetParam}
+		}
+		count, digests, err := service.ImportCSVReaderContextWithDigests(r.Context(), r.Body, mode, pins)
 		if err != nil {
 			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
-		jsonResponse(w, map[string]int{"imported_count": count}, http.StatusOK)
+		jsonResponse(w, map[string]interface{}{
+			"imported_count": count,
+			"source_digest":  digests.SourceDigest,
+			"target_digest":  digests.TargetDigest,
+		}, http.StatusOK)
 		return
 	}
 	if mediaType != "application/json" {
@@ -597,6 +627,22 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	if checked, recent := middleware.RevalidateRecentAuthentication(r.Context()); checked && !recent {
 		jsonError(w, "この操作には再認証が必要です", http.StatusPreconditionRequired)
+		return
+	}
+	if r.URL.Query().Get("preview") == "1" {
+		preview, err := service.PreviewCSVImportReaderContext(r.Context(), strings.NewReader(body.Content), body.Mode)
+		if err != nil {
+			writeFinancialError(w, err, http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, preview, http.StatusOK)
+		return
+	}
+	if r.URL.Query().Get("preview_source_digest") != "" || r.URL.Query().Get("preview_target_digest") != "" {
+		// The strict JSON envelope stays free of preview pins; file uploads are
+		// the only apply path that pins a preview, so a stale pin can never be
+		// smuggled through the compatibility string path.
+		jsonError(w, "JSON経由のimportではpreview digestを指定できません", http.StatusBadRequest)
 		return
 	}
 
@@ -827,7 +873,7 @@ func handleSnapshots(w http.ResponseWriter, r *http.Request) {
 		// Manual snapshots use the same bounded retention as automatic ones so
 		// an authenticated browser cannot consume storage without limit.
 		if err := database.CleanOldSnapshots("", 30); err != nil {
-			jsonError(w, "スナップショットの世代管理に失敗しました", http.StatusInternalServerError)
+			jsonSafeError(w, "スナップショットの世代管理に失敗しました", http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(w, map[string]string{"path": path, "message": "スナップショットを作成しました"}, http.StatusCreated)
@@ -859,13 +905,59 @@ func handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
 // --- ヘルパー ---
 
 func jsonResponse(w http.ResponseWriter, data interface{}, status int) {
+	writeJSONResponse(w, data, status, false)
+}
+
+// jsonSafeResponse writes an error envelope that keeps the caller-provided
+// message even for 5xx. Only use it with text known to be free of internal
+// detail; jsonResponse/jsonError redact every 5xx message instead.
+func jsonSafeResponse(w http.ResponseWriter, data interface{}, status int) {
+	writeJSONResponse(w, data, status, true)
+}
+
+func writeJSONResponse(w http.ResponseWriter, data interface{}, status int, safe bool) {
+	if status >= 400 {
+		message := http.StatusText(status)
+		flags := map[string]any{}
+		switch value := data.(type) {
+		case map[string]string:
+			if value["error"] != "" {
+				message = value["error"]
+			}
+		case map[string]interface{}:
+			flags = value
+			if text, ok := value["error"].(string); ok {
+				message = text
+			}
+		}
+		if safe {
+			httpjson.WriteSafeError(w, message, status, flags)
+		} else {
+			httpjson.WriteError(w, message, status, flags)
+		}
+		return
+	}
+	if status == http.StatusNoContent {
+		w.WriteHeader(status)
+		return
+	}
+	body, err := json.Marshal(data)
+	if err != nil {
+		httpjson.WriteError(w, "", http.StatusInternalServerError, nil)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	_, _ = w.Write(append(body, '\n'))
 }
 
 func jsonError(w http.ResponseWriter, message string, status int) {
 	jsonResponse(w, map[string]string{"error": message}, status)
+}
+
+// jsonSafeError preserves an explicit, deliberately safe 5xx message.
+func jsonSafeError(w http.ResponseWriter, message string, status int) {
+	jsonSafeResponse(w, map[string]string{"error": message}, status)
 }
 
 // --- 画像API ハンドラー (Agent.md §6.5) ---
@@ -1282,9 +1374,9 @@ func handleAIAnalysis(w http.ResponseWriter, r *http.Request) {
 func writeAIAnalysisError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		jsonError(w, "AI分析がタイムアウトしました", http.StatusGatewayTimeout)
+		jsonSafeError(w, "AI分析がタイムアウトしました", http.StatusGatewayTimeout)
 	case errors.Is(err, context.Canceled):
-		jsonError(w, "AI分析リクエストがキャンセルされました", http.StatusRequestTimeout)
+		jsonSafeError(w, "AI分析リクエストがキャンセルされました", http.StatusRequestTimeout)
 	default:
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 	}

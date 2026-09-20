@@ -59,7 +59,7 @@ func handleAuthLogin(authManager *middleware.AuthSessionManager) http.HandlerFun
 		session, err := authManager.CreateSession("user")
 		if err != nil {
 			auditAuth("login_failed", clientIP, "session_creation")
-			jsonError(w, "セッション作成に失敗しました", http.StatusInternalServerError)
+			jsonSafeError(w, "セッション作成に失敗しました", http.StatusInternalServerError)
 			return
 		}
 		authManager.SessionManager().SetSessionCookie(w, r, session)

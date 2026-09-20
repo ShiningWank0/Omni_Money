@@ -37,7 +37,11 @@
 
       <!-- 円グラフ + 凡例 -->
       <div class="chart-body">
-        <div v-if="currentData.length === 0" class="no-data">データがありません</div>
+        <div v-if="loading" class="no-data" role="status">集計を読み込んでいます…</div>
+        <div v-else-if="loadError" class="no-data" role="alert">
+          {{ loadError }} <button type="button" @click="loadData">再読み込み</button>
+        </div>
+        <div v-else-if="currentData.length === 0" class="no-data">データがありません</div>
         <template v-else>
           <div class="chart-container">
             <canvas ref="chartCanvas"></canvas>
@@ -82,6 +86,9 @@ const periodMode = ref('all')
 const chartType = ref('expense')
 const periodOffset = ref(0)
 const summaryData = ref([])
+const loading = ref(false)
+const loadError = ref('')
+let requestId = 0
 const breadcrumbs = ref([])
 
 const periods = [
@@ -189,13 +196,20 @@ function drillUp(index) {
 }
 
 async function loadData() {
+  const currentRequest = ++requestId
   const { start, end } = getDateRange()
+  loading.value = true
+  loadError.value = ''
   try {
-    summaryData.value = await getTagSummary(chartType.value, start, end)
-  } catch (e) {
-    summaryData.value = []
+    const result = await getTagSummary(chartType.value, start, end)
+    if (currentRequest !== requestId) return
+    summaryData.value = result
+    breadcrumbs.value = []
+  } catch {
+    if (currentRequest === requestId) loadError.value = '集計を読み込めませんでした。'
+  } finally {
+    if (currentRequest === requestId) loading.value = false
   }
-  breadcrumbs.value = []
 }
 
 function renderChart() {
@@ -251,7 +265,7 @@ watch([periodMode, periodOffset, chartType], () => {
   loadData()
 })
 
-watch(currentData, () => {
+watch([currentData, loading, loadError], () => {
   nextTick(() => renderChart())
 })
 
@@ -260,6 +274,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  requestId++
   if (chartInstance) chartInstance.destroy()
 })
 </script>

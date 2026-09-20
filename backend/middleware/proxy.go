@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"omni_money/backend/httpjson"
 )
 
 type proxyContextKey string
@@ -241,7 +243,7 @@ func ProxyMiddleware(config *ProxyConfig, next http.Handler) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if config.configErr != nil {
-			jsonError(w, "Proxy configuration is invalid", http.StatusServiceUnavailable)
+			httpjson.WriteSafeError(w, "Proxy configuration is invalid", http.StatusServiceUnavailable, nil)
 			return
 		}
 
@@ -427,7 +429,7 @@ func parseRemoteIP(remoteAddr string) net.IP {
 }
 
 func jsonError(w http.ResponseWriter, message string, status int) {
-	http.Error(w, fmt.Sprintf(`{"error":%q}`, message), status)
+	httpjson.WriteError(w, message, status, nil)
 }
 
 // ClientIPFromRequest はミドルウェアで解決済みのクライアントIPを返す

@@ -13,6 +13,7 @@ import (
 
 	"omni_money/backend/core"
 	"omni_money/backend/fileprivacy"
+	"omni_money/backend/httpjson"
 )
 
 func cleanupCSVSpoolFile(temp *fileprivacy.PrivateTempFile) {
@@ -88,7 +89,7 @@ func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 		}
 		if isCSVImport && csvBody && r.Body != nil {
 			if r.ContentLength > limit {
-				http.Error(w, "CSV request is too large", http.StatusRequestEntityTooLarge)
+				jsonError(w, "CSV request is too large", http.StatusRequestEntityTooLarge)
 				return
 			}
 			// Reserve the full possible private-file size before reading the
@@ -96,7 +97,7 @@ func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 			// exports, and is held until cleanup after the downstream handler.
 			tempRelease, available := core.TryAcquireCSVTempBudget(limit)
 			if !available {
-				http.Error(w, "CSV upload spool is busy", http.StatusTooManyRequests)
+				jsonError(w, "CSV upload spool is busy", http.StatusTooManyRequests)
 				return
 			}
 			defer tempRelease()
@@ -110,7 +111,7 @@ func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 			// bounded private disk space but cannot hold the processing slot.
 			temp, err := fileprivacy.CreatePrivateTempFile("omni-money-csv-upload-")
 			if err != nil {
-				http.Error(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage)
+				httpjson.WriteSafeError(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage, nil)
 				return
 			}
 			tmp := temp.File
@@ -120,27 +121,27 @@ func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 			info, statErr := tmp.Stat()
 			if statErr != nil || !fileprivacy.IsPrivate(tmp, info) {
 				cleanup()
-				http.Error(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage)
+				httpjson.WriteSafeError(w, "CSV upload spool is unavailable", http.StatusInsufficientStorage, nil)
 				return
 			}
 			written, copyErr := io.Copy(tmp, r.Body)
 			if copyErr != nil {
 				cleanup()
 				if written >= limit {
-					http.Error(w, "CSV request is too large", http.StatusRequestEntityTooLarge)
+					jsonError(w, "CSV request is too large", http.StatusRequestEntityTooLarge)
 				} else {
-					http.Error(w, "CSV upload failed", http.StatusBadRequest)
+					jsonError(w, "CSV upload failed", http.StatusBadRequest)
 				}
 				return
 			}
 			if err := tmp.Sync(); err != nil {
 				cleanup()
-				http.Error(w, "CSV upload spool failed", http.StatusInsufficientStorage)
+				httpjson.WriteSafeError(w, "CSV upload spool failed", http.StatusInsufficientStorage, nil)
 				return
 			}
 			if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 				cleanup()
-				http.Error(w, "CSV upload spool failed", http.StatusInsufficientStorage)
+				httpjson.WriteSafeError(w, "CSV upload spool failed", http.StatusInsufficientStorage, nil)
 				return
 			}
 			oldBody := r.Body
@@ -158,7 +159,7 @@ func MaxBodySizeMiddleware(next http.Handler) http.Handler {
 			}
 			release, ok := core.TryAcquireCSVImportSlot()
 			if !ok {
-				http.Error(w, "CSV import is busy", http.StatusTooManyRequests)
+				jsonError(w, "CSV import is busy", http.StatusTooManyRequests)
 				return
 			}
 			defer release()

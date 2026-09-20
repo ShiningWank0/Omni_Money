@@ -1,5 +1,5 @@
 <template>
-  <div class="modal-overlay" @click="$emit('close')">
+  <div class="modal-overlay" @click="!saving && $emit('close')">
     <div class="modal-content cc-settings-modal" @click.stop>
       <h3>{{ title }}</h3>
 
@@ -13,14 +13,14 @@
       <div class="form-row">
         <label>{{ itemLabel }}：</label>
         <div class="select-wrapper">
-          <button @click="showDropdown = !showDropdown" class="select-button">
+          <button :disabled="saving" @click="showDropdown = !showDropdown" class="select-button">
             {{ displayText }} ▼
           </button>
           <div v-if="showDropdown" class="select-dropdown">
             <div class="dropdown-hint">{{ dropdownHint }}</div>
             <label v-for="item in fundItems" :key="item" class="dropdown-item"
               :class="{ selected: localSelected.includes(item) }">
-              <input type="checkbox" :checked="localSelected.includes(item)" @change="toggleItem(item)">
+              <input :disabled="saving" type="checkbox" :checked="localSelected.includes(item)" @change="toggleItem(item)">
               <span>{{ item }}</span>
             </label>
           </div>
@@ -28,17 +28,17 @@
       </div>
 
       <div class="action-buttons">
-        <button @click="handleSave" class="ok-btn">設定を保存</button>
-        <button @click="handleReset" class="delete-btn">設定をクリア</button>
+        <button :disabled="saving" @click="handleSave" class="ok-btn">設定を保存</button>
+        <button :disabled="saving" @click="handleReset" class="delete-btn">設定をクリア</button>
       </div>
 
-      <div v-if="message" class="status-message"
-        :class="message.includes('成功') ? 'status-success' : 'status-error'">
+      <div v-if="message" :role="failed ? 'alert' : 'status'" class="status-message"
+        :class="failed ? 'status-error' : 'status-success'">
         {{ message }}
       </div>
 
       <div class="close-section">
-        <button class="cancel-btn" @click="$emit('close')">閉じる</button>
+        <button :disabled="saving" class="cancel-btn" @click="!saving && $emit('close')">閉じる</button>
       </div>
     </div>
   </div>
@@ -60,14 +60,17 @@ const props = defineProps({
     ]
   },
   fundItems: { type: Array, default: () => [] },
-  selectedItems: { type: Array, default: () => [] }
+  selectedItems: { type: Array, default: () => [] },
+  saveItems: { type: Function, required: true }
 })
 
-const emit = defineEmits(['save', 'close'])
+const emit = defineEmits(['close'])
 
 const showDropdown = ref(false)
 const localSelected = ref([])
 const message = ref('')
+const saving = ref(false)
+const failed = ref(false)
 
 const displayText = computed(() => {
   if (localSelected.value.length === 0) return '選択なし'
@@ -84,15 +87,29 @@ function toggleItem(item) {
   }
 }
 
+async function saveSelection(items, successMessage) {
+  if (saving.value) return
+  saving.value = true
+  message.value = ''
+  failed.value = false
+  try {
+    await props.saveItems(items)
+    localSelected.value = [...items]
+    message.value = successMessage
+  } catch (error) {
+    failed.value = true
+    message.value = error?.message || '設定の保存に失敗しました。入力内容を保持しています。'
+  } finally {
+    saving.value = false
+  }
+}
+
 function handleSave() {
-  emit('save', [...localSelected.value])
-  message.value = '設定を保存しました（成功）'
+  return saveSelection([...localSelected.value], '設定を保存しました')
 }
 
 function handleReset() {
-  localSelected.value = []
-  emit('save', [])
-  message.value = '設定をクリアしました（成功）'
+  return saveSelection([], '設定をクリアしました')
 }
 
 onMounted(() => {

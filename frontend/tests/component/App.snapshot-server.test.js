@@ -38,7 +38,8 @@ const api = vi.hoisted(() => ({
   listSnapshots: vi.fn(),
   restoreSnapshot: vi.fn(),
   clearSessionSecrets: vi.fn(),
-  importCSV: vi.fn()
+  importCSV: vi.fn(),
+  previewCSVImport: vi.fn()
 }))
 
 vi.mock('../../src/utils/api', () => ({ ...api, isWailsMode: false }))
@@ -78,6 +79,17 @@ beforeEach(() => {
   api.getItems.mockResolvedValue([])
   api.listSnapshots.mockResolvedValue(['omni_money_20260102_030405.db'])
   api.importCSV.mockResolvedValue(1)
+  api.previewCSVImportSourceDigest = 'a'.repeat(64)
+  api.previewCSVImportTargetDigest = 'b'.repeat(64)
+  api.previewCSVImport.mockResolvedValue({
+    mode: 'append',
+    source_digest: api.previewCSVImportSourceDigest,
+    target_digest: api.previewCSVImportTargetDigest,
+    new_count: 1,
+    duplicate_count: 0,
+    conflict_count: 0,
+    replace_impact: null
+  })
 })
 
 it('routes a server restore through App session expiry and rejects late private data', async () => {
@@ -143,12 +155,17 @@ it('unmounts the CSV modal and refreshes Pinia only after a successful imported 
     'account,date,item,type,amount\ncash,2026-01-01,lunch,expense,500\n'
   ], 'legacy-v1.csv', { type: 'text/csv' })
   await selectCSVFile(wrapper, legacy)
+  await wrapper.get('.csv-import-modal .preview-btn').trigger('click')
+  await flushPromises()
   api.getAccounts.mockResolvedValue(['after-import'])
   vi.useFakeTimers()
   await wrapper.get('.csv-import-modal .ok-btn').trigger('click')
   await flushPromises()
 
-  expect(api.importCSV).toHaveBeenCalledWith(legacy, 'append')
+  expect(api.importCSV).toHaveBeenCalledWith(legacy, 'append', {
+    sourceDigest: api.previewCSVImportSourceDigest,
+    targetDigest: api.previewCSVImportTargetDigest
+  })
   expect(wrapper.find('.csv-import-modal').exists()).toBe(true)
   await vi.advanceTimersByTimeAsync(1500)
   await flushPromises()
@@ -293,4 +310,82 @@ it('closes the modal and refreshes after deleting a transaction succeeds', async
   expect(wrapper.find('.transaction-modal').exists()).toBe(false)
   expect(api.getAccounts.mock.calls.length).toBe(accountsCalls + 1)
   expect(api.getTransactions.mock.calls.length).toBe(transactionsCalls + 1)
+})
+
+it('blocks repeated transaction submissions and ignores a save completing after session expiry', async () => {
+  const wrapper = await mountTransactionApp([existingTransaction])
+  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
+  await flushPromises()
+  const save = deferred()
+  api.updateTransaction.mockReturnValueOnce(save.promise)
+  await wrapper.get('.transaction-modal form').trigger('submit')
+  await wrapper.get('.transaction-modal form').trigger('submit')
+  expect(api.updateTransaction).toHaveBeenCalledOnce()
+  expect(wrapper.get('.transaction-modal fieldset').element.disabled).toBe(true)
+  await wrapper.get('.transaction-modal').element.parentElement.click()
+  expect(wrapper.find('.transaction-modal').exists()).toBe(true)
+  window.dispatchEvent(new CustomEvent('omni-money:session-expired', { cancelable: true, detail: { reason: 'session-expired' } }))
+  await flushPromises()
+  const accountCalls = api.getAccounts.mock.calls.length
+  save.resolve({ transaction: existingTransaction })
+  await flushPromises()
+  expect(api.getAccounts.mock.calls.length).toBe(accountCalls)
+  expect(wrapper.find('.transaction-modal').exists()).toBe(false)
+  expect(useAppStore(wrapper.vm.$pinia).transactions).toEqual([])
+})
+
+it.each([
+  ['クレジットカード設定', 'saveCreditCardSettings'],
+  ['銀行口座設定', 'saveBankAccountSettings']
+])('keeps %s open on failed save and closes only after success', async (label, method) => {
+  const wrapper = await mountTransactionApp()
+  await wrapper.get('.hamburger-menu').trigger('click')
+  await clickButton(wrapper, label)
+  await vi.dynamicImportSettled()
+  await flushPromises()
+  await wrapper.get('.cc-settings-modal .select-button').trigger('click')
+  await wrapper.get('.cc-settings-modal input').setValue(true)
+  api[method].mockRejectedValueOnce(new Error('settings failed')).mockResolvedValueOnce(undefined)
+  await wrapper.get('.cc-settings-modal .ok-btn').trigger('click')
+  await flushPromises()
+  expect(wrapper.get('.cc-settings-modal [role="alert"]').text()).toContain('settings failed')
+  expect(wrapper.get('.cc-settings-modal input').element.checked).toBe(true)
+  await wrapper.get('.cc-settings-modal .ok-btn').trigger('click')
+  await flushPromises()
+  expect(wrapper.find('.cc-settings-modal').exists()).toBe(false)
+})
+
+it('shows a retryable initial read failure instead of leaving the table loading', async () => {
+  api.getAccounts.mockRejectedValueOnce(new Error('accounts unavailable'))
+  const wrapper = await mountTransactionApp()
+  expect(wrapper.get('.load-error').text()).toContain('口座一覧を読み込めませんでした')
+  expect(wrapper.text()).not.toContain('取引を読み込んでいます')
+  await wrapper.get('.load-error button').trigger('click')
+  await flushPromises()
+  expect(wrapper.find('.load-error').exists()).toBe(false)
+  expect(useAppStore(wrapper.vm.$pinia).accounts).toEqual(['cash'])
+})
+
+it('does not reopen settings or continue hydration after the session has ended', async () => {
+  const wrapper = await mountTransactionApp()
+  const settings = deferred()
+  api.getCreditCardSettings.mockReturnValueOnce(settings.promise)
+  await wrapper.get('.hamburger-menu').trigger('click')
+  await clickButton(wrapper, 'クレジットカード設定')
+  window.dispatchEvent(new CustomEvent('omni-money:session-expired', { cancelable: true, detail: { reason: 'session-expired' } }))
+  settings.resolve(['private-card'])
+  await flushPromises()
+  expect(wrapper.find('.cc-settings-modal').exists()).toBe(false)
+  expect(useAppStore(wrapper.vm.$pinia).creditCardItems).toEqual([])
+})
+
+it('rehydrates after browser cache restoration with a fresh authenticated session', async () => {
+  const wrapper = await mountTransactionApp([existingTransaction])
+  api.getAccounts.mockResolvedValueOnce(['after-cache'])
+  api.getTransactions.mockResolvedValueOnce([])
+  window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }))
+  await flushPromises()
+  expect(useAppStore(wrapper.vm.$pinia).accounts).toEqual(['after-cache'])
+  expect(wrapper.text()).not.toContain('取引を読み込んでいます')
+  expect(wrapper.find('.load-error').exists()).toBe(false)
 })

@@ -115,6 +115,10 @@ func TestAIAPIMiddlewareFailsClosedWithoutAuditStore(t *testing.T) {
 	if recorder.Code != http.StatusServiceUnavailable || nextCalled {
 		t.Fatalf("status=%d nextCalled=%v", recorder.Code, nextCalled)
 	}
+	if !strings.Contains(recorder.Body.String(), "AI監査設定が利用できません") ||
+		strings.Contains(recorder.Body.String(), "サーバー内部でエラーが発生しました") {
+		t.Fatalf("deliberate 503 message was redacted: %s", recorder.Body.String())
+	}
 	if !strings.Contains(logs.String(), `"reason":"audit_key_unavailable"`) || strings.Contains(logs.String(), request.Header.Get("Authorization")) {
 		t.Fatalf("unsafe fail-closed audit: %q", logs.String())
 	}

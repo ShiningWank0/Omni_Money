@@ -18,12 +18,12 @@ type aiNowFunc func() time.Time
 type aiAuditLogFunc func(aiAuditRecord)
 
 type aiFailedAuthAuditKey struct {
-	credentialID   string
+	credentialID    string
 	remoteIP        string
 	mtlsFingerprint string
 	operation       string
-	reason    string
-	status    int
+	reason          string
+	status          int
 }
 
 type aiFailedAuthAuditWindow struct {
@@ -61,12 +61,12 @@ func (aggregator *aiFailedAuthAuditAggregator) record(record aiAuditRecord, now 
 
 	emissions := aggregator.sweepExpiredLocked(now)
 	key := aiFailedAuthAuditKey{
-		credentialID:   record.CredentialID,
+		credentialID:    record.CredentialID,
 		remoteIP:        record.RemoteIP,
 		mtlsFingerprint: record.MTLSClientSHA256,
 		operation:       normalizeAIAuditOperation(record.Operation),
-		reason:    record.Reason,
-		status:    record.Status,
+		reason:          record.Reason,
+		status:          record.Status,
 	}
 	record.Operation = key.operation
 

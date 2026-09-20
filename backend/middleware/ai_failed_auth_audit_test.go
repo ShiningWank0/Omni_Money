@@ -1,9 +1,9 @@
 package middleware
 
 import (
-	"fmt"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -311,7 +311,7 @@ func TestAIFailedAuthAuditAggregatorBoundsManyFingerprintsBehindOneIP(t *testing
 		record := aiAuditRecord{
 			Operation: "analysis", RemoteIP: "192.0.2.50",
 			MTLSClientSHA256: fmt.Sprintf("%064x", index+1),
-			Reason: "authentication_failed", Status: http.StatusUnauthorized,
+			Reason:           "authentication_failed", Status: http.StatusUnauthorized,
 		}
 		aggregator.record(record, now)
 	}
@@ -362,9 +362,9 @@ func TestAuthenticatedRejectionOverflowRemovesSubjectMetadata(t *testing.T) {
 	for i := 0; i < aiFailedAuthAuditMaxDetailedWindow+100; i++ {
 		record := aiAuditRecord{
 			CredentialID: fmt.Sprintf("credential-%d", i),
-			Operation: "analysis", RemoteIP: fmt.Sprintf("192.0.2.%d", i),
+			Operation:    "analysis", RemoteIP: fmt.Sprintf("192.0.2.%d", i),
 			MTLSClientSHA256: fmt.Sprintf("%064x", i+1),
-			Reason: "console_relay_forbidden", Status: http.StatusForbidden,
+			Reason:           "console_relay_forbidden", Status: http.StatusForbidden,
 		}
 		aggregator.record(record, now)
 	}
