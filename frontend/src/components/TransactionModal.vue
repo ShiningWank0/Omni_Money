@@ -1,8 +1,9 @@
 <template>
-  <div class="modal-overlay" @click="$emit('close')">
+  <div class="modal-overlay" @click="!busy && $emit('close')">
     <div class="modal-content transaction-modal" @click.stop>
       <h3>{{ isEditMode ? '取引を編集' : '新しい取引を追加' }}</h3>
-      <form @submit.prevent="handleSubmit">
+      <form @submit.prevent="handleSubmit" :aria-busy="busy">
+        <fieldset :disabled="busy" :inert="busy" class="transaction-fields">
         <div class="form-container">
           <div class="form-row">
             <label>日付:</label>
@@ -158,7 +159,7 @@
             </div>
           </div>
         </div>
-        <div v-if="formError" class="form-error">{{ formError }}</div>
+        <div v-if="formError" class="form-error" role="alert">{{ formError }}</div>
         <div class="modal-buttons" style="display: flex; justify-content: space-between; align-items: center;">
           <div>
             <template v-if="isEditMode && !confirmingDelete">
@@ -171,10 +172,12 @@
             </template>
           </div>
           <div style="display: flex; gap: 8px;">
-            <button type="button" class="cancel-btn" @click="$emit('close')">キャンセル</button>
+            <button type="button" class="cancel-btn" @click="!busy && $emit('close')">キャンセル</button>
             <button type="submit" class="ok-btn">{{ isEditMode ? '更新' : 'OK' }}</button>
           </div>
         </div>
+        </fieldset>
+        <p v-if="busy" role="status">処理しています…</p>
       </form>
     </div>
   </div>
@@ -189,6 +192,7 @@ const MAX_TRANSACTION_AMOUNT = 1_000_000_000
 
 const props = defineProps({
   isEditMode: Boolean,
+  busy: { type: Boolean, default: false },
   transaction: Object,
   fundItems: { type: Array, default: () => [] },
   itemNames: { type: Array, default: () => [] },
@@ -336,7 +340,7 @@ async function loadTags() {
   try {
     allTags.value = await getTags()
   } catch (e) {
-    allTags.value = []
+    formError.value = 'タグ一覧の取得に失敗しました: ' + e.message
   }
 }
 
@@ -352,7 +356,7 @@ async function loadLinkedTransactions() {
   try {
     linkedTransactions.value = await getTransactionLinks(props.transaction.id)
   } catch (e) {
-    linkedTransactions.value = []
+    formError.value = '紐付け一覧の取得に失敗しました: ' + e.message
   }
 }
 
@@ -374,7 +378,8 @@ function onLinkSearch() {
         .slice(0, 10)
       showLinkResults.value = true
     } catch (e) {
-      linkSearchResults.value = []
+      formError.value = '紐付け候補の検索に失敗しました: ' + e.message
+      showLinkResults.value = false
     }
   }, 300)
 }
@@ -495,6 +500,7 @@ function removeImage(index) {
 }
 
 function handleSubmit() {
+  if (props.busy) return
   if (pendingImageCount > 0) {
     formError.value = '画像の読み込みが完了するまでお待ちください'
     return
@@ -562,6 +568,17 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.transaction-fields {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 /* タグセレクター */
 .tag-selector {
   display: flex;

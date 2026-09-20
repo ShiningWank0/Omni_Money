@@ -41,7 +41,7 @@
         なければ未設定のままになります。AI連携の重複排除・日次利用量記録もリセットされます。
         その他の設定は保持され、CSVにない取引関連データは復元されません。
         <label class="replace-confirmation">
-          <input v-model="replaceConfirmed" type="checkbox" :disabled="csvImporting">
+          <input v-model="replaceConfirmed" type="checkbox" :disabled="csvImporting || csvPreviewing">
           <span>現在の取引データが削除されることを理解し、置換を実行します</span>
         </label>
       </div>
@@ -67,6 +67,27 @@
         </div>
       </div>
 
+      <!-- プレビュー結果 -->
+      <div v-if="csvPreview" class="import-preview" role="status">
+        <div class="preview-counts">
+          新規 <strong>{{ csvPreview.new_count }}</strong>件 /
+          重複候補 <strong>{{ csvPreview.duplicate_count }}</strong>件 /
+          競合候補 <strong>{{ csvPreview.conflict_count }}</strong>件
+        </div>
+        <div>候補は既存取引との比較です。自動スキップは行わず、追加では候補を含む全行を取り込みます。</div>
+        <div v-if="csvImportMode === 'replace' && csvPreview.replace_impact" class="preview-impact">
+          置換により削除されます: 取引 {{ csvPreview.replace_impact.transactions }}件 /
+          画像 {{ csvPreview.replace_impact.images }}件 /
+          タグ {{ csvPreview.replace_impact.tags }}件 /
+          タグ付け {{ csvPreview.replace_impact.transaction_tags }}件 /
+          取引リンク {{ csvPreview.replace_impact.transaction_links }}件 /
+          ledger設定 {{ csvPreview.replace_impact.ledger_settings }}件
+        </div>
+      </div>
+      <div v-if="csvPreviewing" class="progress-section">
+        <div class="progress-text">プレビューを確認中...</div>
+      </div>
+
       <!-- プログレスバー -->
       <div v-if="csvImporting" class="progress-section">
         <div class="progress-bar">
@@ -82,6 +103,10 @@
       <!-- ボタン -->
       <div class="modal-buttons">
         <button class="cancel-btn" @click="$emit('close')" :disabled="csvImporting">キャンセル</button>
+        <button v-if="!isWailsMode" class="preview-btn" @click="runCSVPreview" :disabled="previewDisabled"
+          :style="{ opacity: previewDisabled ? 0.5 : 1 }">
+          {{ csvPreviewing ? 'プレビュー中...' : (csvPreview ? '再プレビュー' : 'プレビュー') }}
+        </button>
         <button class="ok-btn" @click="importCSVFile" :disabled="importDisabled"
           :style="{ opacity: importDisabled ? 0.5 : 1 }">
           {{ csvImporting ? 'インポート中...' : 'インポート実行' }}
@@ -93,7 +118,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { importCSV, isWailsMode } from '../utils/api'
+import { importCSV, previewCSVImport, isWailsMode } from '../utils/api'
 import { canStartCSVImport } from '../utils/csvSafety'
 
 const emit = defineEmits(['imported', 'close'])
@@ -104,28 +129,60 @@ const csvImporting = ref(false)
 const csvImportError = ref('')
 const csvImportSuccess = ref('')
 const replaceConfirmed = ref(false)
+const csvPreview = ref(null)
+const csvPreviewing = ref(false)
+let previewGeneration = 0
+// Preview runs before the destructive-consent gate on purpose: the impact
+// report is what the operator needs to decide on the consent checkbox.
+const previewDisabled = computed(() => !csvFile.value || csvImporting.value || csvPreviewing.value)
 const importDisabled = computed(() => !canStartCSVImport({
   hasFile: isWailsMode || Boolean(csvFile.value),
   importing: csvImporting.value,
   mode: csvImportMode.value,
   replaceConfirmed: replaceConfirmed.value
-}))
+}) || csvPreviewing.value || (!isWailsMode && !csvPreview.value))
 
 function onCSVFileSelected(e) {
+  previewGeneration++
   csvFile.value = e.target.files[0] || null
   csvImportError.value = ''
   csvImportSuccess.value = ''
   replaceConfirmed.value = false
+  csvPreview.value = null
 }
 
 function onImportModeChanged() {
+  previewGeneration++
   replaceConfirmed.value = false
   csvImportError.value = ''
   csvImportSuccess.value = ''
+  csvPreview.value = null
+}
+
+async function runCSVPreview() {
+  if (!csvFile.value || csvImporting.value || csvPreviewing.value) return
+  const generation = ++previewGeneration
+  csvPreview.value = null
+  replaceConfirmed.value = false
+  csvPreviewing.value = true
+  csvImportError.value = ''
+  csvImportSuccess.value = ''
+  try {
+    const result = await previewCSVImport(csvFile.value, csvImportMode.value)
+    if (generation === previewGeneration) {
+      csvPreview.value = result
+      replaceConfirmed.value = false
+    }
+  } catch (e) {
+    csvPreview.value = null
+    if (generation === previewGeneration) csvImportError.value = e.message || 'CSVプレビューに失敗しました'
+  } finally {
+    csvPreviewing.value = false
+  }
 }
 
 async function importCSVFile() {
-  if (!isWailsMode && !csvFile.value) return
+  if (importDisabled.value) return
   if (csvImportMode.value === 'replace' && !replaceConfirmed.value) {
     csvImportError.value = '置換によって現在の取引データが削除されることを確認してください'
     return
@@ -136,12 +193,19 @@ async function importCSVFile() {
   csvImportSuccess.value = ''
 
   try {
-    const count = await importCSV(isWailsMode ? null : csvFile.value, csvImportMode.value)
+    const pins = (!isWailsMode && csvPreview.value)
+      ? { sourceDigest: csvPreview.value.source_digest, targetDigest: csvPreview.value.target_digest }
+      : null
+    const count = await importCSV(isWailsMode ? null : csvFile.value, csvImportMode.value, pins)
     csvImportSuccess.value = `CSVインポート完了: ${count}件のトランザクションを${csvImportMode.value === 'replace' ? '置換' : '追加'}しました`
+    csvPreview.value = null
     setTimeout(() => {
       emit('imported')
     }, 1500)
   } catch (e) {
+    // A rejected pin means the ledger changed since the preview: force a
+    // fresh preview instead of letting a stale one be applied later.
+    csvPreview.value = null
     csvImportError.value = e.message?.includes('キャンセル')
       ? 'CSV選択をキャンセルしました。ファイルを選び直せます'
       : (e.message || 'CSVインポートに失敗しました')
@@ -154,6 +218,22 @@ async function importCSVFile() {
 <style scoped>
 .csv-import-modal {
   max-width: 560px;
+}
+
+.import-preview {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: #eef4ff;
+  border: 1px solid #b8c9e8;
+  border-radius: 8px;
+  font-size: 0.9em;
+  color: #2c3e66;
+}
+
+.preview-impact {
+  margin-top: 6px;
+  font-weight: 600;
+  color: #721c24;
 }
 
 .csv-import-modal h3 {

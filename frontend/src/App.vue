@@ -103,6 +103,11 @@
         <div class="balance-amount" aria-live="polite">{{ formatCurrency(store.currentBalance) }}</div>
       </div>
 
+      <div v-if="store.loadError" class="load-error" role="alert">
+        <p>{{ store.loadError }} 表示中のデータは最新でない可能性があります。</p>
+        <button type="button" :disabled="retryingData" @click="retryPrivateData">再読み込み</button>
+      </div>
+
       <div class="transaction-section" :aria-busy="isTableLoading">
         <table class="transaction-table">
           <caption class="sr-only">取引履歴</caption>
@@ -125,7 +130,7 @@
               <td :colspan="transactionColumnCount"><span role="status">取引を読み込んでいます…</span></td>
             </tr>
             <tr v-else-if="sortedTransactions.length === 0" class="table-status-row">
-              <td :colspan="transactionColumnCount">{{ store.searchQuery ? '検索条件に一致する取引はありません' : '取引はまだありません' }}</td>
+              <td :colspan="transactionColumnCount">{{ store.loadError ? 'データを読み込めませんでした' : store.searchQuery ? '検索条件に一致する取引はありません' : '取引はまだありません' }}</td>
             </tr>
             <template v-else>
               <tr
@@ -155,6 +160,7 @@
     <TransactionModal
       v-if="showAddTransactionModal"
       :is-edit-mode="isEditMode"
+      :busy="transactionSaving"
       :transaction="editingTransaction"
       :fund-items="store.accounts"
       :item-names="store.itemNames"
@@ -177,7 +183,7 @@
       v-if="showCreditCardModal"
       :fund-items="store.accounts"
       :selected-items="selectedCreditCardItems"
-      @save="handleSaveCreditCardSettings"
+      :save-items="handleSaveCreditCardSettings"
       @close="hideCreditCardSettings"
     />
 
@@ -197,7 +203,7 @@
       :info-lines="bankAccountInfoLines"
       :fund-items="store.accounts"
       :selected-items="selectedBankAccountItems"
-      @save="handleSaveBankAccountSettings"
+      :save-items="handleSaveBankAccountSettings"
       @close="hideBankAccountSettings"
     />
 
@@ -380,6 +386,9 @@ const store = useAppStore()
 const showMenu = ref(false)
 const showAccountDropdown = ref(false)
 const showAddTransactionModal = ref(false)
+const transactionSaving = ref(false)
+const retryingData = ref(false)
+let financialUIGeneration = 0
 const showImportCSVModal = ref(false)
 const showCreditCardModal = ref(false)
 const showBankAccountModal = ref(false)
@@ -526,6 +535,26 @@ function onSearchInput() {
   }, 300)
 }
 
+async function retryPrivateData() {
+  if (retryingData.value) return
+  const generation = financialUIGeneration
+  retryingData.value = true
+  try {
+    await fetchPrivateData()
+    if (generation === financialUIGeneration) await store.fetchItems()
+  } catch {
+    // Store read errors remain visible until a successful retry.
+  } finally {
+    if (generation === financialUIGeneration) retryingData.value = false
+  }
+}
+
+async function refreshLedger() {
+  const generation = financialUIGeneration
+  await store.fetchAccounts()
+  if (generation === financialUIGeneration) await store.fetchTransactions()
+}
+
 // 取引モーダル操作
 function showAddModal() {
   isEditMode.value = false
@@ -547,31 +576,42 @@ function hideAddModal() {
 }
 
 async function handleSaveTransaction(data) {
+  if (transactionSaving.value) return
+  const generation = financialUIGeneration
+  transactionSaving.value = true
   try {
     if (isEditMode.value && editingTransaction.value) {
       await updateTransaction(editingTransaction.value.id, data)
     } else {
       await addTransaction(data)
     }
+    if (generation !== financialUIGeneration) return
     hideAddModal()
-    await store.fetchAccounts()
-    await store.fetchTransactions()
-  } catch (e) {
-    console.error('取引保存エラー:', e)
-    showToast('取引の保存に失敗しました: ' + e.message, 'error', 5000)
+    await refreshLedger()
+  } catch (error) {
+    if (generation === financialUIGeneration) {
+      showToast('取引の保存を確認できませんでした: ' + error.message, 'error', 5000)
+    }
+  } finally {
+    if (generation === financialUIGeneration) transactionSaving.value = false
   }
 }
 
 async function handleDeleteTransaction() {
-  if (!editingTransaction.value) return
+  if (!editingTransaction.value || transactionSaving.value) return
+  const generation = financialUIGeneration
+  transactionSaving.value = true
   try {
     await apiDeleteTransaction(editingTransaction.value.id)
+    if (generation !== financialUIGeneration) return
     hideAddModal()
-    await store.fetchAccounts()
-    await store.fetchTransactions()
-  } catch (e) {
-    console.error('取引削除エラー:', e)
-    showToast('取引の削除に失敗しました: ' + e.message, 'error', 5000)
+    await refreshLedger()
+  } catch (error) {
+    if (generation === financialUIGeneration) {
+      showToast('取引の削除を確認できませんでした: ' + error.message, 'error', 5000)
+    }
+  } finally {
+    if (generation === financialUIGeneration) transactionSaving.value = false
   }
 }
 
@@ -612,16 +652,21 @@ function hideImportCSVModal() {
 
 async function handleCSVImported() {
   hideImportCSVModal()
-  await store.fetchAccounts()
-  await store.fetchTransactions()
+  await refreshLedger()
 }
 
 // クレジットカード設定
 async function openCreditCardSettings() {
   showMenu.value = false
-  await store.fetchCreditCardSettings()
-  selectedCreditCardItems.value = [...store.creditCardItems]
-  showCreditCardModal.value = true
+  const generation = financialUIGeneration
+  try {
+    await store.fetchCreditCardSettings({ throwOnError: true })
+    if (generation !== financialUIGeneration) return
+    selectedCreditCardItems.value = [...store.creditCardItems]
+    showCreditCardModal.value = true
+  } catch {
+    // The store exposes the failure and retry action in the main view.
+  }
 }
 
 function hideCreditCardSettings() {
@@ -634,29 +679,34 @@ function openAIAPIConsole() {
 }
 
 async function handleAITransactionAdded() {
-  await store.fetchAccounts()
-  await store.fetchTransactions()
+  const generation = financialUIGeneration
+  await refreshLedger()
+  if (generation !== financialUIGeneration) return
   showToast('AI専用入口から取引を追加しました ✓')
 }
 
 async function handleSaveCreditCardSettings(items) {
-  try {
-    await apiSaveCreditCardSettings(items)
-    await store.fetchCreditCardSettings()
-    hideCreditCardSettings()
-    await store.fetchTransactions()
-  } catch (e) {
-    console.error('クレジットカード設定保存エラー:', e)
-    showToast('クレジットカード設定の保存に失敗しました', 'error', 5000)
-  }
+  const generation = financialUIGeneration
+  await apiSaveCreditCardSettings(items)
+  if (generation !== financialUIGeneration) return
+  store.creditCardItems = [...items]
+  selectedCreditCardItems.value = [...items]
+  hideCreditCardSettings()
+  await store.fetchTransactions()
 }
 
 // 銀行口座設定
 async function openBankAccountSettings() {
   showMenu.value = false
-  await store.fetchBankAccountSettings()
-  selectedBankAccountItems.value = [...store.bankAccountItems]
-  showBankAccountModal.value = true
+  const generation = financialUIGeneration
+  try {
+    await store.fetchBankAccountSettings({ throwOnError: true })
+    if (generation !== financialUIGeneration) return
+    selectedBankAccountItems.value = [...store.bankAccountItems]
+    showBankAccountModal.value = true
+  } catch {
+    // The store exposes the failure and retry action in the main view.
+  }
 }
 
 function hideBankAccountSettings() {
@@ -664,29 +714,30 @@ function hideBankAccountSettings() {
 }
 
 async function handleSaveBankAccountSettings(items) {
-  try {
-    await apiSaveBankAccountSettings(items)
-    await store.fetchBankAccountSettings()
-    hideBankAccountSettings()
-    await store.fetchTransactions()
-  } catch (e) {
-    console.error('銀行口座設定保存エラー:', e)
-    showToast('銀行口座設定の保存に失敗しました', 'error', 5000)
-  }
+  const generation = financialUIGeneration
+  await apiSaveBankAccountSettings(items)
+  if (generation !== financialUIGeneration) return
+  store.bankAccountItems = [...items]
+  selectedBankAccountItems.value = [...items]
+  hideBankAccountSettings()
+  await store.fetchTransactions()
 }
 
 // グラフモーダル
 async function showGraphModal() {
   showMenu.value = false
+  const generation = financialUIGeneration
   try {
     // クレジットカード除外済みの残高推移を取得
     const selectedAccounts = store.selectedFundItems.length > 0
       ? store.selectedFundItems
       : store.actualFundItems
-    balanceHistoryData.value = await getBalanceHistoryFiltered(selectedAccounts)
+    const history = await getBalanceHistoryFiltered(selectedAccounts)
+    if (generation !== financialUIGeneration) return
+    balanceHistoryData.value = history
     showGraph.value = true
   } catch (e) {
-    console.error('残高推移取得エラー:', e)
+    if (generation !== financialUIGeneration) return
     showToast('残高推移データの取得に失敗しました', 'error', 5000)
   }
 }
@@ -699,10 +750,14 @@ function openTagChart() {
 
 async function openTagManager() {
   showMenu.value = false
+  const generation = financialUIGeneration
   try {
-    tagManagerTags.value = await getTags()
+    const tags = await getTags()
+    if (generation !== financialUIGeneration) return
+    tagManagerTags.value = tags
     showTagManager.value = true
   } catch (error) {
+    if (generation !== financialUIGeneration) return
     showToast(error?.message || 'タグ一覧の取得に失敗しました', 'error', 5000)
   }
 }
@@ -841,6 +896,9 @@ function stopIdleLock() {
 // navigating away. The v-if guards also unmount open modals and clear their
 // component-local form state.
 function clearSensitiveStateForIdle(preserveCredentialSettings = false) {
+  financialUIGeneration++
+  transactionSaving.value = false
+  retryingData.value = false
   stopIdleLock()
   desktopIdleController?.stop()
   store.resetState()
@@ -885,21 +943,26 @@ function clearSensitiveStateForIdle(preserveCredentialSettings = false) {
 }
 
 async function fetchPrivateData() {
+  const generation = financialUIGeneration
   await store.fetchAccounts({ throwOnError: true })
+  if (generation !== financialUIGeneration) throw new Error('データの読み込みは終了しました')
   await Promise.all([
     store.fetchCreditCardSettings({ throwOnError: true }),
     store.fetchBankAccountSettings({ throwOnError: true }),
     store.fetchTransactions({ throwOnError: true })
   ])
+  if (generation !== financialUIGeneration) throw new Error('データの読み込みは終了しました')
 }
 
 async function handleDesktopVaultUnlocked() {
   if (!isWailsMode) return
+  const generation = financialUIGeneration
   desktopVaultLoading.value = true
   idleScreenLocked.value = true
   desktopVaultError.value = ''
   try {
     const confirmed = await getDesktopVaultStatus()
+    if (generation !== financialUIGeneration || !componentMounted) return
     if (!isDesktopVaultUnlocked(confirmed)) {
       throw new Error('保管庫のロック解除を確認できませんでした')
     }
@@ -975,9 +1038,11 @@ async function handlePageShow(event) {
 
   isInitialLoading.value = true
   clearSensitiveStateForIdle()
+  const generation = financialUIGeneration
   try {
     const authStatus = await getAuthStatus()
-    if (componentMounted) applyServerAuthStatus(authStatus)
+    if (generation !== financialUIGeneration || !componentMounted) return
+    applyServerAuthStatus(authStatus)
     if (!authStatus?.authenticated) {
       window.location.replace('/login')
       return
@@ -1296,6 +1361,7 @@ function handleGlobalClick() {
 
 // 初期化
 onMounted(async () => {
+  const generation = financialUIGeneration
   componentMounted = true
   document.addEventListener('click', handleGlobalClick)
   window.addEventListener('omni-money:reauth-required', handleReauthRequired)
@@ -1328,7 +1394,8 @@ onMounted(async () => {
   }
   try {
     const authStatus = await getAuthStatus()
-    if (componentMounted) applyServerAuthStatus(authStatus)
+    if (generation !== financialUIGeneration || !componentMounted) return
+    applyServerAuthStatus(authStatus)
     if (componentMounted && !isWailsMode && authStatus?.authenticated) {
       const serverIdleSeconds = Number(authStatus?.idle_timeout_seconds)
       if (Number.isFinite(serverIdleSeconds) && serverIdleSeconds > 0) {
@@ -1338,7 +1405,13 @@ onMounted(async () => {
   } catch {
     // The normal API calls below provide the visible error/redirect behavior.
   }
-  await fetchPrivateData()
+  if (generation !== financialUIGeneration || !componentMounted) return
+  try {
+    await fetchPrivateData()
+  } catch {
+    // Failed reads are visible through store.loadError; session expiry owns navigation.
+  }
+  if (generation !== financialUIGeneration || !componentMounted) return
   isInitialLoading.value = false
 
   // スナップショット復元後のリロードならトースト通知を表示
@@ -1354,6 +1427,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  financialUIGeneration++
+  store.resetState()
   componentMounted = false
   document.removeEventListener('click', handleGlobalClick)
   window.removeEventListener('pageshow', handlePageShow)
@@ -1372,6 +1447,16 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.load-error {
+  margin: 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #b00020;
+  border-radius: 8px;
+  color: #b00020;
+  background: #fff5f5;
+}
+.load-error p { margin: 0 0 0.5rem; }
+
 .idle-lock-curtain {
   position: fixed;
   z-index: 100000;

@@ -293,7 +293,7 @@ func writePasskeyError(w http.ResponseWriter, err error, login bool) {
 	case errors.Is(err, control.ErrConflict):
 		jsonError(w, "このパスキーは登録済みか、登録上限に達しています", http.StatusConflict)
 	case errors.Is(err, serverauth.ErrPasskeysUnavailable), errors.Is(err, serverauth.ErrServiceUnavailable):
-		jsonError(w, "パスキーを利用できません", http.StatusServiceUnavailable)
+		jsonSafeError(w, "パスキーを利用できません", http.StatusServiceUnavailable)
 	default:
 		writeServerAccountError(w, err, serverOperationStatus)
 	}

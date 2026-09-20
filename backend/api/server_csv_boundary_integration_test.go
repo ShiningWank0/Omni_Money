@@ -231,6 +231,7 @@ func TestProductionServerCSVStaysInsideAuthenticatedVault(t *testing.T) {
 			want   int
 		}{
 			"snapshots unavailable": {method: http.MethodGet, path: "/api/snapshots", want: http.StatusServiceUnavailable},
+			"unknown API":           {method: http.MethodGet, path: "/api/not-registered", want: http.StatusNotFound},
 			"AI console absent":     {method: http.MethodPost, path: "/api/ai-console/transactions", want: http.StatusNotFound},
 			"AI transaction absent": {method: http.MethodPost, path: "/api/v1/ai/transactions", want: http.StatusNotFound},
 		} {
@@ -238,6 +239,9 @@ func TestProductionServerCSVStaysInsideAuthenticatedVault(t *testing.T) {
 				response := serveServerCSVRequest(t, handler, sessionA, test.method, test.path, nil)
 				if response.Code != test.want {
 					t.Fatalf("status = %d, want %d", response.Code, test.want)
+				}
+				if response.Header().Get("Content-Type") != "application/json" || !json.Valid(response.Body.Bytes()) {
+					t.Fatal("API error was not JSON")
 				}
 			})
 		}

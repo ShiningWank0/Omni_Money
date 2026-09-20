@@ -355,7 +355,7 @@ func TestCSVV3ImageSpoolRejectsReplacementAfterValidation(t *testing.T) {
 	}
 	_, _ = f.Write([]byte("substituted"))
 	_ = f.Close()
-	if _, err := service.importCSVV3Parsed(context.Background(), &parsed, "replace"); err == nil {
+	if _, err := service.importCSVV3Parsed(context.Background(), &parsed, "replace", nil, nil); err == nil {
 		t.Fatal("replacement image was accepted")
 	}
 	if _, err := os.Stat(replacement); err != nil {
@@ -400,7 +400,7 @@ func TestCSVV3ImageSpoolRejectsSameInodeMutationAfterValidation(t *testing.T) {
 		_ = parsed.cleanup()
 		t.Fatal(err)
 	}
-	if _, err := service.importCSVV3Parsed(context.Background(), &parsed, "replace"); err == nil || !strings.Contains(err.Error(), "内容") {
+	if _, err := service.importCSVV3Parsed(context.Background(), &parsed, "replace", nil, nil); err == nil || !strings.Contains(err.Error(), "内容") {
 		_ = parsed.cleanup()
 		t.Fatalf("same-inode image mutation result = %v", err)
 	}
@@ -514,7 +514,7 @@ func TestCSVV3ImportRollsBackWhenImageSpoolCleanupFails(t *testing.T) {
 		_ = parsed.cleanup()
 		t.Fatal(err)
 	}
-	if _, err := service.importCSVV3Parsed(context.Background(), &parsed, "replace"); err == nil || !strings.Contains(err.Error(), "cleanup") {
+	if _, err := service.importCSVV3Parsed(context.Background(), &parsed, "replace", nil, nil); err == nil || !strings.Contains(err.Error(), "cleanup") {
 		// Restore the original directory identity before the normal cleanup path.
 		_ = os.Remove(dir)
 		_ = os.Rename(replacement, dir)
