@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -10,6 +11,8 @@ import (
 	"omni_money/backend/middleware"
 	"omni_money/backend/serverauth"
 	"omni_money/backend/vault"
+
+	"omni_money/backend/httpjson"
 )
 
 // ServerAccountService is the account-plane capability exposed to the HTTP
@@ -108,6 +111,8 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 	mux.HandleFunc("/login", handleLoginPage)
 	mux.HandleFunc("/login/", handleLoginPage)
 	mux.Handle("/", http.FileServer(http.Dir("frontend/dist")))
+	mux.HandleFunc("/api/", httpjson.NotFound)
+	mux.HandleFunc("/api", httpjson.NotFound)
 
 	mux.HandleFunc("/api/auth/setup", handleServerBootstrap(dependencies))
 	mux.HandleFunc("/api/auth/login", handleServerLogin(dependencies))
@@ -157,15 +162,23 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 	}
 	// Static AI credentials are not bound to a UserID/VaultID/DEK. The
 	// multi-user server keeps both the console relay and AI listener absent.
-	mux.HandleFunc("/api/ai-console/", http.NotFound)
-	mux.HandleFunc("/api/v1/ai/", http.NotFound)
+	mux.HandleFunc("/api/ai-console/", httpjson.NotFound)
+	mux.HandleFunc("/api/v1/ai/", httpjson.NotFound)
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		// Health monitoring consumes the status body directly; it is not an
+		// application error envelope, so it must not be funneled through the
+		// shared redacting error writer.
+		status := http.StatusOK
+		body := map[string]string{"status": "ok"}
 		if _, err := dependencies.Control.IsBootstrapped(r.Context()); err != nil {
-			jsonResponse(w, map[string]string{"status": "unavailable"}, http.StatusServiceUnavailable)
-			return
+			status = http.StatusServiceUnavailable
+			body["status"] = "unavailable"
 		}
-		jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(body)
 	})
 
 	var handler http.Handler = mux
@@ -186,5 +199,5 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 }
 
 func handleServerFeatureUnavailable(w http.ResponseWriter, _ *http.Request) {
-	jsonError(w, "この機能はサーバーモードではまだ利用できません", http.StatusServiceUnavailable)
+	jsonSafeError(w, "この機能はサーバーモードではまだ利用できません", http.StatusServiceUnavailable)
 }

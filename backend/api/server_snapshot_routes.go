@@ -18,7 +18,7 @@ type serverSnapshotRestoreRequest struct {
 func handleServerSnapshots(w http.ResponseWriter, r *http.Request) {
 	snapshots, ok := middleware.SnapshotServiceFromContext(r.Context())
 	if !ok {
-		jsonError(w, "ユーザーデータを安全に開けません", http.StatusServiceUnavailable)
+		jsonSafeError(w, "ユーザーデータを安全に開けません", http.StatusServiceUnavailable)
 		return
 	}
 	switch r.Method {
@@ -26,7 +26,7 @@ func handleServerSnapshots(w http.ResponseWriter, r *http.Request) {
 		entries, err := snapshots.ListSnapshotsContext(r.Context())
 		if err != nil {
 			log.Printf("security_event=snapshot_list result=error")
-			jsonError(w, "スナップショットを利用できません", http.StatusServiceUnavailable)
+			jsonSafeError(w, "スナップショットを利用できません", http.StatusServiceUnavailable)
 			return
 		}
 		if entries == nil {
@@ -37,7 +37,7 @@ func handleServerSnapshots(w http.ResponseWriter, r *http.Request) {
 		path, err := snapshots.CreateSnapshotContext(r.Context())
 		if err != nil {
 			log.Printf("security_event=snapshot_create result=error")
-			jsonError(w, "スナップショットを作成できません", http.StatusServiceUnavailable)
+			jsonSafeError(w, "スナップショットを作成できません", http.StatusServiceUnavailable)
 			return
 		}
 		// Never expose the vault path in an API response or audit record.
@@ -81,7 +81,7 @@ func handleServerSnapshotRestore(dependencies ServerDependencies) http.HandlerFu
 			case errors.Is(err, vault.ErrRestoreInFlight):
 				jsonError(w, "復元処理が既に実行中です", http.StatusConflict)
 			case errors.Is(err, vault.ErrDraining), errors.Is(err, vault.ErrClosed):
-				jsonError(w, "アカウントサービスを利用できません", http.StatusServiceUnavailable)
+				jsonSafeError(w, "アカウントサービスを利用できません", http.StatusServiceUnavailable)
 			default:
 				writeAuthRequired(w)
 			}
@@ -94,7 +94,7 @@ func handleServerSnapshotRestore(dependencies ServerDependencies) http.HandlerFu
 			dependencies.Sessions.ClearSessionCookie(w, r)
 			w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
 			log.Printf("security_event=snapshot_restore result=identity_error")
-			jsonError(w, "アカウントサービスを利用できません", http.StatusServiceUnavailable)
+			jsonSafeError(w, "アカウントサービスを利用できません", http.StatusServiceUnavailable)
 			return
 		}
 		// The capability has already atomically drained the exact vault entry.
@@ -109,7 +109,7 @@ func handleServerSnapshotRestore(dependencies ServerDependencies) http.HandlerFu
 		err = operation.RestoreSnapshot(r.Context(), request.Name)
 		if err != nil {
 			log.Printf("security_event=snapshot_restore result=error")
-			jsonResponse(w, map[string]interface{}{
+			jsonSafeResponse(w, map[string]interface{}{
 				"error": "スナップショットを復元できません", "login_required": true,
 			}, http.StatusInternalServerError)
 			return

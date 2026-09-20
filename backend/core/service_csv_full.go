@@ -2530,7 +2530,7 @@ func (s *Service) importCSVV3(content, mode string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	count, importErr := s.importCSVV3Parsed(context.Background(), &parsed, mode)
+	count, importErr := s.importCSVV3Parsed(context.Background(), &parsed, mode, nil, nil)
 	if cleanupErr := parsed.cleanup(); cleanupErr != nil {
 		return 0, errors.Join(importErr, fmt.Errorf("CSV画像一時領域のcleanupに失敗しました: %w", cleanupErr))
 	}
@@ -2541,8 +2541,18 @@ func (s *Service) importCSVV3(content, mode string) (int, error) {
 // from the reader and image payloads are spooled one-at-a-time to private
 // files, so the complete Base64 archive is never duplicated in memory.
 func (s *Service) ImportCSVReaderContext(ctx context.Context, input io.Reader, mode string) (int, error) {
+	count, _, err := s.ImportCSVReaderContextWithDigests(ctx, input, mode, nil)
+	return count, err
+}
+
+// ImportCSVReaderContextWithDigests applies one CSV payload and, when pins are
+// supplied, enforces the preview→apply contract: the source digest must match
+// the submitted bytes and the target digest is re-verified inside the write
+// transaction. Digests are echoed so callers can log/report without secrets.
+func (s *Service) ImportCSVReaderContextWithDigests(ctx context.Context, input io.Reader, mode string, pins *CSVImportPins) (int, *CSVImportDigests, error) {
+	digests := &CSVImportDigests{}
 	if input == nil {
-		return 0, fmt.Errorf("CSV入力がありません")
+		return 0, digests, fmt.Errorf("CSV入力がありません")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -2552,14 +2562,15 @@ func (s *Service) ImportCSVReaderContext(ctx context.Context, input io.Reader, m
 		var ok bool
 		release, ok = TryAcquireCSVOperationSlot()
 		if !ok {
-			return 0, fmt.Errorf("CSV入出力が混雑しています。しばらくしてから再試行してください")
+			return 0, digests, fmt.Errorf("CSV入出力が混雑しています。しばらくしてから再試行してください")
 		}
 		defer release()
 	}
-	buffered := bufio.NewReader(input)
+	sourceDigest := sha256.New()
+	buffered := bufio.NewReader(&digestingReader{input: input, digest: sourceDigest})
 	firstLine, err := readCSVHeaderLine(buffered)
 	if err != nil {
-		return 0, err
+		return 0, digests, err
 	}
 	source := io.MultiReader(strings.NewReader(firstLine), buffered)
 	// The header is already bounded by readCSVHeaderLine. Parse only that
@@ -2588,22 +2599,52 @@ func (s *Service) ImportCSVReaderContext(ctx context.Context, input io.Reader, m
 	if hasV3RecordType {
 		parsed, parseErr := s.parseCSVV3Reader(ctx, stream, true)
 		if parseErr != nil {
-			return 0, parseErr
+			return 0, digests, parseErr
 		}
-		count, importErr := s.importCSVV3Parsed(ctx, &parsed, mode)
+		digests.SourceDigest = hex.EncodeToString(sourceDigest.Sum(nil))
+		if err := enforceCSVPins(pins, digests); err != nil {
+			_ = parsed.cleanup()
+			return 0, digests, err
+		}
+		count, importErr := s.importCSVV3Parsed(ctx, &parsed, mode, pins, digests)
 		if cleanupErr := parsed.cleanup(); cleanupErr != nil {
-			return 0, errors.Join(importErr, fmt.Errorf("CSV画像一時領域のcleanupに失敗しました: %w", cleanupErr))
+			return 0, digests, errors.Join(importErr, fmt.Errorf("CSV画像一時領域のcleanupに失敗しました: %w", cleanupErr))
 		}
-		return count, importErr
+		return count, digests, importErr
 	}
 	if mode == "replace" {
-		return 0, ErrCSVReplaceRequiresV3
+		return 0, digests, ErrCSVReplaceRequiresV3
 	}
 	// Legacy/v2 remains source-compatible for append imports. Full replace is
 	// intentionally v3-only because v1/v2 cannot describe extension data;
 	// the raw archive is never materialized as a second string (the separate
 	// JSON/string compatibility path remains bounded at 64 MiB).
-	return s.importCSVLegacyReaderContext(ctx, stream, mode)
+	rows, err := parseLegacyCSVRows(ctx, stream)
+	if err != nil {
+		return 0, digests, err
+	}
+	digests.SourceDigest = hex.EncodeToString(sourceDigest.Sum(nil))
+	if err := enforceCSVPins(pins, digests); err != nil {
+		return 0, digests, err
+	}
+	count, importErr := s.importCSVLegacyRowsContext(ctx, rows, mode, pins, digests)
+	return count, digests, importErr
+}
+
+// enforceCSVPins validates the caller-supplied preview pins against the
+// freshly computed source digest. The target digest is checked inside the
+// write transaction (verifyCSVPins).
+func enforceCSVPins(pins *CSVImportPins, digests *CSVImportDigests) error {
+	if pins == nil {
+		return nil
+	}
+	if !validDigestHex(pins.SourceDigest) || !validDigestHex(pins.TargetDigest) {
+		return fmt.Errorf("preview digestが不正です。プレビューを取り直してください")
+	}
+	if pins.SourceDigest != digests.SourceDigest {
+		return ErrCSVPreviewConflict
+	}
+	return nil
 }
 
 type csvLegacyImportRow struct {
@@ -2627,6 +2668,16 @@ func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Rea
 	if mode == "replace" {
 		return 0, ErrCSVReplaceRequiresV3
 	}
+	rows, err := parseLegacyCSVRows(ctx, input)
+	if err != nil {
+		return 0, err
+	}
+	return s.importCSVLegacyRowsContext(ctx, rows, mode, nil, nil)
+}
+
+// parseLegacyCSVRows is the validation-only half of the legacy compatibility
+// path, shared by apply and preview so both see identical row semantics.
+func parseLegacyCSVRows(ctx context.Context, input io.Reader) ([]csvLegacyImportRow, error) {
 	guarded := &csvFieldLimitReader{ctx: ctx, input: input, maxFieldBytes: maxCSVGuardFieldBytes, fieldStart: true}
 	// This entrypoint is used by raw HTTP/Desktop readers. Their wire contract
 	// is the 512 MiB bounded stream; only the JSON/string compatibility path is
@@ -2636,38 +2687,38 @@ func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Rea
 	reader.FieldsPerRecord = -1
 	headers, err := reader.Read()
 	if err != nil {
-		return 0, fmt.Errorf("CSVヘッダー読み取りエラー: %w", err)
+		return nil, fmt.Errorf("CSVヘッダー読み取りエラー: %w", err)
 	}
 	if len(headers) > 0 {
 		headers[0] = strings.TrimPrefix(headers[0], "\ufeff")
 	}
 	for _, header := range headers {
 		if !utf8.ValidString(header) {
-			return 0, fmt.Errorf("CSVヘッダーがUTF-8ではありません")
+			return nil, fmt.Errorf("CSVヘッダーがUTF-8ではありません")
 		}
 	}
 	headerMap := make(map[string]int, len(headers))
 	for i, header := range headers {
 		name := strings.TrimSpace(header)
 		if name == "" {
-			return 0, fmt.Errorf("CSVヘッダーが空です")
+			return nil, fmt.Errorf("CSVヘッダーが空です")
 		}
 		if _, exists := headerMap[name]; exists {
-			return 0, fmt.Errorf("CSVヘッダーが重複しています: %s", name)
+			return nil, fmt.Errorf("CSVヘッダーが重複しています: %s", name)
 		}
 		headerMap[name] = i
 	}
 	versionIndex, versionedCSV := headerMap[csvVersionHeader]
 	for _, required := range []string{"account", "date", "item", "type", "amount"} {
 		if _, ok := headerMap[required]; !ok {
-			return 0, fmt.Errorf("必須ヘッダーが不足: %s", required)
+			return nil, fmt.Errorf("必須ヘッダーが不足: %s", required)
 		}
 	}
 	rows := make([]csvLegacyImportRow, 0, 128)
 	var parsedTextBytes int64
 	for {
 		if err := ctx.Err(); err != nil {
-			return 0, err
+			return nil, err
 		}
 		record, readErr := reader.Read()
 		if readErr == io.EOF {
@@ -2675,15 +2726,15 @@ func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Rea
 		}
 		rowNumber := len(rows) + 2
 		if readErr != nil {
-			return 0, fmt.Errorf("CSV行読み取りエラー (行%d): %w", rowNumber, readErr)
+			return nil, fmt.Errorf("CSV行読み取りエラー (行%d): %w", rowNumber, readErr)
 		}
 		for _, value := range record {
 			if !utf8.ValidString(value) {
-				return 0, fmt.Errorf("CSVに不正なUTF-8があります (行%d)", rowNumber)
+				return nil, fmt.Errorf("CSVに不正なUTF-8があります (行%d)", rowNumber)
 			}
 		}
 		if len(rows) >= maxCSVRows {
-			return 0, fmt.Errorf("CSV行数が上限%dを超えました", maxCSVRows)
+			return nil, fmt.Errorf("CSV行数が上限%dを超えました", maxCSVRows)
 		}
 		field := func(name string) (string, error) {
 			idx := headerMap[name]
@@ -2695,32 +2746,32 @@ func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Rea
 		rowVersion := ""
 		if versionedCSV {
 			if versionIndex >= len(record) {
-				return 0, fmt.Errorf("CSVバージョン列が不足しています (行%d)", rowNumber)
+				return nil, fmt.Errorf("CSVバージョン列が不足しています (行%d)", rowNumber)
 			}
 			rowVersion = strings.TrimSpace(record[versionIndex])
 			if rowVersion != csvVersion1 && rowVersion != csvVersion2 {
-				return 0, fmt.Errorf("未対応のCSVバージョンです (行%d): %q", rowNumber, rowVersion)
+				return nil, fmt.Errorf("未対応のCSVバージョンです (行%d): %q", rowNumber, rowVersion)
 			}
 		}
 		account, err := field("account")
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		dateString, err := field("date")
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		item, err := field("item")
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		txType, err := field("type")
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		amountString, err := field("amount")
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		memo := ""
 		if idx, ok := headerMap["memo"]; ok && idx < len(record) {
@@ -2733,7 +2784,7 @@ func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Rea
 			} {
 				decoded, decodeErr := decodeCSVTextCellV2(*value)
 				if decodeErr != nil {
-					return 0, fmt.Errorf("%s列のCSVエスケープが不正です (行%d): %w", name, rowNumber, decodeErr)
+					return nil, fmt.Errorf("%s列のCSVエスケープが不正です (行%d): %w", name, rowNumber, decodeErr)
 				}
 				*value = decoded
 			}
@@ -2754,34 +2805,34 @@ func (s *Service) importCSVLegacyReaderContext(ctx context.Context, input io.Rea
 			{"口座名", account, true}, {"項目", item, true}, {"メモ", memo, false},
 		} {
 			if err := textValidator(field.label, field.value, maxCSVFieldBytes, field.required); err != nil {
-				return 0, fmt.Errorf("%sが不正です (行%d): %w", field.label, rowNumber, err)
+				return nil, fmt.Errorf("%sが不正です (行%d): %w", field.label, rowNumber, err)
 			}
 		}
 		if txType != "income" && txType != "expense" {
-			return 0, fmt.Errorf("種別はincomeまたはexpenseである必要があります (行%d)", rowNumber)
+			return nil, fmt.Errorf("種別はincomeまたはexpenseである必要があります (行%d)", rowNumber)
 		}
 		amount, err := strconv.ParseInt(amountString, 10, 64)
 		if err != nil || amount <= 0 {
-			return 0, fmt.Errorf("金額は正の整数である必要があります (行%d)", rowNumber)
+			return nil, fmt.Errorf("金額は正の整数である必要があります (行%d)", rowNumber)
 		}
 		date, err := parseDateStrict(dateString)
 		if err != nil {
-			return 0, fmt.Errorf("日付形式が正しくありません (行%d): %w", rowNumber, err)
+			return nil, fmt.Errorf("日付形式が正しくありません (行%d): %w", rowNumber, err)
 		}
 		additional := int64(len(account) + len(dateString) + len(item) + len(txType) + len(memo))
 		if additional > maxCSVParsedTextBytes-parsedTextBytes {
-			return 0, fmt.Errorf("CSV解析済みテキスト合計が上限を超えました")
+			return nil, fmt.Errorf("CSV解析済みテキスト合計が上限を超えました")
 		}
 		parsedTextBytes += additional
 		rows = append(rows, csvLegacyImportRow{account: account, date: date, item: item, txType: txType, amount: amount, memo: memo, archiveAmount: amount > validation.MaxTransactionAmount})
 	}
 	if limited.N == 0 {
-		return 0, fmt.Errorf("CSV入力が上限%d bytesを超えました", MaxCSVImportBytes)
+		return nil, fmt.Errorf("CSV入力が上限%d bytesを超えました", MaxCSVImportBytes)
 	}
-	return s.importCSVLegacyRowsContext(ctx, rows, mode)
+	return rows, nil
 }
 
-func (s *Service) importCSVLegacyRowsContext(ctx context.Context, rows []csvLegacyImportRow, mode string) (int, error) {
+func (s *Service) importCSVLegacyRowsContext(ctx context.Context, rows []csvLegacyImportRow, mode string, pins *CSVImportPins, digests *CSVImportDigests) (int, error) {
 	if mode == "replace" {
 		return 0, ErrCSVReplaceRequiresV3
 	}
@@ -2794,6 +2845,9 @@ func (s *Service) importCSVLegacyRowsContext(ctx context.Context, rows []csvLega
 		return 0, fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
 	defer tx.Rollback()
+	if err := verifyCSVPins(ctx, tx, pins, digests); err != nil {
+		return 0, err
+	}
 	stmt, err := tx.PrepareContext(ctx, "INSERT INTO transactions (account, date, item, type, amount, balance, memo) VALUES (?, ?, ?, ?, ?, 0, ?)")
 	if err != nil {
 		return 0, fmt.Errorf("プリペアドステートメントエラー: %w", err)
@@ -2897,7 +2951,7 @@ func (s *Service) ImportCSVFileContext(ctx context.Context, path, mode string) (
 	return s.ImportCSVReaderContext(ctx, file, mode)
 }
 
-func (s *Service) importCSVV3Parsed(ctx context.Context, parsed *csvV3Import, mode string) (int, error) {
+func (s *Service) importCSVV3Parsed(ctx context.Context, parsed *csvV3Import, mode string, pins *CSVImportPins, digests *CSVImportDigests) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -2919,6 +2973,9 @@ func (s *Service) importCSVV3Parsed(ctx context.Context, parsed *csvV3Import, mo
 		return 0, fmt.Errorf("CSV v3 transaction開始エラー: %w", err)
 	}
 	defer tx.Rollback()
+	if err := verifyCSVPins(ctx, tx, pins, digests); err != nil {
+		return 0, err
+	}
 	if mode == "replace" {
 		// Keep this list explicit. In particular, settings outside the two
 		// ledger keys are owned by other features and must survive replace.

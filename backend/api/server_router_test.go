@@ -60,11 +60,12 @@ func (*fakeServerAccounts) DisableUser(context.Context, string, string, time.Tim
 
 type fakeServerControl struct {
 	bootstrapped bool
+	bootstrapErr error
 	user         control.UserSummary
 }
 
 func (fake *fakeServerControl) IsBootstrapped(context.Context) (bool, error) {
-	return fake.bootstrapped, nil
+	return fake.bootstrapped, fake.bootstrapErr
 }
 
 func (fake *fakeServerControl) GetUser(context.Context, string) (control.UserSummary, error) {
