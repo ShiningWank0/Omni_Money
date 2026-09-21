@@ -201,6 +201,8 @@ Colima、LAN 公開、TrueNAS Custom App の手順は[利用ガイド](docs/how-
 
 ### Docker Compose / Pangolin / TrueNAS
 
+公開サーバーの定期脆弱性検査、失敗時の通知先、Pangolin更新の運用は[セキュリティ監視](docs/security-monitoring.md)を参照してください。
+
 同梱の `compose.yaml` はPangolin/Newt向けの閉じた構成です。Omni Moneyは`internal`な専用networkにだけ接続し、Web/AIともホストへポートを公開しません。Pangolinのtargetは`http://omni-money:4000`にします。Newt側も同じ`omni-money-pangolin` networkへ参加させ、`DOCKER_ENFORCE_NETWORK_VALIDATION=true`、公開FQDNに一致する`ALLOWED_HOSTS`、Newtだけを指す`TRUSTED_PROXIES`を設定してください。
 
 ```bash

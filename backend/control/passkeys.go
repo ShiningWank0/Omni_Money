@@ -16,7 +16,8 @@ import (
 	"omni_money/backend/keyenvelope"
 )
 
-const maxPasskeysPerUser = 10
+// MaxPasskeysPerUser also bounds the padded public login credential list.
+const MaxPasskeysPerUser = 10
 
 func (s *Store) CreatePasskeyCredential(ctx context.Context, input PasskeyCredentialInput, now time.Time) (PasskeyCredential, error) {
 	prepared, credentialJSON, envelopeJSON, err := preparePasskeyCredential(input)
@@ -36,8 +37,8 @@ func (s *Store) CreatePasskeyCredential(ctx context.Context, input PasskeyCreden
 	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM passkey_credentials WHERE user_id = ?", prepared.UserID).Scan(&count); err != nil {
 		return PasskeyCredential{}, fmt.Errorf("count passkeys: %w", err)
 	}
-	if count >= maxPasskeysPerUser {
-		return PasskeyCredential{}, fmt.Errorf("%w: no more than %d passkeys may be registered", ErrConflict, maxPasskeysPerUser)
+	if count >= MaxPasskeysPerUser {
+		return PasskeyCredential{}, fmt.Errorf("%w: no more than %d passkeys may be registered", ErrConflict, MaxPasskeysPerUser)
 	}
 	timestamp := now.UTC().UnixMilli()
 	_, err = tx.ExecContext(ctx, `INSERT INTO passkey_credentials(

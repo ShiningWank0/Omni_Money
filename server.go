@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log"
@@ -121,7 +123,12 @@ func newServerRuntime(
 		return nil, fmt.Errorf("control DB SQLCipher鍵ファイルが無効です: %w", err)
 	}
 	opener := securedb.NewEncryptedOpener(controlKey)
+	privacyKey, privacyErr := hkdf.Key(sha256.New, controlKey[:], nil, "omni-money/passkey-login-privacy/v1", 32)
 	controlKey.Destroy()
+	if privacyErr != nil {
+		return nil, fmt.Errorf("derive passkey privacy key: %w", privacyErr)
+	}
+	defer clear(privacyKey)
 	controlStore, err := control.Open(ctx, opener, serverConfig.ControlDBPath)
 	if err != nil {
 		return nil, fmt.Errorf("control DBを開けません: %w", err)
@@ -167,13 +174,14 @@ func newServerRuntime(
 	}
 
 	accountService, err := serverauth.NewService(serverauth.Dependencies{
-		Store:            controlStore,
-		OpenSession:      openVaultSession(vaultManager, runtime.sessions),
-		Sessions:         runtime.sessions,
-		Vaults:           vaultManager,
-		Setup:            runtime.setup,
-		MaxConcurrentKDF: serverConfig.AuthKDFConcurrency,
-		WebAuthn:         passkeyVerifier,
+		Store:             controlStore,
+		OpenSession:       openVaultSession(vaultManager, runtime.sessions),
+		Sessions:          runtime.sessions,
+		Vaults:            vaultManager,
+		Setup:             runtime.setup,
+		MaxConcurrentKDF:  serverConfig.AuthKDFConcurrency,
+		WebAuthn:          passkeyVerifier,
+		PasskeyPrivacyKey: privacyKey,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("server authenticationを初期化できません: %w", err)

@@ -100,26 +100,30 @@ type Dependencies struct {
 	Setup            *SetupAuthorizer
 	MaxConcurrentKDF int
 	WebAuthn         *webauthn.WebAuthn
+	// PasskeyPrivacyKey must be a persistent, purpose-derived 32-byte secret.
+	// Rotating it changes decoy IDs, so a fresh per-process key is not suitable.
+	PasskeyPrivacyKey []byte
 }
 
 // Service is the sole mutation coordinator for server account lifecycle. All
 // login, reset, and disable operations for a user share the same keyed lock so
 // session issuance cannot race credential revocation.
 type Service struct {
-	store        ControlStore
-	passkeyStore PasskeyControlStore
-	openSession  OpenSessionFunc
-	sessions     SessionInvalidator
-	vaults       VaultDrainer
-	setup        *SetupAuthorizer
-	dummy        keyenvelope.Envelope
-	kdfSlots     chan struct{}
-	setupMu      sync.Mutex
-	locksMu      sync.Mutex
-	locks        map[string]*accountLock
-	webauthn     *webauthn.WebAuthn
-	passkeyMu    sync.Mutex
-	ceremonies   map[string]passkeyCeremony
+	store             ControlStore
+	passkeyStore      PasskeyControlStore
+	openSession       OpenSessionFunc
+	sessions          SessionInvalidator
+	vaults            VaultDrainer
+	setup             *SetupAuthorizer
+	dummy             keyenvelope.Envelope
+	kdfSlots          chan struct{}
+	setupMu           sync.Mutex
+	locksMu           sync.Mutex
+	locks             map[string]*accountLock
+	webauthn          *webauthn.WebAuthn
+	passkeyMu         sync.Mutex
+	ceremonies        map[string]passkeyCeremony
+	passkeyPrivacyKey [32]byte
 }
 
 type accountLock struct {
@@ -147,12 +151,15 @@ func NewService(dependencies Dependencies) (*Service, error) {
 	if concurrency < 1 || concurrency > maximumKDFConcurrency {
 		return nil, fmt.Errorf("MaxConcurrentKDF must be between 1 and %d", maximumKDFConcurrency)
 	}
+	if dependencies.WebAuthn != nil && (len(dependencies.PasskeyPrivacyKey) != 32 || bytes.Equal(dependencies.PasskeyPrivacyKey, make([]byte, 32))) {
+		return nil, errors.New("passkey authentication requires a nonzero 32-byte privacy key")
+	}
 	dummy, err := newDummyPasswordEnvelope()
 	if err != nil {
 		return nil, fmt.Errorf("initialize constant-work password verifier: %w", err)
 	}
 	passkeyStore, _ := dependencies.Store.(PasskeyControlStore)
-	return &Service{
+	service := &Service{
 		store:        dependencies.Store,
 		passkeyStore: passkeyStore,
 		openSession:  dependencies.OpenSession,
@@ -164,7 +171,9 @@ func NewService(dependencies Dependencies) (*Service, error) {
 		locks:        make(map[string]*accountLock),
 		webauthn:     dependencies.WebAuthn,
 		ceremonies:   make(map[string]passkeyCeremony),
-	}, nil
+	}
+	copy(service.passkeyPrivacyKey[:], dependencies.PasskeyPrivacyKey)
+	return service, nil
 }
 
 func (s *Service) ready() bool {
