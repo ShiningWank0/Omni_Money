@@ -187,15 +187,7 @@ func (s *Service) BeginPasskeyLogin(ctx context.Context, email, clientKey string
 	if !s.passkeysReady() {
 		return PasskeyLoginBegin{}, ErrPasskeysUnavailable
 	}
-	email, err := normalizeLoginEmail(email)
-	if err != nil {
-		return PasskeyLoginBegin{}, ErrInvalidCredentials
-	}
-	user, err := s.store.GetUserByEmail(ctx, email)
-	if err != nil || user.State != control.UserActive {
-		return PasskeyLoginBegin{}, ErrInvalidCredentials
-	}
-	return s.beginPasskeyAssertion(ctx, user.ID, clientKey, passkeyCeremonyLogin)
+	return s.beginPrivatePasskeyLogin(ctx, email, clientKey)
 }
 
 func (s *Service) BeginPasskeyReauthentication(ctx context.Context, userID, clientKey string) (PasskeyLoginBegin, error) {
@@ -288,7 +280,7 @@ func (s *Service) validatePasskeyAssertion(
 	recordLogin bool,
 ) (control.UserSummary, string, []byte, func(), error) {
 	ceremony, err := s.takePasskeyCeremony(input.CeremonyID, kind, input.ClientKey)
-	if err != nil || len(input.PRFResult) != keyenvelope.PasskeySecretSize {
+	if err != nil || ceremony.UserID == "" || len(input.PRFResult) != keyenvelope.PasskeySecretSize {
 		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
 	}
 	if expectedUserID != "" && ceremony.UserID != expectedUserID {
