@@ -1,4 +1,4 @@
-# 公開サーバーの脆弱性検査と通知
+# 公開サーバーの脆弱性検査
 
 ## CI/CDの検査範囲
 
@@ -13,16 +13,25 @@
 
 Docker公開前にもこれらの検査を実行する。CI成功は、未修正の既知問題や静的解析で分からない設計上の問題がないことを保証しない。Pangolin、Newt、Gerbil、Traefik、Badger、VPS/TrueNASそのものは別配備のため、このCIの検査対象ではない。
 
-## 現在の通知経路
+## 定期検査のIssue報告
 
-失敗はリポジトリのActions画面と、GitHub Actionsの標準メール・Web通知に現れる。利用者のGitHub **Settings → Notifications → System → Actions** で通知先を有効にし、必要なら失敗時のみの通知を選択する。個人の通知設定はリポジトリから強制できない。
+定期実行では検査のJSON結果からIssueを自動作成する。GitHubが自動発行する`GITHUB_TOKEN`を使い、Issue報告ジョブだけに`issues: write`を与える。追加Secretは不要。PR・push・forkではIssue作成を実行しない。
 
-定期実行の通知先は、ワークフローの作成者、cron構文を最後に変更したユーザー、または無効化後に再有効化したユーザーに紐づく。2026-09-20の定期実行のactor/triggering_actorは `ShiningWank0` だった。今回の修正はcron構文を変更しない。
+### Issue作成のルール
 
-Slack/Webhook通知やIssue自動作成は設定していない。検査失敗と脆弱性検出は同義ではなく、取得先の障害やテスト失敗でもCIは失敗するため、通知から実行ログを確認する。
+- govulncheckは到達可能なsymbol、npmはhigh以上、Trivyは修正版のあるHIGH/CRITICALを対象にする。gosecのmedium以上は「静的解析」と明記し、既知CVEの検出と区別する。
+- スキャナー・識別子・対象パッケージ（gosecはファイルと行）で同一性を判定する。Desktop/serverで重なるGoの問題は1件にまとめ、検査条件を併記する。
+- 対象、深刻度、検出版または影響範囲、修正版・更新候補、実行ログへのリンクを記録する。GoのDBが深刻度を提供しない場合はUNSPECIFIEDと明記する。
+- このワークフローが自動作成した同じ問題のOpen Issueには、内容が変わったときだけコメントする。実行日・run IDの変化だけでは追記しない。既存本文や人間のコメントを上書きしない。手動で作成したIssueは自動照合の対象外。
+- ClosedのIssueを再オープンしない。閉じた問題を再検出した場合は新しいIssueを作る。検出が消えても自動クローズはしないので、対応PR・人間の確認で閉じる。
+- 通信障害、不完全なJSON、先行ステップ失敗、artifact欠落・ダウンロードや整合性検証の失敗は「検査エラー」のIssueにする。脆弱性がないという判定にはしない。一般テストの失敗はActionsの実行結果で確認する。
+- Issue報告のAPIエラーもCIを失敗させる。1回の新規作成・追記は合計25件までとし、超過時は失敗を表示する。残件は次回定期実行またはその定期実行の再実行で処理する。
 
-- [GitHub公式のワークフロー通知仕様](https://docs.github.com/en/actions/concepts/workflows-and-actions/notifications-for-workflow-runs)
-- [通知設定](https://github.com/settings/notifications)
+Issue報告ジョブは同じ実行・同じattemptのartifactだけを読む。過去のattemptの結果を混在させないため、再試行時は **Re-run all jobs** を選ぶ（失敗ジョブだけを再試行すると、そのattemptで未実行の検査が欠落扱いになる）。スキャナー側は読み取り権限のみで、Issue書き込み用トークンはスキャナーへ渡さない。Issue報告ジョブはレポートをデータとして解釈し、外部の説明文からコマンド・URLを実行しない。公開Issueへソースコード断片や生のstderrは転載しない。レポートの保存期間は7日。
+
+定期実行の同時処理は直列化し、mainへのpushで進行中の定期実行をキャンセルしない。公開リポジトリは60日間活動がないとscheduleが自動無効化されるため、Actions画面で有効状態を確認する。
+
+ローカル検証は`node --test scripts/security-monitoring.test.mjs`。架空の検出結果と模擬GitHub APIを使用する。
 
 ## パスキーログインの情報漏えい対策と限界
 
@@ -33,11 +42,3 @@ Slack/Webhook通知やIssue自動作成は設定していない。検査失敗�
 この変更はHTTP成否・候補数・架空値の使い回し方からの直接的な判別を抑える。既存の非discoverableパスキーとの互換性のため、実credential IDとその長さ、PRF saltをブラウザーへ渡す方式は維持する。既知IDとの照合、認証器固有の形式・長さの統計的推測、登録変更前後やcontrol DB鍵のローテーション前後の比較、負荷時の時間差まで隠すものではない。完全なcredential情報非開示には、discoverable credentialを必須化するか、WebAuthn開始前の別認証が必要であり、既存パスキーの利用条件が変わる。
 
 [WebAuthnのUsername Enumeration / Privacy leak via credential IDs](https://www.w3.org/TR/webauthn/#sctn-username-enumeration) に沿った互換性を維持する緩和策として扱う。
-
-## Pangolinの更新運用
-
-Pangolin自身は起動時にDB・設定のmigrationを行う。公式更新手順は固定バージョンを更新してComposeを再作成し、管理画面・公開先・トンネルの疎通を確認する流れ。Gerbil・Traefik・Badgerも更新内容に応じて確認する。Badgerの設定自動更新は標準構成の場合に限られ、適用されなくても明示的な失敗にならない場合がある。
-
-VPS上での自動化は可能。更新検知と通知を自動化し、適用処理は排他制御、対象版の固定、DB/configの復旧点、起動と認証付き疎通の確認、失敗通知をまとめる。DB schemaが変わるため、コンテナの旧版への差し戻しだけでは復旧できないことがある。通知だけの導入と、無人での更新適用は別の運用設定として扱う。
-
-[Pangolin公式更新手順](https://docs.pangolin.net/self-host/how-to-update)
