@@ -19,10 +19,31 @@ Docker公開前にもこれらの検査を実行する。CI成功は、未修正
 
 定期実行の通知先は、ワークフローの作成者、cron構文を最後に変更したユーザー、または無効化後に再有効化したユーザーに紐づく。2026-09-20の定期実行のactor/triggering_actorは `ShiningWank0` だった。今回の修正はcron構文を変更しない。
 
-Slack/Webhook通知やIssue自動作成は設定していない。検査失敗と脆弱性検出は同義ではなく、取得先の障害やテスト失敗でもCIは失敗するため、通知から実行ログを確認する。
+定期実行では検査のJSON結果からIssueを自動作成する。追加のSecret、PAT、SMTP設定は不要。GitHubが自動発行する`GITHUB_TOKEN`を使い、通知ジョブだけに`issues: write`を与える。PR・push・forkでIssue作成は実行しない。Slack/Webhook通知は設定していない。
+
+Issueのメール通知には、[通知設定](https://github.com/settings/notifications)のWatching/ParticipatingでEmailを有効にし、リポジトリの **Watch → Custom → Issues** を選ぶ。CI失敗メールは別にActionsの通知を有効にする。送信はGitHubが行うため、VPSのメールサーバーも送信用Secretも不要。個人のメール通知設定・実際の配送は、このリポジトリから検証・変更しない。
+
+### Issue作成のルール
+
+- govulncheckは到達可能なsymbol、npmはhigh以上、Trivyは修正版のあるHIGH/CRITICALを対象にする。gosecのmedium以上は「静的解析」と明記し、既知CVEの検出と区別する。
+- スキャナー・識別子・対象パッケージ（gosecはファイルと行）で同一性を判定する。Desktop/serverで重なるGoの問題は1件にまとめ、検査条件を併記する。
+- 対象、深刻度、検出版または影響範囲、修正版・更新候補、実行ログへのリンクを記録する。GoのDBが深刻度を提供しない場合はUNSPECIFIEDと明記する。
+- 同じ問題のOpen Issueには、内容が変わったときだけコメントする。実行日・run IDの変化だけでは追記しない。既存本文や人間のコメントを上書きしない。
+- ClosedのIssueを再オープンしない。閉じた問題を再検出した場合は新しいIssueを作る。検出が消えても自動クローズはしないので、対応PR・人間の確認で閉じる。
+- 通信障害、不完全なJSON、先行ステップ失敗、artifact欠落は「検査エラー」のIssueにする。脆弱性がないという判定にはしない。一般テストの失敗はActions通知で確認する。
+- 通知自体のAPIエラーもCIを失敗させる。1回の新規作成・追記は合計25件までとし、超過時は失敗を表示する。残件は次回定期実行またはその定期実行の再実行で処理する。
+
+通知ジョブは同じ実行・同じattemptのartifactだけを読む。過去のattemptの結果を混在させないため、再試行時は **Re-run all jobs** を選ぶ（失敗ジョブだけを再試行すると、そのattemptで未実行の検査が欠落扱いになる）。スキャナー側は読み取り権限のみで、通知用トークンはスキャナーへ渡さない。通知ジョブはレポートをデータとして解釈し、外部の説明文からコマンド・URLを実行しない。公開Issueへソースコード断片や生のstderrは転載しない。レポートの保存期間は7日。
+
+定期実行の同時処理は直列化し、mainへのpushで進行中の定期実行をキャンセルしない。GitHub側の障害・ジョブ強制終了・通知設定によってメールが届かない場合もある。公開リポジトリは60日間活動がないとscheduleが自動無効化されるため、Actions画面で有効状態を確認する。
 
 - [GitHub公式のワークフロー通知仕様](https://docs.github.com/en/actions/concepts/workflows-and-actions/notifications-for-workflow-runs)
 - [通知設定](https://github.com/settings/notifications)
+- [GITHUB_TOKENとIssue作成権限](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token)
+- [Issue購読とメール通知](https://docs.github.com/en/subscriptions-and-notifications/get-started/configuring-notifications)
+- [定期実行の自動無効化](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows)
+
+ローカル検証は`node --test scripts/security-monitoring.test.mjs`。架空の検出結果と模擬GitHub APIを使用し、テストのためのIssue作成やメール送信は行わない。
 
 ## パスキーログインの情報漏えい対策と限界
 
@@ -41,3 +62,5 @@ Pangolin自身は起動時にDB・設定のmigrationを行う。公式更新手�
 VPS上での自動化は可能。更新検知と通知を自動化し、適用処理は排他制御、対象版の固定、DB/configの復旧点、起動と認証付き疎通の確認、失敗通知をまとめる。DB schemaが変わるため、コンテナの旧版への差し戻しだけでは復旧できないことがある。通知だけの導入と、無人での更新適用は別の運用設定として扱う。
 
 [Pangolin公式更新手順](https://docs.pangolin.net/self-host/how-to-update)
+
+無料で更新通知を受け取る方法は[Pangolinの更新メール通知](pangolin-update-notifications.md)を参照。
