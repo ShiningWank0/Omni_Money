@@ -76,7 +76,7 @@ export function render(entry, runURL) {
       `- 検査条件: ${clean(d.context.join(', '))}`,
       `- 概要: ${clean(d.summary.join(' / '))}`,
     ].join('\n');
-  const body = `${marker}\n${revision}\n\n${details}\n\n[検査ログ](${runURL})\n\n定期CIによる自動通知です。以降の変化はコメントに記録します。対応内容を確認してから手動または修正PRで閉じてください。自動クローズ・再オープンは行いません。`;
+  const body = `${marker}\n${revision}\n\n${details}\n\n[検査ログ](${runURL})\n\n定期CIによる自動報告です。以降の変化はコメントに記録します。対応内容を確認してから手動または修正PRで閉じてください。自動クローズ・再オープンは行いません。`;
   return { title: title.replaceAll('@', '@\u200b').replace(/[\r\n]/g, ' '), body, marker, revision };
 }
 
@@ -120,7 +120,7 @@ export async function publish(api, findings, runURL) {
       result.created++;
       continue;
     }
-    // A comment generates a notification; a body edit alone generally does not.
+    // Record changes in comments without overwriting the original issue.
     // The latest bot comment is current state; checking every historical digest
     // would incorrectly suppress a regression back to an earlier state.
     const comments = await list(api, `issues/${existing.number}/comments`);
