@@ -227,11 +227,16 @@ test('CLI enforces failure on govulncheck JSON findings even when tool exits suc
   const directory = mkdtempSync(join(tmpdir(), 'omni-security-cli-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   mkdirSync(join(directory, 'bin'));
-  writeFileSync(join(directory, 'bin/go'), `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(goInput)});\n`, { mode: 0o755 });
+  writeFileSync(join(directory, 'bin/go'), `#!${process.execPath}\nrequire('node:fs').appendFileSync('scanner-args.jsonl', JSON.stringify(process.argv.slice(2)) + '\\n');\nprocess.stdout.write(${JSON.stringify(goInput)});\n`, { mode: 0o755 });
   const result = spawnSync(process.execPath, [resolve('scripts/security-reports.mjs'), 'govulncheck'], {
     cwd: directory, env: { ...process.env, PATH: `${join(directory, 'bin')}:${process.env.PATH}` }, encoding: 'utf8',
   });
   assert.equal(result.status, 1);
+  const calls = readFileSync(join(directory, 'scanner-args.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(calls, [
+    ['run', 'golang.org/x/vuln/cmd/govulncheck@v1.6.0', '-json', './...'],
+    ['run', 'golang.org/x/vuln/cmd/govulncheck@v1.6.0', '-json', '-tags', 'server', './...'],
+  ]);
   for (const mode of ['desktop', 'server']) {
     const r = JSON.parse(readFileSync(join(directory, `security-reports/govulncheck-${mode}.json`), 'utf8'));
     assert.equal(r.status, 'findings');

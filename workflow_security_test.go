@@ -27,6 +27,7 @@ func TestGitHubActionsArePinnedAndCheckoutDropsCredentials(t *testing.T) {
 		lines := strings.Split(string(contents), "\n")
 		for index, line := range lines {
 			trimmed := strings.TrimSpace(line)
+			trimmed = strings.TrimPrefix(trimmed, "- ")
 			if !strings.HasPrefix(trimmed, "uses:") {
 				continue
 			}
@@ -131,8 +132,16 @@ func TestCIUsesPinnedGoVulnerabilityScanner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const command = "go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./..."
+	const command = "node scripts/security-reports.mjs govulncheck"
 	if count := strings.Count(string(contents), command); count != 1 {
-		t.Fatalf("CI must run the pinned Go vulnerability scanner exactly once, got %d", count)
+		t.Fatalf("CI must invoke the Go vulnerability report collector exactly once, got %d", count)
+	}
+	reporter, err := os.ReadFile(filepath.Join("scripts", "security-reports.mjs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const scanner = "golang.org/x/vuln/cmd/govulncheck@v1.6.0"
+	if count := strings.Count(string(reporter), scanner); count != 1 {
+		t.Fatalf("report collector must retain the pinned Go vulnerability scanner, got %d", count)
 	}
 }
