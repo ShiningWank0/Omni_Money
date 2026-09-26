@@ -15,8 +15,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   go:
@@ -49,6 +49,7 @@ jobs:
           sudo apt-get install -y build-essential curl tcl libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Build frontend assets for Go embed
+        id: go-security-setup
         working-directory: frontend
         run: |
           npm ci --ignore-scripts
@@ -83,9 +84,8 @@ jobs:
         run: go vet ./...
 
       - name: Run Go security analyzer
-        run: |
-          go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 -quiet -severity medium ./...
-          go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 -quiet -severity medium -tags server ./...
+        if: ${{ !cancelled() && steps.go-security-setup.outcome == 'success' }}
+        run: node scripts/security-reports.mjs gosec
 
       - name: Lint GitHub Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -no-color
@@ -131,9 +131,8 @@ jobs:
           go test -race -tags server ./...
 
       - name: Scan reachable Go vulnerabilities
-        run: |
-          go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
-          go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 -tags server ./...
+        if: ${{ !cancelled() && steps.go-security-setup.outcome == 'success' }}
+        run: node scripts/security-reports.mjs govulncheck
 
       - name: Build SQLCipher-linked server entrypoint
         env:
@@ -244,6 +243,15 @@ jobs:
             .secrets.omni_initial_admin_setup_token != null and
             ([.services["omni-money"].secrets[].source] | index("omni_initial_admin_setup_token")) != null
           ' "$bootstrap_config"
+
+      - name: Upload Go security reports
+        if: ${{ always() && github.event_name == 'schedule' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-go-${{ github.run_attempt }}
+          path: security-reports/*.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   safe-update:
     name: Safe-update full matrix
@@ -360,13 +368,23 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Audit dependencies
-        run: npm audit --audit-level=high
+        working-directory: .
+        run: node scripts/security-reports.mjs npm
 
       - name: Test frontend security boundaries
         run: npm test
 
       - name: Build frontend
         run: npm run build
+
+      - name: Upload frontend security reports
+        if: ${{ always() && github.event_name == 'schedule' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-frontend-${{ github.run_attempt }}
+          path: security-reports/*.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   windows-security:
     name: Windows security boundaries
@@ -406,6 +424,7 @@ jobs:
           persist-credentials: false
 
       - name: Build pinned multi-stage image
+        id: docker-build
         run: docker build --build-arg VERSION=ci --tag omni-money:ci .
 
       - name: Assert non-root multi-vault runtime
@@ -512,6 +531,7 @@ jobs:
           exit 1
 
       - name: Setup Node for server E2E
+        if: ${{ !cancelled() && steps.docker-build.outcome == 'success' }}
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24.19.0'
@@ -527,11 +547,77 @@ jobs:
         run: bash tests/e2e/run-server-e2e.sh --with-deps
 
       - name: Scan image for fixable high-severity vulnerabilities
+        id: trivy
+        if: ${{ !cancelled() && steps.docker-build.outcome == 'success' }}
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           image-ref: omni-money:ci
-          format: table
-          exit-code: '1'
+          format: json
+          output: trivy-report.json
+          # The following step applies the same failure threshold and records
+          # scan errors separately. JSON findings must never make CI green.
+          exit-code: '0'
+          scanners: vuln
           ignore-unfixed: true
           vuln-type: os,library
           severity: CRITICAL,HIGH
+
+      - name: Record Trivy result and enforce security gate
+        if: ${{ always() && steps.trivy.outcome != 'skipped' }}
+        env:
+          TRIVY_OUTCOME: ${{ steps.trivy.outcome }}
+        run: node scripts/security-reports.mjs trivy
+
+      - name: Upload image security report
+        if: ${{ always() && github.event_name == 'schedule' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-image-${{ github.run_attempt }}
+          path: security-reports/*.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  security-automation:
+    name: Security notification tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24.19.0'
+      - run: node --test scripts/security-monitoring.test.mjs
+
+  security-issues:
+    name: Notify scheduled security findings
+    needs: [go, frontend, docker, security-automation]
+    if: >-
+      ${{ always() && github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+          && github.repository == 'ShiningWank0/Omni_Money' && needs.security-automation.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24.19.0'
+      - name: Download reports from this run only
+        id: reports
+        continue-on-error: true # Missing artifacts become scan-error issues.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: security-*-${{ github.run_attempt }}
+          path: security-reports
+          merge-multiple: true
+      - name: Create or update security issues
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/security-issues.mjs
