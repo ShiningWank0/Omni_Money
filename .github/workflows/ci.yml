@@ -620,4 +620,5 @@ jobs:
       - name: Create or update security issues
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SECURITY_REPORT_DOWNLOAD_OUTCOME: ${{ steps.reports.outcome }}
         run: node scripts/security-issues.mjs

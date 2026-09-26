@@ -108,6 +108,16 @@ test('duplicates across Go build modes and call traces produce one issue with so
   assert.deepEqual(result, entries([desktop, report()]));
 });
 
+test('failed artifact download or digest verification rejects even complete-looking files', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'omni-security-integrity-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  for (const scan of scans) writeFileSync(join(directory, `${scan}.json`), JSON.stringify({ schema: 1, scan, status: 'clean', findings: [] }));
+  assert.equal(entries(collect(directory, true)).length, 0);
+  const result = entries(collect(directory, false));
+  assert.equal(result.length, scans.length);
+  assert.ok(result.every(e => e.data.kind === 'scan-error'));
+});
+
 function mockAPI(initial = [], initialComments = []) {
   const state = { issues: structuredClone(initial), comments: structuredClone(initialComments), writes: [], calls: [] };
   const api = async (method, path, body) => {

@@ -8,9 +8,12 @@ const clean = value => String(value ?? '').slice(0, 1000).replaceAll('@', '@\u20
   .replace(/[&<>"'`\[\]\\|*_\r\n]/g, c => `&#${c.charCodeAt(0)};`);
 const unique = values => [...new Set(values)].sort();
 
-export function collect(directory) {
+export function collect(directory, downloadSucceeded = true) {
   return scans.map(scan => {
     try {
+      // download-artifact may leave files behind when digest verification
+      // fails. Never trust partial output from a failed download step.
+      if (!downloadSucceeded) throw new Error();
       const r = JSON.parse(readFileSync(resolve(directory, `${scan}.json`), 'utf8'));
       if (r.schema !== 1 || r.scan !== scan || !['clean', 'findings', 'error'].includes(r.status) || !Array.isArray(r.findings) ||
         (r.status === 'clean' && r.findings.length) || (r.status === 'findings' && !r.findings.length)) throw new Error();
@@ -135,7 +138,7 @@ export async function main(env = process.env) {
   if (env.GITHUB_EVENT_NAME !== 'schedule' || env.GITHUB_REF !== 'refs/heads/main' || env.GITHUB_REPOSITORY !== 'ShiningWank0/Omni_Money') {
     throw new Error('Issue creation is restricted to scheduled main runs of ShiningWank0/Omni_Money');
   }
-  const reports = collect('security-reports');
+  const reports = collect('security-reports', env.SECURITY_REPORT_DOWNLOAD_OUTCOME === 'success');
   const runURL = `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}/attempts/${env.GITHUB_RUN_ATTEMPT}`;
   const result = await publish(githubClient(env.GITHUB_TOKEN, env.GITHUB_REPOSITORY), entries(reports), runURL);
   const summary = `Security issues: ${JSON.stringify(result)}\n`;
