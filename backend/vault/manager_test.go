@@ -479,20 +479,33 @@ func TestServiceCreationRacingFinalRootReleaseIsSafe(t *testing.T) {
 			t.Fatal(err)
 		}
 		start := make(chan struct{})
-		created := make(chan error, 1)
+		type serviceResult struct {
+			service *core.Service
+			err     error
+		}
+		created := make(chan serviceResult, 1)
 		go func() {
 			<-start
 			service, serviceErr := root.Service()
-			if serviceErr == nil {
-				_, serviceErr = service.GetAccounts()
-			}
-			created <- serviceErr
+			created <- serviceResult{service: service, err: serviceErr}
 		}()
 		close(start)
 		root.Release()
-		serviceErr := <-created
-		if serviceErr != nil && !errors.Is(serviceErr, ErrLeaseReleased) && !errors.Is(serviceErr, core.ErrServiceUnavailable) {
-			t.Fatalf("iteration %d: Service race error = %v", iteration, serviceErr)
+		result := <-created
+		if result.err != nil && !errors.Is(result.err, ErrLeaseReleased) && !errors.Is(result.err, core.ErrServiceUnavailable) {
+			t.Fatalf("iteration %d: Service race error = %v", iteration, result.err)
+		}
+		if result.err == nil {
+			if result.service == nil {
+				t.Fatalf("iteration %d: Service returned nil without an error", iteration)
+			}
+			// Race service creation with release, then verify revocation after
+			// release has completed. A query admitted before release may instead
+			// fail inside database/sql while Close runs; its error spelling is
+			// not part of the lease's service-creation contract.
+			if _, err := result.service.GetAccounts(); !errors.Is(err, core.ErrServiceUnavailable) {
+				t.Fatalf("iteration %d: released service retained access: %v", iteration, err)
+			}
 		}
 		if err := manager.Close(context.Background()); err != nil {
 			t.Fatal(err)

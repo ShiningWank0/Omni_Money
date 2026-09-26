@@ -41,6 +41,10 @@ tmp_wails/
 # Logs
 logs/
 
+# Local security scan output (CI uploads normalized reports as artifacts)
+security-reports/
+trivy-report.json
+
 # Local secrets
 .env
 .env.*
