@@ -5,6 +5,23 @@
 # fixture definition.
 set -Eeuo pipefail
 
+# Each CI shard owns a separate fixture and runs the same preflight/recovery
+# checks. Only the independent state-machine scenarios are partitioned.
+safe_update_shard_index="${SAFE_UPDATE_SHARD_INDEX:-0}"
+safe_update_shard_count="${SAFE_UPDATE_SHARD_COUNT:-1}"
+if [[ ! "$safe_update_shard_index" =~ ^(0|[1-9][0-9]?)$ ]] ||
+  [[ ! "$safe_update_shard_count" =~ ^([1-9]|1[0-6])$ ]] ||
+  [ "$safe_update_shard_index" -ge "$safe_update_shard_count" ]; then
+  echo "FAIL: invalid safe-update shard index/count" >&2
+  exit 2
+fi
+if [ -n "${SAFE_UPDATE_ONLY:-}" ] && [ "$safe_update_shard_count" -ne 1 ]; then
+  echo "FAIL: focused scenarios cannot be combined with sharding" >&2
+  exit 2
+fi
+safe_update_case_index=0
+safe_update_cases_run=0
+
 # Docker-free safe-update regression suite. Linux runs the real updater through
 # a mock Docker/Compose state machine; other hosts run portable preflight tests.
 
@@ -740,6 +757,12 @@ fail_legacy_archive_case() {
 
 run_case() {
   local scenario="$1" expected="$2" output status=0 original_env_hash original_data_hash journal_path stale_status pin_path reserve_path
+  local scenario_index="$safe_update_case_index"
+  safe_update_case_index=$((safe_update_case_index + 1))
+  if [ "$((scenario_index % safe_update_shard_count))" -ne "$safe_update_shard_index" ]; then
+    return 0
+  fi
+  safe_update_cases_run=$((safe_update_cases_run + 1))
   printf 'safe-update state-machine scenario: %s\n' "$scenario" >&2
   local -a scenario_env=(SAFE_UPDATE_TEST_SCENARIO="$scenario")
   [ "$scenario" = checkpoint_env ] && scenario_env=(OMNI_UPDATE_CHECKPOINT_DIR=/tmp/attacker-controlled)
@@ -1027,6 +1050,10 @@ run_case runtime_gpu_request 1
 run_case runtime_device_cgroup_rule 1
 run_case runtime_unapproved_runtime 1
 run_case sigkill 137
+[ "$safe_update_cases_run" -gt 0 ] || { echo "FAIL: shard ran no scenarios" >&2; exit 1; }
+printf 'safe-update shard %s/%s: %s of %s scenarios passed\n' "$safe_update_shard_index" "$safe_update_shard_count" "$safe_update_cases_run" "$safe_update_case_index"
+# Every shard also verifies stale-journal rejection with its own fixture.
+teardown_fixture_case_artifacts
 find "$mock_state" -mindepth 1 ! -name config.json -exec rm -f -- {} +
 printf current > "$mock_state/phase"; printf running > "$mock_state/current_state"; printf connected > "$mock_state/net_current"; : > "$mock_state/log"
 mkdir -m 0700 -- "$fixture_root/omni-money-update-checkpoints"

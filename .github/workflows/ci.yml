@@ -6,8 +6,6 @@ on:
   push:
     branches:
       - main
-      - 'codex/**'
-      - 'update/**'
   schedule:
     - cron: '30 3 * * 0'
 
@@ -19,8 +17,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
-  go:
-    name: Go tests
+  go-checks:
+    name: Go checks
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -257,6 +255,10 @@ jobs:
     name: Safe-update full matrix
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
 
     steps:
       - name: Checkout
@@ -337,7 +339,9 @@ jobs:
 
       - name: Run safe-update full matrix
         if: steps.coverage.outputs.run_full == 'true'
-        run: sudo env "PATH=$PATH" scripts/safe-update_test.sh
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: sudo env "PATH=$PATH" "SAFE_UPDATE_SHARD_INDEX=$SHARD_INDEX" SAFE_UPDATE_SHARD_COUNT=4 scripts/safe-update_test.sh
 
       - name: Skip safe-update full matrix
         if: steps.coverage.outputs.run_full != 'true'
@@ -590,9 +594,30 @@ jobs:
           node-version: '24.19.0'
       - run: node --test scripts/security-monitoring.test.mjs
 
+  # Keep the existing required check name, and include the auxiliary security
+  # and update tests in its verdict before GitHub allows the PR to merge.
+  go:
+    name: Go tests
+    needs: [go-checks, safe-update, windows-security, security-automation]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all Go and auxiliary checks to succeed
+        env:
+          GO_RESULT: ${{ needs.go-checks.result }}
+          SAFE_UPDATE_RESULT: ${{ needs.safe-update.result }}
+          WINDOWS_RESULT: ${{ needs.windows-security.result }}
+          SECURITY_AUTOMATION_RESULT: ${{ needs.security-automation.result }}
+        run: |
+          test "$GO_RESULT" = success
+          test "$SAFE_UPDATE_RESULT" = success
+          test "$WINDOWS_RESULT" = success
+          test "$SECURITY_AUTOMATION_RESULT" = success
+
   security-issues:
     name: Report scheduled security findings
-    needs: [go, frontend, docker, security-automation]
+    needs: [go-checks, frontend, docker, security-automation]
     if: >-
       ${{ always() && github.event_name == 'schedule' && github.ref == 'refs/heads/main'
           && github.repository == 'ShiningWank0/Omni_Money' && needs.security-automation.result == 'success' }}

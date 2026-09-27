@@ -25,7 +25,6 @@ func aiTransactionIdentity(credentialID, key, request string, limit int, now tim
 
 func TestAddAITransactionIsAtomicAcrossIdempotencyAndQuota(t *testing.T) {
 	setupCoreTestDB(t)
-	settleAITransactionSnapshotsAtCleanup(t)
 	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
 	request := transactionRequest("cash", "2026-08-09", "food", "expense", 100)
 	identity := aiTransactionIdentity("agent-1", "first-key", "request-1", 1, now)
@@ -75,7 +74,6 @@ func TestAddAITransactionIsAtomicAcrossIdempotencyAndQuota(t *testing.T) {
 
 func TestAddAITransactionRollsBackClaimAndQuotaWithLedgerFailure(t *testing.T) {
 	setupCoreTestDB(t)
-	settleAITransactionSnapshotsAtCleanup(t)
 	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
 	request := transactionRequest("cash", "2026-08-09", "food", "expense", 100)
 	request.Tags = []int64{999999}
@@ -96,7 +94,6 @@ func TestAddAITransactionRollsBackClaimAndQuotaWithLedgerFailure(t *testing.T) {
 
 func TestAddAITransactionConcurrentReplayCreatesOneLedgerRow(t *testing.T) {
 	setupCoreTestDB(t)
-	settleAITransactionSnapshotsAtCleanup(t)
 	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
 	request := transactionRequest("cash", "2026-08-09", "food", "expense", 100)
 	identity := aiTransactionIdentity("agent-concurrent", "shared-key", "shared-request", 100, now)
@@ -147,7 +144,6 @@ func TestAddAITransactionConcurrentReplayCreatesOneLedgerRow(t *testing.T) {
 
 func TestAddAITransactionConcurrentDistinctKeysCannotExceedQuota(t *testing.T) {
 	setupCoreTestDB(t)
-	settleAITransactionSnapshotsAtCleanup(t)
 	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
 	request := transactionRequest("cash", "2026-08-09", "food", "expense", 100)
 
@@ -205,7 +201,6 @@ func TestAddAITransactionIdempotencySurvivesDatabaseReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(database.CloseDB)
-	settleAITransactionSnapshotsAtCleanup(t)
 	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
 	request := transactionRequest("cash", "2026-08-09", "food", "expense", 100)
 	identity := aiTransactionIdentity("agent-persistent", "persistent-key", "persistent-request", 1, now)
@@ -214,11 +209,8 @@ func TestAddAITransactionIdempotencySurvivesDatabaseReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Serialize with the asynchronous snapshot worker before closing the shared
-	// database connection used by the test process.
-	if _, err := database.CreateSnapshot(""); err != nil {
-		t.Fatal(err)
-	}
+	// CloseDB drains the asynchronous snapshot worker before closing the shared
+	// connection. A separate snapshot does not establish worker completion.
 	database.CloseDB()
 	if err := database.InitDB(dbPath); err != nil {
 		t.Fatal(err)
@@ -240,31 +232,6 @@ func TestAddAITransactionIdempotencySurvivesDatabaseReopen(t *testing.T) {
 		}
 	}
 	assertAIMutationCounts(t, 1, 1, 1)
-}
-
-// AutoSnapshot is intentionally asynchronous. Wait for the coalescing worker
-// to become idle before TempDir cleanup so it cannot write into a directory
-// that the testing package is concurrently removing.
-func settleAITransactionSnapshotsAtCleanup(t *testing.T) {
-	t.Helper()
-	t.Cleanup(func() {
-		deadline := time.Now().Add(3 * time.Second)
-		lastCount := -1
-		stableSince := time.Time{}
-		for time.Now().Before(deadline) {
-			snapshots, err := database.ListSnapshots("")
-			if err == nil && len(snapshots) > 0 {
-				if len(snapshots) != lastCount {
-					lastCount = len(snapshots)
-					stableSince = time.Now()
-				} else if time.Since(stableSince) >= 300*time.Millisecond {
-					return
-				}
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		t.Fatalf("AI snapshot worker did not settle before cleanup")
-	})
 }
 
 func assertAIMutationCounts(t *testing.T, transactions, idempotencyRows, usage int) {
