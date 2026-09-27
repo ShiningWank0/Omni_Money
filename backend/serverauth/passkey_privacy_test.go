@@ -229,6 +229,12 @@ func TestPaddedPasskeyLoginStillRequiresValidAssertionAndVaultSecret(t *testing.
 			if tc == "dummy-ceremony" {
 				email = "missing@example.test"
 			}
+			// Each rejected case intentionally counts toward the account
+			// throttle; reset it so this assertion-validation matrix can run
+			// more than loginThrottleMaxFailures cases.
+			if err := store.ClearLoginFailures(context.Background(), LoginThrottleKey(email)); err != nil {
+				t.Fatal(err)
+			}
 			begin, err := service.BeginPasskeyLogin(context.Background(), email, "client")
 			if err != nil {
 				t.Fatal(err)

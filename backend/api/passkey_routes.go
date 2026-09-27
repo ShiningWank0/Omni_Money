@@ -281,6 +281,9 @@ func handleAllPasskeysDelete(dependencies ServerDependencies, passkeys ServerPas
 }
 
 func writePasskeyError(w http.ResponseWriter, err error, login bool) {
+	if writeLoginThrottled(w, err) {
+		return
+	}
 	switch {
 	case login || errors.Is(err, serverauth.ErrInvalidCredentials):
 		writeInvalidCredentials(w)

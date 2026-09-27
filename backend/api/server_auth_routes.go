@@ -8,6 +8,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -159,7 +160,11 @@ func handleServerLogin(dependencies ServerDependencies) http.HandlerFunc {
 		defer request.clear()
 		session, err := dependencies.Accounts.Login(r.Context(), request.Email, request.Password, dependencies.now())
 		if err != nil {
-			auditAuth("server_login_failed", middleware.ClientIPFromRequest(r), "rejected")
+			reason := "rejected"
+			if _, throttled := serverauth.LoginThrottledRetryAfter(err); throttled {
+				reason = "account_throttled"
+			}
+			auditAuth("server_login_failed", middleware.ClientIPFromRequest(r), reason)
 			writeServerAccountError(w, err, serverOperationLogin)
 			return
 		}
@@ -794,7 +799,28 @@ const (
 	serverOperationCredential
 )
 
+// writeLoginThrottled renders the account-level lockout response and reports
+// whether the error was one. All account states produce the same envelope so a
+// locked decoy address (tracked because every email is counted) is
+// indistinguishable from a locked real account.
+func writeLoginThrottled(w http.ResponseWriter, err error) bool {
+	retryAfter, ok := serverauth.LoginThrottledRetryAfter(err)
+	if !ok {
+		return false
+	}
+	seconds := int(retryAfter / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	jsonError(w, "ログイン試行が多すぎます。しばらく待って再試行してください", http.StatusTooManyRequests)
+	return true
+}
+
 func writeServerAccountError(w http.ResponseWriter, err error, operation serverOperation) {
+	if writeLoginThrottled(w, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, serverauth.ErrAuthenticationBusy):
 		w.Header().Set("Retry-After", "1")

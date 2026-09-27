@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"omni_money/backend/securedb"
 )
@@ -30,10 +31,11 @@ var (
 )
 
 type Store struct {
-	mu     sync.RWMutex
-	db     *sql.DB
-	opener *securedb.Opener
-	closed bool
+	mu             sync.RWMutex
+	db             *sql.DB
+	opener         *securedb.Opener
+	closed         bool
+	throttleWrites atomic.Uint64
 }
 
 // Open opens an encrypted control-plane database and takes ownership of opener.

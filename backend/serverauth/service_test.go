@@ -44,6 +44,18 @@ type fakeControlStore struct {
 	disableUserFn                       func(context.Context, string, string, time.Time) error
 	replacePasswordCredentialFn         func(context.Context, string, control.PasswordCredential, control.PasswordCredentialInput, bool, time.Time) (int, error)
 	rotateRecoveryEnvelopeFn            func(context.Context, string, control.RecoveryEnvelope, control.RecoveryEnvelopeInput, time.Time) (control.RecoveryEnvelope, error)
+	loginThrottleLockedUntilFn          func(context.Context, string, time.Time) (time.Time, error)
+	registerLoginFailureFn              func(context.Context, string, time.Time, control.LoginThrottlePolicy) (time.Time, error)
+	clearLoginFailuresFn                func(context.Context, string) error
+	throttleMu                          sync.Mutex
+	throttle                            map[string]fakeLoginThrottleEntry
+}
+
+type fakeLoginThrottleEntry struct {
+	failures    int
+	level       int
+	lockedUntil time.Time
+	lastFailure time.Time
 }
 
 func (f *fakeControlStore) IsBootstrapped(ctx context.Context) (bool, error) {
@@ -163,6 +175,71 @@ func (f *fakeControlStore) RotateRecoveryEnvelope(ctx context.Context, userID st
 		panic("unexpected RotateRecoveryEnvelope call")
 	}
 	return f.rotateRecoveryEnvelopeFn(ctx, userID, expected, replacement, now)
+}
+
+func (f *fakeControlStore) LoginThrottleLockedUntil(ctx context.Context, accountKey string, now time.Time) (time.Time, error) {
+	if f.loginThrottleLockedUntilFn != nil {
+		return f.loginThrottleLockedUntilFn(ctx, accountKey, now)
+	}
+	f.throttleMu.Lock()
+	defer f.throttleMu.Unlock()
+	entry, ok := f.throttle[accountKey]
+	if !ok || !entry.lockedUntil.After(now) {
+		return time.Time{}, nil
+	}
+	return entry.lockedUntil.UTC(), nil
+}
+
+func (f *fakeControlStore) RegisterLoginFailure(ctx context.Context, accountKey string, now time.Time, policy control.LoginThrottlePolicy) (time.Time, error) {
+	if f.registerLoginFailureFn != nil {
+		return f.registerLoginFailureFn(ctx, accountKey, now, policy)
+	}
+	f.throttleMu.Lock()
+	defer f.throttleMu.Unlock()
+	if f.throttle == nil {
+		f.throttle = make(map[string]fakeLoginThrottleEntry)
+	}
+	entry := f.throttle[accountKey]
+	if entry.lockedUntil.After(now) {
+		return entry.lockedUntil.UTC(), nil
+	}
+	if !entry.lastFailure.IsZero() && now.Sub(entry.lastFailure) > policy.Decay {
+		entry = fakeLoginThrottleEntry{}
+	}
+	entry.failures++
+	entry.lastFailure = now
+	var lockedUntil time.Time
+	if entry.failures >= policy.MaxFailures {
+		maxLevel := 1
+		for duration := policy.BaseLock; duration < policy.MaxLock && maxLevel < 64; duration *= 2 {
+			maxLevel++
+		}
+		if entry.level < maxLevel {
+			entry.level++
+		}
+		duration := policy.BaseLock
+		for cycle := 1; cycle < entry.level && duration < policy.MaxLock; cycle++ {
+			duration *= 2
+		}
+		if duration > policy.MaxLock {
+			duration = policy.MaxLock
+		}
+		lockedUntil = now.Add(duration).UTC()
+		entry.lockedUntil = lockedUntil
+		entry.failures = 0
+	}
+	f.throttle[accountKey] = entry
+	return lockedUntil, nil
+}
+
+func (f *fakeControlStore) ClearLoginFailures(ctx context.Context, accountKey string) error {
+	if f.clearLoginFailuresFn != nil {
+		return f.clearLoginFailuresFn(ctx, accountKey)
+	}
+	f.throttleMu.Lock()
+	defer f.throttleMu.Unlock()
+	delete(f.throttle, accountKey)
+	return nil
 }
 
 type fakeSessionInvalidator struct {
