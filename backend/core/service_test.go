@@ -14,6 +14,8 @@ func setupCoreTestDB(t *testing.T) {
 	if err := database.InitDB(dbPath); err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
+	// CloseDB drains scheduled snapshots. Register it after TempDir so the
+	// worker finishes before the testing package removes its files (LIFO).
 	t.Cleanup(database.CloseDB)
 }
 
