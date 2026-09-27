@@ -51,6 +51,4 @@ trivy-report.json
 !.env.example
 secrets/
 
-# Backups
-backups/
 build/bin/
