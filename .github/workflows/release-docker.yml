@@ -83,21 +83,6 @@ jobs:
           go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
           go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 -tags server ./...
 
-      - name: Build release candidate image for scanning
-        env:
-          APP_VERSION: ${{ steps.version.outputs.version }}
-        run: docker build --build-arg "VERSION=$APP_VERSION" --tag omni-money:release-scan .
-
-      - name: Scan release candidate image
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
-        with:
-          image-ref: omni-money:release-scan
-          format: table
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-
   build:
     name: Build architecture image
     needs: prepare
@@ -134,6 +119,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push (single platform)
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
@@ -146,11 +132,30 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
 
+      # Scan the exact digest that was just pushed. Scanning a separately
+      # rebuilt candidate would not cover the published artifact, and this step
+      # runs for both architectures before the multi-arch manifest exists.
+      - name: Scan pushed architecture digest
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: ${{ needs.prepare.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
   manifest:
     name: Publish multi-architecture manifest
     needs: [prepare, build]
     permissions:
+      contents: read
       packages: write # publishes the final multi-architecture GHCR manifest
+      id-token: write # signs the build provenance attestation
+      attestations: write # records the attestation for gh attestation verify
     env:
       APP_VERSION: ${{ needs.prepare.outputs.version }}
     runs-on: ubuntu-latest
@@ -168,6 +173,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Create and push multi-arch manifest
+        id: publish
         env:
           IMAGE: ${{ needs.prepare.outputs.image }}
           VERSION: ${{ env.APP_VERSION }}
@@ -185,12 +191,6 @@ jobs:
             echo "Skipping :latest for prerelease ${VERSION}"
           fi
 
-      - name: Report published digest
-        env:
-          IMAGE: ${{ needs.prepare.outputs.image }}
-          VERSION: ${{ env.APP_VERSION }}
-        run: |
-          set -euo pipefail
           # Hash the exact raw index manifest instead of trusting a buildx
           # template, whose output format has changed across buildx releases.
           digest="sha256:$(docker buildx imagetools inspect --raw "${IMAGE}:${VERSION}" | sha256sum | awk '{print $1}')"
@@ -198,15 +198,34 @@ jobs:
             echo "::error::could not compute the published image digest"
             exit 1
           }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # The action records the attestation with the repository and mirrors it
+      # into GHCR using the default github.token plus this job's packages:write.
+      - name: Attest published image provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ${{ needs.prepare.outputs.image }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+
+      - name: Report published digest
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          VERSION: ${{ env.APP_VERSION }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
           {
             echo "### Published image"
             echo ""
             echo "- Tag: \`${IMAGE}:${VERSION}\`"
-            echo "- Digest-pinned reference: \`${IMAGE}@${digest}\`"
+            echo "- Digest-pinned reference: \`${IMAGE}@${DIGEST}\`"
+            echo "- Provenance: verified with \`scripts/resolve-image-digest.sh --verify --repo ${GITHUB_REPOSITORY}\`"
             echo ""
             echo "Deploy with:"
             echo ""
             echo '```'
-            echo "sudo scripts/safe-update.sh ${IMAGE}@${digest}"
+            echo "sudo scripts/safe-update.sh ${IMAGE}@${DIGEST}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

@@ -548,6 +548,7 @@ func handleBackupCSV(w http.ResponseWriter, r *http.Request) {
 		log.Printf("security_event=csv_export_stream_failed error=%v", err)
 		return
 	}
+	auditAuth("csv_export_succeeded", middleware.ClientIPFromRequest(r), "")
 }
 
 func handleImportCSV(w http.ResponseWriter, r *http.Request) {
@@ -598,6 +599,7 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 			writeFinancialError(w, err, http.StatusBadRequest)
 			return
 		}
+		auditAuth("csv_import_succeeded", middleware.ClientIPFromRequest(r), mode)
 		jsonResponse(w, map[string]interface{}{
 			"imported_count": count,
 			"source_digest":  digests.SourceDigest,
@@ -670,6 +672,7 @@ func handleImportCSV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	auditAuth("csv_import_succeeded", middleware.ClientIPFromRequest(r), body.Mode)
 	jsonResponse(w, map[string]interface{}{
 		"message":        fmt.Sprintf("CSVインポート完了: %d件", count),
 		"imported_count": count,
