@@ -121,6 +121,27 @@ resolved="$(PATH="$helper_bin:$PATH" FAKE_IMAGE_DIGEST="$helper_digest" "$resolv
 }
 [ "$resolved" = "$test_target_image" ] || { echo "FAIL: resolved reference '$resolved'" >&2; exit 1; }
 
+# --verify runs gh attestation verify against the resolved digest and fails
+# closed when the attestation check fails.
+cat > "$helper_bin/gh" <<'EOS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "${FAKE_GH_LOG:?}"
+exit "${FAKE_GH_STATUS:-0}"
+EOS
+chmod 0700 "$helper_bin/gh"
+gh_log="$test_root/gh-invocation.log"
+resolved="$(PATH="$helper_bin:$PATH" FAKE_IMAGE_DIGEST="$helper_digest" FAKE_GH_LOG="$gh_log" "$resolve_digest_helper" --verify --repo example/omni-money registry.example/omni-money:2.0.0)" || {
+  echo "FAIL: resolve-image-digest.sh --verify failed" >&2; exit 1;
+}
+[ "$resolved" = "$test_target_image" ] || { echo "FAIL: verified reference '$resolved'" >&2; exit 1; }
+[ "$(cat "$gh_log")" = "attestation verify oci://$test_target_image --repo example/omni-money" ] || {
+  echo "FAIL: unexpected gh invocation: $(cat "$gh_log")" >&2; exit 1;
+}
+assert_rejected "helper verify failure" env PATH="$helper_bin:$PATH" FAKE_IMAGE_DIGEST="$helper_digest" FAKE_GH_LOG="$gh_log" FAKE_GH_STATUS=1 "$resolve_digest_helper" --verify --repo example/omni-money registry.example/omni-money:2.0.0
+assert_rejected "helper verify without repo" env PATH="$helper_bin:$PATH" FAKE_IMAGE_DIGEST="$helper_digest" "$resolve_digest_helper" --verify registry.example/omni-money:2.0.0
+assert_rejected "helper reversed verify arguments" env PATH="$helper_bin:$PATH" FAKE_IMAGE_DIGEST="$helper_digest" "$resolve_digest_helper" --repo --verify registry.example/omni-money:2.0.0
+rm -f -- "$helper_bin/gh"
+
 # Fallback path: no buildx plugin, a successful pull, and a matching
 # RepoDigest. A foreign RepoDigest alone must never be adopted.
 cat > "$helper_bin/docker" <<'EOS'
