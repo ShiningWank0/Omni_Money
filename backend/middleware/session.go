@@ -793,8 +793,10 @@ func cloneSession(session *Session) *Session {
 	return &copy
 }
 
-// GetSessionFromRequest rejects duplicate/shadow cookies and requires the
-// __Host- cookie on HTTPS.
+// GetSessionFromRequest selects the transport's canonical session cookie.
+// Duplicate canonical cookies are rejected. Cookies under the other (legacy or
+// __Host-) name are ignored here and expired by the auth middleware so a
+// sibling-domain shadow cookie cannot fail every request.
 func (m *SessionManager) GetSessionFromRequest(r *http.Request) (*Session, bool) {
 	if m == nil || r == nil {
 		return nil, false
@@ -857,16 +859,12 @@ func (m *SessionManager) sessionForVaultRequest(r *http.Request) (*Session, bool
 
 func sessionIDFromRequest(r *http.Request) (string, error) {
 	expected := SessionCookieName
-	unexpected := SecureSessionCookieName
 	if RequestProto(r) == "https" {
-		expected, unexpected = SecureSessionCookieName, SessionCookieName
+		expected = SecureSessionCookieName
 	}
 	found := ""
 	count := 0
 	for _, cookie := range r.Cookies() {
-		if cookie.Name == unexpected {
-			return "", errors.New("unexpected session cookie")
-		}
 		if cookie.Name == expected {
 			count++
 			found = cookie.Value
@@ -876,6 +874,42 @@ func sessionIDFromRequest(r *http.Request) (string, error) {
 		return "", errors.New("missing or duplicate session cookie")
 	}
 	return found, nil
+}
+
+// discardUnexpectedSessionCookie expires the session cookie name that does not
+// belong to this transport. A sibling subdomain can set a Domain=parent cookie
+// under the legacy name; ignoring and expiring it keeps authentication bound to
+// the canonical cookie instead of rejecting every request.
+func discardUnexpectedSessionCookie(w http.ResponseWriter, r *http.Request) {
+	if w == nil || r == nil {
+		return
+	}
+	secure := RequestProto(r) == "https"
+	unexpected := SecureSessionCookieName
+	if secure {
+		unexpected = SessionCookieName
+	}
+	present := false
+	for _, cookie := range r.Cookies() {
+		if cookie.Name == unexpected && cookie.Value != "" {
+			present = true
+			break
+		}
+	}
+	if !present {
+		return
+	}
+	// #nosec G124 -- Secure is conditional only for loopback HTTP development;
+	// HTTPS requests always clear the shadow cookie with Secure + SameSite.
+	http.SetCookie(w, &http.Cookie{
+		Name:     unexpected,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   secure,
+	})
 }
 
 func (m *SessionManager) SetSessionCookie(w http.ResponseWriter, r *http.Request, session *Session) {
@@ -927,6 +961,7 @@ func (m *SessionManager) ClearSessionCookie(w http.ResponseWriter, r *http.Reque
 // scoped copy before CSRF/recent-auth middleware runs.
 func SessionAuthMiddleware(sessionManager *SessionManager, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		discardUnexpectedSessionCookie(w, r)
 		if !requiresSessionAuth(r) {
 			next.ServeHTTP(w, r)
 			return
@@ -954,6 +989,7 @@ type CurrentUserStore interface {
 // for Desktop and existing single-user server tests.
 func VaultSessionAuthMiddleware(sessionManager *SessionManager, users CurrentUserStore, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		discardUnexpectedSessionCookie(w, r)
 		if !requiresSessionAuth(r) {
 			next.ServeHTTP(w, r)
 			return

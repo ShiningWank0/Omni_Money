@@ -281,6 +281,33 @@ func TestPaddedPasskeyLoginStillRequiresValidAssertionAndVaultSecret(t *testing.
 	}
 }
 
+func TestPasskeyLoginFinishHoldsResponseFloorForDecoyAndRealFailures(t *testing.T) {
+	record, _ := privacyTestRecord(t, 1)
+	store := &privacyTestStore{user: control.UserSummary{ID: serverAuthTestUserID, Email: "person@example.test", State: control.UserActive}, records: []control.PasskeyCredential{record}}
+	service := privacyTestService(t, store)
+	for _, email := range []string{"person@example.test", "missing@example.test"} {
+		t.Run(email, func(t *testing.T) {
+			begin, err := service.BeginPasskeyLogin(context.Background(), email, "client")
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := time.Now()
+			_, err = service.FinishPasskeyLogin(context.Background(), FinishPasskeyLoginInput{
+				CeremonyID: begin.CeremonyID, ClientKey: "client",
+				CredentialJSON: json.RawMessage(`{}`),
+				PRFResult:      bytes.Repeat([]byte{9}, keyenvelope.PasskeySecretSize),
+			}, time.Now())
+			elapsed := time.Since(started)
+			if !errors.Is(err, ErrInvalidCredentials) {
+				t.Fatalf("finish error = %v", err)
+			}
+			if elapsed < passkeyLoginResponseFloor {
+				t.Fatalf("finish returned before the response floor: %s", elapsed)
+			}
+		})
+	}
+}
+
 func TestPasskeyPrivacyRequiresPersistentSecretAndSeparatesEmails(t *testing.T) {
 	store := &privacyTestStore{user: control.UserSummary{ID: serverAuthTestUserID, Email: "person@example.test", State: control.UserActive}}
 	service := privacyTestService(t, store)
@@ -309,7 +336,7 @@ func TestPasskeyPrivacyRequiresPersistentSecretAndSeparatesEmails(t *testing.T) 
 	lengths := map[int]bool{}
 	for _, descriptor := range first.Options.Response.AllowedCredentials {
 		length := len(descriptor.CredentialID)
-		if length < 16 || length > 1023 {
+		if length < 16 || length > 1024 {
 			t.Fatal("decoy ID is outside the WebAuthn size range")
 		}
 		lengths[length] = true

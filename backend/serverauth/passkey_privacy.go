@@ -20,9 +20,22 @@ import (
 )
 
 // This floor masks ordinary differences between missing-user and credential
-// queries. It is not a constant-time guarantee under database overload. The
-// public HTTP rate limit still applies before this work starts.
+// queries on both login/begin and login/finish. It is not a constant-time
+// guarantee under database overload. The public HTTP rate limit still applies
+// before this work starts.
 const passkeyLoginResponseFloor = 100 * time.Millisecond
+
+// holdPasskeyLoginFloor blocks until the floor has elapsed since started. The
+// request context may end the wait early; a canceled client cannot observe the
+// response, so the timing channel is already closed for that request.
+func holdPasskeyLoginFloor(ctx context.Context, started time.Time) {
+	timer := time.NewTimer(time.Until(started.Add(passkeyLoginResponseFloor)))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
 
 func (s *Service) beginPrivatePasskeyLogin(ctx context.Context, email, clientKey string) (result PasskeyLoginBegin, resultErr error) {
 	started := time.Now()
@@ -123,7 +136,9 @@ func (s *Service) passkeyDecoy(email, purpose string, index int) []byte {
 // their statistical length distribution can be hidden by an allowlist.
 func (s *Service) passkeyDecoyCredentialID(email string, index int) []byte {
 	seed := s.passkeyDecoy(email, "credential", index)
-	length := 16 + (int(seed[0])*256+int(seed[1]))%1008
+	// Cover the full accepted credential ID range (16..1024) so a maximum-length
+	// real credential is not the only length a decoy can never produce.
+	length := 16 + (int(seed[0])*256+int(seed[1]))%1009
 	commonLengths := [...]int{16, 32, 64, 96, 128, 256}
 	if choice := int(seed[2]) % (len(commonLengths) + 1); choice < len(commonLengths) {
 		length = commonLengths[choice]
