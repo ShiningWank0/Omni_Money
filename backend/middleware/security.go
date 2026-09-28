@@ -27,7 +27,11 @@ func cleanupCSVSpoolFile(temp *fileprivacy.PrivateTempFile) {
 }
 
 const (
-	cspHeaderValue = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:"
+	// base-uri/object-src/frame-ancestors do not fall back to default-src;
+	// declare them explicitly so a future injection cannot retarget relative
+	// URLs, embed plugins, or frame the app. X-Frame-Options remains as
+	// defense in depth for older browsers.
+	cspHeaderValue = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 
 	// maxRequestBodySize はリクエストボディの最大サイズ（10MB）
 	maxRequestBodySize = 10 * 1024 * 1024

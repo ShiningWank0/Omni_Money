@@ -9,9 +9,9 @@
 | govulncheck | Go標準ライブラリ・依存関係の既知の脆弱性。呼び出し経路に到達する問題で失敗。Desktopとserverの両ビルド条件を検査 |
 | gosec | コードの危険な実装パターン。medium以上で失敗。Desktopとserverの両ビルド条件を検査 |
 | npm audit | frontendの依存関係。high以上で失敗 |
-| Trivy | ビルドしたOmni MoneyイメージのOS・ライブラリ。修正版のあるHIGH/CRITICALで失敗。`ignore-unfixed: true`のため未修正の問題は除外 |
+| Trivy | Omni MoneyイメージのOS・ライブラリ。修正版のあるHIGH/CRITICALで失敗。`ignore-unfixed: true`のため未修正の問題は除外。Docker Releaseではpush済みの各アーキテクチャdigest（公開される実体）をスキャンし、multi-arch manifestの公開前にゲートする |
 
-Docker公開前にもこれらの検査を実行する。CI成功は、未修正の既知問題や静的解析で分からない設計上の問題がないことを保証しない。Pangolin、Newt、Gerbil、Traefik、Badger、VPS/TrueNASそのものは別配備のため、このCIの検査対象ではない。
+Docker公開前にもこれらの検査を実行する。Docker Releaseは公開したindex digestへbuild provenance attestationを付与し、`scripts/resolve-image-digest.sh --verify --repo OWNER/REPO`で検証できる。CI成功は、未修正の既知問題や静的解析で分からない設計上の問題がないことを保証しない。Pangolin、Newt、Gerbil、Traefik、Badger、VPS/TrueNASそのものは別配備のため、このCIの検査対象ではない。
 
 ## 定期検査のIssue報告
 
@@ -47,7 +47,7 @@ Issue報告ジョブは同じ実行・同じattemptのartifactだけを読む。
 
 ## パスキーログインの情報漏えい対策と限界
 
-有効なメール形式について、アカウント不存在・無効化・パスキー未登録でも、公開login/beginは架空の候補を含む認証開始応答を返す。候補数は登録上限の10件に揃え、transport情報を省略する。架空IDとPRF saltは目的分離した永続秘密鍵と正規化メールから決定的に生成し、通常の問い合わせ時間差には100msの応答時間下限を設ける。秘密鍵は既存control DB鍵からHKDFで導出するため、追加設定・DB移行は不要。
+有効なメール形式について、アカウント不存在・無効化・パスキー未登録でも、公開login/beginは架空の候補を含む認証開始応答を返す。候補数は登録上限の10件に揃え、transport情報を省略する。架空IDとPRF saltは目的分離した永続秘密鍵と正規化メールから決定的に生成する。login/beginは関数全体に、login/finishは全ての失敗応答（架空ceremonyを含む）に100msの応答時間下限を設け、成功時のみ下限を適用しない。秘密鍵は既存control DB鍵からHKDFで導出するため、追加設定・DB移行は不要。
 
 架空候補はサーバー側の認証許可リストに入れず、架空アカウントのceremonyはfinishで拒否する。本物の署名、RP/origin、user verification、本人のcredential、PRFによるvault鍵の復号、期限、一回限りの利用を引き続き検証する。
 
