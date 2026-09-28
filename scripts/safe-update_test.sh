@@ -21,6 +21,9 @@ if [ -n "${SAFE_UPDATE_ONLY:-}" ] && [ "$safe_update_shard_count" -ne 1 ]; then
 fi
 safe_update_case_index=0
 safe_update_cases_run=0
+# Digest-pinned target used by every state-machine scenario. safe-update only
+# accepts complete lowercase sha256 digests; mutable tags are rejected.
+test_target_image="registry.example/omni-money@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 # Docker-free safe-update regression suite. Linux runs the real updater through
 # a mock Docker/Compose state machine; other hosts run portable preflight tests.
@@ -90,9 +93,78 @@ assert_rejected "parent traversal" reject_path_syntax "$test_root/../escape"
 path_contains "$test_root" "$test_root/child"
 assert_rejected "ambiguous sibling prefix" path_contains "$test_root/data" "$test_root/database"
 assert_rejected "registry port without immutable tag" validate_image_reference "registry:5000/image"
+assert_rejected "mutable version tag" validate_image_reference "registry:5000/image:1.2.3"
 assert_rejected "mutable latest tag" validate_image_reference "registry:5000/image:latest"
-validate_image_reference "registry:5000/image:1.2.3"
-validate_image_reference "registry:5000/image@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+assert_rejected "truncated digest" validate_image_reference "registry:5000/image@sha256:0123456789abcdef"
+assert_rejected "non-sha256 digest" validate_image_reference "registry:5000/image@sha512:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+assert_rejected "uppercase digest" validate_image_reference "registry:5000/image@sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
+validate_image_reference "$test_target_image"
+validate_image_reference "registry:5000/image:1.2.3@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+# resolve-image-digest.sh resolves tags with the Docker CLI, passes complete
+# digests through untouched, and rejects unsafe or unresolvable references.
+resolve_digest_helper="$script_dir/resolve-image-digest.sh"
+[ -x "$resolve_digest_helper" ] || { echo "FAIL: resolve-image-digest.sh is not executable" >&2; exit 1; }
+helper_bin="$test_root/helper-bin"; mkdir -m 0700 -p -- "$helper_bin"
+cat > "$helper_bin/docker" <<'EOS'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "buildx version") exit 0 ;;
+  "buildx imagetools") printf '%s\n' "${FAKE_IMAGE_DIGEST:?}"; exit 0 ;;
+esac
+exit 97
+EOS
+chmod 0700 "$helper_bin/docker"
+helper_digest="${test_target_image#*@}"
+resolved="$(PATH="$helper_bin:$PATH" FAKE_IMAGE_DIGEST="$helper_digest" "$resolve_digest_helper" registry.example/omni-money:2.0.0)" || {
+  echo "FAIL: resolve-image-digest.sh failed to resolve a tag" >&2; exit 1;
+}
+[ "$resolved" = "$test_target_image" ] || { echo "FAIL: resolved reference '$resolved'" >&2; exit 1; }
+
+# Fallback path: no buildx plugin, a successful pull, and a matching
+# RepoDigest. A foreign RepoDigest alone must never be adopted.
+cat > "$helper_bin/docker" <<'EOS'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "buildx version") exit 1 ;;
+  "pull --quiet") exit 0 ;;
+  "image inspect") printf '%s\n' "${FAKE_REPO_DIGESTS:?}"; exit 0 ;;
+esac
+exit 97
+EOS
+chmod 0700 "$helper_bin/docker"
+resolved="$(PATH="$helper_bin:$PATH" FAKE_REPO_DIGESTS="other.example/image@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+registry.example/omni-money@$helper_digest" "$resolve_digest_helper" registry.example/omni-money:2.0.0)" || {
+  echo "FAIL: resolve-image-digest.sh fallback resolution failed" >&2; exit 1;
+}
+[ "$resolved" = "$test_target_image" ] || { echo "FAIL: fallback resolution returned '$resolved'" >&2; exit 1; }
+assert_rejected "helper foreign RepoDigest" env PATH="$helper_bin:$PATH" FAKE_REPO_DIGESTS="other.example/image@sha256:$helper_digest" "$resolve_digest_helper" registry.example/omni-money:2.0.0
+
+# Digest passthrough never needs Docker.
+cat > "$helper_bin/docker" <<'EOS'
+#!/usr/bin/env bash
+exit 97
+EOS
+chmod 0700 "$helper_bin/docker"
+resolved="$(PATH="$helper_bin:$PATH" "$resolve_digest_helper" "$test_target_image")" || {
+  echo "FAIL: resolve-image-digest.sh failed on an existing digest" >&2; exit 1;
+}
+[ "$resolved" = "$test_target_image" ] || { echo "FAIL: digest passthrough returned '$resolved'" >&2; exit 1; }
+assert_rejected "helper without tag or digest" env PATH="$helper_bin:$PATH" "$resolve_digest_helper" "registry.example/omni-money"
+assert_rejected "helper latest tag" env PATH="$helper_bin:$PATH" "$resolve_digest_helper" "registry.example/omni-money:latest"
+assert_rejected "helper invalid digest" env PATH="$helper_bin:$PATH" "$resolve_digest_helper" "registry.example/omni-money@sha256:xyz"
+assert_rejected "helper empty repository digest" env PATH="$helper_bin:$PATH" "$resolve_digest_helper" "@sha256:$helper_digest"
+cat > "$helper_bin/docker" <<'EOS'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "buildx version") exit 0 ;;
+  "buildx imagetools") printf 'garbage\n'; exit 0 ;;
+  "pull --quiet") exit 1 ;;
+esac
+exit 97
+EOS
+chmod 0700 "$helper_bin/docker"
+assert_rejected "helper unresolvable digest" env PATH="$helper_bin:$PATH" "$resolve_digest_helper" "registry.example/omni-money:2.0.0"
 
 printf '# safe dotenv\nOMNI_IMAGE=registry.example/omni:1.2.3\nEMPTY=\nQUOTED='"'"'single line'"'"'\n' > "$pin_dir-safe-env"
 validate_compose_env_syntax "$pin_dir-safe-env"
@@ -791,7 +863,7 @@ run_case() {
   rm -f -- "$fixture_root/at-rest.json.replaced"
   original_env_hash="$(sha256_file "$fixture_root/.env")"
   original_data_hash="$(sha256sum -- "$fixture_root/data/ledger.txt" | sed -E 's/[[:space:]].*$//')"
-  output="$(run_update env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT -u DOCKER_CONFIG -u DOCKER_CLI_PLUGIN_EXTRA_DIRS -u DOCKER_CLI_EXPERIMENTAL SAFE_UPDATE_INSTRUMENTED_MOCK_BIN="$mock_bin" MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO="$scenario" MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" OMNI_UPDATE_HEALTH_TIMEOUT_SECONDS=30 "${scenario_env[@]}" "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 2>&1)" || status=$?
+  output="$(run_update env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT -u DOCKER_CONFIG -u DOCKER_CLI_PLUGIN_EXTRA_DIRS -u DOCKER_CLI_EXPERIMENTAL SAFE_UPDATE_INSTRUMENTED_MOCK_BIN="$mock_bin" MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO="$scenario" MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" OMNI_UPDATE_HEALTH_TIMEOUT_SECONDS=30 "${scenario_env[@]}" "$fixture_root/scripts/safe-update.sh" "$test_target_image" 2>&1)" || status=$?
   if [ "$status" -ne "$expected" ]; then printf 'FAIL: scenario %s returned %s (expected %s)\n%s\nmock log:\n' "$scenario" "$status" "$expected" "$output" >&2; sed -n '1,120p' "$mock_state/log" >&2; exit 1; fi
   if grep -Eq 'control-key|at-rest-secret-value' <<< "$output" || grep -Eq 'control-key|at-rest-secret-value' "$mock_state/log"; then
     echo "FAIL: $scenario exposed secret content in output or mock log" >&2
@@ -807,7 +879,7 @@ run_case() {
     journal_path="$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
     [ -f "$journal_path" ] && [ -d "$fixture_root/.omni-money-safe-update.lock" ] || { echo "FAIL: SIGKILL did not leave durable recovery state" >&2; exit 1; }
     stale_status=0
-env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT SAFE_UPDATE_INSTRUMENTED_MOCK_BIN="$mock_bin" MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO=stale_lock MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 >/dev/null 2>&1 || stale_status=$?
+env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT SAFE_UPDATE_INSTRUMENTED_MOCK_BIN="$mock_bin" MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO=stale_lock MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" "$fixture_root/scripts/safe-update.sh" "$test_target_image" >/dev/null 2>&1 || stale_status=$?
     [ "$stale_status" -ne 0 ] && [ -d "$fixture_root/.omni-money-safe-update.lock" ] || { echo "FAIL: stale SIGKILL lock was not fail-closed" >&2; exit 1; }
     rmdir -- "$fixture_root/.omni-money-safe-update.lock"
     for pin_path in "$fixture_root"/.omni-money-safe-update-pin.*; do [ -d "$pin_path" ] && [ ! -L "$pin_path" ] && rm -rf -- "$pin_path"; done
@@ -926,7 +998,7 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT SA
   if [ "$scenario" = success ] || [ "$scenario" = ambient_override ] || [ "$scenario" = legacy_project ]; then
     grep -q 'update succeeded' <<< "$output" || { echo "FAIL: success scenario did not verify update" >&2; exit 1; }
     [ "$(cat "$mock_state/phase")" = candidate ] && [ "$(cat "$mock_state/candidate_state")" = running ] && [ "$(cat "$mock_state/net_candidate")" = connected ] || { echo "FAIL: success candidate was not healthy and connected" >&2; exit 1; }
-    grep -q 'OMNI_IMAGE=registry.example/omni-money:1.2.3' "$fixture_root/.env" || { echo "FAIL: success did not persist the new image" >&2; exit 1; }
+    grep -Fq "OMNI_IMAGE=$test_target_image" "$fixture_root/.env" || { echo "FAIL: success did not persist the new image" >&2; exit 1; }
     grep -Fq 'inspect --format {{json .}} candidate' "$mock_state/log" || { echo "FAIL: success did not compare the candidate runtime contract" >&2; exit 1; }
     for reserve_path in "$fixture_root/omni-money-update-checkpoints"/*/.capacity.reserve; do
       [ ! -e "$reserve_path" ] || { echo "FAIL: success retained the capacity reservation" >&2; exit 1; }
@@ -974,7 +1046,7 @@ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONTEXT SA
 }
 
 cat > "$mock_state/config.json" <<EOF
-{"name":"omni-money","x-omni-update-attestation-file":"./attestation.json","services":{"omni-money":{"image":"registry.example/omni-money:1.2.3","container_name":"omni-money","user":"10001:10001","group_add":[],"restart":"unless-stopped","read_only":true,"cap_drop":["ALL"],"cap_add":[],"devices":[],"security_opt":["no-new-privileges:true"],"cpus":2.0,"mem_limit":"1g","pids_limit":256,"logging":{"driver":"json-file","options":{"max-size":"10m","max-file":"3"}},"ports":[],"environment":{"CONTROL_DB_PATH":"/app/data/control/omni_control.db","CONTROL_DB_ENCRYPTION_KEY_FILE":"/run/secrets/omni_control_database_key","VAULT_ROOT":"/app/data/vaults","AUTH_KDF_CONCURRENCY":"2","TMPDIR":"/tmp","SQLITE_TMPDIR":"/tmp","DATA_AT_REST_MODE":"external-encrypted-volume","DATA_AT_REST_ATTESTATION_FILE":"/run/secrets/omni_data_at_rest_attestation.json","HOST_IP":"0.0.0.0","PORT":"4000","SESSION_MAX_AGE_HOURS":"8","SESSION_IDLE_TIMEOUT_MINUTES":"15","SESSION_REAUTH_MAX_AGE_MINUTES":"5","SESSION_MAX_CONCURRENT":"3","TRUSTED_PROXIES":"172.30.240.3/32","FORCE_HTTPS":"true","ALLOW_INSECURE_HTTP":"false","HTTPS_REDIRECT_HOST":"","PASSKEY_RP_ID":"","PASSKEY_ORIGINS":"","ALLOWED_HOSTS":"money.example.com","CORS_ALLOWED_ORIGINS":""},"volumes":[{"type":"bind","source":"$fixture_root/data","target":"/app/data","read_only":false},{"type":"tmpfs","target":"/tmp"}],"secrets":[{"source":"omni_data_at_rest_attestation","target":"omni_data_at_rest_attestation.json"},{"source":"omni_control_database_key","target":"omni_control_database_key"}],"networks":{"pangolin_target":{"ipv4_address":"172.30.240.2"}}}},"secrets":{"omni_data_at_rest_attestation":{"file":"$fixture_root/at-rest.json"},"omni_control_database_key":{"file":"$fixture_root/control.key"}},"networks":{"pangolin_target":{"name":"omni-money-pangolin","internal":true,"ipam":{"config":[{"subnet":"172.30.240.0/28"}]}}}}
+{"name":"omni-money","x-omni-update-attestation-file":"./attestation.json","services":{"omni-money":{"image":"$test_target_image","container_name":"omni-money","user":"10001:10001","group_add":[],"restart":"unless-stopped","read_only":true,"cap_drop":["ALL"],"cap_add":[],"devices":[],"security_opt":["no-new-privileges:true"],"cpus":2.0,"mem_limit":"1g","pids_limit":256,"logging":{"driver":"json-file","options":{"max-size":"10m","max-file":"3"}},"ports":[],"environment":{"CONTROL_DB_PATH":"/app/data/control/omni_control.db","CONTROL_DB_ENCRYPTION_KEY_FILE":"/run/secrets/omni_control_database_key","VAULT_ROOT":"/app/data/vaults","AUTH_KDF_CONCURRENCY":"2","TMPDIR":"/tmp","SQLITE_TMPDIR":"/tmp","DATA_AT_REST_MODE":"external-encrypted-volume","DATA_AT_REST_ATTESTATION_FILE":"/run/secrets/omni_data_at_rest_attestation.json","HOST_IP":"0.0.0.0","PORT":"4000","SESSION_MAX_AGE_HOURS":"8","SESSION_IDLE_TIMEOUT_MINUTES":"15","SESSION_REAUTH_MAX_AGE_MINUTES":"5","SESSION_MAX_CONCURRENT":"3","TRUSTED_PROXIES":"172.30.240.3/32","FORCE_HTTPS":"true","ALLOW_INSECURE_HTTP":"false","HTTPS_REDIRECT_HOST":"","PASSKEY_RP_ID":"","PASSKEY_ORIGINS":"","ALLOWED_HOSTS":"money.example.com","CORS_ALLOWED_ORIGINS":""},"volumes":[{"type":"bind","source":"$fixture_root/data","target":"/app/data","read_only":false},{"type":"tmpfs","target":"/tmp"}],"secrets":[{"source":"omni_data_at_rest_attestation","target":"omni_data_at_rest_attestation.json"},{"source":"omni_control_database_key","target":"omni_control_database_key"}],"networks":{"pangolin_target":{"ipv4_address":"172.30.240.2"}}}},"secrets":{"omni_data_at_rest_attestation":{"file":"$fixture_root/at-rest.json"},"omni_control_database_key":{"file":"$fixture_root/control.key"}},"networks":{"pangolin_target":{"name":"omni-money-pangolin","internal":true,"ipam":{"config":[{"subnet":"172.30.240.0/28"}]}}}}
 EOF
 
 jq '.services["omni-money"].runtime = "runc"' "$mock_state/config.json" > "$mock_state/config.with-runtime.json"
@@ -1060,7 +1132,7 @@ mkdir -m 0700 -- "$fixture_root/omni-money-update-checkpoints"
 printf '%s\n' '{"version":1,"phase":"stopping"}' > "$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
 chmod 0600 "$fixture_root/omni-money-update-checkpoints/.safe-update-journal"
 stale_status=0
-env SAFE_UPDATE_INSTRUMENTED_MOCK_BIN="$mock_bin" MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO=stale_journal MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" OMNI_UPDATE_HEALTH_TIMEOUT_SECONDS=30 "$fixture_root/scripts/safe-update.sh" registry.example/omni-money:1.2.3 >/dev/null 2>&1 || stale_status=$?
+env SAFE_UPDATE_INSTRUMENTED_MOCK_BIN="$mock_bin" MOCK_STATE_DIR="$mock_state" MOCK_SCENARIO=stale_journal MOCK_LOG="$mock_state/log" MOCK_CONFIG="$mock_state/config.json" MOCK_FIXTURE="$fixture_root" MOCK_DATA="$fixture_root/data" MOCK_ATTESTATION="$fixture_root/attestation.json" MOCK_AT_REST="$fixture_root/at-rest.json" MOCK_CONTROL_KEY="$fixture_root/control.key" MOCK_ENV="$fixture_root/.env" MOCK_COMPOSE="$fixture_root/compose.yaml" OMNI_UPDATE_HEALTH_TIMEOUT_SECONDS=30 "$fixture_root/scripts/safe-update.sh" "$test_target_image" >/dev/null 2>&1 || stale_status=$?
 [ "$stale_status" -ne 0 ] && [ -f "$fixture_root/omni-money-update-checkpoints/.safe-update-journal" ] || { echo "FAIL: stale durable journal was not fail-closed" >&2; exit 1; }
 rm -rf -- "$fixture_root/omni-money-update-checkpoints"
 echo "safe-update state-machine tests passed"

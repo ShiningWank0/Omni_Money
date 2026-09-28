@@ -1,9 +1,10 @@
 # 安全な更新と限定ロールバック
 
 Pangolin/TrueNAS の production Compose project では、同梱の
-scripts/safe-update.sh を version tag または digest と一緒に使います。更新処理は
-Linux + Bash 3.2以降 + GNU tar の host contract を要求し、条件を満たさない場合は停止処理を
-開始せず fail closed します。
+scripts/safe-update.sh を digest 固定した image reference と一緒に使います。tag は可変で
+registry 側の差替えを検知できないため、`repository@sha256:<64 hex>` 以外は受け付けません。
+更新処理は Linux + Bash 3.2以降 + GNU tar の host contract を要求し、条件を満たさない場合は
+停止処理を開始せず fail closed します。
 
 ## 固定された入力と Compose contract
 
@@ -17,9 +18,13 @@ Linux + Bash 3.2以降 + GNU tar の host contract を要求し、条件を満�
   呼び出し前に除去し、選択したprivate env fileを唯一のCompose環境入力にします。
   dotenvは停止前に安全なsingle-line subsetへ限定し、`KEY=value`以外のcolon形式、assignment
   前後の空白、未終端/multiline quote、展開・escape構文を拒否します。
-- image 引数は最後の path component に明示的な immutable version tag を持つか、完全な
-  `@sha256:<64 hex>` digest でなければなりません。`registry:5000/image` は port を
-  tag と誤認しないよう拒否し、`latest` も拒否します。
+- image 引数は完全な小文字 `@sha256:<64 hex>` digest でなければなりません。tag だけの
+  reference（`latest` を含む）は可変で trust anchor にならないため拒否します。tag を併記した
+  `image:tag@sha256:...` は Docker が digest を優先するため受理しますが、運用では digest だけを
+  指定してください。`registry:5000/image` は port を tag と誤認しないよう拒否します。digest は
+  同梱の `scripts/resolve-image-digest.sh <image:tag>` で解決でき、GitHub Actions の Docker
+  Release も公開した digest を job summary へ記録します。helper の出力と job summary の digest が
+  一致することを確認してから更新してください。
 - source Compose file と attestation も owner/mode、device、inode、link count、digest
   を検証します。Compose 自身が生成した resolved JSON を一度だけ private snapshot に
   保存し、以後の ps --all、up --no-start、candidate/rollback 作成はその snapshot
@@ -149,9 +154,12 @@ mode `0700` で、いずれも同じ暗号化 filesystem 上に置きます。�
 場合は、先に `sudo chown`/`sudo chmod` と attestation の3 pathを更新し、dry-run相当の
 preflight（安全更新テスト）を通してから実行します。実行例は次の通りです。
 
-    sudo ./scripts/safe-update.sh ghcr.io/shiningwank0/omni_money:1.1.0
+    image="$(./scripts/resolve-image-digest.sh ghcr.io/shiningwank0/omni_money:<version>)"
+    sudo ./scripts/safe-update.sh "$image"
 
-`safe-update.sh` は executable bit を付けたまま、上記のようにpathを直接指定して実行します。
+`resolve-image-digest.sh` はtagをregistryのdigestへ解決します。解決結果はDocker Releaseの
+job summaryが記録したdigestと照合してください。`safe-update.sh` は executable bit を
+付けたまま、上記のようにpathを直接指定して実行します。
 entry pointは `#!/bin/bash -p` により、script本文より前の `BASH_ENV` 読込みとexport済み
 shell functionのimportを無効化します。`sudo bash scripts/safe-update.sh ...`、
 `bash scripts/safe-update.sh ...`、`source scripts/safe-update.sh` は使用できず、script側も
@@ -183,7 +191,8 @@ lock/journal/recovery bundleを削除せず、serviceを停止したまま管理
 ## 実行例
 
     chmod 700 scripts/safe-update.sh
-    sudo ./scripts/safe-update.sh ghcr.io/shiningwank0/omni_money:1.1.0
+    image="$(./scripts/resolve-image-digest.sh ghcr.io/shiningwank0/omni_money:<version>)"
+    sudo ./scripts/safe-update.sh "$image"
 
 実行前に、data directory、固定 attestation、base Compose の secret file、暗号化 volume
 が production contract に一致していることを確認します。

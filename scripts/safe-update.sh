@@ -268,27 +268,17 @@ fail() {
 }
 
 validate_image_reference() {
-  local image="$1" last_component tag
+  local image="$1"
   case "$image" in
     ''|*[!A-Za-z0-9._/@:+-]*) fail "image reference contains unsupported characters"; return 1 ;;
   esac
-  case "$image" in
-    *@*)
-      [[ "$image" =~ ^[^@]+@sha256:[0-9a-fA-F]{64}$ ]] || {
-        fail "image digest must be a complete sha256 digest"
-        return 1
-      }
-      ;;
-    *)
-      last_component="${image##*/}"
-      case "$last_component" in
-        *:*) tag="${last_component##*:}" ;;
-        *) fail "image reference must include an immutable version tag or sha256 digest"; return 1 ;;
-      esac
-      [ -n "$tag" ] || { fail "image tag must not be empty"; return 1; }
-      [ "$tag" != latest ] || { fail "the mutable latest tag is not allowed"; return 1; }
-      ;;
-  esac
+  # Registry tags are mutable. A tag, even combined with a digest, is not the
+  # trust anchor; only a complete lowercase sha256 digest is immutable, so a
+  # registry compromise cannot swap the artifact between release and deploy.
+  [[ "$image" =~ ^[^@]+@sha256:[0-9a-f]{64}$ ]] || {
+    fail "target image must be pinned by digest (repository@sha256:<64 hex>); version tags are mutable"
+    return 1
+  }
 }
 
 stat_owner() {
@@ -2267,7 +2257,7 @@ safe_update_main() {
   active_env_device="$env_device"; active_env_inode="$env_inode"; active_env_nlink="$env_nlink"; active_env_hash="$env_hash"
   case "$health_timeout" in ''|*[!0-9]*) fail "OMNI_UPDATE_HEALTH_TIMEOUT_SECONDS must be an integer" ;; esac
   (( health_timeout >= 30 && health_timeout <= 600 )) || fail "health timeout must be between 30 and 600 seconds"
-  [ -n "$target_image" ] || fail "usage: scripts/safe-update.sh <pinned-image:version-or-digest>"
+  [ -n "$target_image" ] || fail "usage: scripts/safe-update.sh <repository@sha256:digest>"
   validate_image_reference "$target_image"
   if [ -e "$lock_dir" ] || [ -L "$lock_dir" ]; then
     [ ! -L "$lock_dir" ] || fail "safe-update lock is a symlink; manual recovery is required"
