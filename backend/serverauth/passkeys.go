@@ -240,10 +240,23 @@ func (s *Service) beginPasskeyAssertion(ctx context.Context, userID, clientKey, 
 	return PasskeyLoginBegin{CeremonyID: ceremonyID, Options: assertion}, nil
 }
 
+// FinishPasskeyLogin completes a discoverable login. Every failure path holds
+// the response for passkeyLoginResponseFloor so a decoy ceremony cannot be
+// distinguished from a real account by response time. Successful logins are
+// not delayed; producing one requires the credential.
 func (s *Service) FinishPasskeyLogin(ctx context.Context, input FinishPasskeyLoginInput, now time.Time) (*middleware.Session, error) {
 	if !s.passkeysReady() {
 		return nil, ErrPasskeysUnavailable
 	}
+	started := time.Now()
+	session, err := s.finishPasskeyLogin(ctx, input, now)
+	if err != nil {
+		holdPasskeyLoginFloor(ctx, started)
+	}
+	return session, err
+}
+
+func (s *Service) finishPasskeyLogin(ctx context.Context, input FinishPasskeyLoginInput, now time.Time) (*middleware.Session, error) {
 	user, vaultID, dek, unlock, err := s.validatePasskeyAssertion(ctx, "", passkeyCeremonyLogin, input, now, true)
 	if err != nil {
 		return nil, err

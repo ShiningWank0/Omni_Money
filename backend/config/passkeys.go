@@ -35,6 +35,25 @@ func passkeyConfigFromEnv(transport WebTransportConfig, listenHost, port string)
 	if rpID == "" || strings.ContainsAny(rpID, "/@\x00\r\n\t ") || (strings.Contains(rpID, ":") && net.ParseIP(rpID) == nil) {
 		return PasskeyConfig{}, errors.New("PASSKEY_RP_ID must be a hostname without a scheme, path, or port")
 	}
+	// A single-label or public-suffix RP ID (for example "com") would make every
+	// origin below it a valid passkey scope. Require an explicit domain, and
+	// when ALLOWED_HOSTS is configured require exact equality with one entry.
+	if !IsLoopbackHost(rpID) && net.ParseIP(rpID) == nil {
+		if len(allowedHosts) > 0 {
+			matched := false
+			for _, host := range allowedHosts {
+				if strings.EqualFold(hostWithoutPort(host), rpID) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return PasskeyConfig{}, errors.New("PASSKEY_RP_ID must equal one of the ALLOWED_HOSTS entries")
+			}
+		} else if !strings.Contains(rpID, ".") {
+			return PasskeyConfig{}, errors.New("PASSKEY_RP_ID must be a registrable domain or match ALLOWED_HOSTS")
+		}
+	}
 
 	origins := splitNonEmpty(os.Getenv("PASSKEY_ORIGINS"))
 	if len(origins) == 0 {

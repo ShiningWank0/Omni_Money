@@ -27,6 +27,7 @@ func setValidServerEnvironment(t *testing.T) {
 		"TLS_KEY_FILE":                    "",
 		"AUTH_KDF_CONCURRENCY":            "",
 		"SERVER_SHUTDOWN_TIMEOUT_SECONDS": "",
+		"ALLOWED_HOSTS":                   "",
 		"PASSKEY_RP_ID":                   "",
 		"PASSKEY_ORIGINS":                 "",
 	}
@@ -85,6 +86,43 @@ func TestServerConfigFromEnvParsesPasskeyBoundary(t *testing.T) {
 	t.Setenv("PASSKEY_ORIGINS", "https://unrelated.example.net")
 	if _, err := ServerConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "outside RP ID") {
 		t.Fatalf("cross-site passkey origin accepted: %v", err)
+	}
+}
+
+func TestServerConfigFromEnvRejectsUnscopedPasskeyRID(t *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		rpID         string
+		allowedHosts string
+		origins      string
+		wantError    string
+	}{
+		{name: "single label", rpID: "com", allowedHosts: "money.example.com", origins: "https://money.example.com", wantError: "ALLOWED_HOSTS"},
+		{name: "parent domain", rpID: "example.com", allowedHosts: "money.example.com", origins: "https://money.example.com", wantError: "ALLOWED_HOSTS"},
+		{name: "single label without allowlist", rpID: "com", allowedHosts: "", origins: "https://money.example.com", wantError: "registrable"},
+		{name: "exact match", rpID: "money.example.com", allowedHosts: "money.example.com", origins: "https://money.example.com"},
+		{name: "exact match with port", rpID: "money.example.com", allowedHosts: "money.example.com:443", origins: "https://money.example.com"},
+		{name: "loopback", rpID: "localhost", allowedHosts: "localhost:4000", origins: "http://localhost:4000"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			setValidServerEnvironment(t)
+			t.Setenv("ALLOWED_HOSTS", testCase.allowedHosts)
+			t.Setenv("PASSKEY_RP_ID", testCase.rpID)
+			t.Setenv("PASSKEY_ORIGINS", testCase.origins)
+			result, err := ServerConfigFromEnv()
+			if testCase.wantError == "" {
+				if err != nil {
+					t.Fatalf("RP ID %q was rejected: %v", testCase.rpID, err)
+				}
+				if result.Passkeys.RPID != testCase.rpID {
+					t.Fatalf("RP ID = %q, want %q", result.Passkeys.RPID, testCase.rpID)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), testCase.wantError) {
+				t.Fatalf("RP ID %q error = %v, want %q", testCase.rpID, err, testCase.wantError)
+			}
+		})
 	}
 }
 
