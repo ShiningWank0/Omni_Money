@@ -39,6 +39,12 @@ func (s *Service) beginPrivatePasskeyLogin(ctx context.Context, email, clientKey
 	if err != nil {
 		return PasskeyLoginBegin{}, ErrInvalidCredentials
 	}
+	throttleKey := LoginThrottleKey(email)
+	if retryAfter, throttleErr := s.checkLoginThrottle(ctx, throttleKey, started); throttleErr != nil {
+		return PasskeyLoginBegin{}, throttleErr
+	} else if retryAfter > 0 {
+		return PasskeyLoginBegin{}, &LoginThrottledError{RetryAfter: retryAfter}
+	}
 	user, err := s.store.GetUserByEmail(ctx, email)
 	if err != nil && !errors.Is(err, control.ErrNotFound) {
 		return PasskeyLoginBegin{}, err
@@ -96,6 +102,7 @@ func (s *Service) beginPrivatePasskeyLogin(ctx context.Context, email, clientKey
 	session.AllowedCredentialIDs = ownedIDs
 	ceremonyID, err := s.storePasskeyCeremony(passkeyCeremony{
 		Kind: passkeyCeremonyLogin, UserID: user.ID, ClientKey: clientKey, Session: *session,
+		ThrottleKey: throttleKey,
 	})
 	if err != nil {
 		return PasskeyLoginBegin{}, err

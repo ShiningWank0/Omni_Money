@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 var schemaV1Statements = []string{
 	`CREATE TABLE IF NOT EXISTS users (
@@ -96,6 +96,20 @@ var schemaV2Statements = []string{
 	 ON passkey_credentials(user_id, created_at_ms)`,
 }
 
+var schemaV3Statements = []string{
+	`CREATE TABLE IF NOT EXISTS login_throttle (
+		account_key TEXT PRIMARY KEY CHECK(length(account_key) = 64 AND account_key NOT GLOB '*[^0-9a-f]*'),
+		failure_count INTEGER NOT NULL DEFAULT 0 CHECK(failure_count BETWEEN 0 AND 1000000),
+		lock_level INTEGER NOT NULL DEFAULT 0 CHECK(lock_level BETWEEN 0 AND 64),
+		locked_until_ms INTEGER,
+		last_failure_ms INTEGER NOT NULL CHECK(last_failure_ms > 0),
+		updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= last_failure_ms),
+		CHECK(locked_until_ms IS NULL OR locked_until_ms > last_failure_ms)
+	) STRICT`,
+	`CREATE INDEX IF NOT EXISTS idx_login_throttle_expiry
+	 ON login_throttle(locked_until_ms, last_failure_ms)`,
+}
+
 func initializeSchema(ctx context.Context, db *sql.DB) error {
 	var version int
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
@@ -128,6 +142,11 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 	}
 	if version < 2 {
 		if err := apply(schemaV2Statements, 2); err != nil {
+			return err
+		}
+	}
+	if version < 3 {
+		if err := apply(schemaV3Statements, 3); err != nil {
 			return err
 		}
 	}

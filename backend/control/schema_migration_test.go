@@ -58,6 +58,40 @@ func TestControlSchemaV2MigrationPreservesExistingUsers(t *testing.T) {
 	}
 }
 
+func TestControlSchemaV3MigrationAddsLoginThrottle(t *testing.T) {
+	db := openSchemaTestDB(t)
+	for _, statement := range schemaV2Statements {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec("PRAGMA user_version = 2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO users(
+		id, email, display_name, role, state, vault_id, created_at_ms, updated_at_ms
+	) VALUES (?, ?, ?, 'admin', 'active', ?, 1, 1)`, testAdminID, "admin@example.com", "Admin", "vault_"+testAdminID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := initializeSchema(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var version, users, throttleTables int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM users WHERE id = ?", testAdminID).Scan(&users); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'login_throttle'`).Scan(&throttleTables); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion || users != 1 || throttleTables != 1 {
+		t.Fatalf("migration result version=%d users=%d throttleTables=%d", version, users, throttleTables)
+	}
+}
+
 func TestControlSchemaV2MigrationFailureIsAtomic(t *testing.T) {
 	db := openSchemaTestDB(t)
 	if _, err := db.Exec(`CREATE TABLE passkey_credentials (credential_id BLOB PRIMARY KEY)`); err != nil {

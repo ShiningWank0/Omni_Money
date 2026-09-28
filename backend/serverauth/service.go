@@ -53,6 +53,9 @@ type ControlStore interface {
 	GetPasswordResetTicketByTokenHash(context.Context, []byte) (control.PasswordResetTicket, error)
 	CompletePasswordReset(context.Context, control.CompletePasswordResetInput, time.Time) (control.PasswordResetTicket, error)
 	DisableUser(context.Context, string, string, time.Time) error
+	LoginThrottleLockedUntil(context.Context, string, time.Time) (time.Time, error)
+	RegisterLoginFailure(context.Context, string, time.Time, control.LoginThrottlePolicy) (time.Time, error)
+	ClearLoginFailures(context.Context, string) error
 }
 
 type PasskeyControlStore interface {
@@ -330,6 +333,12 @@ func (s *Service) Login(ctx context.Context, email string, password []byte, now 
 		}
 		return nil, ErrInvalidCredentials
 	}
+	throttleKey := LoginThrottleKey(email)
+	if retryAfter, err := s.checkLoginThrottle(ctx, throttleKey, now); err != nil {
+		return nil, err
+	} else if retryAfter > 0 {
+		return nil, &LoginThrottledError{RetryAfter: retryAfter}
+	}
 	releaseKDF, err := s.reserveKDF(ctx)
 	if err != nil {
 		return nil, err
@@ -345,6 +354,7 @@ func (s *Service) Login(ctx context.Context, email string, password []byte, now 
 		s.runDummyPasswordWork(password)
 		releaseKDF()
 		if errors.Is(lookupErr, control.ErrNotFound) {
+			s.recordLoginFailure(ctx, throttleKey, now)
 			return nil, ErrInvalidCredentials
 		}
 		return nil, lookupErr
@@ -362,11 +372,13 @@ func (s *Service) Login(ctx context.Context, email string, password []byte, now 
 		if err != nil && !errors.Is(err, control.ErrNotFound) {
 			return nil, err
 		}
+		s.recordLoginFailure(ctx, throttleKey, now)
 		return nil, ErrInvalidCredentials
 	}
 	if validateNewPassword(password) != nil {
 		s.runDummyPasswordWork(password)
 		releaseKDF()
+		s.recordLoginFailure(ctx, throttleKey, now)
 		return nil, ErrInvalidCredentials
 	}
 	credential, err := s.store.GetPasswordCredential(ctx, user.ID)
@@ -388,6 +400,7 @@ func (s *Service) Login(ctx context.Context, email string, password []byte, now 
 	if err != nil {
 		clear(dek)
 		if errors.Is(err, keyenvelope.ErrAuthentication) {
+			s.recordLoginFailure(ctx, throttleKey, now)
 			return nil, ErrInvalidCredentials
 		}
 		return nil, err
@@ -399,6 +412,7 @@ func (s *Service) Login(ctx context.Context, email string, password []byte, now 
 		}
 		return nil, err
 	}
+	s.clearLoginFailures(ctx, throttleKey)
 	key, err := securedb.NewRawKey(dek)
 	clear(dek)
 	if err != nil {
@@ -427,16 +441,34 @@ func (s *Service) Reauthenticate(ctx context.Context, userID string, password []
 		return err
 	}
 	defer unlock()
+	user, userErr := s.store.GetUser(ctx, userID)
+	throttleKey := ""
+	if userErr == nil {
+		throttleKey = LoginThrottleKey(user.Email)
+		if retryAfter, throttleErr := s.checkLoginThrottle(ctx, throttleKey, now); throttleErr != nil {
+			return throttleErr
+		} else if retryAfter > 0 {
+			return &LoginThrottledError{RetryAfter: retryAfter}
+		}
+	}
 	if validateNewPassword(password) != nil {
 		if err := s.runDummyPassword(ctx, password); err != nil {
 			return err
 		}
+		if throttleKey != "" {
+			s.recordLoginFailure(ctx, throttleKey, now)
+		}
 		return ErrInvalidCredentials
 	}
-	user, err := s.store.GetUser(ctx, userID)
-	if err != nil || user.State != control.UserActive {
+	if userErr != nil || user.State != control.UserActive {
 		if dummyErr := s.runDummyPassword(ctx, password); dummyErr != nil {
 			return dummyErr
+		}
+		if userErr != nil && !errors.Is(userErr, control.ErrNotFound) {
+			return userErr
+		}
+		if throttleKey != "" {
+			s.recordLoginFailure(ctx, throttleKey, now)
 		}
 		return ErrInvalidCredentials
 	}
@@ -460,6 +492,7 @@ func (s *Service) Reauthenticate(ctx context.Context, userID string, password []
 		return verifyErr
 	}
 	if !verified {
+		s.recordLoginFailure(ctx, throttleKey, now)
 		return ErrInvalidCredentials
 	}
 	if err := s.store.RecordSuccessfulLogin(ctx, userID, credential, now); err != nil {
@@ -468,6 +501,7 @@ func (s *Service) Reauthenticate(ctx context.Context, userID string, password []
 		}
 		return err
 	}
+	s.clearLoginFailures(ctx, throttleKey)
 	return nil
 }
 
@@ -688,6 +722,12 @@ func (s *Service) changePasswordLocked(ctx context.Context, store CredentialLife
 		}
 		return 0, nil, ErrInvalidCredentials
 	}
+	throttleKey := LoginThrottleKey(user.Email)
+	if retryAfter, throttleErr := s.checkLoginThrottle(ctx, throttleKey, now); throttleErr != nil {
+		return 0, nil, throttleErr
+	} else if retryAfter > 0 {
+		return 0, nil, &LoginThrottledError{RetryAfter: retryAfter}
+	}
 	credential, err := s.store.GetPasswordCredential(ctx, userID)
 	if err != nil {
 		return 0, nil, err
@@ -706,6 +746,7 @@ func (s *Service) changePasswordLocked(ctx context.Context, store CredentialLife
 	if unwrapErr != nil {
 		clear(dek)
 		if errors.Is(unwrapErr, keyenvelope.ErrAuthentication) {
+			s.recordLoginFailure(ctx, throttleKey, now)
 			return 0, nil, ErrInvalidCredentials
 		}
 		return 0, nil, unwrapErr
@@ -724,6 +765,7 @@ func (s *Service) changePasswordLocked(ctx context.Context, store CredentialLife
 	if err != nil {
 		return 0, nil, err
 	}
+	s.clearLoginFailures(ctx, throttleKey)
 	s.sessions.DeleteAllSessionsForUser(userID)
 	waitForDrain, _ := s.vaults.BeginUserDrain(userID)
 	return revoked, waitForDrain, nil
@@ -786,7 +828,7 @@ func (s *Service) ListCredentials(ctx context.Context, userID string) (Credentia
 }
 
 func (s *Service) rotateRecoveryLocked(ctx context.Context, store CredentialLifecycleStore, userID string, currentPassword, newRecoverySecret []byte, now time.Time) (func(context.Context) error, error) {
-	dek, vaultID, err := s.unwrapVaultWithPassword(ctx, userID, currentPassword)
+	dek, vaultID, err := s.unwrapVaultWithPassword(ctx, userID, currentPassword, now)
 	if err != nil {
 		return nil, err
 	}
