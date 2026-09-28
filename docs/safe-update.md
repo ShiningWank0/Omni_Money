@@ -157,9 +157,11 @@ preflight（安全更新テスト）を通してから実行します。実行�
     image="$(./scripts/resolve-image-digest.sh ghcr.io/shiningwank0/omni_money:<version>)"
     sudo ./scripts/safe-update.sh "$image"
 
-`resolve-image-digest.sh` はtagをregistryのdigestへ解決します。解決結果はDocker Releaseの
-job summaryが記録したdigestと照合してください。`safe-update.sh` は executable bit を
-付けたまま、上記のようにpathを直接指定して実行します。
+`resolve-image-digest.sh` はtagをregistryのdigestへ解決します。`--verify --repo OWNER/REPO`
+を付けると、Docker Releaseが公開digestへ付与したGitHub build provenance attestationを
+gh CLIで検証できます。`--verify`を使わない場合も、解決結果をDocker Releaseのjob summaryが
+記録したdigestと照合してください。`safe-update.sh` は executable bit を付けたまま、上記の
+ようにpathを直接指定して実行します。
 entry pointは `#!/bin/bash -p` により、script本文より前の `BASH_ENV` 読込みとexport済み
 shell functionのimportを無効化します。`sudo bash scripts/safe-update.sh ...`、
 `bash scripts/safe-update.sh ...`、`source scripts/safe-update.sh` は使用できず、script側も

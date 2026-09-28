@@ -9,9 +9,9 @@
 | govulncheck | Go標準ライブラリ・依存関係の既知の脆弱性。呼び出し経路に到達する問題で失敗。Desktopとserverの両ビルド条件を検査 |
 | gosec | コードの危険な実装パターン。medium以上で失敗。Desktopとserverの両ビルド条件を検査 |
 | npm audit | frontendの依存関係。high以上で失敗 |
-| Trivy | ビルドしたOmni MoneyイメージのOS・ライブラリ。修正版のあるHIGH/CRITICALで失敗。`ignore-unfixed: true`のため未修正の問題は除外 |
+| Trivy | Omni MoneyイメージのOS・ライブラリ。修正版のあるHIGH/CRITICALで失敗。`ignore-unfixed: true`のため未修正の問題は除外。Docker Releaseではpush済みの各アーキテクチャdigest（公開される実体）をスキャンし、multi-arch manifestの公開前にゲートする |
 
-Docker公開前にもこれらの検査を実行する。CI成功は、未修正の既知問題や静的解析で分からない設計上の問題がないことを保証しない。Pangolin、Newt、Gerbil、Traefik、Badger、VPS/TrueNASそのものは別配備のため、このCIの検査対象ではない。
+Docker公開前にもこれらの検査を実行する。Docker Releaseは公開したindex digestへbuild provenance attestationを付与し、`scripts/resolve-image-digest.sh --verify --repo OWNER/REPO`で検証できる。CI成功は、未修正の既知問題や静的解析で分からない設計上の問題がないことを保証しない。Pangolin、Newt、Gerbil、Traefik、Badger、VPS/TrueNASそのものは別配備のため、このCIの検査対象ではない。
 
 ## 定期検査のIssue報告
 

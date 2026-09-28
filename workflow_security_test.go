@@ -95,12 +95,19 @@ func TestDockerReleasePassesVersionBuildArg(t *testing.T) {
 	}
 	workflow := string(contents)
 	for _, required := range []string{
-		`--build-arg "VERSION=$APP_VERSION"`,
 		"build-args: VERSION=${{ env.APP_VERSION }}",
+		`image-ref: ${{ needs.prepare.outputs.image }}@${{ steps.build.outputs.digest }}`,
+		"actions/attest-build-provenance@",
+		"subject-digest: ${{ steps.publish.outputs.digest }}",
+		"id-token: write",
+		"attestations: write",
 	} {
 		if !strings.Contains(workflow, required) {
-			t.Errorf("Docker release workflow is missing version propagation %q", required)
+			t.Errorf("Docker release workflow is missing version or release-assurance control %q", required)
 		}
+	}
+	if strings.Contains(workflow, "omni-money:release-scan") {
+		t.Error("Docker release must scan the pushed digest instead of a separately rebuilt candidate")
 	}
 }
 
