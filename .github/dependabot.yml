@@ -1,0 +1,39 @@
+version: 2
+updates:
+  # Go modules for the server, vault, and control plane. Grouped so a weekly
+  # sweep is one reviewable PR; security updates are raised separately by
+  # Dependabot regardless of grouping.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      go-modules:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      frontend:
+        patterns:
+          - "*"
+
+  # Workflow actions are pinned by commit SHA; Dependabot proposes new pins.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Base images are pinned by tag@sha256 in the Dockerfile; Dependabot proposes
+  # updated digests. Each proposal still passes the CI digest-pinning tests.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
