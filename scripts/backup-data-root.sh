@@ -204,6 +204,30 @@ validate_data_entry() {
   fi
 }
 
+# The destination holds root-owned archives that are later restored over live
+# data. A non-root user who owns the destination or an ancestor with a write
+# bit can replace archive members after verification, so every existing
+# component must be owned by root or the current user, and group/other writable
+# directories are only accepted with the sticky bit (for example /tmp).
+validate_destination_chain() {
+  local path="$1" current owner mode
+  current="$path"
+  while :; do
+    owner="$(stat_owner "$current")" || fail "destination ownership could not be read: $current"
+    mode="$(stat_mode "$current")" || fail "destination mode could not be read: $current"
+    case "$mode" in *[!0-7]*|'') fail "destination has an unreadable mode: $current" ;; esac
+    [ "$owner" = "0" ] || [ "$owner" = "$EUID" ] \
+      || fail "destination chain must be owned by root or the current user: $current"
+    if (( (8#$mode & 18) != 0 )); then
+      (( (8#$mode & 512) != 0 )) \
+        || fail "destination chain is group/other writable without the sticky bit: $current"
+    fi
+    [ "$current" = "/" ] && break
+    current="$(dirname -- "$current")"
+    [ -d "$current" ] || fail "destination parent is not a directory: $current"
+  done
+}
+
 validate_nested_mounts() {
   local root="$1" label="$2" target mounts
   # find -xdev alone misses same-device bind mounts; on Linux cross-check the
@@ -426,7 +450,10 @@ fi
 reject_dangerous_target "$DEST_ROOT" || fail "destination root is too broad or dangerous: $DEST_ROOT"
 case "$DEST_ROOT" in "$data_dir"|"$data_dir"/*) fail "destination must live outside the live data root" ;; esac
 mkdir -p -- "$DEST_ROOT"
+[ ! -L "$DEST_ROOT" ] || fail "destination root must not be a symlink: $DEST_ROOT"
+[ -d "$DEST_ROOT" ] || fail "destination root must be a directory: $DEST_ROOT"
 [ "$(stat_mode "$DEST_ROOT")" = "700" ] || chmod 700 "$DEST_ROOT"
+validate_destination_chain "$DEST_ROOT"
 
 # Capacity preflight on the destination filesystem (archive ≈ logical size).
 data_kb="$(directory_size_kb "$data_dir")" || fail "data size could not be measured"

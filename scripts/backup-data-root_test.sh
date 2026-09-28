@@ -19,6 +19,7 @@
 #   verify_detects_tamper   --verify fails after the archive is modified
 #   backup_rejects_plaintext plaintext SQLite header in the control DB fails closed
 #   symlink_source_rejected symlink in the data tree fails before the service stops
+#   dest_symlink_rejected   symlink destination root fails before the service stops
 #   stop_failure            docker stop failure leaves the service untouched
 #   restart_unhealthy       unhealthy restart keeps the archive and fails loudly
 #   concurrent_lock         an existing lock blocks a second backup
@@ -331,6 +332,19 @@ post_symlink_source_rejected() {
     || { echo "FAIL: destination root should not exist for a pre-stop failure" >&2; FAILURES=$((FAILURES + 1)); }
 }
 
+scenario_dest_symlink_rejected() {
+  new_fixture dest_symlink_rejected
+  build_mocks
+  mkdir -m 700 -p "$fixture_root/real-dest"
+  ln -s "$fixture_root/real-dest" "$fixture_root/dest-link"
+  SCENARIO_ARGS="--dest $fixture_root/dest-link"
+}
+
+post_dest_symlink_rejected() {
+  assert_eq "service never stopped" "running" "$(cat "$mock_state/status")"
+  assert_no_file "$fixture_root/real-dest/.backup.lock"
+}
+
 scenario_stop_failure() {
   new_fixture stop_failure
   build_mocks
@@ -461,6 +475,7 @@ for scenario_name in \
   verify_detects_tamper \
   backup_rejects_plaintext \
   symlink_source_rejected \
+  dest_symlink_rejected \
   stop_failure \
   restart_unhealthy \
   concurrent_lock \
