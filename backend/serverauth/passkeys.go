@@ -39,6 +39,9 @@ type passkeyCeremony struct {
 	ClientKey string
 	Session   webauthn.SessionData
 	PRFSalt   []byte
+	// ThrottleKey binds the ceremony to the account-level failure counter even
+	// when the ceremony was issued for a decoy identity (empty UserID).
+	ThrottleKey string
 }
 
 type PasskeyRegistrationBegin struct {
@@ -155,7 +158,7 @@ func (s *Service) FinishPasskeyRegistration(
 	if err != nil || credential == nil {
 		return control.PasskeySummary{}, ErrPasskeyCeremony
 	}
-	dek, vaultID, err := s.unwrapVaultWithPassword(ctx, userID, input.Password)
+	dek, vaultID, err := s.unwrapVaultWithPassword(ctx, userID, input.Password, now)
 	if err != nil {
 		clear(dek)
 		return control.PasskeySummary{}, err
@@ -205,6 +208,12 @@ func (s *Service) beginPasskeyAssertion(ctx context.Context, userID, clientKey, 
 	if adapter.user.State != control.UserActive {
 		return PasskeyLoginBegin{}, ErrInvalidCredentials
 	}
+	throttleKey := LoginThrottleKey(adapter.user.Email)
+	if retryAfter, throttleErr := s.checkLoginThrottle(ctx, throttleKey, time.Now().UTC()); throttleErr != nil {
+		return PasskeyLoginBegin{}, throttleErr
+	} else if retryAfter > 0 {
+		return PasskeyLoginBegin{}, &LoginThrottledError{RetryAfter: retryAfter}
+	}
 	evalByCredential := make(map[string]any, len(records))
 	for _, record := range records {
 		evalByCredential[base64.RawURLEncoding.EncodeToString(record.ID)] = map[string]any{
@@ -223,6 +232,7 @@ func (s *Service) beginPasskeyAssertion(ctx context.Context, userID, clientKey, 
 	}
 	ceremonyID, err := s.storePasskeyCeremony(passkeyCeremony{
 		Kind: kind, UserID: userID, ClientKey: clientKey, Session: *session,
+		ThrottleKey: throttleKey,
 	})
 	if err != nil {
 		return PasskeyLoginBegin{}, err
@@ -278,9 +288,31 @@ func (s *Service) validatePasskeyAssertion(
 	input FinishPasskeyLoginInput,
 	now time.Time,
 	recordLogin bool,
-) (control.UserSummary, string, []byte, func(), error) {
-	ceremony, err := s.takePasskeyCeremony(input.CeremonyID, kind, input.ClientKey)
-	if err != nil || ceremony.UserID == "" || len(input.PRFResult) != keyenvelope.PasskeySecretSize {
+) (summary control.UserSummary, resultVaultID string, resultDEK []byte, resultUnlock func(), err error) {
+	ceremony, ceremonyErr := s.takePasskeyCeremony(input.CeremonyID, kind, input.ClientKey)
+	if ceremonyErr != nil {
+		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
+	}
+	if ceremony.ThrottleKey != "" {
+		retryAfter, throttleErr := s.checkLoginThrottle(ctx, ceremony.ThrottleKey, now)
+		if throttleErr != nil {
+			return control.UserSummary{}, "", nil, nil, throttleErr
+		}
+		if retryAfter > 0 {
+			return control.UserSummary{}, "", nil, nil, &LoginThrottledError{RetryAfter: retryAfter}
+		}
+		// The counter is shared with password authentication so the lockout
+		// cannot be bypassed by switching between methods.
+		defer func() {
+			switch {
+			case err == nil:
+				s.clearLoginFailures(ctx, ceremony.ThrottleKey)
+			case errors.Is(err, ErrInvalidCredentials):
+				s.recordLoginFailure(ctx, ceremony.ThrottleKey, now)
+			}
+		}()
+	}
+	if ceremony.UserID == "" || len(input.PRFResult) != keyenvelope.PasskeySecretSize {
 		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
 	}
 	if expectedUserID != "" && ceremony.UserID != expectedUserID {
@@ -301,7 +333,10 @@ func (s *Service) validatePasskeyAssertion(
 		}
 	}()
 	user, records, err := s.loadPasskeyUser(ctx, ceremony.UserID)
-	if err != nil || user.user.State != control.UserActive {
+	if err != nil {
+		return control.UserSummary{}, "", nil, nil, err
+	}
+	if user.user.State != control.UserActive {
 		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
 	}
 	updated, err := s.webauthn.ValidateLogin(user, ceremony.Session, parsed)
@@ -395,17 +430,35 @@ func (s *Service) DeleteAllPasskeys(ctx context.Context, userID string) (int, er
 	return removed, nil
 }
 
-func (s *Service) unwrapVaultWithPassword(ctx context.Context, userID string, password []byte) ([]byte, string, error) {
+func (s *Service) unwrapVaultWithPassword(ctx context.Context, userID string, password []byte, now time.Time) ([]byte, string, error) {
+	user, userErr := s.store.GetUser(ctx, userID)
+	throttleKey := ""
+	if userErr == nil {
+		throttleKey = LoginThrottleKey(user.Email)
+		if retryAfter, throttleErr := s.checkLoginThrottle(ctx, throttleKey, now); throttleErr != nil {
+			return nil, "", throttleErr
+		} else if retryAfter > 0 {
+			return nil, "", &LoginThrottledError{RetryAfter: retryAfter}
+		}
+	}
 	if validateNewPassword(password) != nil {
 		if err := s.runDummyPassword(ctx, password); err != nil {
 			return nil, "", err
 		}
+		if throttleKey != "" {
+			s.recordLoginFailure(ctx, throttleKey, now)
+		}
 		return nil, "", ErrInvalidCredentials
 	}
-	user, err := s.store.GetUser(ctx, userID)
-	if err != nil || user.State != control.UserActive {
+	if userErr != nil || user.State != control.UserActive {
 		if dummyErr := s.runDummyPassword(ctx, password); dummyErr != nil {
 			return nil, "", dummyErr
+		}
+		if userErr != nil && !errors.Is(userErr, control.ErrNotFound) {
+			return nil, "", userErr
+		}
+		if throttleKey != "" {
+			s.recordLoginFailure(ctx, throttleKey, now)
 		}
 		return nil, "", ErrInvalidCredentials
 	}
@@ -428,10 +481,12 @@ func (s *Service) unwrapVaultWithPassword(ctx context.Context, userID string, pa
 	if unwrapErr != nil {
 		clear(dek)
 		if errors.Is(unwrapErr, keyenvelope.ErrAuthentication) {
+			s.recordLoginFailure(ctx, throttleKey, now)
 			return nil, "", ErrInvalidCredentials
 		}
 		return nil, "", unwrapErr
 	}
+	s.clearLoginFailures(ctx, throttleKey)
 	return dek, vaultID, nil
 }
 
