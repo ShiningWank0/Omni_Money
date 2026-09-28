@@ -19,6 +19,9 @@ concurrency:
 jobs:
   go-checks:
     name: Go checks
+    # PR checks require an up-to-date base; retain weekly scans without
+    # repeating the same suite after merging to main.
+    if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -603,14 +606,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require all Go and auxiliary checks to succeed
+      - name: Require expected Go result and successful auxiliary checks
         env:
           GO_RESULT: ${{ needs.go-checks.result }}
+          EXPECTED_GO_RESULT: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'skipped' || 'success' }}
           SAFE_UPDATE_RESULT: ${{ needs.safe-update.result }}
           WINDOWS_RESULT: ${{ needs.windows-security.result }}
           SECURITY_AUTOMATION_RESULT: ${{ needs.security-automation.result }}
         run: |
-          test "$GO_RESULT" = success
+          test "$GO_RESULT" = "$EXPECTED_GO_RESULT"
           test "$SAFE_UPDATE_RESULT" = success
           test "$WINDOWS_RESULT" = success
           test "$SECURITY_AUTOMATION_RESULT" = success
