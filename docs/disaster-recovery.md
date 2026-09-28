@@ -51,6 +51,10 @@ sudo bash scripts/backup-data-root.sh --no-start # 停止したまま維持（�
 `--keep N` は作成した世代を含めて新しい順にN世代を残し、それより古い世代を削除する
 （`--keep 0` は全保持と同じ。現在作成中のgenerationは削除対象にならない）。
 
+`--dest` はsymlinkを拒否し、destination rootとその親directoryをroot（または実行ユーザー）
+所有に限定します。sticky bitのないgroup/other書込み可能なdirectoryも拒否します。検証後に
+archiveを差し替えられる事故を防ぐためです。
+
 動作:
 
 1. Compose projectの `omni-money` service containerを一意に解決する（複数/ゼロは中断）

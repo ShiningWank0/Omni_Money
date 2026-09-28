@@ -79,6 +79,9 @@ services:
         read_only: false
         bind:
           create_host_path: true
+      # Docker mounts every tmpfs with noexec,nosuid,nodev by default and the
+      # long form only accepts size/mode, so the exec flags cannot be declared
+      # here explicitly. The CI smoke test repeats them as a contract check.
       - type: tmpfs
         target: /tmp
         tmpfs:
