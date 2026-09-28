@@ -10,16 +10,64 @@
 # Usage:
 #   scripts/resolve-image-digest.sh <repository:tag>
 #   scripts/resolve-image-digest.sh <repository@sha256:digest>
+#   scripts/resolve-image-digest.sh --verify --repo OWNER/REPO <repository:tag>
+#
+# --verify requires the gh CLI and checks the GitHub build provenance
+# attestation that the Docker Release workflow attaches to the resolved digest.
 set -Eeuo pipefail
 
 usage() {
   printf '%s\n' \
-    'usage: scripts/resolve-image-digest.sh <repository:tag|repository@sha256:digest>' >&2
+    'usage: scripts/resolve-image-digest.sh [--verify --repo OWNER/REPO] <repository:tag|repository@sha256:digest>' >&2
   exit 2
 }
 
-[ "$#" -eq 1 ] || usage
-image="$1"
+# verify_attestation checks the GitHub build provenance attestation for the
+# exact resolved digest. Verification output stays on stderr so stdout remains
+# a single machine-readable reference.
+verify_attestation() {
+  local reference="$1" repository_slug="$2"
+  command -v gh >/dev/null 2>&1 || {
+    printf 'error: gh CLI is required for --verify\n' >&2
+    return 1
+  }
+  gh attestation verify "oci://${reference}" --repo "$repository_slug" >&2 || {
+    printf 'error: attestation verification failed for %s\n' "$reference" >&2
+    return 1
+  }
+}
+
+verify=0
+attestation_repo=""
+positional=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --verify)
+      verify=1
+      shift
+      ;;
+    --repo)
+      [ "$#" -ge 2 ] || usage
+      case "$2" in ''|-*) usage ;; esac
+      attestation_repo="$2"
+      shift 2
+      ;;
+    -h|--help) usage ;;
+    --*) usage ;;
+    *)
+      positional+=("$1")
+      shift
+      ;;
+  esac
+done
+[ "${#positional[@]}" -eq 1 ] || usage
+image="${positional[0]}"
+if [ "$verify" -eq 1 ]; then
+  case "$attestation_repo" in
+    */*) ;;
+    *) printf 'error: --verify requires --repo OWNER/REPO\n' >&2; exit 2 ;;
+  esac
+fi
 case "$image" in
   ''|*[!A-Za-z0-9._/@:+-]*)
     printf 'error: image reference contains unsupported characters\n' >&2
@@ -33,7 +81,11 @@ if [[ "$image" == *"@"* ]]; then
     printf 'error: digest reference must be repository@sha256:<64 lowercase hex>\n' >&2
     exit 2
   }
-  printf '%s\n' "$image"
+  reference="$image"
+  if [ "$verify" -eq 1 ]; then
+    verify_attestation "$reference" "$attestation_repo" || exit 1
+  fi
+  printf '%s\n' "$reference"
   exit 0
 fi
 
@@ -79,4 +131,8 @@ fi
   printf 'error: could not resolve an immutable digest for %s\n' "$image" >&2
   exit 1
 }
-printf '%s@%s\n' "$repository" "$digest"
+reference="${repository}@${digest}"
+if [ "$verify" -eq 1 ]; then
+  verify_attestation "$reference" "$attestation_repo" || exit 1
+fi
+printf '%s\n' "$reference"
