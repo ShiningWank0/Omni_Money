@@ -2,7 +2,7 @@
 
 ## CI/CDの検査範囲
 
-`.github/workflows/ci.yml` は全PR、main/codex/updateへのpush、毎週日曜03:30 UTC（日本時間12:30）のscheduleで実行する。GitHub側の負荷で定刻より遅れる場合がある。
+`.github/workflows/ci.yml` は全PR、mainへのpush、毎週日曜03:30 UTC（日本時間12:30）のscheduleで実行する。GitHub側の負荷で定刻より遅れる場合がある。
 
 | 検査 | 対象と失敗条件 |
 | --- | --- |
@@ -32,6 +32,18 @@ Issue報告ジョブは同じ実行・同じattemptのartifactだけを読む。
 定期実行の同時処理は直列化し、mainへのpushで進行中の定期実行をキャンセルしない。公開リポジトリは60日間活動がないとscheduleが自動無効化されるため、Actions画面で有効状態を確認する。
 
 ローカル検証は`node --test scripts/security-monitoring.test.mjs`。架空の検出結果と模擬GitHub APIを使用する。
+
+## 依存関係の自動更新とリポジトリ設定
+
+`.github/dependabot.yml` が、Go module、frontendのnpm、workflowのSHA pin、Dockerfileのbase image digestを毎週の更新PRとして提案する。既知脆弱性の検出（npm audit・govulncheck・Trivy）とは別の仕組みで、更新PRも通常のCIとレビューを通る。
+
+次の3つはGitHubリポジトリの設定であり、CIやリポジトリ内のファイルでは強制できない。管理者が有効化し、GitHubのSettings/Actions画面で状態を確認する。
+
+- **Dependabot alerts / security updates**: 既知脆弱性に対する修正PRを自動作成する
+- **Secret scanning / push protection**: 誤ってcommitした鍵やtokenを検出し、push時に拒否する
+- **Code scanning (CodeQL default setup)**: GoとJavaScriptのデータフロー解析を継続実行する
+
+無効化されていてもCIは成功するため、定期実行のたびにこの節の設定が有効か確認する。
 
 ## パスキーログインの情報漏えい対策と限界
 
