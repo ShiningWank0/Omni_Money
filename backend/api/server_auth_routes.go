@@ -117,9 +117,11 @@ func handleServerBootstrap(dependencies ServerDependencies) http.HandlerFunc {
 			Password: request.Password, RecoverySecret: request.RecoverySecret,
 		}, dependencies.now())
 		if err != nil {
+			auditAuth("server_bootstrap_failed", middleware.ClientIPFromRequest(r), "rejected")
 			writeServerAccountError(w, err, serverOperationSetup)
 			return
 		}
+		auditAuth("server_bootstrap_succeeded", middleware.ClientIPFromRequest(r), "")
 		jsonResponse(w, map[string]interface{}{"user": serverUserResponse(user)}, http.StatusCreated)
 	}
 }
@@ -196,16 +198,19 @@ func handleServerReauthentication(dependencies ServerDependencies) http.HandlerF
 		}
 		defer request.clear()
 		if err := dependencies.Accounts.Reauthenticate(r.Context(), session.UserID, request.Password, dependencies.now()); err != nil {
+			auditAuth("server_reauth_failed", middleware.ClientIPFromRequest(r), "rejected")
 			writeServerAccountError(w, err, serverOperationLogin)
 			return
 		}
 		rotated, err := dependencies.Sessions.RotateAfterReauthentication(session.ID)
 		if err != nil {
+			auditAuth("server_reauth_failed", middleware.ClientIPFromRequest(r), "session_rotation")
 			dependencies.Sessions.ClearSessionCookie(w, r)
 			writeAuthRequired(w)
 			return
 		}
 		dependencies.Sessions.SetSessionCookie(w, r, rotated)
+		auditAuth("server_reauth_succeeded", middleware.ClientIPFromRequest(r), "")
 		writeServerAuthenticatedResponse(w, rotated, "再認証しました")
 	}
 }
@@ -308,6 +313,7 @@ func handleServerLogout(dependencies ServerDependencies) http.HandlerFunc {
 		}
 		dependencies.Sessions.ClearSessionCookie(w, r)
 		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		auditAuth("server_logout", middleware.ClientIPFromRequest(r), "")
 		jsonResponse(w, map[string]bool{"success": true}, http.StatusOK)
 	}
 }
@@ -326,6 +332,7 @@ func handleServerLogoutAll(dependencies ServerDependencies) http.HandlerFunc {
 		deleted := dependencies.Sessions.DeleteAllSessionsForUser(session.UserID)
 		dependencies.Sessions.ClearSessionCookie(w, r)
 		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		auditAuth("server_logout_all", middleware.ClientIPFromRequest(r), "")
 		jsonResponse(w, map[string]interface{}{"success": true, "deleted_sessions": deleted}, http.StatusOK)
 	}
 }
@@ -433,6 +440,7 @@ func handleServerInvitationCreation(dependencies ServerDependencies) http.Handle
 		}
 		invitation, token, err := dependencies.Accounts.CreateInvitation(r.Context(), actor.ID, request.Email, request.Role, now.Add(age), now)
 		if err != nil {
+			auditAuth("server_admin_operation_failed", middleware.ClientIPFromRequest(r), "invitation_create")
 			writeServerAccountError(w, err, serverOperationAdmin)
 			return
 		}
@@ -497,6 +505,7 @@ func handleServerPasswordResetCreation(dependencies ServerDependencies) http.Han
 		}
 		ticket, token, err := dependencies.Accounts.CreatePasswordReset(r.Context(), actor.ID, request.TargetUserID, now.Add(age), now)
 		if err != nil {
+			auditAuth("server_admin_operation_failed", middleware.ClientIPFromRequest(r), "password_reset_create")
 			writeServerAccountError(w, err, serverOperationAdmin)
 			return
 		}
@@ -607,6 +616,7 @@ func handleServerUserAction(dependencies ServerDependencies) http.HandlerFunc {
 			}
 		}
 		if err != nil {
+			auditAuth("server_admin_operation_failed", middleware.ClientIPFromRequest(r), "user_"+parts[1])
 			writeServerAccountError(w, err, serverOperationAdmin)
 			return
 		}
@@ -639,6 +649,7 @@ func handleServerInvitationAction(dependencies ServerDependencies) http.HandlerF
 			return
 		}
 		if err := lifecycle.RevokeInvitation(r.Context(), actor.ID, id, dependencies.now()); err != nil {
+			auditAuth("server_admin_operation_failed", middleware.ClientIPFromRequest(r), "invitation_revoke")
 			writeServerAccountError(w, err, serverOperationAdmin)
 			return
 		}
@@ -671,6 +682,7 @@ func handleServerPasswordResetAction(dependencies ServerDependencies) http.Handl
 			return
 		}
 		if err := lifecycle.RevokePasswordReset(r.Context(), actor.ID, id, dependencies.now()); err != nil {
+			auditAuth("server_admin_operation_failed", middleware.ClientIPFromRequest(r), "password_reset_revoke")
 			writeServerAccountError(w, err, serverOperationAdmin)
 			return
 		}

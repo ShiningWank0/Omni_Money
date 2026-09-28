@@ -214,7 +214,7 @@ func TestDeleteAllSessionsIsUserScopedAndCannotBeResurrected(t *testing.T) {
 	}
 }
 
-func TestSessionRequestRejectsDuplicateAndShadowCookies(t *testing.T) {
+func TestSessionRequestIgnoresShadowCookiesAndRejectsDuplicates(t *testing.T) {
 	start := time.Date(2026, time.August, 20, 0, 0, 0, 0, time.UTC)
 	manager, _ := newClockedSessionManager(t, securityTestSessionConfig(), start)
 	session, err := manager.CreateSession("user")
@@ -230,10 +230,10 @@ func TestSessionRequestRejectsDuplicateAndShadowCookies(t *testing.T) {
 	}{
 		{name: "one HTTP cookie", target: "http://money.example/api/accounts", cookies: []*http.Cookie{{Name: SessionCookieName, Value: session.ID}}, wantOK: true},
 		{name: "duplicate HTTP cookie", target: "http://money.example/api/accounts", cookies: []*http.Cookie{{Name: SessionCookieName, Value: session.ID}, {Name: SessionCookieName, Value: session.ID}}},
-		{name: "secure cookie shadows HTTP cookie", target: "http://money.example/api/accounts", cookies: []*http.Cookie{{Name: SessionCookieName, Value: session.ID}, {Name: SecureSessionCookieName, Value: session.ID}}},
+		{name: "secure cookie shadows HTTP cookie", target: "http://money.example/api/accounts", cookies: []*http.Cookie{{Name: SessionCookieName, Value: session.ID}, {Name: SecureSessionCookieName, Value: session.ID}}, wantOK: true},
 		{name: "one HTTPS host cookie", target: "https://money.example/api/accounts", cookies: []*http.Cookie{{Name: SecureSessionCookieName, Value: session.ID}}, wantOK: true},
 		{name: "duplicate HTTPS host cookie", target: "https://money.example/api/accounts", cookies: []*http.Cookie{{Name: SecureSessionCookieName, Value: session.ID}, {Name: SecureSessionCookieName, Value: session.ID}}},
-		{name: "legacy cookie shadows host cookie", target: "https://money.example/api/accounts", cookies: []*http.Cookie{{Name: SecureSessionCookieName, Value: session.ID}, {Name: SessionCookieName, Value: session.ID}}},
+		{name: "legacy cookie shadows host cookie", target: "https://money.example/api/accounts", cookies: []*http.Cookie{{Name: SecureSessionCookieName, Value: session.ID}, {Name: SessionCookieName, Value: session.ID}}, wantOK: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -246,6 +246,34 @@ func TestSessionRequestRejectsDuplicateAndShadowCookies(t *testing.T) {
 				t.Fatalf("GetSessionFromRequest ok=%v, want %v", ok, test.wantOK)
 			}
 		})
+	}
+}
+
+func TestDiscardUnexpectedSessionCookieExpiresShadowCookie(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://money.example/api/accounts", nil)
+	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "attacker"})
+	recorder := httptest.NewRecorder()
+	discardUnexpectedSessionCookie(recorder, request)
+	header := strings.Join(recorder.Header().Values("Set-Cookie"), "\n")
+	if !strings.Contains(header, SessionCookieName+"=;") || !strings.Contains(header, "Max-Age=0") {
+		t.Fatalf("shadow cookie was not expired: %q", header)
+	}
+	if !strings.Contains(header, "Secure") || !strings.Contains(header, "HttpOnly") || !strings.Contains(header, "SameSite=Strict") {
+		t.Fatalf("expiry cookie attributes are unsafe: %q", header)
+	}
+
+	clean := httptest.NewRecorder()
+	discardUnexpectedSessionCookie(clean, httptest.NewRequest(http.MethodGet, "https://money.example/api/accounts", nil))
+	if cookies := clean.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("clean request received a Set-Cookie header: %#v", cookies)
+	}
+
+	httpRequest := httptest.NewRequest(http.MethodGet, "http://money.example/api/accounts", nil)
+	httpRequest.AddCookie(&http.Cookie{Name: SecureSessionCookieName, Value: "attacker"})
+	httpRecorder := httptest.NewRecorder()
+	discardUnexpectedSessionCookie(httpRecorder, httpRequest)
+	if header := strings.Join(httpRecorder.Header().Values("Set-Cookie"), "\n"); !strings.Contains(header, SecureSessionCookieName+"=;") {
+		t.Fatalf("HTTP shadow cookie was not expired: %q", header)
 	}
 }
 

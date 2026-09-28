@@ -129,6 +129,7 @@ func handlePasskeyRegistrationFinish(dependencies ServerDependencies, passkeys S
 			Password: request.Password, CredentialJSON: request.CredentialJSON, PRFResult: request.PRFResult,
 		}, dependencies.now())
 		if err != nil {
+			auditAuth("server_passkey_registration_failed", middleware.ClientIPFromRequest(r), "rejected")
 			writePasskeyError(w, err, false)
 			return
 		}

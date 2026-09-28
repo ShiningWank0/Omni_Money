@@ -66,6 +66,20 @@ func TestSecurityHeadersMiddlewareHSTSOnlyForHTTPS(t *testing.T) {
 	}
 }
 
+func TestSecurityHeadersMiddlewareDeclaresCSPContainmentDirectives(t *testing.T) {
+	handler := SecurityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "https://example.test/", nil))
+	policy := recorder.Header().Get("Content-Security-Policy")
+	for _, directive := range []string{"object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"} {
+		if !strings.Contains(policy, directive) {
+			t.Fatalf("Content-Security-Policy is missing %q: %q", directive, policy)
+		}
+	}
+}
+
 func TestMaxBodySizeMiddlewareLimitsConcurrentCSVImports(t *testing.T) {
 	release, ok := core.TryAcquireCSVImportSlot()
 	if !ok {
