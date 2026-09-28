@@ -184,3 +184,29 @@ jobs:
           else
             echo "Skipping :latest for prerelease ${VERSION}"
           fi
+
+      - name: Report published digest
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          VERSION: ${{ env.APP_VERSION }}
+        run: |
+          set -euo pipefail
+          # Hash the exact raw index manifest instead of trusting a buildx
+          # template, whose output format has changed across buildx releases.
+          digest="sha256:$(docker buildx imagetools inspect --raw "${IMAGE}:${VERSION}" | sha256sum | awk '{print $1}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::could not compute the published image digest"
+            exit 1
+          }
+          {
+            echo "### Published image"
+            echo ""
+            echo "- Tag: \`${IMAGE}:${VERSION}\`"
+            echo "- Digest-pinned reference: \`${IMAGE}@${digest}\`"
+            echo ""
+            echo "Deploy with:"
+            echo ""
+            echo '```'
+            echo "sudo scripts/safe-update.sh ${IMAGE}@${digest}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

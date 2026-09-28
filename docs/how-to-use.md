@@ -138,7 +138,7 @@ docker compose -f compose.yaml -f compose.local.yaml logs --tail=200 omni-money
 
 `down -v`は使用しないでください。bind mountのdataを削除しなくても、control key、recovery code、暗号化volumeの復旧情報を失うと復号できません。
 
-Pangolin/TrueNAS本番のversion更新は、通常の`up --build`ではなく`./scripts/safe-update.sh <固定image:version>`を使います。data migrationはtransactionalに実行され、scriptは停止後のoffline checkpointを検証してからcandidateをingressに接続します。candidateがhealthyになる前に失敗した場合だけ、旧dataと旧imageへrollbackします。要件と復旧時の挙動は[安全な更新と限定ロールバック](safe-update.md)を参照してください。
+Pangolin/TrueNAS本番のversion更新は、通常の`up --build`ではなく、digest固定したimageを`./scripts/safe-update.sh`へ渡します。tagは可変のため受け付けません。digestは`./scripts/resolve-image-digest.sh <image:tag>`で解決できます。data migrationはtransactionalに実行され、scriptは停止後のoffline checkpointを検証してからcandidateをingressに接続します。candidateがhealthyになる前に失敗した場合だけ、旧dataと旧imageへrollbackします。要件と復旧時の挙動は[安全な更新と限定ロールバック](safe-update.md)を参照してください。
 
 ## 4. Pangolin / TrueNAS
 
