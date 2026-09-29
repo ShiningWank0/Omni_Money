@@ -10,13 +10,14 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.1
 	github.com/go-webauthn/webauthn v0.17.1
 	github.com/mattn/go-sqlite3 v1.14.49
-	github.com/wailsapp/wails/v2 v2.11.0
+	github.com/wailsapp/wails/v2 v2.16.0
 	golang.org/x/crypto v0.55.0
 	golang.org/x/image v0.45.0
 	golang.org/x/sys v0.47.0
 )
 
 require (
+	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
