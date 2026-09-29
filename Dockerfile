@@ -44,7 +44,7 @@ RUN CGO_ENABLED=1 \
     LD_LIBRARY_PATH=/usr/local/lib /omni_money_server 2>&1 | grep -q "CONTROL_DB_PATH is required"
 
 # ===== Stage 3: 軽量ランタイム =====
-FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 # バージョン情報を実行時環境変数として参照可能にする（§8.3準拠）
 ARG VERSION
