@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1288,6 +1289,80 @@ func TestCSVV3RejectsUnsafeTagSettingsAndCreatedAt(t *testing.T) {
 	}
 	if _, err := (&Service{}).parseCSVV3(csvV3TestContent(t, transaction, badImage)); err == nil || !strings.Contains(err.Error(), "created_at") {
 		t.Fatalf("created_at result = %v", err)
+	}
+}
+
+func TestCSVV3TagLevelBounds(t *testing.T) {
+	tests := []struct {
+		name        string
+		level       string
+		parentDepth int
+		wantLevel   int
+	}{
+		{name: "root", level: "1", wantLevel: 1},
+		{name: "child", level: "2", parentDepth: 1, wantLevel: 2},
+		{name: "maximum depth", level: "3", parentDepth: 2, wantLevel: 3},
+		{name: "negative", level: "-1"},
+		{name: "zero", level: "0"},
+		{name: "above maximum depth", level: "4", parentDepth: 2},
+		{name: "int32 maximum", level: "2147483647"},
+		{name: "int32 overflow", level: "2147483648"},
+		// These values narrow to valid levels on 32-bit platforms. Include
+		// matching parents so hierarchy checks cannot hide a missing bound.
+		{name: "wrap to root", level: "4294967297"},
+		{name: "wrap to child", level: "4294967298", parentDepth: 1},
+		{name: "wrap to maximum depth", level: "4294967299", parentDepth: 2},
+		{name: "int64 maximum", level: "9223372036854775807"},
+		{name: "int64 overflow", level: "9223372036854775808"},
+	}
+	for _, recordType := range []string{"tag", "tag_legacy"} {
+		t.Run(recordType, func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					var rows []map[string]string
+					for level := 1; level <= tt.parentDepth; level++ {
+						parent := map[string]string{
+							csvVersionHeader: "3", "record_type": recordType,
+							"id": strconv.Itoa(level), "tag_name": "parent" + strconv.Itoa(level),
+							"tag_level": strconv.Itoa(level),
+						}
+						if level > 1 {
+							parent["tag_parent_id"] = strconv.Itoa(level - 1)
+						}
+						rows = append(rows, parent)
+					}
+					target := map[string]string{
+						csvVersionHeader: "3", "record_type": recordType,
+						"id": "99", "tag_name": "target", "tag_level": tt.level,
+					}
+					if tt.parentDepth > 0 {
+						target["tag_parent_id"] = strconv.Itoa(tt.parentDepth)
+					}
+					rows = append(rows, target)
+					parsed, err := (&Service{}).parseCSVV3(csvV3TestContent(t, rows...))
+					t.Cleanup(func() {
+						if err := parsed.cleanup(); err != nil {
+							t.Fatal(err)
+						}
+					})
+					if tt.wantLevel == 0 {
+						if err == nil || !strings.Contains(err.Error(), "タグ階層") {
+							t.Fatalf("level %q: got %v, want tag level error", tt.level, err)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatalf("level %q: %v", tt.level, err)
+					}
+					if len(parsed.tags) != len(rows) {
+						t.Fatalf("got %d tags, want %d", len(parsed.tags), len(rows))
+					}
+					if got := parsed.tags[len(parsed.tags)-1].level; got != tt.wantLevel {
+						t.Fatalf("got level %d, want %d", got, tt.wantLevel)
+					}
+				})
+			}
+		})
 	}
 }
 
