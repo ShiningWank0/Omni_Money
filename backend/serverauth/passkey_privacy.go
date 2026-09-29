@@ -80,7 +80,7 @@ func (s *Service) beginPrivatePasskeyLogin(ctx context.Context, email, clientKey
 	}
 
 	descriptors := make([]protocol.CredentialDescriptor, 0, control.MaxPasskeysPerUser)
-	prf := make(map[string]any, control.MaxPasskeysPerUser)
+	prf := make(map[string]protocol.PRFValues, control.MaxPasskeysPerUser)
 	ownedIDs := make([][]byte, 0, len(records))
 	for _, record := range records {
 		if len(record.ID) == 0 || !bytes.Equal(record.ID, record.Credential.ID) || len(record.PRFSalt) != keyenvelope.PasskeySecretSize {
@@ -88,13 +88,13 @@ func (s *Service) beginPrivatePasskeyLogin(ctx context.Context, email, clientKey
 		}
 		descriptors = append(descriptors, protocol.CredentialDescriptor{Type: protocol.PublicKeyCredentialType, CredentialID: record.ID})
 		ownedIDs = append(ownedIDs, record.ID)
-		prf[base64.RawURLEncoding.EncodeToString(record.ID)] = map[string]any{"first": protocol.URLEncodedBase64(record.PRFSalt)}
+		prf[base64.RawURLEncoding.EncodeToString(record.ID)] = protocol.PRFValues{First: protocol.URLEncodedBase64(record.PRFSalt)}
 	}
 	for index := len(records); index < control.MaxPasskeysPerUser; index++ {
 		id := s.passkeyDecoyCredentialID(email, index)
 		salt := s.passkeyDecoy(email, "prf", index)[:keyenvelope.PasskeySecretSize]
 		descriptors = append(descriptors, protocol.CredentialDescriptor{Type: protocol.PublicKeyCredentialType, CredentialID: id})
-		prf[base64.RawURLEncoding.EncodeToString(id)] = map[string]any{"first": protocol.URLEncodedBase64(salt)}
+		prf[base64.RawURLEncoding.EncodeToString(id)] = protocol.PRFValues{First: protocol.URLEncodedBase64(salt)}
 	}
 	// A stable order and stable decoys prevent repeated requests from exposing
 	// which entries are real. Omit authenticator transports for every entry.
@@ -103,7 +103,7 @@ func (s *Service) beginPrivatePasskeyLogin(ctx context.Context, email, clientKey
 	})
 	assertion, session, err := s.webauthn.BeginDiscoverableLogin(
 		webauthn.WithUserVerification(protocol.VerificationRequired),
-		webauthn.WithAssertionExtensions(protocol.AuthenticationExtensions{"prf": map[string]any{"evalByCredential": prf}}),
+		webauthn.WithAssertionExtensions(webauthn.WithExtensionPRFByCredential(prf, nil)),
 	)
 	if err != nil {
 		return PasskeyLoginBegin{}, err
