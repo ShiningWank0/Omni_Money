@@ -152,9 +152,26 @@ func TestPasskeyLoginBeginConcealsMissingDisabledAndPasswordOnlyAccounts(t *test
 			if len(options.AllowedCredentials) != control.MaxPasskeysPerUser || options.UserVerification != protocol.VerificationRequired {
 				t.Fatal("public request shape differs")
 			}
+			prf := browserPRFInputs(t, options.Extensions)
+			if len(prf.Eval) != 0 || len(prf.EvalByCredential) != control.MaxPasskeysPerUser {
+				t.Fatal("public PRF request shape differs")
+			}
 			for _, descriptor := range options.AllowedCredentials {
 				if len(descriptor.Transport) != 0 {
 					t.Fatal("transport metadata leaked")
+				}
+				id := base64.RawURLEncoding.EncodeToString(descriptor.CredentialID)
+				input := prf.EvalByCredential[id]
+				salt, err := base64.RawURLEncoding.DecodeString(input["first"])
+				if err != nil || len(input) != 1 || len(salt) != keyenvelope.PasskeySecretSize {
+					t.Fatal("credential has no valid browser PRF input")
+				}
+				if !tc.missing && !tc.disabled {
+					for _, record := range store.records {
+						if bytes.Equal(record.ID, descriptor.CredentialID) && !bytes.Equal(salt, record.PRFSalt) {
+							t.Fatal("real credential PRF salt changed")
+						}
+					}
 				}
 			}
 			if first.CeremonyID == second.CeremonyID || bytes.Equal(options.Challenge, second.Options.Response.Challenge) {
@@ -189,6 +206,72 @@ func TestPasskeyLoginBeginConcealsMissingDisabledAndPasswordOnlyAccounts(t *test
 				t.Fatal("identity leaked in public response")
 			}
 		})
+	}
+}
+
+// Decode the browser-facing JSON independently of go-webauthn's extension
+// structs so API migrations cannot silently change field names or encoding.
+type browserPRF struct {
+	Eval             map[string]string            `json:"eval"`
+	EvalByCredential map[string]map[string]string `json:"evalByCredential"`
+}
+
+func browserPRFInputs(t *testing.T, extensions any) browserPRF {
+	t.Helper()
+	data, err := json.Marshal(extensions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		PRF *browserPRF `json:"prf"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.PRF == nil {
+		t.Fatal("browser response omitted PRF")
+	}
+	return *decoded.PRF
+}
+
+func TestPasskeyRegistrationPreservesBrowserPRFSalt(t *testing.T) {
+	store := &privacyTestStore{user: control.UserSummary{ID: serverAuthTestUserID, Email: "person@example.test", State: control.UserActive}}
+	service := privacyTestService(t, store)
+	begin, err := service.BeginPasskeyRegistration(context.Background(), store.user.ID, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prf := browserPRFInputs(t, begin.Options.Response.Extensions)
+	salt, err := base64.RawURLEncoding.DecodeString(prf.Eval["first"])
+	if err != nil || len(prf.Eval) != 1 || len(prf.EvalByCredential) != 0 || len(salt) != keyenvelope.PasskeySecretSize {
+		t.Fatal("registration PRF JSON is invalid")
+	}
+	storedSalt := service.ceremonies[begin.CeremonyID].PRFSalt
+	if !bytes.Equal(salt, storedSalt) || bytes.Equal(salt, make([]byte, keyenvelope.PasskeySecretSize)) {
+		t.Fatal("browser and stored registration PRF salt differ")
+	}
+}
+
+func TestPasskeyReauthenticationPreservesBrowserPRFSalts(t *testing.T) {
+	store := &privacyTestStore{user: control.UserSummary{ID: serverAuthTestUserID, Email: "person@example.test", State: control.UserActive}}
+	for i := byte(1); i <= 2; i++ {
+		record, _ := privacyTestRecord(t, i)
+		store.records = append(store.records, record)
+	}
+	service := privacyTestService(t, store)
+	begin, err := service.BeginPasskeyReauthentication(context.Background(), store.user.ID, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prf := browserPRFInputs(t, begin.Options.Response.Extensions)
+	if len(prf.Eval) != 0 || len(prf.EvalByCredential) != len(store.records) {
+		t.Fatal("reauthentication PRF JSON is invalid")
+	}
+	for _, record := range store.records {
+		input := prf.EvalByCredential[base64.RawURLEncoding.EncodeToString(record.ID)]
+		if len(input) != 1 || input["first"] != base64.RawURLEncoding.EncodeToString(record.PRFSalt) {
+			t.Fatal("reauthentication credential PRF salt changed")
+		}
 	}
 }
 
