@@ -68,7 +68,9 @@ func TestDesktopReleaseUsesLeastPrivilegeAndReproducibleTools(t *testing.T) {
 		"needs: [prepare, build, attest]",
 		"actions: read",
 		"contents: write",
-		"WAILS_VERSION: v2.11.0",
+		`WAILS_VERSION="$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"`,
+		"go-version-file: go.mod",
+		"node-version-file: .node-version",
 		"VITE_APP_VERSION: ${{ needs.prepare.outputs.version }}",
 		"github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION",
 		"SHA256SUMS",
@@ -81,9 +83,48 @@ func TestDesktopReleaseUsesLeastPrivilegeAndReproducibleTools(t *testing.T) {
 	if strings.Count(workflow, "contents: read") < 3 {
 		t.Error("prepare, build, and attest jobs must retain read-only contents access")
 	}
-	for _, forbidden := range []string{"cmd/wails@latest", `xattr -cr`} {
+	for _, forbidden := range []string{"cmd/wails@latest", "WAILS_VERSION:", `xattr -cr`} {
 		if strings.Contains(workflow, forbidden) {
 			t.Errorf("release workflow contains forbidden pattern %q", forbidden)
+		}
+	}
+}
+
+func TestDockerPullRequestsCannotPublishImages(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join(".github", "workflows", "release-docker.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(contents)
+	start := strings.Index(workflow, "\n  build-check:\n")
+	end := strings.Index(workflow, "\n  prepare:\n")
+	if start < 0 || end <= start {
+		t.Fatal("Docker PR build check is missing")
+	}
+	check := workflow[start:end]
+	for _, required := range []string{"if: github.event_name == 'pull_request'", "contents: read", "push: false", "linux/amd64", "linux/arm64", "provenance: mode=max", "sbom: true"} {
+		if !strings.Contains(check, required) {
+			t.Errorf("Docker PR check is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"push: true", "login-action@", ": write", "secrets.", "attest-build-provenance@"} {
+		if strings.Contains(check, forbidden) {
+			t.Errorf("Docker PR check must not publish: %q", forbidden)
+		}
+	}
+	prepare := workflow[end:strings.Index(workflow, "\n  build:\n")]
+	if !strings.Contains(prepare, "if: github.event_name == 'push'") {
+		t.Error("release prepare must gate publication to push events")
+	}
+	for _, action := range []string{"docker/setup-buildx-action", "docker/build-push-action"} {
+		pins := regexp.MustCompile(regexp.QuoteMeta(action)+`@([0-9a-f]{40})`).FindAllStringSubmatch(workflow, -1)
+		if len(pins) < 2 {
+			t.Fatalf("%s must be exercised in PR and release builds", action)
+		}
+		for _, pin := range pins[1:] {
+			if pin[1] != pins[0][1] {
+				t.Errorf("%s must use the same pin in PR and release builds", action)
+			}
 		}
 	}
 }

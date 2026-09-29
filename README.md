@@ -97,10 +97,10 @@ CSVは画像を含め常に暗号化されない平文です。Desktopではダ�
 
 ## 必要な環境
 
-- Go 1.26.6 以上（CI・リリースは 1.26.7）
-- Node.js 24.19 以上
+- Go: 最低対応版と配布用固定版は `go.mod` の `go` / `toolchain` を参照
+- Node.js: ビルド用固定版は `.node-version` を参照
 - npm
-- 固定版 Wails v2.11.0（配布workflowが導入）
+- 固定版 Wails（`go.mod` の指定版を配布workflowが導入）
 - Docker
 
 Desktopの開発・配布は、[利用ガイド](docs/how-to-use.md)と[SQLCipher鍵の運用](docs/sqlcipher-key-operations.md)に記載した固定SQLCipher手順、および固定版Wailsを使ってください。未固定版やタグなしのWails CLIを実行しないでください。
@@ -277,7 +277,9 @@ npm run build
 
 - `validate-version.yml`: PR で `VERSION` の後退を検知
 - `release-desktop.yml`: 関連pathを変更したPRではmacOS Intel、macOS Apple Silicon、Windows、Linuxの4 Desktop artifactを固定Wails/SQLCipherでbuild検証するが、配布Releaseやversion tagはpublishしない。`main`ではVERSIONまたはrelease workflow自体の変更時に4 artifactをbuildし、version releaseをpublishする。
-- `release-docker.yml`: `main`のVERSION変更時にGHCR向けlinux/amd64 + linux/arm64のmulti-arch manifestをbuildし、stable releaseだけ`latest`を更新する。
+- `release-docker.yml`: 関連pathのPRでは本番と同じActionでlinux/amd64 + linux/arm64を公開せずbuild検証する。`main`のVERSION変更時にGHCR向けmulti-arch manifestをbuildし、stable releaseだけ`latest`を更新する。
+
+依存更新のグループ方針とGo/Node/Wailsの固定版管理は[依存更新のレビュー](docs/dependency-updates.md)を参照してください。
 
 ## 機能追加リスト
 

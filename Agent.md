@@ -234,7 +234,7 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
 
 ## 8. 自動構築（CI/CD）の要件
 
-**重要方針**: 正式な配布 build は workflow の固定 toolchain で行う。Desktop は固定 Wails v2.11.0 と固定 SQLCipher、server は Dockerfile または固定 SQLCipher と `server libsqlite3 sqlite_omit_load_extension` tags を使う。latest tag、bare Wails、未固定 tag は使わない。
+**重要方針**: 正式な配布 build は workflow の固定 toolchain で行う。Desktop は`go.mod` 指定版の Wails と固定 SQLCipher、server は Dockerfile または固定 SQLCipher と `server libsqlite3 sqlite_omit_load_extension` tags を使う。latest tag、bare Wails、未固定 tag は使わない。
 
 ### 8.1. バージョン管理とリリーストリガー
 
@@ -255,7 +255,7 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
 #### 8.2.1. デスクトップ用構築（`release-desktop.yml`）
 
 * **PR**: build設定・実行可能コードに関係するpathの変更時に、release workflowが4 artifactのbuild検証を行う。PR buildは配布Releaseやversion tagを作成しない。
-* **main**: `VERSION`またはrelease workflow自体の変更時に、固定Wails v2.11.0・固定SQLCipher・固定tags/CGO設定でmacOS Intel (`darwin/amd64`)、macOS Apple Silicon (`darwin/arm64`)、Windows (`windows/amd64`)、Linux (`linux/amd64`) の4 artifactをbuildし、version releaseを公開する。
+* **main**: `VERSION`またはrelease workflow自体の変更時に、`go.mod`指定版のWails・固定SQLCipher・固定tags/CGO設定でmacOS Intel (`darwin/amd64`)、macOS Apple Silicon (`darwin/arm64`)、Windows (`windows/amd64`)、Linux (`linux/amd64`) の4 artifactをbuildし、version releaseを公開する。
 * **source of truth**: path filter、version埋め込み、固定action、重複release防止は `release-desktop.yml` を参照する。
 
 #### 8.2.2. コンテナ用構築（`release-docker.yml`）
@@ -288,7 +288,7 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
    - **用途**: SQLiteデータベースをGoで動かすための仕組み（cgo）の利用、およびMac向けWailsアプリの画面描画処理の構築に必須となる。
    - **使用方法**: 固定SQLCipher build script と workflow の固定 tags/CGO 設定から利用する。通常SQLiteへのfallbackはしない。
 
-4. **Wails v2.11.0**
+4. **Wails（`go.mod` 指定版）**
    - **用途**: Desktop 4 artifactの固定版build。
    - **使用方法**: release workflowと同じ固定版・SQLCipher・build tagsを使う。latest tagやbare CLIを使わない。
 

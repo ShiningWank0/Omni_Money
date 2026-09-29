@@ -30,8 +30,23 @@ func TestDockerBaseImagesUsePinnedSupportedVersions(t *testing.T) {
 	if len(images) != 3 {
 		t.Fatalf("Dockerfile has %d pinned stages, want 3", len(images))
 	}
-	if !strings.HasPrefix(images[1], "golang:1.26.7-alpine@sha256:") {
-		t.Errorf("backend builder must stay aligned with Go 1.26.7 on Alpine: %s", images[1])
+	goMod, err := os.ReadFile("go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolchain := regexp.MustCompile(`(?m)^toolchain go([0-9]+\.[0-9]+\.[0-9]+)$`).FindSubmatch(goMod)
+	if len(toolchain) != 2 {
+		t.Fatal("go.mod must pin a Go toolchain with a patch version")
+	}
+	if !strings.HasPrefix(images[1], "golang:"+string(toolchain[1])+"-alpine@sha256:") {
+		t.Errorf("backend builder must match go.mod toolchain %s: %s", toolchain[1], images[1])
+	}
+	nodeVersion, err := os.ReadFile(".node-version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(images[0], "node:"+strings.TrimSpace(string(nodeVersion))+"-alpine@sha256:") {
+		t.Errorf("frontend builder must match .node-version: %s", images[0])
 	}
 	if !strings.HasPrefix(images[2], "alpine:3.24@sha256:") {
 		t.Errorf("runtime must use the reviewed Alpine 3.24 image: %s", images[2])

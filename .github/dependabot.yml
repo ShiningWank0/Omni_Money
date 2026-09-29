@@ -1,17 +1,22 @@
 version: 2
 updates:
-  # Go modules for the server, vault, and control plane. Grouped so a weekly
-  # sweep is one reviewable PR; security updates are raised separately by
-  # Dependabot regardless of grouping.
+  # Group routine version updates. Security updates keep their own policy.
+  # Major versions and dependencies requiring coordinated migrations stay
+  # in individual PRs; excluding from a group does not ignore the dependency.
   - package-ecosystem: gomod
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      go-modules:
+      go-modules-minor-patch:
+        applies-to: version-updates
         patterns:
           - "*"
+        update-types: [minor, patch]
+        exclude-patterns:
+          - "github.com/wailsapp/wails/v2"
+          - "github.com/go-webauthn/*"
 
   - package-ecosystem: npm
     directory: /frontend
@@ -19,9 +24,11 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      frontend:
+      frontend-minor-patch:
+        applies-to: version-updates
         patterns:
           - "*"
+        update-types: [minor, patch]
 
   # Workflow actions are pinned by commit SHA; Dependabot proposes new pins.
   - package-ecosystem: github-actions
@@ -29,6 +36,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
 
   # Base images are pinned by tag@sha256 in the Dockerfile; Dependabot proposes
   # updated digests. Each proposal still passes the CI digest-pinning tests.
@@ -37,3 +49,9 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+        exclude-patterns: [golang, node]

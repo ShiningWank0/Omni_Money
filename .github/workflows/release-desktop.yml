@@ -15,6 +15,7 @@ on:
       - 'scripts/build-openssl-darwin.sh'
       - 'scripts/backup-data-root*.sh'
       - 'scripts/build-sqlcipher-*.sh'
+      - '.node-version'
       - 'go.mod'
       - 'go.sum'
       - 'wails.json'
@@ -30,9 +31,6 @@ permissions: {}
 concurrency:
   group: desktop-release-${{ github.ref }}
   cancel-in-progress: false
-
-env:
-  WAILS_VERSION: v2.11.0
 
 jobs:
   prepare:
@@ -76,13 +74,13 @@ jobs:
         if: github.event_name == 'push'
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '1.26.7'
+          go-version-file: go.mod
 
       - name: Setup Node.js for release quality gate
         if: github.event_name == 'push'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: '24.19.0'
+          node-version-file: .node-version
 
       - name: Install Linux build dependencies
         if: github.event_name == 'push'
@@ -181,12 +179,12 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '1.26.7'
+          go-version-file: go.mod
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: '24.19.0'
+          node-version-file: .node-version
 
       - name: Setup MSYS2 UCRT64
         if: runner.os == 'Windows'
@@ -216,11 +214,11 @@ jobs:
       - name: Install Wails CLI
         shell: bash
         run: |
-          REQUIRED_VERSION="$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"
-          if [ "$REQUIRED_VERSION" != "$WAILS_VERSION" ]; then
-            echo "::error::go.mod Wails version ($REQUIRED_VERSION) does not match $WAILS_VERSION"
+          WAILS_VERSION="$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"
+          [[ "$WAILS_VERSION" =~ ^v2\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::go.mod must pin a stable Wails v2 release"
             exit 1
-          fi
+          }
           go install "github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION"
 
       - name: Build pinned static SQLCipher on Linux
