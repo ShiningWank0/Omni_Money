@@ -103,9 +103,10 @@ func (s *Service) BeginPasskeyRegistration(ctx context.Context, userID, clientKe
 			UserVerification: protocol.VerificationRequired,
 		}),
 		webauthn.WithConveyancePreference(protocol.PreferNoAttestation),
-		webauthn.WithExtensions(protocol.AuthenticationExtensions{
-			"prf": map[string]any{"eval": map[string]any{"first": protocol.URLEncodedBase64(prfSalt)}},
-		}),
+		webauthn.WithExtensions(
+			// The response outlives the temporary salt, which is cleared below.
+			webauthn.WithExtensionPRF(protocol.PRFValues{First: protocol.URLEncodedBase64(bytes.Clone(prfSalt))}),
+		),
 	)
 	if err != nil {
 		clear(prfSalt)
@@ -214,18 +215,16 @@ func (s *Service) beginPasskeyAssertion(ctx context.Context, userID, clientKey, 
 	} else if retryAfter > 0 {
 		return PasskeyLoginBegin{}, &LoginThrottledError{RetryAfter: retryAfter}
 	}
-	evalByCredential := make(map[string]any, len(records))
+	evalByCredential := make(map[string]protocol.PRFValues, len(records))
 	for _, record := range records {
-		evalByCredential[base64.RawURLEncoding.EncodeToString(record.ID)] = map[string]any{
-			"first": protocol.URLEncodedBase64(record.PRFSalt),
+		evalByCredential[base64.RawURLEncoding.EncodeToString(record.ID)] = protocol.PRFValues{
+			First: protocol.URLEncodedBase64(record.PRFSalt),
 		}
 	}
 	assertion, session, err := s.webauthn.BeginLogin(
 		adapter,
 		webauthn.WithUserVerification(protocol.VerificationRequired),
-		webauthn.WithAssertionExtensions(protocol.AuthenticationExtensions{
-			"prf": map[string]any{"evalByCredential": evalByCredential},
-		}),
+		webauthn.WithAssertionExtensions(webauthn.WithExtensionPRFByCredential(evalByCredential, nil)),
 	)
 	if err != nil {
 		return PasskeyLoginBegin{}, fmt.Errorf("begin passkey login: %w", err)
