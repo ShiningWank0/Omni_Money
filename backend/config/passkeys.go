@@ -17,6 +17,7 @@ type PasskeyConfig struct {
 
 func passkeyConfigFromEnv(transport WebTransportConfig, listenHost, port string) (PasskeyConfig, error) {
 	rpID := strings.TrimSpace(os.Getenv("PASSKEY_RP_ID"))
+	explicitRPID := rpID != ""
 	allowedHosts := splitNonEmpty(os.Getenv("ALLOWED_HOSTS"))
 	if rpID == "" {
 		candidate := strings.TrimSpace(os.Getenv("HTTPS_REDIRECT_HOST"))
@@ -35,10 +36,20 @@ func passkeyConfigFromEnv(transport WebTransportConfig, listenHost, port string)
 	if rpID == "" || strings.ContainsAny(rpID, "/@\x00\r\n\t ") || (strings.Contains(rpID, ":") && net.ParseIP(rpID) == nil) {
 		return PasskeyConfig{}, errors.New("PASSKEY_RP_ID must be a hostname without a scheme, path, or port")
 	}
+	// WebAuthn RP IDs are domains, never IP addresses. Keep the default
+	// loopback server usable through localhost without changing explicit RP IDs.
+	loopbackFallback := false
+	if ip := net.ParseIP(rpID); ip != nil {
+		if explicitRPID || !ip.IsLoopback() {
+			return PasskeyConfig{}, errors.New("PASSKEY_RP_ID must be a domain, not an IP address; use localhost for local access")
+		}
+		rpID = "localhost"
+		loopbackFallback = true
+	}
 	// A single-label or public-suffix RP ID (for example "com") would make every
 	// origin below it a valid passkey scope. Require an explicit domain, and
 	// when ALLOWED_HOSTS is configured require exact equality with one entry.
-	if !IsLoopbackHost(rpID) && net.ParseIP(rpID) == nil {
+	if !IsLoopbackHost(rpID) {
 		if len(allowedHosts) > 0 {
 			matched := false
 			for _, host := range allowedHosts {
@@ -74,6 +85,14 @@ func passkeyConfigFromEnv(transport WebTransportConfig, listenHost, port string)
 		}
 		for _, host := range hosts {
 			hostname := hostWithoutPort(host)
+			if ip := net.ParseIP(hostname); loopbackFallback && ip != nil && ip.IsLoopback() {
+				hostname = "localhost"
+				if _, originPort, err := net.SplitHostPort(host); err == nil {
+					host = net.JoinHostPort(hostname, originPort)
+				} else {
+					host = hostname
+				}
+			}
 			if hostname == rpID || strings.HasSuffix(strings.ToLower(hostname), "."+strings.ToLower(rpID)) {
 				origins = append(origins, scheme+"://"+host)
 			}

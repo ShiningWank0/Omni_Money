@@ -95,6 +95,8 @@ docker compose -f compose.yaml -f compose.bootstrap.yaml -f compose.local.yaml u
 
 ローカルoverrideは`127.0.0.1:4000`だけへHTTPをpublishします。ブラウザで`http://localhost:4000`を開きます。
 
+パスキーのRP IDにはIPアドレスを指定できません。ローカルでは`PASSKEY_RP_ID=localhost`と`PASSKEY_ORIGINS=http://localhost:4000`を使用してください。明示設定がなく、RP IDの候補がloopback IPの場合は`localhost`を既定値とします。明示したRP IDやoriginは自動変換しません。
+
 ### 最初のAdminを作る
 
 初回画面で次を入力します。

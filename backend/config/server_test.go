@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 )
 
 func setValidServerEnvironment(t *testing.T) {
@@ -126,6 +128,45 @@ func TestServerConfigFromEnvRejectsUnscopedPasskeyRID(t *testing.T) {
 	}
 }
 
+func TestPasskeyLoopbackDefaultsMatchWebAuthnDomainRequirements(t *testing.T) {
+	for _, tc := range []struct {
+		name, listenHost, allowedHosts, rpID, origins, wantError string
+	}{
+		{name: "default IPv4", listenHost: "127.0.0.1"},
+		{name: "IPv4 allowlist", listenHost: "127.0.0.1", allowedHosts: "127.0.0.1:4000"},
+		{name: "default IPv6", listenHost: "::1"},
+		{name: "IPv6 allowlist", listenHost: "::1", allowedHosts: "[::1]:4000"},
+		{name: "explicit localhost", listenHost: "127.0.0.1", allowedHosts: "localhost:4000", rpID: "localhost", origins: "http://localhost:4000"},
+		{name: "explicit IPv4", listenHost: "127.0.0.1", rpID: "127.0.0.1", wantError: "not an IP address"},
+		{name: "explicit IPv6", listenHost: "::1", rpID: "::1", wantError: "not an IP address"},
+		{name: "remote IP", listenHost: "127.0.0.1", allowedHosts: "192.0.2.1:4000", wantError: "not an IP address"},
+		{name: "explicit origin is not rewritten", listenHost: "127.0.0.1", origins: "http://127.0.0.1:4000", wantError: "outside RP ID"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setValidServerEnvironment(t)
+			t.Setenv("ALLOWED_HOSTS", tc.allowedHosts)
+			t.Setenv("PASSKEY_RP_ID", tc.rpID)
+			t.Setenv("PASSKEY_ORIGINS", tc.origins)
+			cfg, err := passkeyConfigFromEnv(WebTransportConfig{}, tc.listenHost, "4000")
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("got %v, want %q", err, tc.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.RPID != "localhost" || len(cfg.Origins) != 1 || cfg.Origins[0] != "http://localhost:4000" {
+				t.Fatalf("unexpected loopback boundary: %+v", cfg)
+			}
+			if _, err := webauthn.New(&webauthn.Config{RPID: cfg.RPID, RPDisplayName: "Omni Money", RPOrigins: cfg.Origins, RPTopOrigins: cfg.Origins}); err != nil {
+				t.Fatalf("configuration cannot initialize WebAuthn: %v", err)
+			}
+		})
+	}
+}
+
 func TestServerConfigFromEnvRequiresAbsoluteSecurityPaths(t *testing.T) {
 	pathNames := []string{
 		"CONTROL_DB_PATH",
@@ -225,6 +266,7 @@ func TestServerConfigFromEnvRejectsNonLoopbackInsecureHTTP(t *testing.T) {
 	t.Setenv("HOST_IP", "0.0.0.0")
 	t.Setenv("FORCE_HTTPS", "true")
 	t.Setenv("TRUSTED_PROXIES", "172.30.240.3/32")
+	t.Setenv("ALLOWED_HOSTS", "money.example.com")
 	if _, err := ServerConfigFromEnv(); err != nil {
 		t.Fatalf("strict HTTPS proxy configuration rejected: %v", err)
 	}
