@@ -1,7 +1,7 @@
 module omni_money
 
 // Go 1.26.6 contains the standard-library fixes for GO-2026-5972 and
-// GO-2026-6090. CI and release builds intentionally use the newer 1.26.7.
+// GO-2026-6090. CI and release builds use the pinned toolchain below.
 go 1.26.6
 
 toolchain go1.26.7
