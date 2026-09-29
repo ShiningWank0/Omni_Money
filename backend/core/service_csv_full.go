@@ -2048,22 +2048,21 @@ func (s *Service) parseCSVV3Reader(ctx context.Context, input io.Reader, spoolIm
 				}
 			}
 			level, err := csvV3Int(record, headerMap, "tag_level", true, true)
-			if err != nil {
+			// Validate the int64 value before narrowing it on 32-bit platforms.
+			if err != nil || level < 1 || level > validation.MaxTagLevel {
 				return csvV3Import{}, fmt.Errorf("タグ階層が不正です (行%d)", rowNumber)
 			}
-			if err := validation.ValidateTagLevel(int(level)); err != nil {
-				return csvV3Import{}, fmt.Errorf("タグ階層が不正です (行%d): %w", rowNumber, err)
-			}
+			tagLevel := int(level)
 			parent, err := csvV3Int(record, headerMap, "tag_parent_id", false, true)
 			if err != nil {
 				return csvV3Import{}, fmt.Errorf("タグ親id (行%d): %w", rowNumber, err)
 			}
 			if parent == 0 {
-				if err := validation.ValidateTagHierarchy(int(level), nil); err != nil {
+				if err := validation.ValidateTagHierarchy(tagLevel, nil); err != nil {
 					return csvV3Import{}, fmt.Errorf("タグ階層が不正です (行%d): %w", rowNumber, err)
 				}
 			}
-			row := csvV3Tag{id: id, parentID: parent, name: name, level: int(level), archiveLegacy: archiveTag}
+			row := csvV3Tag{id: id, parentID: parent, name: name, level: tagLevel, archiveLegacy: archiveTag}
 			if parent == 0 {
 				if !archiveTag {
 					if _, exists := tagNames[name]; exists {
