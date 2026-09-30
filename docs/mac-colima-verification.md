@@ -4,7 +4,7 @@
 
 ## 1. Mac 側の準備
 
-1. FileVault が有効であること、検証ディレクトリが iCloud Drive や他の同期先に含まれないことを確認します。以下は空の `~/Desktop/test` を専用に使う例です。Desktop 同期が有効なら同期対象外の別ディレクトリを選びます。
+1. FileVault が有効であり、Colima の VM ディスクの実体がその保護対象にあること、検証ディレクトリが iCloud Drive や他の同期先に含まれないことを確認します。以下は空の `~/Desktop/test` を専用に使う例です。Desktop 同期が有効なら同期対象外の別ディレクトリを選びます。
 2. 検証ディレクトリに既存データやシンボリックリンクを入れず、本番の鍵・DB・CSVをコピーしません。空きポート 4000 を確認します。
 3. Docker Compose 2.24.4 以上を用意します。[Compose の `!override` 仕様](https://docs.docker.com/reference/compose-file/merge/#replace-value)が必要です。`docker compose version` で確認します。
 
