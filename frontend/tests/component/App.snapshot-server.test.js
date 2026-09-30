@@ -22,6 +22,7 @@ const api = vi.hoisted(() => ({
   getTags: vi.fn(),
   getAccounts: vi.fn(),
   getTransactions: vi.fn(),
+  getTransactionImages: vi.fn(),
   getCreditCardSettings: vi.fn(),
   getBankAccountSettings: vi.fn(),
   getItems: vi.fn(),
@@ -77,6 +78,7 @@ beforeEach(() => {
   api.getCreditCardSettings.mockResolvedValue([])
   api.getBankAccountSettings.mockResolvedValue([])
   api.getItems.mockResolvedValue([])
+  api.getTransactionImages.mockResolvedValue([])
   api.listSnapshots.mockResolvedValue(['omni_money_20260102_030405.db'])
   api.importCSV.mockResolvedValue(1)
   api.previewCSVImportSourceDigest = 'a'.repeat(64)
@@ -194,6 +196,33 @@ async function mountTransactionApp(transactions = []) {
   return wrapper
 }
 
+async function openTransactionEditor(wrapper) {
+  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
+  await vi.dynamicImportSettled()
+  await flushPromises()
+  await wrapper.get('.details-icon-button[aria-label="取引を編集"]').trigger('click')
+  await flushPromises()
+}
+
+it('shows saved images in read-only details before the pencil opens editing', async () => {
+  const image = { id: 3, filename: 'receipt.png', data_url: 'data:image/png;base64,iVBORw0KGgo=' }
+  api.getTransactionImages.mockResolvedValueOnce([image])
+  const wrapper = await mountTransactionApp([existingTransaction])
+
+  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
+  await vi.dynamicImportSettled()
+  await flushPromises()
+  expect(wrapper.find('.transaction-modal').exists()).toBe(false)
+  expect(wrapper.get('.transaction-details').text()).toContain('lunch')
+  expect(wrapper.get('.details-image-list img').attributes('src')).toBe(image.data_url)
+  expect(api.getTransactionImages).toHaveBeenCalledWith(existingTransaction.id)
+
+  await wrapper.get('.details-icon-button[aria-label="取引を編集"]').trigger('click')
+  await flushPromises()
+  expect(wrapper.find('.transaction-details').exists()).toBe(false)
+  expect(wrapper.get('.transaction-modal h3').text()).toBe('取引を編集')
+})
+
 it('keeps a new transaction draft and skips refresh when add fails', async () => {
   const wrapper = await mountTransactionApp()
   await wrapper.get('.header-add-btn .add-btn').trigger('click')
@@ -217,8 +246,7 @@ it('keeps a new transaction draft and skips refresh when add fails', async () =>
 
 it('keeps the edited transaction and skips refresh when update fails', async () => {
   const wrapper = await mountTransactionApp([existingTransaction])
-  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
-  await flushPromises()
+  await openTransactionEditor(wrapper)
   const accountsCalls = api.getAccounts.mock.calls.length
   const transactionsCalls = api.getTransactions.mock.calls.length
 
@@ -236,8 +264,7 @@ it('keeps the edited transaction and skips refresh when update fails', async () 
 
 it('keeps the edited transaction and skips refresh when delete fails', async () => {
   const wrapper = await mountTransactionApp([existingTransaction])
-  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
-  await flushPromises()
+  await openTransactionEditor(wrapper)
   const accountsCalls = api.getAccounts.mock.calls.length
   const transactionsCalls = api.getTransactions.mock.calls.length
 
@@ -276,8 +303,7 @@ it('closes the modal and refreshes after adding a transaction succeeds', async (
 
 it('closes the modal and refreshes after updating a transaction succeeds', async () => {
   const wrapper = await mountTransactionApp([existingTransaction])
-  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
-  await flushPromises()
+  await openTransactionEditor(wrapper)
   const accountsCalls = api.getAccounts.mock.calls.length
   const transactionsCalls = api.getTransactions.mock.calls.length
 
@@ -294,8 +320,7 @@ it('closes the modal and refreshes after updating a transaction succeeds', async
 
 it('closes the modal and refreshes after deleting a transaction succeeds', async () => {
   const wrapper = await mountTransactionApp([existingTransaction])
-  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
-  await flushPromises()
+  await openTransactionEditor(wrapper)
   const accountsCalls = api.getAccounts.mock.calls.length
   const transactionsCalls = api.getTransactions.mock.calls.length
 
@@ -314,8 +339,7 @@ it('closes the modal and refreshes after deleting a transaction succeeds', async
 
 it('blocks repeated transaction submissions and ignores a save completing after session expiry', async () => {
   const wrapper = await mountTransactionApp([existingTransaction])
-  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
-  await flushPromises()
+  await openTransactionEditor(wrapper)
   const save = deferred()
   api.updateTransaction.mockReturnValueOnce(save.promise)
   await wrapper.get('.transaction-modal form').trigger('submit')
