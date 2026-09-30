@@ -35,6 +35,8 @@ CIの整合性チェックとGoテストは、Dockerだけの更新による固�
 フロントエンドのmajor更新はdesktopモードの画面・ストア操作とserver E2Eを確認する。
 
 Docker release workflowはPR上で、本番と同じBuildx/build-push Actionによるamd64/arm64ビルド、SBOM/provenance生成を行う。レジストリへのpush、ログイン、署名公開は行わない。
+本番のReleaseは「タグなしdigest push → スキャン → staging index → attestation → 検証 → release tag公開」の順で行い、検証前にversion/latestを公開しない。
+Release経路の変更は、まず`workflow_dispatch`のリハーサル（release tagを公開しない同一チェーン）で検証してからVERSIONを更新する。
 この検証は公開後のattestation検証の代替にはならない。attestation Action更新は、証明生成・検証まで別途確認する。
 
 Dependabot PRに移行コードを追加した後は自動rebaseが停止するため、最新mainの取り込みは明示的に行う。

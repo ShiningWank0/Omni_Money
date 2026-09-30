@@ -113,8 +113,8 @@ func TestDockerPullRequestsCannotPublishImages(t *testing.T) {
 		}
 	}
 	prepare := workflow[end:strings.Index(workflow, "\n  build:\n")]
-	if !strings.Contains(prepare, "if: github.event_name == 'push'") {
-		t.Error("release prepare must gate publication to push events")
+	if !strings.Contains(prepare, "if: github.event_name != 'pull_request'") {
+		t.Error("release prepare must run for release pushes and rehearsals, never for PRs")
 	}
 	for _, action := range []string{"docker/setup-buildx-action", "docker/build-push-action"} {
 		pins := regexp.MustCompile(regexp.QuoteMeta(action)+`@([0-9a-f]{40})`).FindAllStringSubmatch(workflow, -1)
@@ -137,11 +137,21 @@ func TestDockerReleasePassesVersionBuildArg(t *testing.T) {
 	workflow := string(contents)
 	for _, required := range []string{
 		"build-args: VERSION=${{ env.APP_VERSION }}",
+		"push-by-digest=true",
 		`image-ref: ${{ needs.prepare.outputs.image }}@${{ steps.build.outputs.digest }}`,
+		"TRIVY_PLATFORM: ${{ matrix.platform }}",
 		"actions/attest-build-provenance@",
 		"subject-digest: ${{ steps.publish.outputs.digest }}",
 		"id-token: write",
 		"attestations: write",
+		"gh attestation verify",
+		"--signer-workflow",
+		"--source-ref",
+		"--deny-self-hosted-runners",
+		"--dry-run",
+		"workflow_dispatch:",
+		"rehearsal-staging",
+		"if: github.event_name != 'workflow_dispatch'",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("Docker release workflow is missing version or release-assurance control %q", required)
@@ -149,6 +159,26 @@ func TestDockerReleasePassesVersionBuildArg(t *testing.T) {
 	}
 	if strings.Contains(workflow, "omni-money:release-scan") {
 		t.Error("Docker release must scan the pushed digest instead of a separately rebuilt candidate")
+	}
+	if strings.Contains(workflow, "tags: ${{ needs.prepare.outputs.image }}") {
+		t.Error("per-architecture images must be pushed by digest without release tags")
+	}
+	buildStart := strings.Index(workflow, "\n  build:\n")
+	manifestStart := strings.Index(workflow, "\n  manifest:\n")
+	if buildStart < 0 || manifestStart <= buildStart {
+		t.Fatal("Docker release workflow build/manifest jobs are missing or out of order")
+	}
+	buildJob := workflow[buildStart:manifestStart]
+	for _, forbidden := range []string{"push: true", "tags:"} {
+		if strings.Contains(buildJob, forbidden) {
+			t.Errorf("release build job must push by digest only; found %q", forbidden)
+		}
+	}
+	attest := strings.Index(workflow, "Attest staged image provenance")
+	verify := strings.Index(workflow, "Verify provenance before publishing release tags")
+	publish := strings.Index(workflow, "Publish verified release tags")
+	if attest < 0 || verify < 0 || publish < 0 || !(attest < verify && verify < publish) {
+		t.Error("the staged attestation must be verified before any release tag is published")
 	}
 }
 
