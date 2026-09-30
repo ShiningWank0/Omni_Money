@@ -138,9 +138,9 @@
                 :key="transaction.id"
                 tabindex="0"
                 :aria-label="getTransactionAriaLabel(transaction)"
-                @click="onEditTransaction(transaction)"
-                @keydown.enter="onEditTransaction(transaction)"
-                @keydown.space.prevent="onEditTransaction(transaction)"
+                @click="showTransactionDetails(transaction)"
+                @keydown.enter="showTransactionDetails(transaction)"
+                @keydown.space.prevent="showTransactionDetails(transaction)"
               >
                 <td class="date-cell">{{ formatDateTime(transaction.date) }}</td>
                 <td v-if="store.shouldShowFundItemColumn">{{ transaction.fundItem || transaction.account }}</td>
@@ -156,7 +156,14 @@
 
     <BuildInfo />
 
-    <!-- 新規取引追加モーダル -->
+    <TransactionDetailsModal
+      v-if="viewingTransaction && !showAddTransactionModal"
+      :transaction="viewingTransaction"
+      @edit="editViewedTransaction"
+      @close="viewingTransaction = null"
+    />
+
+    <!-- 新規取引追加・編集モーダル -->
     <TransactionModal
       v-if="showAddTransactionModal"
       :is-edit-mode="isEditMode"
@@ -350,6 +357,7 @@ import { reloadLocation, replaceLocation } from './utils/navigation'
 
 // 初期表示に不要な管理・分析モーダルは、開いた時だけ読み込む。
 const CSVImportModal = defineAsyncComponent(() => import('./components/CSVImportModal.vue'))
+const TransactionDetailsModal = defineAsyncComponent(() => import('./components/TransactionDetailsModal.vue'))
 const CreditCardSettingsModal = defineAsyncComponent(() => import('./components/CreditCardSettingsModal.vue'))
 const BalanceChart = defineAsyncComponent(() => import('./components/BalanceChart.vue'))
 const SnapshotManager = defineAsyncComponent(() => import('./components/SnapshotManager.vue'))
@@ -440,6 +448,7 @@ const heartbeatTrailingMs = 30 * 1000
 const heartbeatFailureRecheckDelaysMs = [500, 1500]
 const isEditMode = ref(false)
 const editingTransaction = ref(null)
+const viewingTransaction = ref(null)
 const dateSortOrder = ref('desc')
 const isInitialLoading = ref(true)
 const selectedCreditCardItems = ref([])
@@ -502,7 +511,7 @@ function getAmountCellClass(type) {
 
 function getTransactionAriaLabel(transaction) {
   const account = transaction.fundItem || transaction.account || '資金項目なし'
-  return `${formatDateTime(transaction.date)}、${account}、${transaction.item}、${formatAmount(transaction.amount, transaction.type, transaction.amount_exact)}。編集する`
+  return `${formatDateTime(transaction.date)}、${account}、${transaction.item}、${formatAmount(transaction.amount, transaction.type, transaction.amount_exact)}。詳細を見る`
 }
 
 function isCreditCardItem(account) {
@@ -557,13 +566,20 @@ async function refreshLedger() {
 
 // 取引モーダル操作
 function showAddModal() {
+  viewingTransaction.value = null
   isEditMode.value = false
   editingTransaction.value = null
   showAddTransactionModal.value = true
   store.fetchItems()
 }
 
-function onEditTransaction(tx) {
+function showTransactionDetails(tx) {
+  viewingTransaction.value = { ...tx }
+}
+
+function editViewedTransaction() {
+  const tx = viewingTransaction.value
+  if (!tx) return
   isEditMode.value = true
   editingTransaction.value = { ...tx }
   showAddTransactionModal.value = true
@@ -587,6 +603,7 @@ async function handleSaveTransaction(data) {
     }
     if (generation !== financialUIGeneration) return
     hideAddModal()
+    viewingTransaction.value = null
     await refreshLedger()
   } catch (error) {
     if (generation === financialUIGeneration) {
@@ -605,6 +622,7 @@ async function handleDeleteTransaction() {
     await apiDeleteTransaction(editingTransaction.value.id)
     if (generation !== financialUIGeneration) return
     hideAddModal()
+    viewingTransaction.value = null
     await refreshLedger()
   } catch (error) {
     if (generation === financialUIGeneration) {
@@ -926,6 +944,7 @@ function clearSensitiveStateForIdle(preserveCredentialSettings = false) {
   reauthPasswordInput.value = null
   isEditMode.value = false
   editingTransaction.value = null
+  viewingTransaction.value = null
   selectedCreditCardItems.value = []
   selectedBankAccountItems.value = []
   balanceHistoryData.value = null
