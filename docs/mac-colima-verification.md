@@ -24,14 +24,13 @@ mounts:
 ```bash
 TEST_DIR="$HOME/Desktop/test"
 CONTEXT=colima-omni-money-v2
-REPO_DIR="$HOME/Desktop/Omni_Money"
 ```
 
-context 名や repository の場所が違う場合は置き換えます。`docker context inspect "$CONTEXT"` が対象の Colima プロファイルを指すことも確認してください。
+context 名が違う場合は置き換えます。`docker context inspect "$CONTEXT"` が対象の Colima プロファイルを指すことも確認してください。
 
 ## 2. 公開済みイメージと秘密ファイル
 
-[Docker Release workflow](../.github/workflows/release-docker.yml) の 2.0.0 実行結果から、公開された `ghcr.io/shiningwank0/omni_money@sha256:<64 桁>` を確認します。`latest` やタグだけを使わず、ワークフローの job summary と registry の digest が一致することを確認してください。手元で `--build` すると Dockerfile の既定バージョンは `dev` となり、公開成果物そのものの検証になりません。
+[Docker Release workflow](../.github/workflows/release-docker.yml) の 2.0.0 実行結果から、公開された `ghcr.io/shiningwank0/omni_money@sha256:<64 桁>` を確認します。`latest` やタグだけを使わず、ワークフローの job summary と registry の digest が一致することを確認してください。Apple Silicon の Colima では `linux/arm64` を含む公開イメージの digest を使います。Mac 用 ZIP の SHA-256 や build job の単一アーキテクチャ digest は、この手順の公開イメージ digest と区別してください。手元で `--build` すると Dockerfile の既定バージョンは `dev` となり、公開成果物そのものの検証になりません。
 
 次の二つのファイルは Mac 上の専用ディレクトリに初回だけ作ります。ブロック内の `set -eC` はエラー時に中止し、既存ファイルへの上書きを禁止します。既存の鍵を上書きすると DB を復号できなくなるため、再実行時は既存ファイルを残します。`sudo chown` は実行しません。秘密ファイルの中身をチャット、Issue、PR、ログへ貼らないでください。Mac 側の `0600` ファイルはコンテナの UID `10001` から読めるとは限らないため、後で Colima VM 内の専用 volume に取り込みます。
 
@@ -145,7 +144,6 @@ docker --context "$CONTEXT" run --rm --network none --read-only --user 0:0 \
 次はリポジトリのルートで実行します。初回は `--env-file` と四つの `-f` を明示し、**最後**に Mac 専用設定を指定します。Admin 作成後は bootstrap を外した三つの `-f` にします。`config` は起動せず、解決済みの設定を表示します。
 
 ```bash
-cd "$REPO_DIR"
 docker --context "$CONTEXT" compose \
   --env-file "$TEST_DIR/compose.env" \
   -f compose.yaml -f compose.bootstrap.yaml -f compose.local.yaml \
@@ -156,7 +154,7 @@ docker --context "$CONTEXT" compose \
 
 - `image` が公開された 2.0.0 の完全な digest で、`build` がない。
 - `/app/data` が `type: volume`、`/run/secrets` が読み取り専用の `type: volume`、`/tmp` が `type: tmpfs`。Mac のパスを指す書き込み可能な bind mount がない。
-- Web の公開先が **`127.0.0.1:4000` の一つだけ**。`4001` や `0.0.0.0` の公開がない。
+- Web ポートの宣言が **`127.0.0.1:4000` の一つだけ**。`4001` や `0.0.0.0` の宣言がない。この `config` 出力だけでは実際のポート公開は確認できません。
 - `pangolin_target` が `internal: true`、service がその network 一つだけに接続されている。
 - `user: 10001:10001`、`read_only: true`、`cap_drop: [ALL]`、`no-new-privileges:true` が残っている。
 - `secrets` に Mac のファイル由来の mount が残らず、初回だけ setup token の環境変数が設定される。control key と attestation の参照先は VM 内の `/run/secrets` である。
@@ -170,7 +168,33 @@ docker --context "$CONTEXT" compose \
   -f "$TEST_DIR/compose.mac-test.yaml" up -d --no-build --pull never
 ```
 
-`http://localhost:4000/healthz` の応答を確認し、ブラウザでは `http://localhost:4000` を開きます。初回 Admin 作成には setup token が必要です。ブラウザで生成される recovery code は安全な場所に保管します。
+起動後は次の二つでコンテナの状態と**実際に公開されたポート**を確認します。`compose config` に `published: "4000"` があっても、実際のポートが公開されているとは限りません。Docker 29.5.2 と Colima で、`internal: true` の bridge network だけに接続したコンテナが `healthy` でも、ポート公開がない事例がありました（[Moby の報告](https://github.com/moby/moby/discussions/53256)、[Docker の bridge network 説明](https://docs.docker.com/engine/network/drivers/bridge/)）。この確認のためにコンテナを停止する必要はありません。
+
+```bash
+docker --context "$CONTEXT" compose \
+  --env-file "$TEST_DIR/compose.env" \
+  -f compose.yaml -f compose.bootstrap.yaml -f compose.local.yaml \
+  -f "$TEST_DIR/compose.mac-test.yaml" ps
+docker --context "$CONTEXT" port omni-money 4000/tcp
+```
+
+`docker port` が `127.0.0.1:4000` を返し、`curl --fail --silent --show-error http://127.0.0.1:4000/healthz` に応答があれば、そのままブラウザで `http://localhost:4000` を開きます。`0.0.0.0` や Mac の LAN アドレスで公開されていたら、外部から到達できる可能性があるため、利用を中止して設定を確認してください。
+
+`docker port` が `no public port '4000/tcp' published for omni-money` を返し、Mac の `lsof -nP -iTCP:4000 -sTCP:LISTEN` も空なら、Colima VM への SSH トンネルを使います。まず VM 内からサービスに到達できることと SSH の接続名を確認します。以下の `172.30.240.2` は `compose.yaml` の `omni-money` に指定された固定 IP です。設定を変えた場合は解決済み `compose config` の IP を使います。
+
+```bash
+colima ssh --profile omni-money-v2 -- curl --fail --silent --show-error http://172.30.240.2:4000/healthz
+colima ssh-config --profile omni-money-v2 | grep '^Host '
+```
+
+`Host colima-omni-money-v2` を確認したら、**別のターミナル**で次を実行して開いたままにします。SSH は Mac の loopback `127.0.0.1:4000` だけを VM 内のサービスへ転送します。接続名が異なる場合は表示された名前に置き換えてください。
+
+```bash
+ssh -F "$HOME/.colima/ssh_config" -o ExitOnForwardFailure=yes -N \
+  -L 127.0.0.1:4000:172.30.240.2:4000 colima-omni-money-v2
+```
+
+元のターミナルで `curl --fail --silent --show-error http://127.0.0.1:4000/healthz` を実行し、応答を確認してからブラウザで `http://localhost:4000` を開きます。SSH のターミナルを閉じるとブラウザからの接続も切れます。トンネルが起動しない場合、別プロセスが 4000 番を使用していないか `lsof` で確認し、対象を特定せずに停止しないでください。初回 Admin 作成には setup token が必要です。ブラウザで生成される recovery code は安全な場所に保管します。
 
 Admin 作成後は bootstrap overlay を外した次の構成で再作成します。起動を確認してから、次のコマンドで VM 内の setup token だけを退役させます。対象 volume 名を二重確認し、control key と attestation は残します。Mac 側の `$TEST_DIR/secrets/initial-admin-setup.token` も不要になったことを確認して削除します。
 
@@ -187,12 +211,12 @@ docker --context "$CONTEXT" run --rm --network none --read-only --user 0:0 \
 
 ## 5. 検証と終了
 
-- `docker --context "$CONTEXT" ps` で公開先を確認し、同じ LAN の別端末から Mac の LAN アドレスの 4000 番に接続できないことを実測します。
+- `docker --context "$CONTEXT" port omni-money 4000/tcp` と Mac の `lsof -nP -iTCP:4000 -sTCP:LISTEN` で実際の公開先を確認します。SSH トンネル使用中は Mac の `127.0.0.1:4000` だけが待ち受けていることを確かめ、同じ LAN の別端末から Mac の LAN アドレスの 4000 番に接続できないことを実測します。
 - ブラウザの開発者ツールの Network で、アプリ操作中に意図しない外部ホストへの通信がないことを確認します。試験データを使い、ログやエラー応答に setup token、鍵、取引内容が出ないことを確認します。
 - 試験用の二人のユーザーで、自分の家計簿だけを参照でき、Admin が他ユーザーの取引内容を閲覧できないことを確認します。
 - この Mac の HTTP 検証は TrueNAS/Pangolin の TLS、公開 FQDN、ACL、更新・復旧手順の代わりにはなりません。TrueNAS に既存データがある場合は、暗号化済みの複製を使った隔離環境で更新経路を別途試します。
 
-停止時は bootstrap を外した構成で `down` を使い、named volume は保持します。
+停止時は SSH トンネルを使っていた場合、そのターミナルで `Ctrl+C` を押します。その後、bootstrap を外した構成で `down` を使い、named volume は保持します。
 
 ```bash
 docker --context "$CONTEXT" compose \
