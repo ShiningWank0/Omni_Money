@@ -15,6 +15,9 @@ on:
   push:
     branches: [main]
     paths: ['VERSION']
+  # Manual rehearsal: runs the exact release chain (build by digest, scan,
+  # stage index, attest, verify) without publishing version/latest tags.
+  workflow_dispatch:
 
 permissions: {}
 
@@ -60,7 +63,7 @@ jobs:
 
   prepare:
     name: Validate and scan release
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -79,11 +82,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$(awk 'END { print NR }' VERSION)" != 1 ]; then
-            echo "::error::VERSION must contain exactly one line"
-            exit 1
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            # Rehearsal version: valid SemVer, never matches a release VERSION.
+            VERSION="0.0.0-rehearsal.${GITHUB_RUN_ID}"
+          else
+            if [ "$(awk 'END { print NR }' VERSION)" != 1 ]; then
+              echo "::error::VERSION must contain exactly one line"
+              exit 1
+            fi
+            VERSION="$(sed -n '1p' VERSION)"
           fi
-          VERSION="$(sed -n '1p' VERSION)"
           semver_re='^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))(\.((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
           if [ "${#VERSION}" -gt 64 ] || [[ ! "$VERSION" =~ $semver_re ]]; then
             echo "::error::VERSION is not valid SemVer"
@@ -135,16 +143,19 @@ jobs:
     needs: prepare
     permissions:
       contents: read
-      packages: write # pushes the per-architecture GHCR images
+      packages: write # pushes the untagged per-architecture GHCR manifests
     env:
       APP_VERSION: ${{ needs.prepare.outputs.version }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
             platform: linux/amd64
+            arch: amd64
           - runner: ubuntu-24.04-arm
             platform: linux/arm64
+            arch: arm64
 
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -165,28 +176,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push (single platform)
+      # Push the single-platform manifest by digest only, so no public tag can
+      # ever point at an image that has not passed the vulnerability scan. The
+      # multi-arch release tags are created after both scans succeed.
+      - name: Build and push by digest (single platform)
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
-          push: true
           platforms: ${{ matrix.platform }}
-          tags: ${{ needs.prepare.outputs.image }}:${{ env.APP_VERSION }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           build-args: VERSION=${{ env.APP_VERSION }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
 
-      # Scan the exact digest that was just pushed. Scanning a separately
-      # rebuilt candidate would not cover the published artifact, and this step
-      # runs for both architectures before the multi-arch manifest exists.
+      # TRIVY_PLATFORM must match the pushed platform: the digest is an index
+      # (image + attestation manifests) and Trivy otherwise resolves it as
+      # linux/amd64, which fails on the arm64 runner.
       - name: Scan pushed architecture digest
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          TRIVY_PLATFORM: ${{ matrix.platform }}
         with:
           image-ref: ${{ needs.prepare.outputs.image }}@${{ steps.build.outputs.digest }}
           format: table
@@ -195,12 +209,29 @@ jobs:
           vuln-type: os,library
           severity: CRITICAL,HIGH
 
+      - name: Export scanned digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::build digest is invalid"; exit 1; }
+          mkdir -p "${{ runner.temp }}/digests"
+          touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
+
+      - name: Upload scanned digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
   manifest:
     name: Publish multi-architecture manifest
     needs: [prepare, build]
     permissions:
       contents: read
-      packages: write # publishes the final multi-architecture GHCR manifest
+      packages: write # publishes the staged and release GHCR manifests
       id-token: write # signs the build provenance attestation
       attestations: write # records the attestation for gh attestation verify
     env:
@@ -219,60 +250,143 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
-      - name: Create and push multi-arch manifest
+      - name: Download scanned digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      # Stage the index under a non-release tag, attest it, and verify the
+      # attestation before any release tag exists. The staging tag points at
+      # the same digest as the final release; only version/latest are the
+      # operator-facing references.
+      - name: Stage candidate index
         id: publish
         env:
           IMAGE: ${{ needs.prepare.outputs.image }}
           VERSION: ${{ env.APP_VERSION }}
+          REHEARSAL: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
-          # buildx imagetools はOCI image index（Buildxが生成する形式）を正しく処理できる
-          docker buildx imagetools create -t "${IMAGE}:${VERSION}" \
-            "${IMAGE}:${VERSION}-amd64" \
-            "${IMAGE}:${VERSION}-arm64"
-
-          if [[ "$VERSION" != *-* ]]; then
-            docker buildx imagetools create -t "${IMAGE}:latest" \
-              "${IMAGE}:${VERSION}-amd64" \
-              "${IMAGE}:${VERSION}-arm64"
+          set -euo pipefail
+          if [ "$REHEARSAL" = "true" ]; then
+            staging_ref="${IMAGE}:rehearsal-staging"
           else
-            echo "Skipping :latest for prerelease ${VERSION}"
+            staging_ref="${IMAGE}:${VERSION}-staging"
           fi
-
+          sources=()
+          for file in "${{ runner.temp }}"/digests/*; do
+            name="$(basename "$file")"
+            [[ "$name" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::invalid scanned digest file: $name"; exit 1; }
+            sources+=("${IMAGE}@sha256:${name}")
+          done
+          [ "${#sources[@]}" -eq 2 ] || { echo "::error::expected exactly two scanned architecture digests"; exit 1; }
+          # buildx imagetools はOCI image index（Buildxが生成する形式）を正しく処理できる
+          docker buildx imagetools create -t "$staging_ref" "${sources[@]}"
           # Hash the exact raw index manifest instead of trusting a buildx
           # template, whose output format has changed across buildx releases.
-          digest="sha256:$(docker buildx imagetools inspect --raw "${IMAGE}:${VERSION}" | sha256sum | awk '{print $1}')"
+          digest="sha256:$(docker buildx imagetools inspect --raw "$staging_ref" | sha256sum | awk '{print $1}')"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-            echo "::error::could not compute the published image digest"
+            echo "::error::could not compute the staged image digest"
+            exit 1
+          }
+          # Prove the release index bytes before any release tag is published.
+          # --dry-run prints the exact manifest bytes plus one newline, so the
+          # command substitution below hashes the manifest without it.
+          dry="$(docker buildx imagetools create --dry-run "${sources[@]}")"
+          planned="sha256:$(printf '%s' "$dry" | sha256sum | awk '{print $1}')"
+          [ "$planned" = "$digest" ] || {
+            echo "::error::release index digest ${planned} differs from the staged ${digest}"
             exit 1
           }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "staging_ref=$staging_ref" >> "$GITHUB_OUTPUT"
 
       # The action records the attestation with the repository and mirrors it
       # into GHCR using the default github.token plus this job's packages:write.
-      - name: Attest published image provenance
+      - name: Attest staged image provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-name: ${{ needs.prepare.outputs.image }}
           subject-digest: ${{ steps.publish.outputs.digest }}
           push-to-registry: true
 
-      - name: Report published digest
+      - name: Verify provenance before publishing release tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "oci://${IMAGE}@${DIGEST}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release-docker.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --deny-self-hosted-runners
+
+      # Rehearsals stop here: the chain above is identical to a release, but no
+      # version/latest tag is created.
+      - name: Publish verified release tags
+        if: github.event_name != 'workflow_dispatch'
         env:
           IMAGE: ${{ needs.prepare.outputs.image }}
           VERSION: ${{ env.APP_VERSION }}
           DIGEST: ${{ steps.publish.outputs.digest }}
         run: |
           set -euo pipefail
+          sources=()
+          for file in "${{ runner.temp }}"/digests/*; do
+            name="$(basename "$file")"
+            [[ "$name" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::invalid scanned digest file: $name"; exit 1; }
+            sources+=("${IMAGE}@sha256:${name}")
+          done
+          [ "${#sources[@]}" -eq 2 ] || { echo "::error::expected exactly two scanned architecture digests"; exit 1; }
+          assert_digest() {
+            local actual
+            actual="sha256:$(docker buildx imagetools inspect --raw "$1" | sha256sum | awk '{print $1}')"
+            [ "$actual" = "$DIGEST" ] || {
+              echo "::error::$1 digest ${actual} differs from the verified ${DIGEST}"
+              exit 1
+            }
+          }
+          docker buildx imagetools create -t "${IMAGE}:${VERSION}" "${sources[@]}"
+          assert_digest "${IMAGE}:${VERSION}"
+          if [[ "$VERSION" != *-* ]]; then
+            docker buildx imagetools create -t "${IMAGE}:latest" "${sources[@]}"
+            assert_digest "${IMAGE}:latest"
+          else
+            echo "Skipping :latest for prerelease ${VERSION}"
+          fi
+
+      - name: Report published digest
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          VERSION: ${{ env.APP_VERSION }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          STAGING_REF: ${{ steps.publish.outputs.staging_ref }}
+          REHEARSAL: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
           {
-            echo "### Published image"
-            echo ""
-            echo "- Tag: \`${IMAGE}:${VERSION}\`"
-            echo "- Digest-pinned reference: \`${IMAGE}@${DIGEST}\`"
-            echo "- Provenance: verified with \`scripts/resolve-image-digest.sh --verify --repo ${GITHUB_REPOSITORY}\`"
-            echo ""
-            echo "Deploy with:"
-            echo ""
-            echo '```'
-            echo "sudo scripts/safe-update.sh ${IMAGE}@${DIGEST}"
-            echo '```'
+            if [ "$REHEARSAL" = "true" ]; then
+              echo "### Release rehearsal verified (no release tags published)"
+              echo ""
+              echo "- Staged reference: \`${STAGING_REF}\`"
+              echo "- Verified digest: \`${IMAGE}@${DIGEST}\`"
+              echo ""
+              echo "The build, scan, attestation, and verification chain above is identical to a release."
+            else
+              echo "### Published image (provenance verified)"
+              echo ""
+              echo "- Tag: \`${IMAGE}:${VERSION}\`"
+              echo "- Digest-pinned reference: \`${IMAGE}@${DIGEST}\`"
+              echo "- Staging tag: \`${STAGING_REF}\` (same digest)"
+              echo ""
+              echo "Verify and deploy:"
+              echo ""
+              echo '```'
+              echo "scripts/resolve-image-digest.sh --verify --repo ${GITHUB_REPOSITORY} ${IMAGE}:${VERSION}"
+              echo "sudo scripts/safe-update.sh ${IMAGE}@${DIGEST}"
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

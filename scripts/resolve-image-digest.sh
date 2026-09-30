@@ -23,15 +23,21 @@ usage() {
 }
 
 # verify_attestation checks the GitHub build provenance attestation for the
-# exact resolved digest. Verification output stays on stderr so stdout remains
-# a single machine-readable reference.
+# exact resolved digest. The signing workflow, source ref, and runner class are
+# pinned exactly like the release pipeline's own verification so another
+# workflow in the same repository cannot sign a substitute image. Verification
+# output stays on stderr so stdout remains a single machine-readable reference.
 verify_attestation() {
   local reference="$1" repository_slug="$2"
   command -v gh >/dev/null 2>&1 || {
     printf 'error: gh CLI is required for --verify\n' >&2
     return 1
   }
-  gh attestation verify "oci://${reference}" --repo "$repository_slug" >&2 || {
+  gh attestation verify "oci://${reference}" \
+    --repo "$repository_slug" \
+    --signer-workflow "${repository_slug}/.github/workflows/release-docker.yml" \
+    --source-ref refs/heads/main \
+    --deny-self-hosted-runners >&2 || {
     printf 'error: attestation verification failed for %s\n' "$reference" >&2
     return 1
   }

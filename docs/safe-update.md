@@ -154,13 +154,17 @@ mode `0700` で、いずれも同じ暗号化 filesystem 上に置きます。�
 場合は、先に `sudo chown`/`sudo chmod` と attestation の3 pathを更新し、dry-run相当の
 preflight（安全更新テスト）を通してから実行します。実行例は次の通りです。
 
-    image="$(./scripts/resolve-image-digest.sh ghcr.io/shiningwank0/omni_money:<version>)"
+    image="$(./scripts/resolve-image-digest.sh --verify --repo OWNER/REPO ghcr.io/shiningwank0/omni_money:<version>)"
     sudo ./scripts/safe-update.sh "$image"
 
-`resolve-image-digest.sh` はtagをregistryのdigestへ解決します。`--verify --repo OWNER/REPO`
-を付けると、Docker Releaseが公開digestへ付与したGitHub build provenance attestationを
-gh CLIで検証できます。`--verify`を使わない場合も、解決結果をDocker Releaseのjob summaryが
-記録したdigestと照合してください。`safe-update.sh` は executable bit を付けたまま、上記の
+`resolve-image-digest.sh` はtagをregistryのdigestへ解決します。配備手順では `--verify --repo OWNER/REPO`
+を**必須**とし、Docker Releaseが公開digestへ付与したGitHub build provenance attestationを
+gh CLIで検証してから `safe-update.sh` へ渡してください。`--verify`は署名workflow
+（`release-docker.yml`）・source ref（`refs/heads/main`）・GitHub-hosted runnerを固定して検証します。
+`safe-update.sh` 自体が必須とするのはdigest固定までで、provenance検証はこの配備手順側の責務です。
+`--verify`を使えない環境ではdigestのみを解決し、Docker Releaseのjob summaryが記録したdigestと
+照合してください（非推奨）。
+`safe-update.sh` は executable bit を付けたまま、上記の
 ようにpathを直接指定して実行します。
 entry pointは `#!/bin/bash -p` により、script本文より前の `BASH_ENV` 読込みとexport済み
 shell functionのimportを無効化します。`sudo bash scripts/safe-update.sh ...`、
@@ -193,7 +197,7 @@ lock/journal/recovery bundleを削除せず、serviceを停止したまま管理
 ## 実行例
 
     chmod 700 scripts/safe-update.sh
-    image="$(./scripts/resolve-image-digest.sh ghcr.io/shiningwank0/omni_money:<version>)"
+    image="$(./scripts/resolve-image-digest.sh --verify --repo OWNER/REPO ghcr.io/shiningwank0/omni_money:<version>)"
     sudo ./scripts/safe-update.sh "$image"
 
 実行前に、data directory、固定 attestation、base Compose の secret file、暗号化 volume
