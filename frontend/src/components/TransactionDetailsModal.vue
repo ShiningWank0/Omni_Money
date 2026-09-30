@@ -36,7 +36,10 @@
             <figure v-for="image in images" :key="image.id">
               <img v-if="imageURL(image)" :src="imageURL(image)" :alt="image.filename || '添付画像'">
               <div v-else class="details-invalid-image">この画像は表示できません</div>
-              <figcaption>{{ image.filename || '添付画像' }}</figcaption>
+              <figcaption>
+                <span>{{ image.filename || '添付画像' }}</span>
+                <button type="button" class="details-image-remove" :aria-label="`${image.filename || '添付画像'}を削除`" @click="$emit('remove-image', image.id)">削除</button>
+              </figcaption>
             </figure>
           </div>
         </section>
@@ -51,7 +54,7 @@ import { getTransactionImages } from '../utils/api'
 import { formatExactCurrency } from '../utils/exactAmount'
 
 const props = defineProps({ transaction: { type: Object, required: true } })
-const emit = defineEmits(['edit', 'close'])
+const emit = defineEmits(['edit', 'close', 'remove-image'])
 const editButton = ref(null)
 const images = ref([])
 const imagesLoading = ref(false)
@@ -94,7 +97,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.transaction-details { overflow: hidden; }
+.modal-content.transaction-details { width: min(1000px, calc(100vw - 3rem)); max-width: 1000px; max-height: calc(100dvh - 3rem); overflow: hidden; }
 .details-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
 .details-header h3 { margin: 0; }
 .details-actions { display: flex; gap: .4rem; }
@@ -102,10 +105,10 @@ onBeforeUnmount(() => {
 .details-icon-button:hover, .details-icon-button:focus-visible { border-color: #667eea; background: #f1f3ff; }
 .details-icon-button svg { width: 1.2rem; height: 1.2rem; }
 .details-body { overflow-y: auto; min-height: 0; }
-.details-fields { margin: 0; }
-.details-fields > div { display: grid; grid-template-columns: minmax(6rem, 30%) 1fr; gap: .75rem; padding: .6rem 0; border-bottom: 1px solid #e8e8e8; }
+.details-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 1.5rem; margin: 0; }
+.details-fields > div { min-width: 0; padding: .6rem 0; border-bottom: 1px solid #e8e8e8; }
 .details-fields dt { color: #5e6664; }
-.details-fields dd { margin: 0; overflow-wrap: anywhere; }
+.details-fields dd { margin: .2rem 0 0; overflow-wrap: anywhere; }
 .details-memo { white-space: pre-wrap; }
 .details-images { margin-top: 1rem; }
 .details-images h4 { margin: 0 0 .75rem; }
@@ -113,8 +116,14 @@ onBeforeUnmount(() => {
 .details-image-list { display: grid; gap: 1rem; }
 .details-image-list figure { margin: 0; padding: .5rem; border: 1px solid #ddd; border-radius: .6rem; text-align: center; }
 .details-image-list img { display: block; max-width: 100%; max-height: 55vh; margin: auto; object-fit: contain; }
-.details-image-list figcaption { margin-top: .4rem; overflow-wrap: anywhere; font-size: .85rem; color: #565d5b; }
+.details-image-list figcaption { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-top: .4rem; overflow-wrap: anywhere; font-size: .85rem; color: #565d5b; }
+.details-image-remove { flex-shrink: 0; border: 1px solid #db8f8f; border-radius: .5rem; padding: .35rem .65rem; background: #fff; color: #982626; cursor: pointer; }
+.details-image-remove:hover { background: #fff0f0; }
 .details-invalid-image { padding: 1rem; color: #8a2525; }
 .details-retry { padding: .4rem .8rem; border: 1px solid #667eea; border-radius: .5rem; background: #fff; color: #4358b4; cursor: pointer; }
-@media (max-width: 480px) { .details-fields > div { grid-template-columns: 1fr; gap: .15rem; } }
+@media (max-width: 700px) {
+  .modal-content.transaction-details { width: calc(100vw - 1rem); max-height: calc(100dvh - 1rem); padding: 1rem; }
+  .details-fields { grid-template-columns: minmax(0, 1fr); }
+  .details-image-list figcaption { flex-wrap: wrap; }
+}
 </style>

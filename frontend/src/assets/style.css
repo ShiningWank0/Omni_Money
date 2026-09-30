@@ -542,8 +542,10 @@ body {
 
 /* 取引追加モーダル専用のレスポンシブレイアウト */
 .modal-content.transaction-modal {
-    height: calc(100vh - 4rem);
-    max-height: calc(100vh - 4rem);
+    width: min(1120px, calc(100vw - 3rem));
+    max-width: 1120px;
+    height: min(720px, calc(100dvh - 3rem));
+    max-height: calc(100dvh - 3rem);
     overflow: hidden;
 }
 
@@ -1136,8 +1138,8 @@ body {
     .modal-content.transaction-modal {
         width: 98%;
         max-width: none;
-        height: calc(100vh - 2rem);
-        max-height: calc(100vh - 2rem);
+        height: min(720px, calc(100dvh - 2rem));
+        max-height: calc(100dvh - 2rem);
         padding: 1rem;
     }
 
@@ -1207,8 +1209,8 @@ body {
     /* 非常に小さい画面用取引モーダルの調整 */
     .modal-content.transaction-modal {
         width: 100%;
-        height: calc(100vh - 1rem);
-        max-height: calc(100vh - 1rem);
+        height: calc(100dvh - 1rem);
+        max-height: calc(100dvh - 1rem);
         padding: 0.8rem;
         border-radius: 10px;
     }

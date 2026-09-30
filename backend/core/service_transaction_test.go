@@ -115,6 +115,29 @@ func TestAddTransactionRollsBackOnTagError(t *testing.T) {
 	}
 }
 
+func TestAddTransactionCreatesSelectedNewTagOnlyOnSuccessfulSave(t *testing.T) {
+	setupCoreTestDB(t)
+	req := transactionRequest("cash", "2026-01-01", "lunch", "expense", 1000)
+	req.NewTagPaths = []string{"Food/Lunch"}
+	created, err := AddTransaction(req)
+	if err != nil {
+		t.Fatalf("AddTransaction with new tag failed: %v", err)
+	}
+	tags, err := GetTransactionTags(created.ID)
+	if err != nil || len(tags) != 1 || tags[0].Name != "Lunch" {
+		t.Fatalf("created transaction tags=%#v err=%v", tags, err)
+	}
+
+	req.NewTagPaths = []string{"Other/Valid", "Invalid/"}
+	if _, err := AddTransaction(req); err == nil {
+		t.Fatal("AddTransaction accepted an invalid pending tag")
+	}
+	var count int
+	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM tags WHERE name = 'Other'").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("failed save created a tag: count=%d err=%v", count, err)
+	}
+}
+
 func TestUpdateTransactionRollsBackOnTagError(t *testing.T) {
 	setupCoreTestDB(t)
 	id := insertTestTransaction(t, "cash", "2026-01-01", "食費", "expense", 1000, -1000)

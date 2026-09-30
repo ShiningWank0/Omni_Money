@@ -363,6 +363,11 @@ func TestAITransactionRejectsInvalidTagsAndImages(t *testing.T) {
 		Type:    "expense",
 		Amount:  100,
 	}
+	newTag := valid
+	newTag.NewTagPaths = []string{"private"}
+	if _, err := validateAITransactionReferences(newTag, &aicredentials.Credential{}); err == nil {
+		t.Fatal("AI request created a tag outside its allowed tag IDs")
+	}
 
 	unknownTag := valid
 	unknownTag.Tags = []int64{999999}

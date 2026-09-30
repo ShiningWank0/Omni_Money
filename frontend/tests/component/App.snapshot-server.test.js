@@ -223,6 +223,56 @@ it('shows saved images in read-only details before the pencil opens editing', as
   expect(wrapper.get('.transaction-modal h3').text()).toBe('取引を編集')
 })
 
+it('keeps a saved image when its staged deletion is cancelled', async () => {
+  const image = { id: 13, filename: 'receipt.png', data_url: 'data:image/png;base64,AAAA' }
+  api.getTransactionImages.mockResolvedValue([image])
+  api.updateTransaction.mockClear()
+  const wrapper = await mountTransactionApp([existingTransaction])
+
+  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
+  await vi.dynamicImportSettled()
+  await flushPromises()
+  await wrapper.get('.details-image-remove').trigger('click')
+  await flushPromises()
+  expect(wrapper.get('.transaction-modal .image-preview.pending-removal').text()).toContain('receipt.png')
+
+  await wrapper.get('.transaction-modal .cancel-btn').trigger('click')
+  await flushPromises()
+  expect(api.updateTransaction).not.toHaveBeenCalled()
+  expect(wrapper.get('.transaction-details .details-image-list img').attributes('src')).toBe(image.data_url)
+
+  await wrapper.get('.details-icon-button[aria-label="取引を編集"]').trigger('click')
+  await flushPromises()
+  expect(wrapper.find('.transaction-modal .image-preview.pending-removal').exists()).toBe(false)
+})
+
+it('discards a new transaction draft and selected image on cancel', async () => {
+  api.addTransaction.mockClear()
+  api.createTag.mockClear()
+  api.createTagByPath.mockClear()
+  const wrapper = await mountTransactionApp()
+  await wrapper.get('.header-add-btn .add-btn').trigger('click')
+  await wrapper.get('input[placeholder="例: 給与、食費、交通費"]').setValue('draft item')
+  await wrapper.get('.new-tag-input').setValue('draft tag')
+  await wrapper.get('.new-tag-row .add-tag-btn').trigger('click')
+  const input = wrapper.get('.transaction-modal input[type="file"]')
+  Object.defineProperty(input.element, 'files', {
+    configurable: true,
+    value: [new File(['image'], 'draft.png', { type: 'image/png' })]
+  })
+  await input.trigger('change')
+  await vi.waitFor(() => expect(wrapper.find('.transaction-modal .image-preview').exists()).toBe(true))
+
+  await wrapper.get('.transaction-modal .cancel-btn').trigger('click')
+  await wrapper.get('.header-add-btn .add-btn').trigger('click')
+  await flushPromises()
+  expect(wrapper.get('input[placeholder="例: 給与、食費、交通費"]').element.value).toBe('')
+  expect(wrapper.find('.transaction-modal .image-preview').exists()).toBe(false)
+  expect(api.addTransaction).not.toHaveBeenCalled()
+  expect(api.createTag).not.toHaveBeenCalled()
+  expect(api.createTagByPath).not.toHaveBeenCalled()
+})
+
 it('keeps a new transaction draft and skips refresh when add fails', async () => {
   const wrapper = await mountTransactionApp()
   await wrapper.get('.header-add-btn .add-btn').trigger('click')

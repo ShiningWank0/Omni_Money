@@ -150,15 +150,19 @@ type Setting struct {
 
 // TransactionRequest は取引追加・更新リクエストの構造体
 type TransactionRequest struct {
-	Account string                    `json:"account"`
-	Date    string                    `json:"date"`
-	Time    string                    `json:"time"`
-	Item    string                    `json:"item"`
-	Type    string                    `json:"type"`
-	Amount  int64                     `json:"amount"`
-	Memo    string                    `json:"memo"`
-	Images  []TransactionImageRequest `json:"images,omitempty"` // 画像添付（Base64）
-	Tags    []int64                   `json:"tags,omitempty"`   // タグID一覧
+	Account        string                    `json:"account"`
+	Date           string                    `json:"date"`
+	Time           string                    `json:"time"`
+	Item           string                    `json:"item"`
+	Type           string                    `json:"type"`
+	Amount         int64                     `json:"amount"`
+	Memo           string                    `json:"memo"`
+	Images         []TransactionImageRequest `json:"images,omitempty"`           // 画像添付（Base64）
+	DeleteImageIDs []int64                   `json:"delete_image_ids,omitempty"` // 更新時に削除する既存画像
+	NewTagPaths    []string                  `json:"new_tag_paths,omitempty"`    // 確定時に作成・選択するタグ
+	LinkAddIDs     []int64                   `json:"link_add_ids,omitempty"`     // 更新時に追加する紐付け
+	LinkRemoveIDs  []int64                   `json:"link_remove_ids,omitempty"`  // 更新時に解除する紐付け
+	Tags           []int64                   `json:"tags,omitempty"`             // タグID一覧
 }
 
 // TransactionResponse はフロントエンドに返す取引データ
