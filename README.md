@@ -17,7 +17,7 @@ Wails によるデスクトップアプリとして使えるほか、Docker で�
 
 ## 使い方
 
-macOS デスクトップアプリ、Mac + Colima、TrueNAS Custom App の詳しい導入・アクセス・バックアップ手順は、[利用ガイド](docs/how-to-use.md)を参照してください。
+Mac + Colima で公開済みDockerイメージを検証する場合は[隔離検証手順](docs/mac-colima-verification.md)を使用してください。macOS デスクトップアプリと TrueNAS Custom App の導入・アクセス・バックアップ手順は[利用ガイド](docs/how-to-use.md)を参照してください。
 
 ## 主な機能
 
@@ -226,7 +226,7 @@ docker compose -f compose.yaml -f compose.bootstrap.yaml up -d --build
 
 ネイティブLinuxでbind mountを使う場合、初回起動前に`./data`を固定UID/GID `10001:10001`へ設定し、control keyは`root:10001`・`0440`、setup tokenは`10001:10001`・`0400`、非秘密のattestationは`root:root`・`0444`にします。safe-updateのhost secret contractもこのowner/modeとdevice/inode/hashを固定し、差替えを拒否します。TrueNASでは同等のACLを設定します。`chmod 777`やPrivileged modeは使いません。
 
-ローカル端末だけから試す場合は、閉じたbase構成にloopback公開を重ねます。
+以下はネイティブLinuxでローカル端末だけからsource buildを試す手順です。Mac + Colimaで公開済みイメージを検証する場合は[専用手順](docs/mac-colima-verification.md)を使用し、上記の`sudo chown`と次の`--build`を実行しないでください。Linuxのローカル構成では、閉じたbase構成にloopback公開を重ねます。
 
 ```bash
 docker compose -f compose.yaml -f compose.bootstrap.yaml -f compose.local.yaml up -d --build

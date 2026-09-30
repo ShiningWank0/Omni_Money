@@ -51,7 +51,11 @@ AIはDesktop/serverのproductionで提供していません。user-vault-bound A
 
 ## 3. Docker Composeでローカル確認
 
-### 必要なもの
+Mac + Colimaで公開済みDockerイメージを検証する場合は、[Mac + Colima の隔離検証手順](mac-colima-verification.md)を使用してください。以下の`sudo chown`とbind mountの準備例はネイティブLinux向けです。macOSでそのまま実行しないでください。
+
+### Linux の bind mount 手順
+
+#### 必要なもの
 
 - Docker EngineとDocker Compose
 - SQLCipherに加えて、host側data directoryを保護するLUKS2、ZFS native encryption等
@@ -80,7 +84,7 @@ chmod 600 secrets/control-database.key secrets/initial-admin-setup.token
 - `PASSKEY_RP_ID`（Pangolinの公開FQDN、scheme/portなし）
 - `PASSKEY_ORIGINS`（例: `https://money.example.com`）
 
-data directoryはcontainer UID/GID `10001:10001`だけが書けるようにします。macOS/ColimaではDocker Desktop/Colimaのfile sharingとvolume ownershipの差を確認してください。
+Linuxのdata directoryはcontainer UID/GID `10001:10001`だけが書けるようにします。次の`sudo chown`はLinuxホスト用で、macOS/Colimaには適用しません。
 
 ```bash
 sudo chown 10001:10001 data secrets/initial-admin-setup.token
@@ -93,7 +97,7 @@ sudo chmod 444 secrets/omni_data_at_rest.json
 docker compose -f compose.yaml -f compose.bootstrap.yaml -f compose.local.yaml up -d --build
 ```
 
-ローカルoverrideは`127.0.0.1:4000`だけへHTTPをpublishします。ブラウザで`http://localhost:4000`を開きます。
+このLinux向けローカルoverrideは`127.0.0.1:4000`だけへHTTPをpublishします。ブラウザで`http://localhost:4000`を開きます。Mac + Colimaでは[専用手順](mac-colima-verification.md)に従い、公開済みimageとVM内のnamed volumeを使います。
 
 パスキーのRP IDにはIPアドレスを指定できません。ローカルでは`PASSKEY_RP_ID=localhost`と`PASSKEY_ORIGINS=http://localhost:4000`を使用してください。明示設定がなく、RP IDの候補がloopback IPの場合は`localhost`を既定値とします。明示したRP IDやoriginは自動変換しません。
 
