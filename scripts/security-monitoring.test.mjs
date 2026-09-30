@@ -108,6 +108,23 @@ test('duplicates across Go build modes and call traces produce one issue with so
   assert.deepEqual(result, entries([desktop, report()]));
 });
 
+test('multiple advisories for one package share one issue while gosec stays per rule', () => {
+  const first = report();
+  first.findings[0].id = 'GO-2099-0001';
+  const second = report();
+  second.findings[0].id = 'GO-2099-0002';
+  const grouped = entries([first, second]);
+  assert.equal(grouped.length, 1);
+  assert.deepEqual(grouped[0].data.id, ['GO-2099-0001', 'GO-2099-0002']);
+  assert.match(render(grouped[0], runURL).body, /GO-2099-0001, GO-2099-0002/);
+
+  const gosec = normalize('gosec-server', JSON.stringify({ Stats: { files: 1, found: 2 }, 'Golang errors': {}, Issues: [
+    { severity: 'MEDIUM', rule_id: 'G401', file: '/repo/backend/file.go', line: '42', details: 'a' },
+    { severity: 'HIGH', rule_id: 'G402', file: '/repo/backend/file.go', line: '42', details: 'b' },
+  ] }), 1, '/repo');
+  assert.equal(entries([gosec]).length, 2);
+});
+
 test('failed artifact download or digest verification rejects even complete-looking files', t => {
   const directory = mkdtempSync(join(tmpdir(), 'omni-security-integrity-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -184,7 +201,7 @@ test('pagination finds existing issue beyond first 100 and ignores forged human 
 
 test('batch limit bounds notification volume and fails visibly for remaining findings', async () => {
   const reports = Array.from({ length: 26 }, (_, i) => {
-    const r = report(); r.findings[0].id = `GO-2099-${i}`; return r;
+    const r = report(); r.findings[0].component = `example.org/dependency${i}`; return r;
   });
   const { api, state } = mockAPI();
   await assert.rejects(publish(api, entries(reports), runURL), /limit reached/);
