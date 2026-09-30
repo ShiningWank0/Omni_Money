@@ -2,7 +2,10 @@
 
 Dependabotは週次で確認し、各エコシステムの通常更新PR上限は5件とする。
 Go・npm・GitHub Actions・Dockerのminor/patch更新をそれぞれまとめ、major更新は個別PRにする。
-脆弱性修正はこの通常更新グループとは別に扱い、更新対象を恒久的にignoreしない。
+脆弱性修正はエコシステム毎に別グループとしてminor/patchをまとめ、majorは個別PRにする。
+更新対象を恒久的にignoreしない。
+
+定期検査が作成するIssueも同じ方針で、同一パッケージの複数advisoryは1件へ集約する。
 
 Wails、WebAuthn、DockerのGo/Nodeは通常グループから除外し、個別PRで扱う。
 Goの1.x間、WebAuthnの0.x間はSemVerではminorでも、関連設定やAPI移行が必要になるためである。
