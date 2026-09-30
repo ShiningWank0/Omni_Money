@@ -39,7 +39,10 @@ export function entries(reports) {
       continue;
     }
     for (const f of report.findings) {
-      const key = hash([f.tool, f.id, f.component]);
+      // Vulnerabilities group per scanner and package so every advisory for
+      // the same dependency shares one issue. Static analysis stays per rule
+      // and location because the rule identifies the defect.
+      const key = f.tool === 'gosec' ? hash([f.tool, f.id, f.component]) : hash([f.tool, f.component]);
       grouped.set(key, [...(grouped.get(key) || []), f]);
     }
   }
@@ -49,7 +52,7 @@ export function entries(reports) {
     else {
       const first = findings[0];
       data = { kind: first.tool === 'gosec' ? 'static-analysis' : 'vulnerability',
-        tool: first.tool, id: first.id, component: first.component };
+        tool: first.tool, component: first.component, id: unique(findings.map(f => f.id)) };
       for (const field of ['severity', 'installed', 'fixed', 'summary', 'context']) {
         data[field] = unique(findings.map(f => f[field]).filter(Boolean));
       }
@@ -64,12 +67,13 @@ export function render(entry, runURL) {
   const revision = `<!-- ${prefix}:revision:${digest} -->`;
   const isError = d.kind === 'scan-error';
   const category = isError ? '検査エラー' : d.kind === 'static-analysis' ? '静的解析' : '脆弱性';
-  const title = `[Security: ${category}] ${d.tool}${isError ? '' : ` ${d.id} / ${d.component}`}`.slice(0, 240);
+  const identifiers = Array.isArray(d.id) ? d.id.join(', ') : d.id;
+  const title = `[Security: ${category}] ${d.tool}${isError ? '' : ` ${identifiers} / ${d.component}`}`.slice(0, 240);
   const details = isError
     ? '検査結果が欠落、無効、または検査自体が失敗しています。脆弱性の検出とは別の通知です。先行ステップ・依存先・artifact取得を含めて実行ログを確認してください。'
     : [
       `- 対象: ${clean(d.component)}`,
-      `- 識別子: ${clean(d.id)}`,
+      `- 識別子: ${clean(identifiers)}`,
       `- 深刻度: ${clean(d.severity.join(', '))}（UNSPECIFIEDは検査元が深刻度を提供していない場合）`,
       `- 検出版／範囲: ${clean(d.installed.join(', ') || '該当なし／未提供')}`,
       `- 修正版／対応候補: ${clean(d.fixed.join(', ') || '検査元に修正版の記載なし。個別の対応確認が必要')}`,

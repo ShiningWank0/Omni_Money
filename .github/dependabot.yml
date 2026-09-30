@@ -17,6 +17,16 @@ updates:
         exclude-patterns:
           - "github.com/wailsapp/wails/v2"
           - "github.com/go-webauthn/*"
+      # Minor/patch security fixes arrive immediately when an advisory is
+      # published; group them per ecosystem so several advisories open one PR.
+      # Major security updates stay individual like other majors.
+      go-modules-security:
+        applies-to: security-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+        exclude-patterns:
+          - "github.com/wailsapp/wails/v2"
+          - "github.com/go-webauthn/*"
 
   - package-ecosystem: npm
     directory: /frontend
@@ -28,6 +38,10 @@ updates:
         applies-to: version-updates
         patterns:
           - "*"
+        update-types: [minor, patch]
+      frontend-security:
+        applies-to: security-updates
+        patterns: ["*"]
         update-types: [minor, patch]
 
   # Workflow actions are pinned by commit SHA; Dependabot proposes new pins.
@@ -41,6 +55,10 @@ updates:
         applies-to: version-updates
         patterns: ["*"]
         update-types: [minor, patch]
+      actions-security:
+        applies-to: security-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
 
   # Base images are pinned by tag@sha256 in the Dockerfile; Dependabot proposes
   # updated digests. Each proposal still passes the CI digest-pinning tests.
@@ -52,6 +70,11 @@ updates:
     groups:
       docker-minor-patch:
         applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+        exclude-patterns: [golang, node]
+      docker-security:
+        applies-to: security-updates
         patterns: ["*"]
         update-types: [minor, patch]
         exclude-patterns: [golang, node]
