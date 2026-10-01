@@ -223,6 +223,45 @@ it('shows saved images in read-only details before the pencil opens editing', as
   expect(wrapper.get('.transaction-modal h3').text()).toBe('取引を編集')
 })
 
+it('opens only the selected image above details and closes only the image on backdrop click', async () => {
+  const images = [
+    { id: 3, filename: 'first.png', data_url: 'data:image/png;base64,AAAA' },
+    { id: 4, filename: 'second.png', data_url: 'data:image/png;base64,BBBB' }
+  ]
+  api.getTransactionImages.mockResolvedValueOnce(images)
+  const wrapper = await mountTransactionApp([existingTransaction])
+
+  await wrapper.get('tbody tr[tabindex="0"]').trigger('click')
+  await vi.dynamicImportSettled()
+  await flushPromises()
+  expect(wrapper.findAll('.details-fields > div')).toHaveLength(5)
+  await wrapper.findAll('.details-image-thumbnail')[1].trigger('click')
+  expect(wrapper.get('.details-image-open img').attributes('src')).toBe(images[1].data_url)
+
+  await wrapper.get('.details-image-open').trigger('click')
+  await flushPromises()
+  const lightbox = document.querySelector('.details-lightbox')
+  expect(lightbox).not.toBeNull()
+  expect(lightbox.querySelector('img').getAttribute('src')).toBe(images[1].data_url)
+  lightbox.querySelector('img').click()
+  expect(document.querySelector('.details-lightbox')).not.toBeNull()
+  lightbox.querySelector('.details-lightbox-actions button').click()
+  await flushPromises()
+  expect(lightbox.querySelector('img').classList.contains('is-zoomed')).toBe(true)
+  lightbox.click()
+  await flushPromises()
+  expect(document.querySelector('.details-lightbox')).toBeNull()
+  expect(wrapper.find('.transaction-details').exists()).toBe(true)
+
+  await wrapper.get('.details-image-open').trigger('click')
+  await flushPromises()
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+  await flushPromises()
+  expect(document.querySelector('.details-lightbox')).toBeNull()
+  expect(wrapper.find('.transaction-details').exists()).toBe(true)
+  wrapper.unmount()
+})
+
 it('keeps a saved image when its staged deletion is cancelled', async () => {
   const image = { id: 13, filename: 'receipt.png', data_url: 'data:image/png;base64,AAAA' }
   api.getTransactionImages.mockResolvedValue([image])
