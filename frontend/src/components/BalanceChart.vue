@@ -15,9 +15,12 @@
           <option value="30">過去1ヶ月</option>
         </select>
       </div>
-      <div class="graph-container" ref="chartContainer">
-        <Line v-if="chartData" :data="chartData" :options="chartOptions" />
-        <div v-else class="graph-empty">データがありません</div>
+      <p v-if="mobileChartWidth" class="graph-scroll-hint">グラフは左右にスワイプできます</p>
+      <div class="graph-scroll" tabindex="0" role="region" aria-label="残高推移グラフ">
+        <div class="graph-container" :style="mobileChartWidth ? { width: mobileChartWidth } : null">
+          <Line v-if="chartData" :data="chartData" :options="chartOptions" />
+          <div v-else class="graph-empty">データがありません</div>
+        </div>
       </div>
     </div>
   </div>
@@ -59,8 +62,14 @@ defineEmits(['close'])
 
 const selectedPeriod = ref('all')
 const modalStyle = ref({})
+const isNarrowScreen = ref(false)
 
 function updateModalSize() {
+  isNarrowScreen.value = window.matchMedia('(max-width: 700px)').matches
+  if (isNarrowScreen.value) {
+    modalStyle.value = {}
+    return
+  }
   const headerCard = document.querySelector('.header.card')
   const contentCard = document.querySelector('.content-card')
   if (!headerCard || !contentCard) return
@@ -114,6 +123,12 @@ const filteredHistory = computed(() => {
     balances: filteredBalances,
     balances_exact: filteredBalancesExact
   }
+})
+
+const mobileChartWidth = computed(() => {
+  const count = filteredHistory.value?.dates?.length || 0
+  if (!isNarrowScreen.value || count <= 8) return null
+  return `${Math.min(2400, Math.max(640, count * 20))}px`
 })
 
 // 日付ラベルの間引き（データが多すぎる場合）
@@ -335,14 +350,33 @@ onUnmounted(() => {
   outline: none;
 }
 
-.graph-container {
+.graph-scroll {
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 8px;
+}
+
+.graph-scroll:focus-visible {
+  outline: 2px solid #667eea;
+  outline-offset: 2px;
+}
+
+.graph-container {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
   position: relative;
   background: #f8fafc;
   border-radius: 8px;
   padding: 12px;
 }
+
+.graph-scroll-hint { display: none; }
 
 .graph-empty {
   display: flex;
@@ -353,13 +387,25 @@ onUnmounted(() => {
   font-size: 1.1em;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 700px) {
   .graph-modal {
+    width: calc(100vw - 1rem);
+    max-width: calc(100vw - 1rem);
+    height: calc(100vh - 1rem);
+    max-height: calc(100vh - 1rem);
+    height: calc(100dvh - 1rem);
+    max-height: calc(100dvh - 1rem);
+    margin: 0;
+    align-self: center;
     padding: 1rem;
+    overflow: hidden;
   }
 
-  .graph-container {
-    min-height: 250px;
+  .graph-scroll-hint {
+    display: block;
+    margin: 0 0 .4rem;
+    color: #5e6664;
+    font-size: .8rem;
   }
 }
 </style>
