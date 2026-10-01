@@ -21,10 +21,11 @@ import (
 )
 
 const (
-	passkeyCeremonyRegistration = "registration"
-	passkeyCeremonyLogin        = "login"
-	passkeyCeremonyReauth       = "reauthentication"
-	maxPasskeyCeremonies        = 4096
+	passkeyCeremonyRegistration          = "registration"
+	passkeyCeremonyRegistrationAssertion = "registration_assertion"
+	passkeyCeremonyLogin                 = "login"
+	passkeyCeremonyReauth                = "reauthentication"
+	maxPasskeyCeremonies                 = 4096
 )
 
 var (
@@ -39,6 +40,11 @@ type passkeyCeremony struct {
 	ClientKey string
 	Session   webauthn.SessionData
 	PRFSalt   []byte
+	// Candidate carries an attested but not yet persisted credential while the
+	// registration assertion evaluates the registration PRF salt. It is kept in
+	// memory only and becomes login-capable only when the assertion finish step
+	// commits it with the vault envelope.
+	Candidate *webauthn.Credential
 	// ThrottleKey binds the ceremony to the account-level failure counter even
 	// when the ceremony was issued for a decoy identity (empty UserID).
 	ThrottleKey string
@@ -55,6 +61,21 @@ type PasskeyLoginBegin struct {
 }
 
 type FinishPasskeyRegistrationInput struct {
+	CeremonyID     string
+	ClientKey      string
+	Name           string
+	Password       []byte
+	CredentialJSON json.RawMessage
+	PRFResult      []byte
+}
+
+type BeginPasskeyRegistrationAssertionInput struct {
+	CeremonyID     string
+	ClientKey      string
+	CredentialJSON json.RawMessage
+}
+
+type FinishPasskeyRegistrationAssertionInput struct {
 	CeremonyID     string
 	ClientKey      string
 	Name           string
@@ -179,6 +200,143 @@ func (s *Service) FinishPasskeyRegistration(
 	clear(verifiedDEK)
 	record, err := s.passkeyStore.CreatePasskeyCredential(ctx, control.PasskeyCredentialInput{
 		UserID: userID, Name: input.Name, Credential: *credential,
+		PRFSalt: ceremony.PRFSalt, VaultEnvelope: *passkeyEnvelope,
+	}, now)
+	if err != nil {
+		return control.PasskeySummary{}, err
+	}
+	return record.Summary(), nil
+}
+
+// BeginPasskeyRegistrationAssertion continues a registration whose
+// authenticator returned prf.enabled=true without a create-time PRF result.
+// The create response is verified against the registration ceremony, then the
+// candidate credential is bound to a fresh assertion challenge so the
+// authenticator can evaluate the original registration salt. The candidate
+// stays in memory and is not login-capable until the assertion finish step
+// persists it with its vault envelope.
+func (s *Service) BeginPasskeyRegistrationAssertion(
+	ctx context.Context,
+	userID string,
+	input BeginPasskeyRegistrationAssertionInput,
+) (PasskeyLoginBegin, error) {
+	if !s.passkeysReady() {
+		return PasskeyLoginBegin{}, ErrPasskeysUnavailable
+	}
+	ceremony, err := s.takePasskeyCeremony(input.CeremonyID, passkeyCeremonyRegistration, input.ClientKey)
+	if err != nil || ceremony.UserID != userID {
+		return PasskeyLoginBegin{}, ErrPasskeyCeremony
+	}
+	defer clear(ceremony.PRFSalt)
+	if len(input.CredentialJSON) == 0 {
+		return PasskeyLoginBegin{}, ErrPasskeyCeremony
+	}
+	parsed, err := protocol.ParseCredentialCreationResponseBytes(input.CredentialJSON)
+	if err != nil {
+		return PasskeyLoginBegin{}, ErrPasskeyCeremony
+	}
+	unlock, err := s.lockAccount("user:" + userID)
+	if err != nil {
+		return PasskeyLoginBegin{}, err
+	}
+	user, _, err := s.loadPasskeyUser(ctx, userID)
+	if err != nil || user.user.State != control.UserActive {
+		unlock()
+		return PasskeyLoginBegin{}, ErrInvalidCredentials
+	}
+	credential, err := s.webauthn.CreateCredential(user, ceremony.Session, parsed)
+	if err != nil || credential == nil {
+		unlock()
+		return PasskeyLoginBegin{}, ErrPasskeyCeremony
+	}
+	evalByCredential := map[string]protocol.PRFValues{
+		base64.RawURLEncoding.EncodeToString(credential.ID): {
+			First: protocol.URLEncodedBase64(bytes.Clone(ceremony.PRFSalt)),
+		},
+	}
+	assertion, session, err := s.webauthn.BeginLogin(
+		webAuthnUser{user: user.user, credentials: []webauthn.Credential{*credential}},
+		webauthn.WithUserVerification(protocol.VerificationRequired),
+		webauthn.WithAssertionExtensions(webauthn.WithExtensionPRFByCredential(evalByCredential, nil)),
+	)
+	unlock()
+	if err != nil {
+		return PasskeyLoginBegin{}, fmt.Errorf("begin passkey registration assertion: %w", err)
+	}
+	pendingSalt := bytes.Clone(ceremony.PRFSalt)
+	defer clear(pendingSalt)
+	ceremonyID, err := s.storePasskeyCeremony(passkeyCeremony{
+		Kind: passkeyCeremonyRegistrationAssertion, UserID: userID, ClientKey: input.ClientKey,
+		Session: *session, PRFSalt: pendingSalt, Candidate: credential,
+	})
+	if err != nil {
+		return PasskeyLoginBegin{}, err
+	}
+	return PasskeyLoginBegin{CeremonyID: ceremonyID, Options: assertion}, nil
+}
+
+// FinishPasskeyRegistrationAssertion verifies the candidate assertion
+// (signature, challenge, RP ID, origin, user verification, credential ID)
+// before wrapping the vault key with the PRF output and persisting the
+// credential. A failure never leaves a registered credential behind.
+func (s *Service) FinishPasskeyRegistrationAssertion(
+	ctx context.Context,
+	userID string,
+	input FinishPasskeyRegistrationAssertionInput,
+	now time.Time,
+) (control.PasskeySummary, error) {
+	if !s.passkeysReady() {
+		return control.PasskeySummary{}, ErrPasskeysUnavailable
+	}
+	ceremony, err := s.takePasskeyCeremony(input.CeremonyID, passkeyCeremonyRegistrationAssertion, input.ClientKey)
+	if err != nil || ceremony.UserID != userID || ceremony.Candidate == nil {
+		return control.PasskeySummary{}, ErrPasskeyCeremony
+	}
+	defer clear(ceremony.PRFSalt)
+	if len(input.PRFResult) != keyenvelope.PasskeySecretSize {
+		return control.PasskeySummary{}, ErrPasskeyPRFRequired
+	}
+	parsed, err := protocol.ParseCredentialRequestResponseBytes(input.CredentialJSON)
+	if err != nil {
+		return control.PasskeySummary{}, ErrPasskeyCeremony
+	}
+	unlock, err := s.lockAccount("user:" + userID)
+	if err != nil {
+		return control.PasskeySummary{}, err
+	}
+	defer unlock()
+	user, _, err := s.loadPasskeyUser(ctx, userID)
+	if err != nil || user.user.State != control.UserActive {
+		return control.PasskeySummary{}, ErrInvalidCredentials
+	}
+	candidate := *ceremony.Candidate
+	updated, err := s.webauthn.ValidateLogin(
+		webAuthnUser{user: user.user, credentials: []webauthn.Credential{candidate}},
+		ceremony.Session, parsed,
+	)
+	if err != nil || updated == nil || updated.Authenticator.CloneWarning || !bytes.Equal(updated.ID, candidate.ID) {
+		return control.PasskeySummary{}, ErrPasskeyCeremony
+	}
+	dek, vaultID, err := s.unwrapVaultWithPassword(ctx, userID, input.Password, now)
+	if err != nil {
+		clear(dek)
+		return control.PasskeySummary{}, err
+	}
+	defer clear(dek)
+	binding := keyenvelope.Context{UserID: userID, VaultID: vaultID}
+	passkeyEnvelope, err := keyenvelope.WrapWithPasskey(dek, input.PRFResult, binding)
+	if err != nil {
+		return control.PasskeySummary{}, err
+	}
+	// Verify the newly persisted unlock path before committing the credential.
+	verifiedDEK, err := keyenvelope.UnwrapWithPasskey(passkeyEnvelope, input.PRFResult, binding)
+	if err != nil || !bytes.Equal(verifiedDEK, dek) {
+		clear(verifiedDEK)
+		return control.PasskeySummary{}, ErrPasskeyPRFRequired
+	}
+	clear(verifiedDEK)
+	record, err := s.passkeyStore.CreatePasskeyCredential(ctx, control.PasskeyCredentialInput{
+		UserID: userID, Name: input.Name, Credential: *updated,
 		PRFSalt: ceremony.PRFSalt, VaultEnvelope: *passkeyEnvelope,
 	}, now)
 	if err != nil {
