@@ -16,18 +16,10 @@
             <option value="30">過去1ヶ月</option>
           </select>
         </div>
-        <div v-if="!isCompactViewport" class="graph-y-controls" role="group" aria-label="縦軸の表示範囲">
-          <span>縦軸:</span>
-          <button type="button" aria-label="縦軸を拡大" title="縦軸を拡大" :disabled="!dataYRange" @click="zoomY(0.8)">＋</button>
-          <button type="button" aria-label="縦軸を縮小" title="縦軸を縮小" :disabled="!dataYRange" @click="zoomY(1.25)">－</button>
-          <button type="button" aria-label="縦軸を上へ移動" title="縦軸を上へ移動" :disabled="!dataYRange" @click="panY(1)">↑</button>
-          <button type="button" aria-label="縦軸を下へ移動" title="縦軸を下へ移動" :disabled="!dataYRange" @click="panY(-1)">↓</button>
-          <button type="button" aria-label="縦軸を元に戻す" title="縦軸を元に戻す" :disabled="!yViewport" @click="resetY">戻す</button>
-        </div>
       </div>
-      <p class="graph-gesture-hint">グラフ上ではドラッグで縦移動、ホイールで拡大・縮小できます</p>
+      <p class="graph-gesture-hint">縦ドラッグで表示範囲を移動、ホイール・ピンチで拡大縮小できます</p>
       <p class="graph-scroll-hint" :class="{ 'is-hidden': !isHorizontallyScrollable }">グラフは左右にスクロールできます</p>
-      <div ref="chartViewport" class="graph-scroll" :class="{ 'is-dragging': isDraggingY }" tabindex="0" role="region" aria-label="残高推移グラフ" @scroll="onChartScroll" @wheel="onChartWheel" @pointerdown="startYAxisPan" @pointermove="moveYAxisPan" @pointerup="stopYAxisPan" @pointercancel="stopYAxisPan" @lostpointercapture="stopYAxisPan">
+      <div ref="chartViewport" class="graph-scroll" :class="{ 'is-dragging': isDraggingY }" tabindex="0" role="region" aria-label="残高推移グラフ" @scroll="onChartScroll" @wheel="onChartWheel" @pointerdown="startYAxisPan" @pointermove="moveYAxisPan" @pointerup="stopYAxisPan" @pointercancel="stopYAxisPan" @lostpointercapture="stopYAxisPan" @touchstart="startTouchGesture" @touchmove="moveTouchGesture" @touchend="endTouchGesture" @touchcancel="endTouchGesture">
         <div class="graph-track" :style="virtualChartWidth ? { width: virtualChartWidth } : null">
           <div class="graph-container" :style="chartWindowWidth ? { width: chartWindowWidth } : null">
             <Line v-if="chartData" :data="chartData" :options="chartOptions" :plugins="chartPlugins" />
@@ -78,7 +70,6 @@ defineEmits(['close'])
 const CHART_POINT_SPACING = 60
 const CHART_VERTICAL_SCALE_WIDTH = 56
 const CHART_HORIZONTAL_MARGIN = 24
-const COMPACT_VIEWPORT_MAX_WIDTH = 700
 const selectedPeriod = ref('all')
 const chartViewport = ref(null)
 const virtualChartWidth = ref(null)
@@ -90,11 +81,9 @@ const chartPlotWidth = ref(0)
 const chartPlotRightMargin = ref(CHART_HORIZONTAL_MARGIN)
 const yViewport = ref(null)
 const isDraggingY = ref(false)
-const isCompactViewport = ref(
-  typeof window !== 'undefined' && window.innerWidth > 0 && window.innerWidth <= COMPACT_VIEWPORT_MAX_WIDTH
-)
 let chartResizeObserver
 let dragStart
+let touchGesture
 let scrollFrame
 let layoutRevision = 0
 let isUnmounted = false
@@ -142,7 +131,6 @@ function updateChartDimensions(alignLatest = false) {
   const viewportHeight = viewport.clientHeight
   if (!viewportWidth || !viewportHeight) return
 
-  isCompactViewport.value = viewportWidth <= COMPACT_VIEWPORT_MAX_WIDTH
   const previousWidth = Number.parseFloat(virtualChartWidth.value) || viewportWidth
   const previousViewportWidth = Number.parseFloat(chartWindowWidth.value) || viewportWidth
   const wasAtLatest = previousWidth - previousViewportWidth - viewport.scrollLeft <= 2
@@ -286,13 +274,6 @@ function zoomY(factor) {
   setYRange(center - span / 2, center + span / 2)
 }
 
-function panY(direction) {
-  const range = yViewport.value || dataYRange.value
-  if (!range) return
-  const shift = (range.max - range.min) * 0.25 * direction
-  setYRange(range.min + shift, range.max + shift)
-}
-
 function resetY() {
   yViewport.value = null
 }
@@ -341,6 +322,64 @@ function stopYAxisPan(event) {
   if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
     event.currentTarget.releasePointerCapture(event.pointerId)
   }
+}
+
+function startTouchGesture(event) {
+  const range = yViewport.value || dataYRange.value
+  if (!range) return
+  const touches = event.touches
+  if (touches.length === 1) {
+    touchGesture = { kind: 'single', mode: null, x: touches[0].clientX, y: touches[0].clientY, range: { ...range } }
+  } else if (touches.length === 2) {
+    const first = touches[0]
+    const second = touches[1]
+    touchGesture = {
+      kind: 'pinch',
+      distance: Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY),
+      centerY: (first.clientY + second.clientY) / 2,
+      range: { ...range }
+    }
+  } else {
+    touchGesture = null
+  }
+}
+
+function moveTouchGesture(event) {
+  if (!touchGesture || !dataYRange.value) return
+  const touches = event.touches
+  const height = chartViewport.value?.clientHeight
+  if (!height) return
+  if (touches.length === 1 && touchGesture.kind === 'single') {
+    const dx = touches[0].clientX - touchGesture.x
+    const dy = touches[0].clientY - touchGesture.y
+    if (!touchGesture.mode) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < 6) return
+      touchGesture.mode = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical'
+    }
+    if (touchGesture.mode === 'horizontal') return // Keep native horizontal scrolling and momentum.
+    event.preventDefault()
+    const span = touchGesture.range.max - touchGesture.range.min
+    const shift = dy / height * span
+    setYRange(touchGesture.range.min + shift, touchGesture.range.max + shift)
+  } else if (touches.length === 2 && touchGesture.kind === 'pinch' && touchGesture.distance > 0) {
+    event.preventDefault()
+    const first = touches[0]
+    const second = touches[1]
+    const distance = Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY)
+    if (!distance) return
+    const centerY = (first.clientY + second.clientY) / 2
+    const range = touchGesture.range
+    const center = (range.min + range.max) / 2
+    const span = (range.max - range.min) * touchGesture.distance / distance
+    if (span <= Math.abs(center) * Number.EPSILON * 32) return
+    const shift = (centerY - touchGesture.centerY) / height * span
+    setYRange(center - span / 2 + shift, center + span / 2 + shift)
+  }
+}
+
+function endTouchGesture(event) {
+  if (event.touches.length) startTouchGesture(event)
+  else touchGesture = null
 }
 
 watch(chartData, resetY)
@@ -519,37 +558,11 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-.graph-period-control,
-.graph-y-controls {
+.graph-period-control {
   display: flex;
   align-items: center;
   gap: .35rem;
 }
-
-.graph-y-controls { flex-wrap: wrap; }
-
-.graph-y-controls span {
-  color: #666;
-  font-size: .85em;
-}
-
-.graph-y-controls button {
-  min-width: 2.75rem;
-  min-height: 2.75rem;
-  border: 1px solid #ddd;
-  border-radius: 8px;
-  background: white;
-  color: #333;
-  cursor: pointer;
-}
-
-.graph-y-controls button:hover:not(:disabled),
-.graph-y-controls button:focus-visible {
-  border-color: #667eea;
-  outline-color: #667eea;
-}
-
-.graph-y-controls button:disabled { opacity: .45; cursor: default; }
 
 .graph-period-label {
   font-size: 0.9em;
@@ -579,6 +592,7 @@ onUnmounted(() => {
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-inline: contain;
+  touch-action: pan-x;
   -webkit-overflow-scrolling: touch;
   border-radius: 8px;
   cursor: grab;
@@ -640,8 +654,5 @@ onUnmounted(() => {
     padding: 1rem;
   }
 
-  .graph-y-controls { width: 100%; }
-
-  .graph-gesture-hint { display: none; }
 }
 </style>
