@@ -4,10 +4,15 @@ import BalanceChart from '../../src/components/BalanceChart.vue'
 
 vi.mock('vue-chartjs', () => ({
   Line: {
-    props: ['options'],
+    props: ['data', 'options'],
     template: `<div class="line-chart"
       :data-y-min="options.scales.y.min"
       :data-y-max="options.scales.y.max"
+      :data-x-min="options.scales.x.min"
+      :data-x-max="options.scales.x.max"
+      :data-first-date="options.scales.x.ticks.callback(0)"
+      :data-first-amount="data.datasets[0]?.data[0]?.y"
+      :data-tooltip-date="options.plugins.tooltip.callbacks.title([{ dataIndex: 0 }])"
       :data-tick-precision="options.scales.y.ticks.precision"
       :data-tick-label="options.scales.y.ticks.callback(-2005.935)" />`
   }
@@ -36,6 +41,11 @@ function stubResize() {
     observe() {}
     disconnect() {}
   })
+  vi.stubGlobal('requestAnimationFrame', callback => {
+    queueMicrotask(callback)
+    return 1
+  })
+  vi.stubGlobal('cancelAnimationFrame', () => {})
   return () => notifyResize()
 }
 
@@ -56,7 +66,7 @@ function mountChart(history, { width = 375, height = 800 } = {}) {
 }
 
 function chartWidth(wrapper) {
-  return wrapper.get('.graph-container').element.style.width
+  return wrapper.get('.graph-track').element.style.width
 }
 
 it('sizes the chart from distinct transaction dates instead of viewport height', async () => {
@@ -65,6 +75,7 @@ it('sizes the chart from distinct transaction dates instead of viewport height',
   notifyResize()
   await wrapper.vm.$nextTick()
   expect(chartWidth(wrapper)).toBe('375px')
+  expect(wrapper.get('.graph-container').element.style.width).toBe('375px')
   expect(wrapper.get('.graph-scroll-hint').classes()).toContain('is-hidden')
 
   // 1〜2日分の点では縦長画面だけを理由に横スクロールしない。
@@ -87,8 +98,12 @@ it('sizes the chart from distinct transaction dates instead of viewport height',
   await wrapper.setProps({ balanceHistory: historyFor(tenDates) })
   notifyResize()
   await wrapper.vm.$nextTick()
+  await wrapper.vm.$nextTick()
+  await wrapper.vm.$nextTick()
   expect(chartWidth(wrapper)).toBe('620px')
   expect(wrapper.get('.graph-scroll-hint').classes()).not.toContain('is-hidden')
+  expect(wrapper.get('.graph-scroll').element.scrollLeft).toBe(245)
+  expect(Number(wrapper.get('.line-chart').attributes('data-x-max'))).toBe(9)
 
   // デスクトップでは表示領域の幅をそのまま使う。
   resize(1400, 600)
@@ -99,16 +114,40 @@ it('sizes the chart from distinct transaction dates instead of viewport height',
   wrapper.unmount()
 })
 
-it('keeps very long histories renderable without dropping points', async () => {
+it('keeps every transaction date at the minimum spacing with a viewport-sized canvas', async () => {
   const notifyResize = stubResize()
   const dates = Array.from({ length: 1000 }, (_, index) => recentDate(1000 - index))
   const { wrapper } = mountChart(historyFor(dates), { width: 375, height: 800 })
   notifyResize()
   await wrapper.vm.$nextTick()
-  // jsdom は devicePixelRatio=1。canvas 面積予算 8M / 高さ 800 が上限になる。
-  expect(chartWidth(wrapper)).toBe('10000px')
+  await wrapper.vm.$nextTick()
+  expect(chartWidth(wrapper)).toBe('60020px')
+  expect(wrapper.get('.graph-container').element.style.width).toBe('375px')
+  expect(wrapper.get('.graph-scroll').element.scrollLeft).toBe(59645)
+  expect(Number(wrapper.get('.line-chart').attributes('data-x-max'))).toBe(999)
+  wrapper.get('.graph-scroll').element.scrollLeft = 0
+  await wrapper.get('.graph-scroll').trigger('scroll')
+  await Promise.resolve()
+  await wrapper.vm.$nextTick()
+  expect(Number(wrapper.get('.line-chart').attributes('data-x-min'))).toBe(0)
+  expect(Number(wrapper.get('.line-chart').attributes('data-x-max'))).toBeCloseTo(295 / 60)
+  expect(wrapper.get('.line-chart').attributes('data-first-date')).toBe(
+    `${Number(dates[0].slice(5, 7))}/${Number(dates[0].slice(8, 10))}`
+  )
+  expect(wrapper.get('.line-chart').attributes('data-first-amount')).toBe('100')
+  expect(wrapper.get('.line-chart').attributes('data-tooltip-date')).toBe(dates[0])
   expect(wrapper.get('.graph-scroll-hint').classes()).not.toContain('is-hidden')
   wrapper.unmount()
+
+  // PC幅でも同じ点間隔を使い、最初は最新側を表示する。
+  const desktop = mountChart(historyFor(dates), { width: 1400, height: 800 })
+  notifyResize()
+  await desktop.wrapper.vm.$nextTick()
+  await desktop.wrapper.vm.$nextTick()
+  expect(chartWidth(desktop.wrapper)).toBe('60020px')
+  expect(desktop.wrapper.get('.graph-container').element.style.width).toBe('1400px')
+  expect(desktop.wrapper.get('.graph-scroll').element.scrollLeft).toBe(58620)
+  desktop.wrapper.unmount()
 })
 
 it('recalculates the required width when the display period changes', async () => {
