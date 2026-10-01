@@ -62,9 +62,13 @@ func (s *registrationTestStore) GetPasskeyCredential(_ context.Context, userID s
 	return control.PasskeyCredential{}, control.ErrNotFound
 }
 
-func (s *registrationTestStore) RecordSuccessfulPasskeyUse(_ context.Context, expected control.PasskeyCredential, _ webauthn.Credential, _ time.Time, _ bool) error {
-	for _, record := range s.records {
+func (s *registrationTestStore) RecordSuccessfulPasskeyUse(_ context.Context, expected control.PasskeyCredential, updated webauthn.Credential, _ time.Time, _ bool) error {
+	for index, record := range s.records {
 		if bytes.Equal(record.ID, expected.ID) {
+			if record.Credential.Authenticator.SignCount != expected.Credential.Authenticator.SignCount {
+				return errors.New("stale credential commit")
+			}
+			s.records[index].Credential = updated
 			return nil
 		}
 	}
@@ -299,6 +303,9 @@ func TestPasskeyRegistrationAssertionWithoutCreateTimePRF(t *testing.T) {
 	if !bytes.Equal(record.PRFSalt, registrationSalt) || !bytes.Equal(record.ID, credentialID) {
 		t.Fatal("persisted credential lost its registration salt or ID")
 	}
+	if record.Credential.Authenticator.SignCount != 1 {
+		t.Fatalf("registration assertion counter was not persisted: %d", record.Credential.Authenticator.SignCount)
+	}
 	unwrapped, err := keyenvelope.UnwrapWithPasskey(&record.VaultEnvelope, prfResult, keyenvelope.Context{UserID: serverAuthTestUserID, VaultID: serverAuthTestVaultID})
 	if err != nil || !bytes.Equal(unwrapped, dek) {
 		clear(unwrapped)
@@ -306,18 +313,33 @@ func TestPasskeyRegistrationAssertionWithoutCreateTimePRF(t *testing.T) {
 	}
 	clear(unwrapped)
 
-	// A passkey login after the assertion-based registration must decrypt the
-	// vault with the same PRF output.
+	// Replaying the registration assertion's counter must not open the vault.
+	replayBegin, err := service.BeginPasskeyLogin(ctx, "person@example.test", "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayAssertion := signedPrivacyAssertionWithCount(t, replayBegin, record, key, "https://money.example.test", true, 1)
+	replaySession, err := service.FinishPasskeyLogin(ctx, FinishPasskeyLoginInput{
+		CeremonyID: replayBegin.CeremonyID, ClientKey: "client", CredentialJSON: replayAssertion, PRFResult: append([]byte(nil), prfResult...),
+	}, serverAuthTestNow)
+	if !errors.Is(err, ErrInvalidCredentials) || replaySession != nil {
+		t.Fatalf("replayed registration counter was accepted: session=%v, err=%v", replaySession, err)
+	}
+
+	// The next counter must still decrypt the vault with the same PRF output.
 	loginBegin, err := service.BeginPasskeyLogin(ctx, "person@example.test", "client")
 	if err != nil {
 		t.Fatal(err)
 	}
-	loginAssertion := signedPrivacyAssertion(t, loginBegin, record, key, "https://money.example.test", true)
+	loginAssertion := signedPrivacyAssertionWithCount(t, loginBegin, record, key, "https://money.example.test", true, 2)
 	session, err := service.FinishPasskeyLogin(ctx, FinishPasskeyLoginInput{
 		CeremonyID: loginBegin.CeremonyID, ClientKey: "client", CredentialJSON: loginAssertion, PRFResult: append([]byte(nil), prfResult...),
 	}, serverAuthTestNow)
 	if err != nil || session == nil || session.UserID != serverAuthTestUserID {
 		t.Fatalf("login after assertion registration failed: %v", err)
+	}
+	if got := store.records[0].Credential.Authenticator.SignCount; got != 2 {
+		t.Fatalf("login assertion counter was not persisted: %d", got)
 	}
 }
 
