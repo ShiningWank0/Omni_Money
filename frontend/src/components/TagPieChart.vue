@@ -285,6 +285,7 @@ onUnmounted(() => {
   width: 95%;
   max-height: calc(100vh - 4rem);
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .tag-chart-modal h3 {
@@ -410,6 +411,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
+  width: 100%;
+  min-width: 0;
 }
 
 .chart-container {
@@ -428,6 +431,7 @@ onUnmounted(() => {
 
 .chart-legend {
   width: 100%;
+  min-width: 0;
 }
 
 .legend-total {
@@ -470,6 +474,8 @@ onUnmounted(() => {
 
 .legend-name {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 0.9em;
   color: #333;
   font-weight: 500;
@@ -491,5 +497,32 @@ onUnmounted(() => {
 .legend-drill {
   font-size: 0.7em;
   color: #667eea;
+}
+
+@media (max-width: 700px) {
+  .tag-chart-modal {
+    width: calc(100vw - 1rem);
+    max-width: calc(100vw - 1rem);
+    max-height: calc(100vh - 1rem);
+    max-height: calc(100dvh - 1rem);
+    padding: 1rem;
+  }
+
+  .period-btn { min-width: 0; }
+  .date-navigator { flex-wrap: wrap; gap: .5rem; }
+  .breadcrumbs { overflow-wrap: anywhere; }
+  .chart-container { max-width: 360px; }
+
+  .legend-item {
+    display: grid;
+    grid-template-columns: 14px minmax(0, 1fr) auto;
+    gap: .25rem .5rem;
+  }
+
+  .legend-color { grid-column: 1; grid-row: 1 / 3; }
+  .legend-name { grid-column: 2; grid-row: 1; }
+  .legend-amount { grid-column: 2; grid-row: 2; overflow-wrap: anywhere; }
+  .legend-ratio { grid-column: 3; grid-row: 1; }
+  .legend-drill { grid-column: 3; grid-row: 2; text-align: right; }
 }
 </style>
