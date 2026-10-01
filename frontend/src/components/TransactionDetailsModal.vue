@@ -64,7 +64,8 @@
       </div>
     </section>
     <Teleport to="body">
-      <div v-if="lightboxImage" class="details-lightbox" role="dialog" aria-modal="true"
+      <div v-if="lightboxImage" ref="lightboxOverlay" class="details-lightbox"
+        :class="{ 'has-navigation': images.length > 1 }" role="dialog" aria-modal="true"
         aria-label="画像の拡大表示" @click.self="closeLightbox">
         <div class="details-lightbox-actions">
           <button type="button" @click="lightboxZoomed = !lightboxZoomed">
@@ -72,6 +73,12 @@
           </button>
           <button ref="lightboxCloseButton" type="button" aria-label="画像を閉じる" @click="closeLightbox">×</button>
         </div>
+        <template v-if="images.length > 1">
+          <button type="button" class="details-lightbox-nav previous" aria-label="前の画像"
+            :disabled="previousImageIndex < 0" @click="changeLightboxImage(-1)">‹</button>
+          <button type="button" class="details-lightbox-nav next" aria-label="次の画像"
+            :disabled="nextImageIndex < 0" @click="changeLightboxImage(1)">›</button>
+        </template>
         <img :src="imageURL(lightboxImage)" :alt="lightboxImage.filename || '添付画像'"
           :class="{ 'is-zoomed': lightboxZoomed }">
       </div>
@@ -92,10 +99,13 @@ const imagesLoading = ref(false)
 const imagesError = ref(false)
 const selectedImageIndex = ref(0)
 const selectedImage = computed(() => images.value[selectedImageIndex.value] || images.value[0] || null)
+const previousImageIndex = computed(() => adjacentViewableImageIndex(-1))
+const nextImageIndex = computed(() => adjacentViewableImageIndex(1))
 const imageOpenButton = ref(null)
 const lightboxImage = ref(null)
 const lightboxZoomed = ref(false)
 const lightboxCloseButton = ref(null)
+const lightboxOverlay = ref(null)
 let active = true
 
 function imageURL(image) {
@@ -103,6 +113,13 @@ function imageURL(image) {
   return /^data:image\/(?:jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(image.data_url)
     ? image.data_url
     : ''
+}
+
+function adjacentViewableImageIndex(direction) {
+  for (let index = selectedImageIndex.value + direction; index >= 0 && index < images.value.length; index += direction) {
+    if (imageURL(images.value[index])) return index
+  }
+  return -1
 }
 
 async function loadImages() {
@@ -137,13 +154,29 @@ async function closeLightbox() {
   if (active) imageOpenButton.value?.focus()
 }
 
-function onKeydown(event) {
-  if (event.key !== 'Escape') return
-  if (lightboxImage.value) {
-    closeLightbox()
-  } else {
-    emit('close')
+function changeLightboxImage(direction) {
+  if (!lightboxImage.value) return
+  const index = direction < 0 ? previousImageIndex.value : nextImageIndex.value
+  if (index < 0) return
+  selectedImageIndex.value = index
+  lightboxImage.value = images.value[index]
+  lightboxZoomed.value = false
+  if (lightboxOverlay.value) {
+    lightboxOverlay.value.scrollTop = 0
+    lightboxOverlay.value.scrollLeft = 0
   }
+}
+
+function onKeydown(event) {
+  if (lightboxImage.value) {
+    if (event.key === 'Escape') closeLightbox()
+    if (images.value.length > 1 && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+      event.preventDefault()
+      changeLightboxImage(event.key === 'ArrowLeft' ? -1 : 1)
+    }
+    return
+  }
+  if (event.key === 'Escape') emit('close')
 }
 
 onMounted(() => {
@@ -193,15 +226,22 @@ onBeforeUnmount(() => {
 .details-invalid-image { padding: 1rem; color: #8a2525; }
 .details-retry { padding: .4rem .8rem; border: 1px solid #667eea; border-radius: .5rem; background: #fff; color: #4358b4; cursor: pointer; }
 .details-lightbox { position: fixed; inset: 0; z-index: 1100; display: flex; align-items: center; justify-content: center; overflow: auto; padding: 1.5rem; box-sizing: border-box; background: rgba(10, 15, 22, .92); }
+.details-lightbox.has-navigation { padding-inline: 3.5rem; }
 .details-lightbox img { display: block; flex: none; max-width: 100%; max-height: 100%; width: auto; height: auto; margin: auto; object-fit: contain; }
 .details-lightbox img.is-zoomed { max-width: none; max-height: none; }
 .details-lightbox-actions { position: fixed; top: .75rem; right: .75rem; z-index: 1; display: flex; gap: .5rem; }
 .details-lightbox-actions button { min-height: 2.5rem; border: 1px solid #fff; border-radius: .5rem; padding: .35rem .8rem; background: rgba(10, 15, 22, .85); color: #fff; font: inherit; cursor: pointer; }
 .details-lightbox-actions button:last-child { min-width: 2.5rem; font-size: 1.5rem; line-height: 1; }
+.details-lightbox-nav { position: fixed; top: 50%; z-index: 1; transform: translateY(-50%); width: 2.75rem; height: 3.5rem; border: 1px solid #fff; border-radius: .5rem; background: rgba(10, 15, 22, .75); color: #fff; font-size: 2rem; cursor: pointer; }
+.details-lightbox-nav.previous { left: .5rem; }
+.details-lightbox-nav.next { right: .5rem; }
+.details-lightbox-nav:disabled { opacity: .35; cursor: default; }
 @media (max-width: 700px) {
   .modal-content.transaction-details { width: calc(100vw - 1rem); max-height: calc(100dvh - 1rem); padding: 1rem; }
   .details-fields > div { grid-template-columns: minmax(0, 1fr); gap: .2rem; }
   .details-image-list figcaption { flex-wrap: wrap; }
   .details-lightbox { padding: .5rem; }
+  .details-lightbox.has-navigation { padding-inline: 2.75rem; }
+  .details-lightbox-nav { width: 2.25rem; height: 3rem; }
 }
 </style>
