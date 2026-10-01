@@ -82,17 +82,22 @@ function credentialToJSON(credential) {
   }
 }
 
-function extractPRFResult(credential) {
-  const first = credential.getClientExtensionResults()?.prf?.results?.first
-  if (!(first instanceof ArrayBuffer) && !ArrayBuffer.isView(first)) {
-    throw new Error('このパスキーはOmni MoneyのVault復号に必要なPRF機能へ対応していません')
-  }
-  const result = first instanceof ArrayBuffer
-    ? new Uint8Array(first.slice(0))
-    : new Uint8Array(first.buffer.slice(first.byteOffset, first.byteOffset + first.byteLength))
+function readPRFResult(value) {
+  if (!(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)) return null
+  const result = value instanceof ArrayBuffer
+    ? new Uint8Array(value.slice(0))
+    : new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))
   if (result.byteLength !== 32) {
     result.fill(0)
     throw new Error('パスキーから安全なVault鍵を取得できませんでした')
+  }
+  return result
+}
+
+function extractPRFResult(credential) {
+  const result = readPRFResult(credential.getClientExtensionResults()?.prf?.results?.first)
+  if (!result) {
+    throw new Error('このパスキーはOmni MoneyのVault復号に必要なPRF機能へ対応していません')
   }
   return result
 }
@@ -101,7 +106,28 @@ export async function createPasskey(options) {
   requirePasskeySupport()
   const credential = await navigator.credentials.create({ publicKey: parseCreationOptions(options.publicKey) })
   if (!credential) throw new Error('パスキー登録がキャンセルされました')
-  return { credential: credentialToJSON(credential), prfResult: extractPRFResult(credential) }
+  const prf = credential.getClientExtensionResults()?.prf
+  return {
+    credential: credentialToJSON(credential),
+    prfResult: readPRFResult(prf?.results?.first),
+    prfEnabled: prf?.enabled === true,
+    prfPresent: prf !== undefined && prf !== null
+  }
+}
+
+// Some authenticators (Bitwarden's browser extension among them) report
+// prf.enabled=true at credential creation but only return a PRF result during
+// a follow-up assertion. This runs that assertion against the candidate
+// credential with the salt the server bound to the registration ceremony.
+export async function assertPasskeyPRF(options) {
+  requirePasskeySupport()
+  const credential = await navigator.credentials.get({ publicKey: parseRequestOptions(options.publicKey) })
+  if (!credential) throw new Error('パスキー登録の確認がキャンセルされました')
+  const result = readPRFResult(credential.getClientExtensionResults()?.prf?.results?.first)
+  if (!result) {
+    throw new Error('このパスキーはOmni MoneyのVault復号に必要なPRF出力を返しませんでした')
+  }
+  return { credential: credentialToJSON(credential), prfResult: result }
 }
 
 export async function authenticatePasskey(options) {
