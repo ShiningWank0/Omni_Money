@@ -57,8 +57,21 @@ function encodeExtensionValue(value) {
   return value
 }
 
+// The PRF output unwraps the vault key, so it may travel only in the
+// dedicated prf_result_b64 field. WebAuthn Level 3 requires toJSON() to copy
+// getClientExtensionResults() into clientExtensionResults, which would send
+// the same secret a second time inside the credential JSON. Strip that copy
+// so the value appears exactly once on the wire and in any request log.
+function stripCredentialPRFResults(json) {
+  const prf = json?.clientExtensionResults?.prf
+  if (prf && typeof prf === 'object') {
+    delete prf.results
+  }
+  return json
+}
+
 function credentialToJSON(credential) {
-  if (typeof credential.toJSON === 'function') return credential.toJSON()
+  if (typeof credential.toJSON === 'function') return stripCredentialPRFResults(credential.toJSON())
   const response = credential.response
   const encodedResponse = { clientDataJSON: bytesToBase64url(response.clientDataJSON) }
   if ('attestationObject' in response) {
@@ -72,14 +85,14 @@ function credentialToJSON(credential) {
     encodedResponse.signature = bytesToBase64url(response.signature)
     if (response.userHandle) encodedResponse.userHandle = bytesToBase64url(response.userHandle)
   }
-  return {
+  return stripCredentialPRFResults({
     id: credential.id,
     rawId: bytesToBase64url(credential.rawId),
     type: credential.type,
     response: encodedResponse,
     clientExtensionResults: encodeExtensionValue(credential.getClientExtensionResults()),
     authenticatorAttachment: credential.authenticatorAttachment || undefined
-  }
+  })
 }
 
 function readPRFResult(value) {

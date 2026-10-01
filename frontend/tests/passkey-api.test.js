@@ -13,6 +13,14 @@ globalThis.window = {
 }
 
 const sourcePRF = Uint8Array.from({ length: 32 }, (_, index) => 255 - index)
+const sourcePRFBase64 = () => window.btoa(String.fromCharCode(...sourcePRF))
+const sourcePRFBase64url = () => sourcePRFBase64().replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+const assertCredentialCarriesNoPRF = body => {
+  assert.equal(body.credential.clientExtensionResults?.prf?.results, undefined)
+  const encoded = JSON.stringify(body.credential)
+  assert.equal(encoded.includes(sourcePRFBase64()), false)
+  assert.equal(encoded.includes(sourcePRFBase64url()), false)
+}
 let createCredential = null
 Object.defineProperty(globalThis, 'navigator', {
   configurable: true,
@@ -23,7 +31,12 @@ Object.defineProperty(globalThis, 'navigator', {
       },
       async get() {
         return {
-          toJSON: () => ({ id: 'passkey-id', type: 'public-key', response: { signature: 'AA' } }),
+          toJSON: () => ({
+            id: 'passkey-id',
+            type: 'public-key',
+            response: { signature: 'AA' },
+            clientExtensionResults: { prf: { enabled: true, results: { first: sourcePRFBase64url() } } }
+          }),
           getClientExtensionResults: () => ({ prf: { enabled: true, results: { first: sourcePRF.buffer } } })
         }
       }
@@ -40,7 +53,12 @@ afterEach(() => {
 
 test('passkey registration finishes directly when creation returns a PRF result', async () => {
   createCredential = {
-    toJSON: () => ({ id: 'create-id', type: 'public-key', response: { attestationObject: 'AA' } }),
+    toJSON: () => ({
+      id: 'create-id',
+      type: 'public-key',
+      response: { attestationObject: 'AA' },
+      clientExtensionResults: { prf: { enabled: true, results: { first: sourcePRFBase64url() } } }
+    }),
     getClientExtensionResults: () => ({ prf: { enabled: true, results: { first: sourcePRF.buffer } } })
   }
   const requests = []
@@ -57,6 +75,7 @@ test('passkey registration finishes directly when creation returns a PRF result'
       assert.equal(body.ceremony_id, 'register-ceremony')
       assert.equal(body.name, 'MacBook')
       assert.equal(body.credential.id, 'create-id')
+      assertCredentialCarriesNoPRF(body)
       assert.equal(Uint8Array.from(atob(body.prf_result_b64), character => character.charCodeAt(0)).byteLength, 32)
       return Response.json({ passkey: { id: 1, name: 'MacBook' } })
     }
@@ -99,6 +118,7 @@ test('passkey registration runs a PRF assertion step-up when creation has no res
       assert.equal(body.ceremony_id, 'assert-ceremony')
       assert.equal(body.name, 'Bitwarden')
       assert.equal(body.credential.id, 'passkey-id')
+      assertCredentialCarriesNoPRF(body)
       assert.equal(Uint8Array.from(atob(body.prf_result_b64), character => character.charCodeAt(0)).byteLength, 32)
       return Response.json({ passkey: { id: 2, name: 'Bitwarden' } })
     }
@@ -154,6 +174,7 @@ test('passkey reauthentication rotates auth state through the two-step API', asy
       const body = JSON.parse(options.body)
       assert.equal(body.ceremony_id, 'ceremony')
       assert.equal(body.credential.id, 'passkey-id')
+      assertCredentialCarriesNoPRF(body)
       assert.equal(Uint8Array.from(atob(body.prf_result_b64), character => character.charCodeAt(0)).byteLength, 32)
       return Response.json({ authenticated: true, csrf_token: 'csrf-after' })
     }
