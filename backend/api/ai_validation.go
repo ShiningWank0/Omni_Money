@@ -85,6 +85,9 @@ func normalizeAndValidateAITransaction(req models.TransactionRequest, now time.T
 // validateAITransactionReferences はAI入力に含まれるDB参照を事前検証する。
 // 画像は通常Web/Wailsと同じcore.AddTransaction境界で検証する。
 func validateAITransactionReferences(req models.TransactionRequest, credential *aicredentials.Credential) (models.TransactionRequest, error) {
+	if len(req.NewTagPaths) > 0 {
+		return req, fmt.Errorf("AI経由で新しいタグは作成できません")
+	}
 	if len(req.Tags) > maxAITagIDs {
 		return req, fmt.Errorf("タグIDは%d件までです", maxAITagIDs)
 	}
