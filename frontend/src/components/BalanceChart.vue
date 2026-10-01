@@ -16,21 +16,15 @@
             <option value="30">過去1ヶ月</option>
           </select>
         </div>
-        <div class="graph-y-controls" role="group" aria-label="縦軸の表示範囲">
-          <span>縦軸:</span>
-          <button type="button" aria-label="縦軸を拡大" title="縦軸を拡大" :disabled="!dataYRange" @click="zoomY(0.8)">＋</button>
-          <button type="button" aria-label="縦軸を縮小" title="縦軸を縮小" :disabled="!dataYRange" @click="zoomY(1.25)">－</button>
-          <button type="button" aria-label="縦軸を上へ移動" title="縦軸を上へ移動" :disabled="!dataYRange" @click="panY(1)">↑</button>
-          <button type="button" aria-label="縦軸を下へ移動" title="縦軸を下へ移動" :disabled="!dataYRange" @click="panY(-1)">↓</button>
-          <button type="button" aria-label="縦軸を元に戻す" title="縦軸を元に戻す" :disabled="!yViewport" @click="resetY">戻す</button>
-        </div>
       </div>
-      <p class="graph-gesture-hint">グラフ上ではドラッグで縦移動、ホイールで拡大・縮小できます</p>
+      <p class="graph-gesture-hint">縦ドラッグで表示範囲を移動、ホイール・ピンチで拡大縮小できます</p>
       <p class="graph-scroll-hint" :class="{ 'is-hidden': !isHorizontallyScrollable }">グラフは左右にスクロールできます</p>
-      <div ref="chartViewport" class="graph-scroll" :class="{ 'is-dragging': isDraggingY }" tabindex="0" role="region" aria-label="残高推移グラフ" @wheel="onChartWheel" @pointerdown="startYAxisPan" @pointermove="moveYAxisPan" @pointerup="stopYAxisPan" @pointercancel="stopYAxisPan" @lostpointercapture="stopYAxisPan">
-        <div class="graph-container" :style="virtualChartWidth ? { width: virtualChartWidth } : null">
-          <Line v-if="chartData" :data="chartData" :options="chartOptions" />
-          <div v-else class="graph-empty">データがありません</div>
+      <div ref="chartViewport" class="graph-scroll" :class="{ 'is-dragging': isDraggingY }" tabindex="0" role="region" aria-label="残高推移グラフ" @scroll="onChartScroll" @wheel="onChartWheel" @pointerdown="startYAxisPan" @pointermove="moveYAxisPan" @pointerup="stopYAxisPan" @pointercancel="stopYAxisPan" @lostpointercapture="stopYAxisPan" @touchstart="startTouchGesture" @touchmove="moveTouchGesture" @touchend="endTouchGesture" @touchcancel="endTouchGesture">
+        <div class="graph-track" :style="virtualChartWidth ? { width: virtualChartWidth } : null">
+          <div class="graph-container" :style="chartWindowWidth ? { width: chartWindowWidth } : null">
+            <Line v-if="chartData" :data="chartData" :options="chartOptions" :plugins="chartPlugins" />
+            <div v-else class="graph-empty">データがありません</div>
+          </div>
         </div>
       </div>
     </div>
@@ -38,7 +32,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { Line } from 'vue-chartjs'
 import { exactInteger, formatExactInteger } from '../utils/exactAmount'
 import {
@@ -71,27 +65,92 @@ const props = defineProps({
 
 defineEmits(['close'])
 
+// 点間の最小間隔とY軸ラベル・左右余白の見積もり。横幅は画面高ではなく
+// 取引のある異なる日付の数だけで決める（日付の暦上の空白は追加しない）。
+const CHART_POINT_SPACING = 60
+const CHART_VERTICAL_SCALE_WIDTH = 56
+const CHART_HORIZONTAL_MARGIN = 24
 const selectedPeriod = ref('all')
 const chartViewport = ref(null)
 const virtualChartWidth = ref(null)
+const chartWindowWidth = ref(null)
 const isHorizontallyScrollable = ref(false)
+const chartScrollLeft = ref(0)
+const chartPlotLeft = ref(CHART_VERTICAL_SCALE_WIDTH)
+const chartPlotWidth = ref(0)
+const chartPlotRightMargin = ref(CHART_HORIZONTAL_MARGIN)
 const yViewport = ref(null)
 const isDraggingY = ref(false)
 let chartResizeObserver
 let dragStart
+let touchGesture
+let scrollFrame
+let layoutRevision = 0
+let isUnmounted = false
+let alignLatestPending = true
+let measuredChartWidth = 0
 
-function updateChartDimensions() {
+// Chart.js の canvas は常に表示領域幅に抑える。横スクロール用の track だけを
+// 日付数に応じて伸ばし、x 軸の表示範囲をスクロール位置へ同期する。
+const chartPlugins = [{
+  id: 'balanceChartPlotArea',
+  afterLayout(chart) {
+    // x 軸の範囲変更でも afterLayout は呼ばれる。各幅で一度だけ測り、
+    // 測定値→オプション更新→再測定の循環を起こさない。
+    if (Math.round(chart.width) === measuredChartWidth) return
+    measuredChartWidth = Math.round(chart.width)
+    const left = Math.round(chart.chartArea.left)
+    const width = Math.round(chart.chartArea.right - chart.chartArea.left)
+    const rightMargin = Math.round(chart.width - chart.chartArea.right)
+    if (!Number.isFinite(left) || !Number.isFinite(width) || width < 1 || !Number.isFinite(rightMargin)) return
+    if (left === chartPlotLeft.value && width === chartPlotWidth.value && rightMargin === chartPlotRightMargin.value) return
+    queueMicrotask(() => {
+      if (isUnmounted) return
+      chartPlotLeft.value = left
+      chartPlotWidth.value = width
+      chartPlotRightMargin.value = rightMargin
+      updateChartDimensions()
+    })
+  }
+}]
+
+function onChartScroll() {
+  if (scrollFrame != null) return
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = null
+    chartScrollLeft.value = chartViewport.value?.scrollLeft || 0
+  })
+}
+
+function updateChartDimensions(alignLatest = false) {
   const viewport = chartViewport.value
   if (!viewport) return
+  if (alignLatest) alignLatestPending = true
 
   const viewportWidth = viewport.clientWidth
   const viewportHeight = viewport.clientHeight
   if (!viewportWidth || !viewportHeight) return
 
-  // 縦に長い画面でも、横幅をスクロール領域へ広げてグラフの比率を保つ。
-  const width = Math.ceil(Math.max(viewportWidth, viewportHeight * 16 / 9))
+  const previousWidth = Number.parseFloat(virtualChartWidth.value) || viewportWidth
+  const previousViewportWidth = Number.parseFloat(chartWindowWidth.value) || viewportWidth
+  const wasAtLatest = previousWidth - previousViewportWidth - viewport.scrollLeft <= 2
+  const points = filteredHistory.value?.dates?.length || 0
+  const width = Math.ceil(Math.max(
+    viewportWidth,
+    chartPlotLeft.value + CHART_POINT_SPACING * Math.max(0, points - 1) + chartPlotRightMargin.value
+  ))
+  chartWindowWidth.value = `${viewportWidth}px`
   virtualChartWidth.value = `${width}px`
   isHorizontallyScrollable.value = width > viewportWidth + 1
+  const revision = ++layoutRevision
+  nextTick(() => {
+    if (isUnmounted || revision !== layoutRevision || !chartViewport.value) return
+    if (alignLatestPending || wasAtLatest) {
+      chartViewport.value.scrollLeft = Math.max(0, width - viewportWidth)
+    }
+    chartScrollLeft.value = chartViewport.value.scrollLeft
+    alignLatestPending = false
+  })
 }
 
 // 口座ごとの色パレット（グラスモーフィズムに合う色合い）
@@ -137,20 +196,6 @@ const filteredHistory = computed(() => {
   }
 })
 
-// 日付ラベルの間引き（データが多すぎる場合）
-function thinLabels(dates) {
-  const maxLabels = 30
-  if (dates.length <= maxLabels) return dates.map(d => formatDateLabel(d))
-
-  const step = Math.ceil(dates.length / maxLabels)
-  return dates.map((d, i) => {
-    if (i % step === 0 || i === dates.length - 1) {
-      return formatDateLabel(d)
-    }
-    return ''
-  })
-}
-
 function formatDateLabel(dateStr) {
   const parts = dateStr.split('-')
   if (parts.length >= 3) {
@@ -175,13 +220,12 @@ const chartData = computed(() => {
 })
 
 function buildChartData(history, accounts) {
-  const labels = thinLabels(history.dates)
   const datasets = accounts.map((acc, idx) => {
     const color = colorPalette[idx % colorPalette.length]
     const exactData = history.balances_exact?.[acc] || []
     return {
       label: acc,
-      data: (history.balances[acc] || []).map((value, i) => Number(exactInteger(value, exactData[i]))),
+      data: (history.balances[acc] || []).map((value, i) => ({ x: i, y: Number(exactInteger(value, exactData[i])) })),
       exactData,
       borderColor: color.border,
       backgroundColor: color.bg,
@@ -193,14 +237,15 @@ function buildChartData(history, accounts) {
     }
   })
 
-  return { labels, datasets }
+  return { datasets }
 }
 
 const dataYRange = computed(() => {
   let min = Infinity
   let max = -Infinity
   for (const dataset of chartData.value?.datasets || []) {
-    for (const value of dataset.data) {
+    for (const point of dataset.data) {
+      const value = point.y
       if (!Number.isFinite(value)) continue
       min = Math.min(min, value)
       max = Math.max(max, value)
@@ -229,18 +274,17 @@ function zoomY(factor) {
   setYRange(center - span / 2, center + span / 2)
 }
 
-function panY(direction) {
-  const range = yViewport.value || dataYRange.value
-  if (!range) return
-  const shift = (range.max - range.min) * 0.25 * direction
-  setYRange(range.min + shift, range.max + shift)
-}
-
 function resetY() {
   yViewport.value = null
 }
 
 function onChartWheel(event) {
+  if (event.shiftKey && isHorizontallyScrollable.value) {
+    event.preventDefault()
+    chartViewport.value.scrollLeft += event.deltaY
+    onChartScroll()
+    return
+  }
   if (!dataYRange.value || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
   event.preventDefault()
   zoomY(Math.exp(Math.max(-100, Math.min(100, event.deltaY)) * 0.002))
@@ -280,11 +324,87 @@ function stopYAxisPan(event) {
   }
 }
 
+function startTouchGesture(event) {
+  const range = yViewport.value || dataYRange.value
+  if (!range) return
+  const touches = event.touches
+  if (touches.length === 1) {
+    touchGesture = { kind: 'single', mode: null, x: touches[0].clientX, y: touches[0].clientY, range: { ...range } }
+  } else if (touches.length === 2) {
+    const first = touches[0]
+    const second = touches[1]
+    touchGesture = {
+      kind: 'pinch',
+      distance: Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY),
+      centerY: (first.clientY + second.clientY) / 2,
+      range: { ...range }
+    }
+  } else {
+    touchGesture = null
+  }
+}
+
+function moveTouchGesture(event) {
+  if (!touchGesture || !dataYRange.value) return
+  const touches = event.touches
+  const height = chartViewport.value?.clientHeight
+  if (!height) return
+  if (touches.length === 1 && touchGesture.kind === 'single') {
+    const dx = touches[0].clientX - touchGesture.x
+    const dy = touches[0].clientY - touchGesture.y
+    if (!touchGesture.mode) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < 6) return
+      touchGesture.mode = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical'
+    }
+    if (touchGesture.mode === 'horizontal') return // Keep native horizontal scrolling and momentum.
+    event.preventDefault()
+    const span = touchGesture.range.max - touchGesture.range.min
+    const shift = dy / height * span
+    setYRange(touchGesture.range.min + shift, touchGesture.range.max + shift)
+  } else if (touches.length === 2 && touchGesture.kind === 'pinch' && touchGesture.distance > 0) {
+    event.preventDefault()
+    const first = touches[0]
+    const second = touches[1]
+    const distance = Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY)
+    if (!distance) return
+    const centerY = (first.clientY + second.clientY) / 2
+    const range = touchGesture.range
+    const center = (range.min + range.max) / 2
+    const span = (range.max - range.min) * touchGesture.distance / distance
+    if (span <= Math.abs(center) * Number.EPSILON * 32) return
+    const shift = (centerY - touchGesture.centerY) / height * span
+    setYRange(center - span / 2 + shift, center + span / 2 + shift)
+  }
+}
+
+function endTouchGesture(event) {
+  if (event.touches.length) startTouchGesture(event)
+  else touchGesture = null
+}
+
 watch(chartData, resetY)
+
+// 期間・履歴の変更時は最新の日付へ戻す。ResizeObserver は表示位置を保つ。
+watch(filteredHistory, async () => {
+  measuredChartWidth = 0
+  await nextTick()
+  updateChartDimensions(true)
+})
+
+const chartXRange = computed(() => {
+  const points = filteredHistory.value?.dates?.length || 0
+  if (points <= 1) return { min: -0.5, max: 0.5 }
+  if (!isHorizontallyScrollable.value) return { min: 0, max: points - 1 }
+  const min = chartScrollLeft.value / CHART_POINT_SPACING
+  const width = chartPlotWidth.value || Math.max(1, (Number.parseFloat(chartWindowWidth.value) || 0) - CHART_VERTICAL_SCALE_WIDTH - CHART_HORIZONTAL_MARGIN)
+  return { min, max: min + width / CHART_POINT_SPACING }
+})
 
 const chartOptions = computed(() => ({
   responsive: true,
   maintainAspectRatio: false,
+  animation: false,
+  parsing: false,
   interaction: {
     mode: 'index',
     intersect: false,
@@ -317,13 +437,16 @@ const chartOptions = computed(() => ({
         },
         label(item) {
           const value = item.dataset.exactData?.[item.dataIndex]
-          return `${item.dataset.label}: ¥${formatExactInteger(item.raw, value)}`
+          return `${item.dataset.label}: ¥${formatExactInteger(item.parsed.y, value)}`
         }
       }
     }
   },
   scales: {
     x: {
+      type: 'linear',
+      min: chartXRange.value.min,
+      max: chartXRange.value.max,
       ticks: {
         color: '#666',
         font: { size: 10 },
@@ -331,6 +454,12 @@ const chartOptions = computed(() => ({
         minRotation: 0,
         autoSkip: true,
         maxTicksLimit: 20,
+        stepSize: 1,
+        callback(value) {
+          if (!Number.isInteger(value)) return ''
+          const date = filteredHistory.value?.dates?.[value]
+          return date ? formatDateLabel(date) : ''
+        },
       },
       grid: {
         color: 'rgba(0, 0, 0, 0.06)',
@@ -340,6 +469,7 @@ const chartOptions = computed(() => ({
       ticks: {
         color: '#666',
         font: { size: 11 },
+        precision: 0,
         callback(value) {
           if (Math.abs(value) >= 1000000) {
             return '¥' + (value / 1000000).toFixed(1) + 'M'
@@ -350,24 +480,29 @@ const chartOptions = computed(() => ({
               maximumFractionDigits: 2,
             }) + '万'
           }
-          return '¥' + value.toLocaleString('ja-JP')
+          return '¥' + value.toLocaleString('ja-JP', { maximumFractionDigits: 0 })
         },
       },
       grid: {
         color: 'rgba(0, 0, 0, 0.06)',
       },
       beginAtZero: false,
+      suggestedMin: dataYRange.value?.min,
+      suggestedMax: dataYRange.value?.max,
       ...(yViewport.value || {}),
     }
   }
 }))
 
 onMounted(() => {
-  chartResizeObserver = new ResizeObserver(updateChartDimensions)
+  chartResizeObserver = new ResizeObserver(() => updateChartDimensions())
   if (chartViewport.value) chartResizeObserver.observe(chartViewport.value)
+  updateChartDimensions(true)
 })
 
 onUnmounted(() => {
+  isUnmounted = true
+  if (scrollFrame != null) cancelAnimationFrame(scrollFrame)
   chartResizeObserver?.disconnect()
 })
 </script>
@@ -423,37 +558,11 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-.graph-period-control,
-.graph-y-controls {
+.graph-period-control {
   display: flex;
   align-items: center;
   gap: .35rem;
 }
-
-.graph-y-controls { flex-wrap: wrap; }
-
-.graph-y-controls span {
-  color: #666;
-  font-size: .85em;
-}
-
-.graph-y-controls button {
-  min-width: 2.75rem;
-  min-height: 2.75rem;
-  border: 1px solid #ddd;
-  border-radius: 8px;
-  background: white;
-  color: #333;
-  cursor: pointer;
-}
-
-.graph-y-controls button:hover:not(:disabled),
-.graph-y-controls button:focus-visible {
-  border-color: #667eea;
-  outline-color: #667eea;
-}
-
-.graph-y-controls button:disabled { opacity: .45; cursor: default; }
 
 .graph-period-label {
   font-size: 0.9em;
@@ -483,6 +592,7 @@ onUnmounted(() => {
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-inline: contain;
+  touch-action: pan-x;
   -webkit-overflow-scrolling: touch;
   border-radius: 8px;
   cursor: grab;
@@ -495,14 +605,19 @@ onUnmounted(() => {
   outline-offset: 2px;
 }
 
+.graph-track {
+  height: 100%;
+  position: relative;
+}
+
 .graph-container {
   width: 100%;
   height: 100%;
   box-sizing: border-box;
-  position: relative;
+  position: sticky;
+  left: 0;
   background: #f8fafc;
   border-radius: 8px;
-  padding: 12px;
 }
 
 .graph-scroll-hint {
@@ -539,8 +654,5 @@ onUnmounted(() => {
     padding: 1rem;
   }
 
-  .graph-y-controls { width: 100%; }
-
-  .graph-gesture-hint { display: none; }
 }
 </style>
