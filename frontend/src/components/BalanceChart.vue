@@ -73,7 +73,7 @@ defineEmits(['close'])
 
 // 点間の最小間隔とY軸ラベル・左右余白の見積もり。横幅は画面高ではなく
 // 取引のある異なる日付の数だけで決める（日付の暦上の空白は追加しない）。
-const CHART_POINT_SPACING = 64
+const CHART_POINT_SPACING = 60
 const CHART_VERTICAL_SCALE_WIDTH = 56
 const CHART_HORIZONTAL_MARGIN = 24
 const COMPACT_VIEWPORT_MAX_WIDTH = 700

@@ -87,7 +87,7 @@ it('sizes the chart from distinct transaction dates instead of viewport height',
   await wrapper.setProps({ balanceHistory: historyFor(tenDates) })
   notifyResize()
   await wrapper.vm.$nextTick()
-  expect(chartWidth(wrapper)).toBe('656px')
+  expect(chartWidth(wrapper)).toBe('620px')
   expect(wrapper.get('.graph-scroll-hint').classes()).not.toContain('is-hidden')
 
   // デスクトップでは表示領域の幅をそのまま使う。
@@ -105,7 +105,7 @@ it('recalculates the required width when the display period changes', async () =
   const { wrapper } = mountChart(historyFor(dates), { width: 375, height: 800 })
   notifyResize()
   await wrapper.vm.$nextTick()
-  expect(chartWidth(wrapper)).toBe('784px')
+  expect(chartWidth(wrapper)).toBe('740px')
   expect(wrapper.get('.graph-scroll-hint').classes()).not.toContain('is-hidden')
 
   await wrapper.get('#balance-chart-period').setValue('90')
