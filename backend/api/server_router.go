@@ -56,6 +56,8 @@ type ServerControlStore interface {
 type ServerPasskeyService interface {
 	BeginPasskeyRegistration(context.Context, string, string) (serverauth.PasskeyRegistrationBegin, error)
 	FinishPasskeyRegistration(context.Context, string, serverauth.FinishPasskeyRegistrationInput, time.Time) (control.PasskeySummary, error)
+	BeginPasskeyRegistrationAssertion(context.Context, string, serverauth.BeginPasskeyRegistrationAssertionInput) (serverauth.PasskeyLoginBegin, error)
+	FinishPasskeyRegistrationAssertion(context.Context, string, serverauth.FinishPasskeyRegistrationAssertionInput, time.Time) (control.PasskeySummary, error)
 	BeginPasskeyLogin(context.Context, string, string) (serverauth.PasskeyLoginBegin, error)
 	FinishPasskeyLogin(context.Context, serverauth.FinishPasskeyLoginInput, time.Time) (*middleware.Session, error)
 	BeginPasskeyReauthentication(context.Context, string, string) (serverauth.PasskeyLoginBegin, error)
@@ -134,6 +136,8 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 		mux.HandleFunc("/api/auth/passkeys/login/finish", handlePasskeyLoginFinish(dependencies, passkeys))
 		mux.HandleFunc("/api/auth/passkeys/register/begin", handlePasskeyRegistrationBegin(dependencies, passkeys))
 		mux.HandleFunc("/api/auth/passkeys/register/finish", handlePasskeyRegistrationFinish(dependencies, passkeys))
+		mux.HandleFunc("/api/auth/passkeys/register/assert/begin", handlePasskeyRegistrationAssertionBegin(dependencies, passkeys))
+		mux.HandleFunc("/api/auth/passkeys/register/assert/finish", handlePasskeyRegistrationAssertionFinish(dependencies, passkeys))
 		mux.HandleFunc("/api/auth/passkeys/reauth/begin", handlePasskeyReauthenticationBegin(dependencies, passkeys))
 		mux.HandleFunc("/api/auth/passkeys/reauth/finish", handlePasskeyReauthenticationFinish(dependencies, passkeys))
 		mux.HandleFunc("/api/auth/passkeys", handlePasskeyList(passkeys))

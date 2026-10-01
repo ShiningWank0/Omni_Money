@@ -277,6 +277,11 @@ func TestPasskeyReauthenticationPreservesBrowserPRFSalts(t *testing.T) {
 
 func signedPrivacyAssertion(t *testing.T, begin PasskeyLoginBegin, record control.PasskeyCredential, key *ecdsa.PrivateKey, origin string, uv bool) []byte {
 	t.Helper()
+	return signedPrivacyAssertionWithCount(t, begin, record, key, origin, uv, 1)
+}
+
+func signedPrivacyAssertionWithCount(t *testing.T, begin PasskeyLoginBegin, record control.PasskeyCredential, key *ecdsa.PrivateKey, origin string, uv bool, signCount uint32) []byte {
+	t.Helper()
 	client, _ := json.Marshal(map[string]any{"type": "webauthn.get", "challenge": begin.Options.Response.Challenge.String(), "origin": origin})
 	rp := sha256.Sum256([]byte("money.example.test"))
 	auth := make([]byte, 37)
@@ -285,7 +290,7 @@ func signedPrivacyAssertion(t *testing.T, begin PasskeyLoginBegin, record contro
 	if uv {
 		auth[32] |= 4
 	}
-	binary.BigEndian.PutUint32(auth[33:], 1)
+	binary.BigEndian.PutUint32(auth[33:], signCount)
 	clientHash := sha256.Sum256(client)
 	signed := sha256.Sum256(append(append([]byte(nil), auth...), clientHash[:]...))
 	signature, err := ecdsa.SignASN1(rand.Reader, key, signed[:])

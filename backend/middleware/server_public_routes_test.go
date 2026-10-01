@@ -24,6 +24,8 @@ func TestServerPublicAuthAllowlistIsExact(t *testing.T) {
 		{http.MethodGet, "/api/auth/passkeys/login/begin", false},
 		{http.MethodPost, "/api/auth/passkeys/login/begin/", false},
 		{http.MethodPost, "/api/auth/passkeys/register/begin", false},
+		{http.MethodPost, "/api/auth/passkeys/register/assert/begin", false},
+		{http.MethodPost, "/api/auth/passkeys/register/assert/finish", false},
 		{http.MethodGet, "/api/auth/setup", false},
 		{http.MethodPost, "/api/auth/setup/", false},
 		{http.MethodPost, "/api/auth/invitations/accept/", false},

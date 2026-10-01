@@ -1,6 +1,6 @@
 import { ApiError, responseError, checkStatus, expectJSON, expectList, expectVoid, schema, validateData, isObject } from './apiResponse.js'
 export { ApiError } from './apiResponse.js'
-import { authenticatePasskey, createPasskey } from './passkeys.js'
+import { assertPasskeyPRF, authenticatePasskey, createPasskey } from './passkeys.js'
 
 // Wailsバインディングへのラッパー関数
 // デスクトップモード時はWailsのGoバインディングを直接呼び出し、
@@ -317,28 +317,52 @@ export async function listPasskeys() {
   return data.passkeys ?? []
 }
 
+async function finishPasskeyRegistration(path, ceremonyID, credential, prfResult, name, password) {
+  const finish = await apiFetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ceremony_id: ceremonyID,
+      name,
+      password_b64: textToBase64(password),
+      credential,
+      prf_result_b64: bytesToBase64(prfResult)
+    })
+  }, { skipReauth: true })
+  await throwIfNotOk(finish, 'パスキーを登録できませんでした')
+  return await expectJSON(finish, schema.passkey)
+}
+
 export async function registerPasskey({ name, password }) {
   if (isWails) throw new Error('パスキー登録はサーバーモード専用です')
   const begin = await apiFetch('/api/auth/passkeys/register/begin', { method: 'POST' })
   await throwIfNotOk(begin, 'パスキー登録を開始できませんでした')
   const ceremony = await expectJSON(begin, schema.ceremony)
   const created = await createPasskey(ceremony.options)
+  let stepUp = null
   try {
-    const finish = await apiFetch('/api/auth/passkeys/register/finish', {
+    if (created.prfResult) {
+      return await finishPasskeyRegistration('/api/auth/passkeys/register/finish', ceremony.ceremony_id, created.credential, created.prfResult, name, password)
+    }
+    if (!created.prfEnabled) {
+      throw new Error(created.prfPresent
+        ? 'このパスキーはOmni MoneyのVault復号に必要なPRF機能へ対応していません。PRF対応のパスキー保存先で登録してください'
+        : 'このパスキー保存先はPRF機能の結果を返さないため、Vault復号用のパスキーとして登録できません')
+    }
+    // prf.enabled=true でも作成時に結果を返さない認証器向けに、同じ salt で
+    // 追加 assertion を実行してから登録を完了する。
+    const assertionBegin = await apiFetch('/api/auth/passkeys/register/assert/begin', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ceremony_id: ceremony.ceremony_id,
-        name,
-        password_b64: textToBase64(password),
-        credential: created.credential,
-        prf_result_b64: bytesToBase64(created.prfResult)
-      })
+      body: JSON.stringify({ ceremony_id: ceremony.ceremony_id, credential: created.credential })
     }, { skipReauth: true })
-    await throwIfNotOk(finish, 'パスキーを登録できませんでした')
-    return await expectJSON(finish, schema.passkey)
+    await throwIfNotOk(assertionBegin, 'パスキー登録の追加確認を開始できませんでした')
+    const assertionCeremony = await expectJSON(assertionBegin, schema.ceremony)
+    stepUp = await assertPasskeyPRF(assertionCeremony.options)
+    return await finishPasskeyRegistration('/api/auth/passkeys/register/assert/finish', assertionCeremony.ceremony_id, stepUp.credential, stepUp.prfResult, name, password)
   } finally {
-    created.prfResult.fill(0)
+    created.prfResult?.fill(0)
+    stepUp?.prfResult?.fill(0)
   }
 }
 

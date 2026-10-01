@@ -29,6 +29,11 @@ type passkeyFinishRequest struct {
 
 func (request *passkeyFinishRequest) clear() { clear(request.PRFResult) }
 
+type passkeyRegistrationAssertionBeginRequest struct {
+	CeremonyID     string          `json:"ceremony_id"`
+	CredentialJSON json.RawMessage `json:"credential"`
+}
+
 type passkeyRegistrationFinishRequest struct {
 	CeremonyID     string          `json:"ceremony_id"`
 	Name           string          `json:"name"`
@@ -130,6 +135,63 @@ func handlePasskeyRegistrationFinish(dependencies ServerDependencies, passkeys S
 		}, dependencies.now())
 		if err != nil {
 			auditAuth("server_passkey_registration_failed", middleware.ClientIPFromRequest(r), "rejected")
+			writePasskeyError(w, err, false)
+			return
+		}
+		auditCredentialMutation("server_passkey_registered", middleware.ClientIPFromRequest(r), session.UserID, session.UserID)
+		jsonResponse(w, map[string]any{"passkey": result}, http.StatusCreated)
+	}
+}
+
+func handlePasskeyRegistrationAssertionBegin(dependencies ServerDependencies, passkeys ServerPasskeyService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		session, ok := middleware.SessionFromContext(r.Context())
+		if !ok || session.UserID == "" {
+			writeAuthRequired(w)
+			return
+		}
+		var request passkeyRegistrationAssertionBeginRequest
+		if !decodeStrictServerJSONLimit(w, r, &request, maxPasskeyRequestBody) {
+			return
+		}
+		result, err := passkeys.BeginPasskeyRegistrationAssertion(r.Context(), session.UserID, serverauth.BeginPasskeyRegistrationAssertionInput{
+			CeremonyID: request.CeremonyID, ClientKey: middleware.ClientIPFromRequest(r),
+			CredentialJSON: request.CredentialJSON,
+		})
+		if err != nil {
+			writePasskeyError(w, err, false)
+			return
+		}
+		jsonResponse(w, result, http.StatusOK)
+	}
+}
+
+func handlePasskeyRegistrationAssertionFinish(dependencies ServerDependencies, passkeys ServerPasskeyService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		session, ok := middleware.SessionFromContext(r.Context())
+		if !ok || session.UserID == "" {
+			writeAuthRequired(w)
+			return
+		}
+		var request passkeyRegistrationFinishRequest
+		if !decodeStrictServerJSONLimit(w, r, &request, maxPasskeyRequestBody) {
+			return
+		}
+		defer request.clear()
+		result, err := passkeys.FinishPasskeyRegistrationAssertion(r.Context(), session.UserID, serverauth.FinishPasskeyRegistrationAssertionInput{
+			CeremonyID: request.CeremonyID, ClientKey: middleware.ClientIPFromRequest(r), Name: request.Name,
+			Password: request.Password, CredentialJSON: request.CredentialJSON, PRFResult: request.PRFResult,
+		}, dependencies.now())
+		if err != nil {
+			auditAuth("server_passkey_registration_failed", middleware.ClientIPFromRequest(r), "assertion_rejected")
 			writePasskeyError(w, err, false)
 			return
 		}

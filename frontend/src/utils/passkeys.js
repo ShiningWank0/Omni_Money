@@ -57,8 +57,21 @@ function encodeExtensionValue(value) {
   return value
 }
 
+// The PRF output unwraps the vault key, so it may travel only in the
+// dedicated prf_result_b64 field. WebAuthn Level 3 requires toJSON() to copy
+// getClientExtensionResults() into clientExtensionResults, which would send
+// the same secret a second time inside the credential JSON. Strip that copy
+// so the value appears exactly once on the wire and in any request log.
+function stripCredentialPRFResults(json) {
+  const prf = json?.clientExtensionResults?.prf
+  if (prf && typeof prf === 'object') {
+    delete prf.results
+  }
+  return json
+}
+
 function credentialToJSON(credential) {
-  if (typeof credential.toJSON === 'function') return credential.toJSON()
+  if (typeof credential.toJSON === 'function') return stripCredentialPRFResults(credential.toJSON())
   const response = credential.response
   const encodedResponse = { clientDataJSON: bytesToBase64url(response.clientDataJSON) }
   if ('attestationObject' in response) {
@@ -72,27 +85,32 @@ function credentialToJSON(credential) {
     encodedResponse.signature = bytesToBase64url(response.signature)
     if (response.userHandle) encodedResponse.userHandle = bytesToBase64url(response.userHandle)
   }
-  return {
+  return stripCredentialPRFResults({
     id: credential.id,
     rawId: bytesToBase64url(credential.rawId),
     type: credential.type,
     response: encodedResponse,
     clientExtensionResults: encodeExtensionValue(credential.getClientExtensionResults()),
     authenticatorAttachment: credential.authenticatorAttachment || undefined
-  }
+  })
 }
 
-function extractPRFResult(credential) {
-  const first = credential.getClientExtensionResults()?.prf?.results?.first
-  if (!(first instanceof ArrayBuffer) && !ArrayBuffer.isView(first)) {
-    throw new Error('このパスキーはOmni MoneyのVault復号に必要なPRF機能へ対応していません')
-  }
-  const result = first instanceof ArrayBuffer
-    ? new Uint8Array(first.slice(0))
-    : new Uint8Array(first.buffer.slice(first.byteOffset, first.byteOffset + first.byteLength))
+function readPRFResult(value) {
+  if (!(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)) return null
+  const result = value instanceof ArrayBuffer
+    ? new Uint8Array(value.slice(0))
+    : new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))
   if (result.byteLength !== 32) {
     result.fill(0)
     throw new Error('パスキーから安全なVault鍵を取得できませんでした')
+  }
+  return result
+}
+
+function extractPRFResult(credential) {
+  const result = readPRFResult(credential.getClientExtensionResults()?.prf?.results?.first)
+  if (!result) {
+    throw new Error('このパスキーはOmni MoneyのVault復号に必要なPRF機能へ対応していません')
   }
   return result
 }
@@ -101,7 +119,28 @@ export async function createPasskey(options) {
   requirePasskeySupport()
   const credential = await navigator.credentials.create({ publicKey: parseCreationOptions(options.publicKey) })
   if (!credential) throw new Error('パスキー登録がキャンセルされました')
-  return { credential: credentialToJSON(credential), prfResult: extractPRFResult(credential) }
+  const prf = credential.getClientExtensionResults()?.prf
+  return {
+    credential: credentialToJSON(credential),
+    prfResult: readPRFResult(prf?.results?.first),
+    prfEnabled: prf?.enabled === true,
+    prfPresent: prf !== undefined && prf !== null
+  }
+}
+
+// Some authenticators (Bitwarden's browser extension among them) report
+// prf.enabled=true at credential creation but only return a PRF result during
+// a follow-up assertion. This runs that assertion against the candidate
+// credential with the salt the server bound to the registration ceremony.
+export async function assertPasskeyPRF(options) {
+  requirePasskeySupport()
+  const credential = await navigator.credentials.get({ publicKey: parseRequestOptions(options.publicKey) })
+  if (!credential) throw new Error('パスキー登録の確認がキャンセルされました')
+  const result = readPRFResult(credential.getClientExtensionResults()?.prf?.results?.first)
+  if (!result) {
+    throw new Error('このパスキーはOmni MoneyのVault復号に必要なPRF出力を返しませんでした')
+  }
+  return { credential: credentialToJSON(credential), prfResult: result }
 }
 
 export async function authenticatePasskey(options) {

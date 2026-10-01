@@ -19,6 +19,7 @@
         <h3 id="register-passkey-title">新しいパスキーを登録</h3>
         <p class="section-description">
           Vault鍵をこのパスキーでも安全に開けるようにするため、現在のパスワードを一度だけ確認します。
+          パスキーの保存先によっては、登録確認のあとにPRF出力取得のためのもう一度の確認が表示されます。
         </p>
         <form class="registration-form" @submit.prevent="register">
           <label>
