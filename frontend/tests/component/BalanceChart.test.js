@@ -166,7 +166,7 @@ it('recalculates the required width when the display period changes', async () =
   wrapper.unmount()
 })
 
-it('hides the vertical axis controls on compact viewports only', async () => {
+it('does not render dedicated vertical axis buttons at any viewport width', async () => {
   const notifyResize = stubResize()
   const { wrapper, resize } = mountChart(historyFor([recentDate(1), recentDate(0)]), { width: 375, height: 800 })
   notifyResize()
@@ -176,8 +176,8 @@ it('hides the vertical axis controls on compact viewports only', async () => {
   resize(1400, 600)
   notifyResize()
   await wrapper.vm.$nextTick()
-  expect(wrapper.find('.graph-y-controls').exists()).toBe(true)
-  expect(wrapper.find('[aria-label="縦軸を拡大"]').exists()).toBe(true)
+  expect(wrapper.find('.graph-y-controls').exists()).toBe(false)
+  expect(wrapper.find('[aria-label="縦軸を拡大"]').exists()).toBe(false)
   wrapper.unmount()
 })
 
@@ -192,7 +192,7 @@ it('renders integer yen labels for the y axis', async () => {
   wrapper.unmount()
 })
 
-it('zooms, pans, and resets only the vertical chart range', async () => {
+it('zooms and pans the vertical chart range with mouse gestures', async () => {
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
   const wrapper = mount(BalanceChart, {
     props: {
@@ -205,15 +205,6 @@ it('zooms, pans, and resets only the vertical chart range', async () => {
   })
   const chart = () => wrapper.get('.line-chart')
   expect(chart().attributes('data-y-min')).toBeUndefined()
-  await wrapper.get('[aria-label="縦軸を拡大"]').trigger('click')
-  expect(chart().attributes('data-y-min')).toBe('96')
-  expect(chart().attributes('data-y-max')).toBe('104')
-  await wrapper.get('[aria-label="縦軸を上へ移動"]').trigger('click')
-  expect(chart().attributes('data-y-min')).toBe('98')
-  expect(chart().attributes('data-y-max')).toBe('106')
-  await wrapper.get('[aria-label="縦軸を元に戻す"]').trigger('click')
-  expect(chart().attributes('data-y-min')).toBeUndefined()
-
   const graph = wrapper.get('.graph-scroll').element
   Object.defineProperty(graph, 'clientHeight', { value: 600 })
   graph.setPointerCapture = vi.fn()
@@ -228,13 +219,63 @@ it('zooms, pans, and resets only the vertical chart range', async () => {
   pointer('pointermove', 110)
   await wrapper.vm.$nextTick()
   expect(chart().attributes('data-y-min')).toBe('96')
+  expect(chart().attributes('data-y-max')).toBe('106')
   pointer('pointerup', 110)
 
-  await wrapper.get('[aria-label="縦軸を元に戻す"]').trigger('click')
   const wheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -100 })
   graph.dispatchEvent(wheel)
   await wrapper.vm.$nextTick()
   expect(wheel.defaultPrevented).toBe(true)
-  expect(Number(chart().attributes('data-y-min'))).toBeGreaterThan(95)
+  expect(Number(chart().attributes('data-y-min'))).toBeGreaterThan(96)
+  expect(Number(chart().attributes('data-y-max'))).toBeLessThan(106)
+  await wrapper.setProps({ balanceHistory: historyFor([recentDate(0)]) })
+  expect(chart().attributes('data-y-min')).toBeUndefined()
+  wrapper.unmount()
+})
+
+it('keeps horizontal touch scrolling native and pans or pinches the vertical range', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  const wrapper = mount(BalanceChart, {
+    props: { balanceHistory: { accounts: ['test'], dates: ['2026-10-01'], balances: { test: [100] } } }
+  })
+  const chart = () => wrapper.get('.line-chart')
+  const graph = wrapper.get('.graph-scroll').element
+  Object.defineProperty(graph, 'clientHeight', { value: 600 })
+  const touch = (type, positions) => {
+    const event = new Event(type, { bubbles: true, cancelable: true })
+    Object.defineProperty(event, 'touches', { value: positions.map(([clientX, clientY]) => ({ clientX, clientY })) })
+    graph.dispatchEvent(event)
+    return event
+  }
+
+  touch('touchstart', [[200, 50]])
+  const horizontal = touch('touchmove', [[100, 52]])
+  expect(horizontal.defaultPrevented).toBe(false)
+  expect(chart().attributes('data-y-min')).toBeUndefined()
+  touch('touchend', [])
+
+  touch('touchstart', [[20, 50]])
+  const vertical = touch('touchmove', [[22, 110]])
+  await wrapper.vm.$nextTick()
+  expect(vertical.defaultPrevented).toBe(true)
+  expect(chart().attributes('data-y-min')).toBe('96')
+  expect(chart().attributes('data-y-max')).toBe('106')
+  touch('touchend', [])
+
+  touch('touchstart', [[100, 100], [200, 100]])
+  const pinch = touch('touchmove', [[80, 100], [220, 100]])
+  await wrapper.vm.$nextTick()
+  expect(pinch.defaultPrevented).toBe(true)
+  const afterPinch = Number(chart().attributes('data-y-min'))
+  expect(afterPinch).toBeGreaterThan(96)
+  expect(Number(chart().attributes('data-y-max'))).toBeLessThan(106)
+  touch('touchend', [])
+
+  touch('touchstart', [[100, 100], [200, 100]])
+  const twoFingerPan = touch('touchmove', [[100, 160], [200, 160]])
+  await wrapper.vm.$nextTick()
+  expect(twoFingerPan.defaultPrevented).toBe(true)
+  expect(Number(chart().attributes('data-y-min'))).toBeGreaterThan(afterPinch)
+  touch('touchend', [])
   wrapper.unmount()
 })
