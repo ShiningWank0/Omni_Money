@@ -273,6 +273,9 @@ func TestPasskeyRegistrationAssertionWithoutCreateTimePRF(t *testing.T) {
 		assertBegin.Options.Response.UserVerification != protocol.VerificationRequired {
 		t.Fatal("assertion does not target the candidate credential with required user verification")
 	}
+	if bytes.Equal(assertBegin.Options.Response.Challenge, begin.Options.Response.Challenge) {
+		t.Fatal("registration assertion reused the creation challenge")
+	}
 	encodedID := base64.RawURLEncoding.EncodeToString(credentialID)
 	prf := browserPRFInputs(t, assertBegin.Options.Response.Extensions)
 	salt, err := base64.RawURLEncoding.DecodeString(prf.EvalByCredential[encodedID]["first"])
@@ -424,6 +427,11 @@ func TestPasskeyRegistrationAssertionCeremonyIsSingleUse(t *testing.T) {
 	credentialID := bytes.Repeat([]byte{0x5e}, 32)
 	attestation := signedRegistrationAttestation(t, begin, key, credentialID, "https://money.example.test", true, nil)
 	assertBegin := beginRegistrationAssertion(t, service, begin, attestation)
+	if _, err := service.BeginPasskeyRegistrationAssertion(ctx, serverAuthTestUserID, BeginPasskeyRegistrationAssertionInput{
+		CeremonyID: begin.CeremonyID, ClientKey: "client", CredentialJSON: attestation,
+	}); !errors.Is(err, ErrPasskeyCeremony) {
+		t.Fatalf("registration ceremony replay error = %v", err)
+	}
 	assertion := signedPrivacyAssertion(t, assertBegin, control.PasskeyCredential{ID: credentialID}, key, "https://money.example.test", true)
 	input := FinishPasskeyRegistrationAssertionInput{
 		CeremonyID: assertBegin.CeremonyID, ClientKey: "client", Name: "Once",
