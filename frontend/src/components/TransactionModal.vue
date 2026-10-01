@@ -137,7 +137,7 @@
           </div>
           </div>
 
-          <!-- 画像は広い画面ではフォームの横、狭い画面ではフォームの前に置く。 -->
+          <!-- 画像は広い画面ではフォームの横、狭い画面ではフォームの後に置く。 -->
           <section class="transaction-image-panel" aria-labelledby="transaction-images-title">
             <div class="image-panel-heading">
               <h4 id="transaction-images-title">画像</h4>
@@ -723,8 +723,7 @@ onBeforeUnmount(() => {
 .transaction-save-actions { display: flex; gap: .5rem; margin-left: auto; }
 @media (max-width: 700px) {
   .form-container { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
-  .transaction-image-panel { grid-row: 1; padding: .8rem; }
-  .transaction-primary-fields { grid-row: 2; }
+  .transaction-image-panel { padding: .8rem; }
   .transaction-footer-actions { gap: .6rem; }
 }
 @media (max-width: 480px) {
