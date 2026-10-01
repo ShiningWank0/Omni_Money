@@ -391,14 +391,19 @@ onUnmounted(() => {
   .graph-modal {
     width: calc(100vw - 1rem);
     max-width: calc(100vw - 1rem);
-    height: calc(100vh - 1rem);
+    height: auto;
     max-height: calc(100vh - 1rem);
-    height: calc(100dvh - 1rem);
     max-height: calc(100dvh - 1rem);
     margin: 0;
     align-self: center;
     padding: 1rem;
-    overflow: hidden;
+    overflow-y: auto;
+  }
+
+  .graph-scroll {
+    flex: none;
+    height: min(56vh, 110vw, 500px);
+    height: min(56dvh, 110vw, 500px);
   }
 
   .graph-scroll-hint {
