@@ -336,7 +336,7 @@ func (s *Service) FinishPasskeyRegistrationAssertion(
 	}
 	clear(verifiedDEK)
 	record, err := s.passkeyStore.CreatePasskeyCredential(ctx, control.PasskeyCredentialInput{
-		UserID: userID, Name: input.Name, Credential: candidate,
+		UserID: userID, Name: input.Name, Credential: *updated,
 		PRFSalt: ceremony.PRFSalt, VaultEnvelope: *passkeyEnvelope,
 	}, now)
 	if err != nil {
