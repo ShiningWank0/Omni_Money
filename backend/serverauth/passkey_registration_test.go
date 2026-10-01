@@ -357,7 +357,7 @@ func TestPasskeyRegistrationAssertionRejectsInvalidAttestations(t *testing.T) {
 }
 
 func TestPasskeyRegistrationAssertionRejectsInvalidAssertions(t *testing.T) {
-	for _, tc := range []string{"wrong-origin", "no-uv", "wrong-signature", "foreign-credential", "wrong-client", "expired"} {
+	for _, tc := range []string{"wrong-origin", "wrong-challenge", "no-uv", "wrong-signature", "foreign-credential", "wrong-client", "expired"} {
 		t.Run(tc, func(t *testing.T) {
 			dek := bytes.Repeat([]byte{37}, keyenvelope.DEKSize)
 			service, store := newRegistrationTestService(t, dek)
@@ -388,7 +388,13 @@ func TestPasskeyRegistrationAssertionRejectsInvalidAssertions(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			assertion := signedPrivacyAssertion(t, assertBegin, candidate, signingKey, origin, tc != "no-uv")
+			assertionBegin := assertBegin
+			if tc == "wrong-challenge" {
+				altered := *assertBegin.Options
+				altered.Response.Challenge = protocol.URLEncodedBase64(bytes.Repeat([]byte{0x7a}, 32))
+				assertionBegin = PasskeyLoginBegin{CeremonyID: assertBegin.CeremonyID, Options: &altered}
+			}
+			assertion := signedPrivacyAssertion(t, assertionBegin, candidate, signingKey, origin, tc != "no-uv")
 			input := FinishPasskeyRegistrationAssertionInput{
 				CeremonyID: assertBegin.CeremonyID, ClientKey: "client", Name: "Invalid",
 				Password: []byte(registrationTestPassword), CredentialJSON: assertion,
