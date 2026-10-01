@@ -99,6 +99,18 @@ it('sizes the chart from distinct transaction dates instead of viewport height',
   wrapper.unmount()
 })
 
+it('keeps very long histories renderable without dropping points', async () => {
+  const notifyResize = stubResize()
+  const dates = Array.from({ length: 1000 }, (_, index) => recentDate(1000 - index))
+  const { wrapper } = mountChart(historyFor(dates), { width: 375, height: 800 })
+  notifyResize()
+  await wrapper.vm.$nextTick()
+  // jsdom は devicePixelRatio=1。canvas 面積予算 8M / 高さ 800 が上限になる。
+  expect(chartWidth(wrapper)).toBe('10000px')
+  expect(wrapper.get('.graph-scroll-hint').classes()).not.toContain('is-hidden')
+  wrapper.unmount()
+})
+
 it('recalculates the required width when the display period changes', async () => {
   const notifyResize = stubResize()
   const dates = Array.from({ length: 12 }, (_, index) => recentDate(220 - index * 20))

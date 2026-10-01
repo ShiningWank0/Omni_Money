@@ -77,6 +77,10 @@ const CHART_POINT_SPACING = 60
 const CHART_VERTICAL_SCALE_WIDTH = 56
 const CHART_HORIZONTAL_MARGIN = 24
 const COMPACT_VIEWPORT_MAX_WIDTH = 700
+// 端末の canvas 面積・一辺の上限で描画が失敗しないための安全予算。
+// iOS Safari の 16.7M px 上限より小さく、通常の点数の幅には影響しない。
+const CHART_CANVAS_PIXEL_BUDGET = 8_000_000
+const CHART_MAX_CANVAS_DIMENSION = 16384
 
 const selectedPeriod = ref('all')
 const chartViewport = ref(null)
@@ -96,6 +100,19 @@ function requiredChartWidth() {
   return CHART_VERTICAL_SCALE_WIDTH + CHART_HORIZONTAL_MARGIN + CHART_POINT_SPACING * (points - 1)
 }
 
+// 点が非常に多い履歴でも全点を保持したまま描画できるよう、canvas の実ピクセル
+// 換算で安全な幅の上限を求める。上限を超えた場合は点間隔が圧縮されるだけで、
+// 日付や残高を切り捨てない。
+function maxCanvasSafeChartWidth(viewportHeight) {
+  if (!viewportHeight) return Number.POSITIVE_INFINITY
+  const ratio = typeof window !== 'undefined' && Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0
+    ? window.devicePixelRatio
+    : 1
+  const byArea = Math.floor(CHART_CANVAS_PIXEL_BUDGET / (viewportHeight * ratio * ratio))
+  const byDimension = Math.floor(CHART_MAX_CANVAS_DIMENSION / ratio)
+  return Math.max(0, Math.min(byArea, byDimension))
+}
+
 function updateChartDimensions() {
   const viewport = chartViewport.value
   if (!viewport) return
@@ -105,7 +122,7 @@ function updateChartDimensions() {
   if (!viewportWidth || !viewportHeight) return
 
   isCompactViewport.value = viewportWidth <= COMPACT_VIEWPORT_MAX_WIDTH
-  const width = Math.ceil(Math.max(viewportWidth, requiredChartWidth()))
+  const width = Math.ceil(Math.max(viewportWidth, Math.min(requiredChartWidth(), maxCanvasSafeChartWidth(viewportHeight))))
   virtualChartWidth.value = `${width}px`
   isHorizontallyScrollable.value = width > viewportWidth + 1
 }
