@@ -235,6 +235,7 @@ function renderChart() {
     options: {
       responsive: true,
       maintainAspectRatio: true,
+      aspectRatio: 1,
       plugins: {
         legend: { display: false },
         tooltip: {
@@ -417,8 +418,9 @@ onUnmounted(() => {
 
 .chart-container {
   position: relative;
-  width: 100%;
-  max-width: 300px;
+  width: min(100%, 35vh);
+  width: min(100%, 35dvh);
+  aspect-ratio: 1;
   margin: 0 auto 16px;
 }
 
@@ -511,7 +513,10 @@ onUnmounted(() => {
   .period-btn { min-width: 0; }
   .date-navigator { flex-wrap: wrap; gap: .5rem; }
   .breadcrumbs { overflow-wrap: anywhere; }
-  .chart-container { max-width: 360px; }
+  .chart-container {
+    width: min(100%, 70vh);
+    width: min(100%, 70dvh);
+  }
 
   .legend-item {
     display: grid;
