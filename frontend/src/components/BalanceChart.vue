@@ -16,7 +16,7 @@
             <option value="30">過去1ヶ月</option>
           </select>
         </div>
-        <div class="graph-y-controls" role="group" aria-label="縦軸の表示範囲">
+        <div v-if="!isCompactViewport" class="graph-y-controls" role="group" aria-label="縦軸の表示範囲">
           <span>縦軸:</span>
           <button type="button" aria-label="縦軸を拡大" title="縦軸を拡大" :disabled="!dataYRange" @click="zoomY(0.8)">＋</button>
           <button type="button" aria-label="縦軸を縮小" title="縦軸を縮小" :disabled="!dataYRange" @click="zoomY(1.25)">－</button>
@@ -71,14 +71,30 @@ const props = defineProps({
 
 defineEmits(['close'])
 
+// 点間の最小間隔とY軸ラベル・左右余白の見積もり。横幅は画面高ではなく
+// 取引のある異なる日付の数だけで決める（日付の暦上の空白は追加しない）。
+const CHART_POINT_SPACING = 64
+const CHART_VERTICAL_SCALE_WIDTH = 56
+const CHART_HORIZONTAL_MARGIN = 24
+const COMPACT_VIEWPORT_MAX_WIDTH = 700
+
 const selectedPeriod = ref('all')
 const chartViewport = ref(null)
 const virtualChartWidth = ref(null)
 const isHorizontallyScrollable = ref(false)
 const yViewport = ref(null)
 const isDraggingY = ref(false)
+const isCompactViewport = ref(
+  typeof window !== 'undefined' && window.innerWidth > 0 && window.innerWidth <= COMPACT_VIEWPORT_MAX_WIDTH
+)
 let chartResizeObserver
 let dragStart
+
+function requiredChartWidth() {
+  const points = filteredHistory.value?.dates?.length || 0
+  if (points < 2) return 0
+  return CHART_VERTICAL_SCALE_WIDTH + CHART_HORIZONTAL_MARGIN + CHART_POINT_SPACING * (points - 1)
+}
 
 function updateChartDimensions() {
   const viewport = chartViewport.value
@@ -88,8 +104,8 @@ function updateChartDimensions() {
   const viewportHeight = viewport.clientHeight
   if (!viewportWidth || !viewportHeight) return
 
-  // 縦に長い画面でも、横幅をスクロール領域へ広げてグラフの比率を保つ。
-  const width = Math.ceil(Math.max(viewportWidth, viewportHeight * 16 / 9))
+  isCompactViewport.value = viewportWidth <= COMPACT_VIEWPORT_MAX_WIDTH
+  const width = Math.ceil(Math.max(viewportWidth, requiredChartWidth()))
   virtualChartWidth.value = `${width}px`
   isHorizontallyScrollable.value = width > viewportWidth + 1
 }
@@ -282,6 +298,9 @@ function stopYAxisPan(event) {
 
 watch(chartData, resetY)
 
+// 表示期間の変更で必要な横幅を再計算する（画面サイズは ResizeObserver が担当）。
+watch(() => filteredHistory.value?.dates?.length || 0, updateChartDimensions)
+
 const chartOptions = computed(() => ({
   responsive: true,
   maintainAspectRatio: false,
@@ -340,6 +359,7 @@ const chartOptions = computed(() => ({
       ticks: {
         color: '#666',
         font: { size: 11 },
+        precision: 0,
         callback(value) {
           if (Math.abs(value) >= 1000000) {
             return '¥' + (value / 1000000).toFixed(1) + 'M'
@@ -350,7 +370,7 @@ const chartOptions = computed(() => ({
               maximumFractionDigits: 2,
             }) + '万'
           }
-          return '¥' + value.toLocaleString('ja-JP')
+          return '¥' + value.toLocaleString('ja-JP', { maximumFractionDigits: 0 })
         },
       },
       grid: {
