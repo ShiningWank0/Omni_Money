@@ -240,6 +240,9 @@ func (s *Service) AddTransactionContext(ctx context.Context, req models.Transact
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if len(req.DeleteImageIDs) != 0 || len(req.LinkAddIDs) != 0 || len(req.LinkRemoveIDs) != 0 {
+		return nil, fmt.Errorf("新規取引に更新専用の操作は指定できません")
+	}
 	db, err := s.database()
 	if err != nil {
 		return nil, err
@@ -300,7 +303,8 @@ func prepareTransactionInsertContext(ctx context.Context, req models.Transaction
 // path atomically combine idempotency, quota accounting, and the ledger write.
 func addPreparedTransactionIn(tx *sql.Tx, prepared preparedTransactionInsert) (*models.TransactionResponse, error) {
 	req := prepared.request
-	if err := validateTagIDsIn(tx, req.Tags); err != nil {
+	tagIDs, err := resolveTransactionTagIDsIn(tx, req.Tags, req.NewTagPaths)
+	if err != nil {
 		return nil, err
 	}
 	result, err := tx.Exec(
@@ -319,7 +323,7 @@ func addPreparedTransactionIn(tx *sql.Tx, prepared preparedTransactionInsert) (*
 	if err := insertPreparedTransactionImages(tx, id, prepared.images); err != nil {
 		return nil, err
 	}
-	for _, tagID := range req.Tags {
+	for _, tagID := range tagIDs {
 		if _, err := tx.Exec("INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)", id, tagID); err != nil {
 			return nil, fmt.Errorf("タグ紐付けエラー: %w", err)
 		}
@@ -373,7 +377,8 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 		return nil, fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
 	defer tx.Rollback()
-	if err := validateTagIDsIn(tx, req.Tags); err != nil {
+	tagIDs, err := resolveTransactionTagIDsIn(tx, req.Tags, req.NewTagPaths)
+	if err != nil {
 		return nil, err
 	}
 
@@ -398,6 +403,9 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 	if _, err := tx.Exec("DELETE FROM transaction_archive_amounts WHERE transaction_id = ?", id); err != nil {
 		return nil, fmt.Errorf("archive金額解除エラー: %w", err)
 	}
+	if err := deleteTransactionImagesIn(tx, id, req.DeleteImageIDs); err != nil {
+		return nil, err
+	}
 	if err := insertPreparedTransactionImages(tx, id, preparedImages); err != nil {
 		return nil, err
 	}
@@ -411,8 +419,8 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 	if _, err := tx.Exec("DELETE FROM transaction_tags WHERE transaction_id = ?", id); err != nil {
 		return nil, fmt.Errorf("タグ紐付け削除エラー: %w", err)
 	}
-	if len(req.Tags) > 0 {
-		for _, tagID := range req.Tags {
+	if len(tagIDs) > 0 {
+		for _, tagID := range tagIDs {
 			if _, err := tx.Exec("INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)", id, tagID); err != nil {
 				return nil, fmt.Errorf("タグ紐付けエラー: %w", err)
 			}
@@ -443,6 +451,9 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 	if err != nil {
 		return nil, fmt.Errorf("設定取得エラー: %w", err)
 	}
+	if err := applyTransactionLinkChangesIn(tx, id, req.LinkAddIDs, req.LinkRemoveIDs, settings); err != nil {
+		return nil, err
+	}
 	if err := pruneInvalidTransactionLinksIn(tx, settings); err != nil {
 		return nil, fmt.Errorf("紐付け整合性チェックエラー: %w", err)
 	}
@@ -454,6 +465,28 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 	resp.Tags, _ = s.GetTransactionTags(int64(t.ID))
 	s.autoSnapshot()
 	return &resp, nil
+}
+
+func resolveTransactionTagIDsIn(tx *sql.Tx, existingIDs []int64, newPaths []string) ([]int64, error) {
+	if len(newPaths) > 10 {
+		return nil, fmt.Errorf("一度に作成できるタグは10件までです")
+	}
+	if err := validateTagIDsIn(tx, existingIDs); err != nil {
+		return nil, err
+	}
+	ids := append([]int64(nil), existingIDs...)
+	for _, path := range newPaths {
+		segments, err := parseTagPathSegments(path)
+		if err != nil {
+			return nil, err
+		}
+		tag, err := createTagPathWithinTx(tx, segments)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, tag.ID)
+	}
+	return ids, nil
 }
 
 // validateTagIDsIn checks every requested reference before a transaction
@@ -1892,6 +1925,34 @@ func (s *Service) finishTransactionImageDelete(result sql.Result, err error) err
 	return nil
 }
 
+// deleteTransactionImagesIn keeps image removals in the same transaction as
+// the edited fields and new images. A failed update leaves every image intact.
+func deleteTransactionImagesIn(tx *sql.Tx, transactionID int64, ids []int64) error {
+	for _, responseID := range ids {
+		if responseID == 0 || responseID == math.MinInt64 {
+			return fmt.Errorf("画像が見つかりません")
+		}
+		table := "transaction_images"
+		imageID := responseID
+		if responseID < 0 {
+			table = "transaction_image_archive"
+			imageID = -responseID
+		}
+		result, err := tx.Exec("DELETE FROM "+table+" WHERE transaction_id = ? AND id = ?", transactionID, imageID)
+		if err != nil {
+			return fmt.Errorf("画像削除エラー: %w", err)
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("画像削除結果確認エラー: %w", err)
+		}
+		if deleted != 1 {
+			return fmt.Errorf("画像が見つかりません")
+		}
+	}
+	return nil
+}
+
 func insertPreparedTransactionImages(db sqlExecutor, transactionID int64, images []preparedTransactionImage) error {
 	if len(images) == 0 {
 		return nil
@@ -2303,7 +2364,25 @@ func (s *Service) CreateTagByPath(path string) (*models.Tag, error) {
 	if err != nil {
 		return nil, err
 	}
+	segments, err := parseTagPathSegments(path)
+	if err != nil {
+		return nil, err
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		tag, txErr := createTagPathIn(db, segments)
+		if txErr == nil {
+			s.autoSnapshot()
+			return tag, nil
+		}
+		if !isSQLiteBusyError(txErr) || attempt == 4 {
+			return nil, txErr
+		}
+		time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("タグ作成を完了できませんでした")
+}
 
+func parseTagPathSegments(path string) ([]string, error) {
 	parts := strings.Split(path, "/")
 	var segments []string
 	for _, p := range parts {
@@ -2320,19 +2399,7 @@ func (s *Service) CreateTagByPath(path string) (*models.Tag, error) {
 	if err := validation.ValidateTagLevel(len(segments)); err != nil {
 		return nil, err
 	}
-
-	for attempt := 0; attempt < 5; attempt++ {
-		tag, txErr := createTagPathIn(db, segments)
-		if txErr == nil {
-			s.autoSnapshot()
-			return tag, nil
-		}
-		if !isSQLiteBusyError(txErr) || attempt == 4 {
-			return nil, txErr
-		}
-		time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
-	}
-	return nil, fmt.Errorf("タグ作成を完了できませんでした")
+	return segments, nil
 }
 
 func createTagPathIn(db *sql.DB, segments []string) (*models.Tag, error) {
@@ -2341,8 +2408,20 @@ func createTagPathIn(db *sql.DB, segments []string) (*models.Tag, error) {
 		return nil, fmt.Errorf("タグtransaction開始エラー: %w", err)
 	}
 	defer tx.Rollback()
+	tag, err := createTagPathWithinTx(tx, segments)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("タグtransaction確定エラー: %w", err)
+	}
+	return tag, nil
+}
+
+func createTagPathWithinTx(tx *sql.Tx, segments []string) (*models.Tag, error) {
 	var parentID *int64
 	var tag *models.Tag
+	var err error
 	for i, name := range segments {
 		level := i + 1
 		parentLevel := i
@@ -2399,9 +2478,6 @@ func createTagPathIn(db *sql.DB, segments []string) (*models.Tag, error) {
 		tag = &models.Tag{ID: existingID, Name: name, ParentID: parentID, Level: level}
 		pid := existingID
 		parentID = &pid
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("タグtransaction確定エラー: %w", err)
 	}
 	return tag, nil
 }
@@ -3506,6 +3582,57 @@ func isCardWithdrawalLinkAccountsWithSettings(accountA, accountB string, creditC
 	accountA = strings.TrimSpace(accountA)
 	accountB = strings.TrimSpace(accountB)
 	return (creditCards[accountA] && bankAccounts[accountB]) || (bankAccounts[accountA] && creditCards[accountB])
+}
+
+func applyTransactionLinkChangesIn(tx *sql.Tx, transactionID int64, addIDs, removeIDs []int64, settings map[string]string) error {
+	if len(addIDs)+len(removeIDs) > 100 {
+		return fmt.Errorf("一度に変更できる紐付けは100件までです")
+	}
+	for _, linkedID := range removeIDs {
+		if linkedID <= 0 || linkedID == transactionID {
+			return fmt.Errorf("紐付け対象の取引が見つかりません")
+		}
+		parentID, childID := transactionID, linkedID
+		if parentID > childID {
+			parentID, childID = childID, parentID
+		}
+		result, err := tx.Exec("DELETE FROM transaction_links WHERE parent_id = ? AND child_id = ?", parentID, childID)
+		if err != nil {
+			return fmt.Errorf("紐付け削除エラー: %w", err)
+		}
+		removed, err := result.RowsAffected()
+		if err != nil || removed != 1 {
+			return fmt.Errorf("指定された紐付けは存在しません")
+		}
+	}
+	creditCards := stringSetFromSetting(settings["credit_card_items"])
+	bankAccounts := stringSetFromSetting(settings["bank_account_items"])
+	var account string
+	if len(addIDs) > 0 {
+		if err := tx.QueryRow("SELECT account FROM transactions WHERE id = ?", transactionID).Scan(&account); err != nil {
+			return fmt.Errorf("紐付け対象の取引が見つかりません")
+		}
+	}
+	for _, linkedID := range addIDs {
+		if linkedID <= 0 || linkedID == transactionID {
+			return fmt.Errorf("同一または無効な取引とは紐付けできません")
+		}
+		var linkedAccount string
+		if err := tx.QueryRow("SELECT account FROM transactions WHERE id = ?", linkedID).Scan(&linkedAccount); err != nil {
+			return fmt.Errorf("紐付け対象の取引が見つかりません")
+		}
+		if !isCardWithdrawalLinkAccountsWithSettings(account, linkedAccount, creditCards, bankAccounts) {
+			return fmt.Errorf("紐付けはクレジットカード項目と銀行口座項目の取引間でのみ追加できます")
+		}
+		parentID, childID := transactionID, linkedID
+		if parentID > childID {
+			parentID, childID = childID, parentID
+		}
+		if _, err := tx.Exec("INSERT OR IGNORE INTO transaction_links (parent_id, child_id) VALUES (?, ?)", parentID, childID); err != nil {
+			return fmt.Errorf("紐付け追加エラー: %w", err)
+		}
+	}
+	return nil
 }
 
 func stringSetFromSetting(value string) map[string]bool {

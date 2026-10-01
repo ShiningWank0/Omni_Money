@@ -160,6 +160,7 @@
       v-if="viewingTransaction && !showAddTransactionModal"
       :transaction="viewingTransaction"
       @edit="editViewedTransaction"
+      @remove-image="editViewedTransaction"
       @close="viewingTransaction = null"
     />
 
@@ -169,6 +170,7 @@
       :is-edit-mode="isEditMode"
       :busy="transactionSaving"
       :transaction="editingTransaction"
+      :initial-remove-image-id="initialRemoveImageId"
       :fund-items="store.accounts"
       :item-names="store.itemNames"
       :credit-card-items="store.creditCardItems"
@@ -449,6 +451,7 @@ const heartbeatFailureRecheckDelaysMs = [500, 1500]
 const isEditMode = ref(false)
 const editingTransaction = ref(null)
 const viewingTransaction = ref(null)
+const initialRemoveImageId = ref(null)
 const dateSortOrder = ref('desc')
 const isInitialLoading = ref(true)
 const selectedCreditCardItems = ref([])
@@ -567,6 +570,7 @@ async function refreshLedger() {
 // 取引モーダル操作
 function showAddModal() {
   viewingTransaction.value = null
+  initialRemoveImageId.value = null
   isEditMode.value = false
   editingTransaction.value = null
   showAddTransactionModal.value = true
@@ -577,9 +581,10 @@ function showTransactionDetails(tx) {
   viewingTransaction.value = { ...tx }
 }
 
-function editViewedTransaction() {
+function editViewedTransaction(imageId = null) {
   const tx = viewingTransaction.value
   if (!tx) return
+  initialRemoveImageId.value = typeof imageId === 'number' ? imageId : null
   isEditMode.value = true
   editingTransaction.value = { ...tx }
   showAddTransactionModal.value = true
@@ -589,6 +594,7 @@ function editViewedTransaction() {
 function hideAddModal() {
   showAddTransactionModal.value = false
   editingTransaction.value = null
+  initialRemoveImageId.value = null
 }
 
 async function handleSaveTransaction(data) {
@@ -945,6 +951,7 @@ function clearSensitiveStateForIdle(preserveCredentialSettings = false) {
   isEditMode.value = false
   editingTransaction.value = null
   viewingTransaction.value = null
+  initialRemoveImageId.value = null
   selectedCreditCardItems.value = []
   selectedBankAccountItems.value = []
   balanceHistoryData.value = null

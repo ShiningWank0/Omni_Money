@@ -69,6 +69,64 @@ func TestUpdateTransactionPrunesInvalidTransactionLinks(t *testing.T) {
 	}
 }
 
+func TestUpdateTransactionCommitsStagedTagsLinksAndImagesTogether(t *testing.T) {
+	setupCoreTestDB(t)
+	cardID := insertTestTransaction(t, "credit card", "2026-01-01", "original", "expense", 100, -100)
+	bankID := insertTestTransaction(t, "main bank", "2026-01-02", "payment", "expense", 100, -100)
+	otherBankID := insertTestTransaction(t, "main bank", "2026-01-03", "second payment", "expense", 100, -200)
+	cashID := insertTestTransaction(t, "cash", "2026-01-04", "unrelated", "expense", 100, -100)
+	writeStringSliceSetting(t, "credit_card_items", []string{"credit card"})
+	writeStringSliceSetting(t, "bank_account_items", []string{"main bank"})
+	if err := AddTransactionLink(cardID, bankID); err != nil {
+		t.Fatal(err)
+	}
+	image, err := database.GetDB().Exec(`INSERT INTO transaction_images (transaction_id, filename, data, mime_type)
+		VALUES (?, 'receipt.png', ?, 'image/png')`, cardID, encodePNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageID, _ := image.LastInsertId()
+	request := models.TransactionRequest{
+		Account: "credit card", Date: "2026-01-01", Item: "updated", Type: "expense", Amount: 200,
+		NewTagPaths: []string{"Work/Travel"}, DeleteImageIDs: []int64{imageID},
+		LinkRemoveIDs: []int64{bankID}, LinkAddIDs: []int64{cashID},
+	}
+	if _, err := UpdateTransaction(cardID, request); err == nil {
+		t.Fatal("invalid staged link was accepted")
+	}
+	var item string
+	if err := database.GetDB().QueryRow("SELECT item FROM transactions WHERE id = ?", cardID).Scan(&item); err != nil || item != "original" {
+		t.Fatalf("failed update changed item=%q err=%v", item, err)
+	}
+	var count int
+	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM tags WHERE name = 'Work'").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("failed update created tag: count=%d err=%v", count, err)
+	}
+	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transaction_images WHERE id = ?", imageID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("failed update removed image: count=%d err=%v", count, err)
+	}
+	links, err := GetTransactionLinks(cardID)
+	if err != nil || len(links) != 1 || links[0].ID != bankID {
+		t.Fatalf("failed update changed links: %#v err=%v", links, err)
+	}
+
+	request.LinkAddIDs = []int64{otherBankID}
+	if _, err := UpdateTransaction(cardID, request); err != nil {
+		t.Fatalf("valid staged update failed: %v", err)
+	}
+	tags, err := GetTransactionTags(cardID)
+	if err != nil || len(tags) != 1 || tags[0].Name != "Travel" {
+		t.Fatalf("updated tags=%#v err=%v", tags, err)
+	}
+	links, err = GetTransactionLinks(cardID)
+	if err != nil || len(links) != 1 || links[0].ID != otherBankID {
+		t.Fatalf("updated links=%#v err=%v", links, err)
+	}
+	if err := database.GetDB().QueryRow("SELECT COUNT(*) FROM transaction_images WHERE id = ?", imageID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("updated image count=%d err=%v", count, err)
+	}
+}
+
 func TestSaveBankAccountSettingsPrunesInvalidTransactionLinks(t *testing.T) {
 	setupCoreTestDB(t)
 	cardTx := insertTestTransaction(t, "credit card", "2026-01-01", "食費", "expense", 1000, -1000)

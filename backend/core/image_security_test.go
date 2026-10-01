@@ -306,6 +306,79 @@ func TestInvalidLegacyImageIsNeverReturnedAsDataURL(t *testing.T) {
 	}
 }
 
+func TestUpdateTransactionDeletesOnlySelectedImagesAtomically(t *testing.T) {
+	db := initImageTestDB(t)
+	first, err := db.Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+		VALUES ('cash', '2026-01-01', 'original', 'expense', 100, -100, '')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transactionID, _ := first.LastInsertId()
+	second, err := db.Exec(`INSERT INTO transactions (account, date, item, type, amount, balance, memo)
+		VALUES ('cash', '2026-01-02', 'other', 'expense', 100, -200, '')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTransactionID, _ := second.LastInsertId()
+	png := encodePNG(t)
+	stored, err := db.Exec(`INSERT INTO transaction_images (transaction_id, filename, data, mime_type)
+		VALUES (?, 'stored.png', ?, 'image/png')`, transactionID, png)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedID, _ := stored.LastInsertId()
+	archived, err := db.Exec(`INSERT INTO transaction_image_archive (transaction_id, filename, data, mime_type)
+		VALUES (?, 'archived.png', ?, 'image/png')`, transactionID, png)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedID, _ := archived.LastInsertId()
+	other, err := db.Exec(`INSERT INTO transaction_images (transaction_id, filename, data, mime_type)
+		VALUES (?, 'other.png', ?, 'image/png')`, otherTransactionID, png)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherID, _ := other.LastInsertId()
+
+	request := models.TransactionRequest{
+		Account: "cash", Date: "2026-01-01", Item: "updated", Type: "expense", Amount: 200,
+		Images:         []models.TransactionImageRequest{imageRequest("new.png", "image/png", png)},
+		DeleteImageIDs: []int64{storedID, otherID},
+	}
+	if _, err := UpdateTransaction(transactionID, request); err == nil {
+		t.Fatal("update accepted an image belonging to another transaction")
+	}
+	var item string
+	if err := db.QueryRow("SELECT item FROM transactions WHERE id = ?", transactionID).Scan(&item); err != nil {
+		t.Fatal(err)
+	}
+	if item != "original" {
+		t.Fatalf("failed update changed item to %q", item)
+	}
+	var remaining int
+	if err := db.QueryRow("SELECT COUNT(*) FROM transaction_images WHERE id = ?", storedID).Scan(&remaining); err != nil || remaining != 1 {
+		t.Fatalf("failed update removed original image: count=%d err=%v", remaining, err)
+	}
+
+	request.DeleteImageIDs = []int64{storedID, -archivedID}
+	if _, err := UpdateTransaction(transactionID, request); err != nil {
+		t.Fatalf("update with selected image removals failed: %v", err)
+	}
+	if err := db.QueryRow("SELECT item FROM transactions WHERE id = ?", transactionID).Scan(&item); err != nil || item != "updated" {
+		t.Fatalf("updated item=%q err=%v", item, err)
+	}
+	var filename string
+	if err := db.QueryRow("SELECT filename FROM transaction_images WHERE transaction_id = ?", transactionID).Scan(&filename); err != nil || filename != "new.png" {
+		t.Fatalf("remaining image=%q err=%v", filename, err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM transaction_image_archive WHERE transaction_id = ?", transactionID).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("archived images remaining=%d err=%v", remaining, err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM transaction_images WHERE id = ?", otherID).Scan(&remaining); err != nil || remaining != 1 {
+		t.Fatalf("other transaction image count=%d err=%v", remaining, err)
+	}
+}
+
 func imageRequest(filename, mimeType string, data []byte) models.TransactionImageRequest {
 	return models.TransactionImageRequest{
 		Filename: filename,

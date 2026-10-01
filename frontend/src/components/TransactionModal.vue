@@ -5,6 +5,7 @@
       <form @submit.prevent="handleSubmit" :aria-busy="busy">
         <fieldset :disabled="busy" :inert="busy" class="transaction-fields">
         <div class="form-container">
+          <div class="transaction-primary-fields">
           <div class="form-row">
             <label>日付:</label>
             <input type="date" v-model="form.date" required>
@@ -72,7 +73,7 @@
             <div class="tag-selector">
               <div class="selected-tags">
                 <span v-for="tag in selectedTags" :key="tag.id" class="tag-badge">
-                  {{ getTagPath(tag) }}
+                  {{ getTagPath(tag) }}<small v-if="tag.pending">（保存時に作成）</small>
                   <button type="button" class="tag-remove" @click="removeTag(tag.id)">×</button>
                 </span>
               </div>
@@ -98,36 +99,12 @@
             </div>
           </div>
 
-          <!-- 画像添付 (Agent.md §6.5) -->
-          <div class="form-row">
-            <label>画像:</label>
-            <div class="image-upload-area"
-              @dragover.prevent="isDragOver = true"
-              @dragleave="isDragOver = false"
-              @drop.prevent="onImageDrop"
-              @click="triggerFileSelect"
-              :class="{ 'drag-over': isDragOver }">
-              <div class="image-previews" v-if="attachedImages.length > 0" @click.stop>
-                <div v-for="(img, index) in attachedImages" :key="index" class="image-preview">
-                  <img :src="img.preview" :alt="img.filename">
-                  <button type="button" class="image-remove" @click="removeImage(index)">×</button>
-                </div>
-              </div>
-              <div class="image-upload-placeholder">
-                <span class="upload-icon">📷</span>
-                <span>クリックまたはドラッグ&ドロップで画像を添付</span>
-                <small>JPEG / PNG / GIF / WebP、1枚5 MiB・最大10枚</small>
-              </div>
-              <input ref="fileInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple
-                @change="onFileSelect" style="display: none;">
-            </div>
-          </div>
-
           <!-- 取引紐付け (Agent.md §6.2) - カード支払いと銀行引き落としのみ -->
           <div v-if="showLinkSection" class="form-row">
             <label>紐付け:</label>
             <div class="link-section">
               <div class="link-hint">{{ linkHint }}</div>
+              <div class="link-hint">紐付けの変更は「更新」を押した時に確定します。</div>
               <div v-if="linkedTransactions.length > 0" class="linked-list">
                 <div v-for="lt in linkedTransactions" :key="lt.id" class="linked-item">
                   <div class="linked-info">
@@ -158,9 +135,55 @@
               </div>
             </div>
           </div>
+          </div>
+
+          <!-- 画像は広い画面ではフォームの横、狭い画面ではフォームの前に置く。 -->
+          <section class="transaction-image-panel" aria-labelledby="transaction-images-title">
+            <div class="image-panel-heading">
+              <h4 id="transaction-images-title">画像</h4>
+              <span>{{ activeImageCount }} / {{ MAX_IMAGE_COUNT }} 枚</span>
+            </div>
+            <p v-if="isEditMode && imagesLoading" class="image-panel-message" role="status">保存済み画像を読み込んでいます…</p>
+            <div v-else-if="imagesError" class="image-panel-message" role="alert">
+              保存済み画像を読み込めませんでした。
+              <button type="button" class="image-retry" @click="loadExistingImages">再読み込み</button>
+            </div>
+            <div v-else-if="existingImages.length" class="image-preview-group">
+              <h5>保存済みの画像</h5>
+              <div class="image-previews">
+              <figure v-for="image in existingImages" :key="image.id" class="image-preview" :class="{ 'pending-removal': removedImageIds.includes(image.id) }">
+                <img v-if="imageURL(image)" :src="imageURL(image)" :alt="image.filename || '添付画像'">
+                <div v-else class="image-unavailable">この画像は表示できません</div>
+                <figcaption>{{ image.filename || '添付画像' }}</figcaption>
+                <button type="button" class="image-remove" @click="toggleExistingImage(image.id)">
+                  {{ removedImageIds.includes(image.id) ? '元に戻す' : '削除する' }}
+                </button>
+              </figure>
+              </div>
+            </div>
+            <div v-if="attachedImages.length" class="image-preview-group">
+              <h5>今回追加する画像</h5>
+              <div class="image-previews">
+              <figure v-for="(img, index) in attachedImages" :key="index" class="image-preview">
+                <img :src="img.preview" :alt="img.filename">
+                <figcaption>{{ img.filename }}</figcaption>
+                <button type="button" class="image-remove" @click="removeImage(index)">追加を取り消す</button>
+              </figure>
+              </div>
+            </div>
+            <p v-if="removedImageIds.length" class="image-removal-note">{{ removedImageIds.length }} 枚の削除は「更新」を押した時に確定します。</p>
+            <div class="image-upload-area" :class="{ 'drag-over': isDragOver }"
+              @dragover.prevent="onImageDragOver" @dragleave="isDragOver = false" @drop.prevent="onImageDrop">
+              <button type="button" class="image-add-button" :disabled="imagesLoading || imagesError" @click="triggerFileSelect">画像を追加</button>
+              <span>またはここにドラッグ＆ドロップ</span>
+              <small>JPEG / PNG / GIF / WebP、1枚5 MiB・最大10枚</small>
+              <input ref="fileInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple
+                aria-label="追加する画像を選択" @change="onFileSelect" hidden>
+            </div>
+          </section>
         </div>
         <div v-if="formError" class="form-error" role="alert">{{ formError }}</div>
-        <div class="modal-buttons" style="display: flex; justify-content: space-between; align-items: center;">
+        <div class="modal-buttons transaction-footer-actions">
           <div>
             <template v-if="isEditMode && !confirmingDelete">
               <button type="button" class="delete-btn" @click="confirmingDelete = true">削除</button>
@@ -171,7 +194,7 @@
               <button type="button" class="delete-confirm-no" @click="confirmingDelete = false">いいえ</button>
             </template>
           </div>
-          <div style="display: flex; gap: 8px;">
+          <div class="transaction-save-actions">
             <button type="button" class="cancel-btn" @click="!busy && $emit('close')">キャンセル</button>
             <button type="submit" class="ok-btn">{{ isEditMode ? '更新' : 'OK' }}</button>
           </div>
@@ -184,8 +207,8 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
-import { getTags, createTag, createTagByPath, getTransactionLinks, addTransactionLink, removeTransactionLink, getTransactions, isWailsMode } from '../utils/api'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { getTags, getTransactionLinks, getTransactions, getTransactionImages, isWailsMode } from '../utils/api'
 import { formatExactInteger } from '../utils/exactAmount'
 
 const MAX_TRANSACTION_AMOUNT = 1_000_000_000
@@ -194,6 +217,7 @@ const props = defineProps({
   isEditMode: Boolean,
   busy: { type: Boolean, default: false },
   transaction: Object,
+  initialRemoveImageId: { type: Number, default: null },
   fundItems: { type: Array, default: () => [] },
   itemNames: { type: Array, default: () => [] },
   creditCardItems: { type: Array, default: () => [] },
@@ -207,6 +231,10 @@ const isDragOver = ref(false)
 const confirmingDelete = ref(false)
 const formError = ref('')
 const attachedImages = ref([])
+const existingImages = ref([])
+const removedImageIds = ref([])
+const imagesLoading = ref(false)
+const imagesError = ref(false)
 const fileInput = ref(null)
 const allTags = ref([])
 const selectedTags = ref([])
@@ -214,6 +242,7 @@ const selectedLevel1 = ref('')
 const selectedLevel2 = ref('')
 const selectedLevel3 = ref('')
 const newTagName = ref('')
+let nextPendingTagID = -1
 
 const form = ref({
   date: new Date().toISOString().slice(0, 10),
@@ -313,39 +342,38 @@ function removeTag(tagId) {
   selectedTags.value = selectedTags.value.filter(t => t.id !== tagId)
 }
 
-async function createNewTag() {
+function createNewTag() {
   if (!newTagName.value.trim()) return
   const input = newTagName.value.trim()
-
-  try {
-    let tag
-    if (input.includes('/')) {
-      tag = await createTagByPath(input)
-    } else {
-      const parentId = Number(selectedLevel2.value || selectedLevel1.value) || null
-      tag = await createTag(input, parentId)
-    }
-    newTagName.value = ''
-    await loadTags()
-    if (!selectedTags.value.some(t => t.id === tag.id)) {
-      const fullPath = buildTagPath(allTags.value, tag.id)
-      selectedTags.value.push({ id: tag.id, name: tag.name, path: fullPath })
-    }
-  } catch (e) {
-    formError.value = 'タグ作成エラー: ' + e.message
+  const parentID = Number(selectedLevel2.value || selectedLevel1.value) || null
+  const parentPath = parentID ? buildTagPath(allTags.value, parentID) : ''
+  const path = input.includes('/') || !parentPath ? input : `${parentPath}/${input}`
+  const segments = path.split('/').map(segment => segment.trim())
+  if (segments.length > 3 || segments.some(segment => !segment)) {
+    formError.value = 'タグは空の名前を含めず3階層までで指定してください'
+    return
   }
+  const canonicalPath = segments.join('/')
+  if (!selectedTags.value.some(tag => getTagPath(tag).split('/').map(segment => segment.trim()).join('/') === canonicalPath)) {
+    selectedTags.value.push({ id: nextPendingTagID--, name: segments[segments.length - 1], path: canonicalPath, pending: true })
+  }
+  newTagName.value = ''
+  formError.value = ''
 }
 
 async function loadTags() {
   try {
-    allTags.value = await getTags()
+    const tags = await getTags()
+    if (active) allTags.value = tags
   } catch (e) {
-    formError.value = 'タグ一覧の取得に失敗しました: ' + e.message
+    if (active) formError.value = 'タグ一覧の取得に失敗しました: ' + e.message
   }
 }
 
 // --- 取引紐付け (Agent.md §6.2) ---
 const linkedTransactions = ref([])
+const pendingLinkAddIDs = ref([])
+const pendingLinkRemoveIDs = ref([])
 const linkSearchQuery = ref('')
 const linkSearchResults = ref([])
 const showLinkResults = ref(false)
@@ -354,9 +382,10 @@ let linkSearchTimer = null
 async function loadLinkedTransactions() {
   if (!props.isEditMode || !props.transaction?.id) return
   try {
-    linkedTransactions.value = await getTransactionLinks(props.transaction.id)
+    const links = await getTransactionLinks(props.transaction.id)
+    if (active) linkedTransactions.value = links
   } catch (e) {
-    formError.value = '紐付け一覧の取得に失敗しました: ' + e.message
+    if (active) formError.value = '紐付け一覧の取得に失敗しました: ' + e.message
   }
 }
 
@@ -370,6 +399,7 @@ function onLinkSearch() {
   linkSearchTimer = setTimeout(async () => {
     try {
       const all = await getTransactions('', linkSearchQuery.value.trim())
+      if (!active) return
       const currentId = props.transaction?.id
       const linkedIds = new Set(linkedTransactions.value.map(lt => lt.id))
       linkSearchResults.value = (all || [])
@@ -378,8 +408,10 @@ function onLinkSearch() {
         .slice(0, 10)
       showLinkResults.value = true
     } catch (e) {
-      formError.value = '紐付け候補の検索に失敗しました: ' + e.message
-      showLinkResults.value = false
+      if (active) {
+        formError.value = '紐付け候補の検索に失敗しました: ' + e.message
+        showLinkResults.value = false
+      }
     }
   }, 300)
 }
@@ -395,24 +427,24 @@ function isLinkCounterpart(tx) {
   return false
 }
 
-async function linkTransaction(tx) {
-  try {
-    await addTransactionLink(props.transaction.id, tx.id)
-    await loadLinkedTransactions()
-    linkSearchQuery.value = ''
-    linkSearchResults.value = []
-    showLinkResults.value = false
-  } catch (e) {
-    formError.value = '紐付けエラー: ' + (e.message || e)
+function linkTransaction(tx) {
+  if (pendingLinkRemoveIDs.value.includes(tx.id)) {
+    pendingLinkRemoveIDs.value = pendingLinkRemoveIDs.value.filter(id => id !== tx.id)
+  } else if (!pendingLinkAddIDs.value.includes(tx.id)) {
+    pendingLinkAddIDs.value = [...pendingLinkAddIDs.value, tx.id]
   }
+  linkedTransactions.value = [...linkedTransactions.value, { ...tx, fundItem: tx.fundItem || tx.account }]
+  linkSearchQuery.value = ''
+  linkSearchResults.value = []
+  showLinkResults.value = false
 }
 
-async function unlinkTransaction(linkedId) {
-  try {
-    await removeTransactionLink(props.transaction.id, linkedId)
-    await loadLinkedTransactions()
-  } catch (e) {
-    formError.value = '紐付け解除エラー: ' + (e.message || e)
+function unlinkTransaction(linkedId) {
+  linkedTransactions.value = linkedTransactions.value.filter(link => link.id !== linkedId)
+  if (pendingLinkAddIDs.value.includes(linkedId)) {
+    pendingLinkAddIDs.value = pendingLinkAddIDs.value.filter(id => id !== linkedId)
+  } else if (!pendingLinkRemoveIDs.value.includes(linkedId)) {
+    pendingLinkRemoveIDs.value = [...pendingLinkRemoveIDs.value, linkedId]
   }
 }
 
@@ -424,11 +456,53 @@ const MAX_IMAGE_COUNT = 10
 const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
 let pendingImageCount = 0
 let pendingImageBytes = 0
+let active = true
+let imagesRequest = 0
+const pendingReaders = new Set()
+const activeImageCount = computed(() => existingImages.value.length - removedImageIds.value.length + attachedImages.value.length)
+
+function imageURL(image) {
+  if (image.invalid || typeof image.data_url !== 'string') return ''
+  return /^data:image\/(?:jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(image.data_url)
+    ? image.data_url
+    : ''
+}
+
+async function loadExistingImages() {
+  if (!props.isEditMode || !props.transaction?.id) return
+  const request = ++imagesRequest
+  imagesLoading.value = true
+  imagesError.value = false
+  try {
+    const result = await getTransactionImages(props.transaction.id)
+    if (!active || request !== imagesRequest) return
+    existingImages.value = result
+    removedImageIds.value = result.some(image => image.id === props.initialRemoveImageId)
+      ? [props.initialRemoveImageId]
+      : []
+  } catch {
+    if (active && request === imagesRequest) imagesError.value = true
+  } finally {
+    if (active && request === imagesRequest) imagesLoading.value = false
+  }
+}
+
+function toggleExistingImage(imageId) {
+  if (removedImageIds.value.includes(imageId)) {
+    removedImageIds.value = removedImageIds.value.filter(id => id !== imageId)
+  } else {
+    removedImageIds.value = [...removedImageIds.value, imageId]
+  }
+}
 
 function triggerFileSelect() {
-  if (fileInput.value) {
+  if (!props.busy && !imagesLoading.value && !imagesError.value && fileInput.value) {
     fileInput.value.click()
   }
+}
+
+function onImageDragOver() {
+  if (!props.busy && !imagesLoading.value && !imagesError.value) isDragOver.value = true
 }
 
 function onAmountInput(e) {
@@ -443,13 +517,15 @@ function onFileSelect(e) {
 
 function onImageDrop(e) {
   isDragOver.value = false
+  if (props.busy || imagesLoading.value || imagesError.value) return
   const files = Array.from(e.dataTransfer.files)
   processFiles(files)
 }
 
 function processFiles(files) {
+  if (props.busy || imagesLoading.value || imagesError.value) return
   let acceptedBytes = attachedImages.value.reduce((total, image) => total + (image.size || 0), 0) + pendingImageBytes
-  let acceptedCount = attachedImages.value.length + pendingImageCount
+  let acceptedCount = activeImageCount.value + pendingImageCount
 
   for (const file of files) {
     if (acceptedCount >= MAX_IMAGE_COUNT) {
@@ -474,7 +550,10 @@ function processFiles(files) {
     pendingImageCount++
     pendingImageBytes += file.size
     const reader = new FileReader()
+    pendingReaders.add(reader)
     reader.onload = (e) => {
+      pendingReaders.delete(reader)
+      if (!active) return
       const base64 = e.target.result.split(',')[1]
       attachedImages.value.push({
         filename: file.name,
@@ -487,6 +566,8 @@ function processFiles(files) {
       pendingImageBytes -= file.size
     }
     reader.onerror = () => {
+      pendingReaders.delete(reader)
+      if (!active) return
       pendingImageCount--
       pendingImageBytes -= file.size
       formError.value = `${file.name}: 画像の読み込みに失敗しました`
@@ -501,6 +582,10 @@ function removeImage(index) {
 
 function handleSubmit() {
   if (props.busy) return
+  if (props.isEditMode && (imagesLoading.value || imagesError.value)) {
+    formError.value = '保存済み画像の読み込みが完了してから更新してください'
+    return
+  }
   if (pendingImageCount > 0) {
     formError.value = '画像の読み込みが完了するまでお待ちください'
     return
@@ -524,8 +609,13 @@ function handleSubmit() {
     type: form.value.type,
     amount: amount,
     memo: form.value.memo,
-    tags: selectedTags.value.map(t => t.id)
+    tags: selectedTags.value.filter(tag => !tag.pending).map(tag => tag.id)
   }
+
+  const newTagPaths = selectedTags.value.filter(tag => tag.pending).map(tag => tag.path)
+  if (newTagPaths.length) data.new_tag_paths = newTagPaths
+  if (pendingLinkAddIDs.value.length) data.link_add_ids = [...pendingLinkAddIDs.value]
+  if (pendingLinkRemoveIDs.value.length) data.link_remove_ids = [...pendingLinkRemoveIDs.value]
 
   // 画像がある場合はBase64で含める
   if (attachedImages.value.length > 0) {
@@ -535,12 +625,15 @@ function handleSubmit() {
       mime_type: img.mime_type
     }))
   }
+  if (removedImageIds.value.length > 0) data.delete_image_ids = [...removedImageIds.value]
 
   emit('save', data)
 }
 
 onMounted(async () => {
+  if (props.isEditMode && props.transaction?.id) loadExistingImages()
   await loadTags()
+  if (!active) return
 
   if (props.isEditMode && props.transaction) {
     const tx = props.transaction
@@ -565,6 +658,21 @@ onMounted(async () => {
     await loadLinkedTransactions()
   }
 })
+
+onBeforeUnmount(() => {
+  active = false
+  imagesRequest++
+  clearTimeout(linkSearchTimer)
+  for (const reader of pendingReaders) reader.abort()
+  pendingReaders.clear()
+  attachedImages.value = []
+  existingImages.value = []
+  removedImageIds.value = []
+  selectedTags.value = []
+  linkedTransactions.value = []
+  linkSearchResults.value = []
+  form.value = { date: '', time: '', fundItem: '', type: 'expense', item: '', amount: '', memo: '' }
+})
 </script>
 
 <style scoped>
@@ -578,6 +686,49 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+.form-container {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  align-content: start;
+  gap: 1.5rem;
+}
+.transaction-primary-fields,
+.transaction-image-panel {
+  min-width: 0;
+}
+.transaction-image-panel {
+  padding: 1rem;
+  border: 1px solid #dce2f5;
+  border-radius: .85rem;
+  background: #f8f9ff;
+}
+.image-panel-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: .75rem;
+  margin-bottom: .75rem;
+}
+.image-panel-heading h4,
+.image-preview-group h5 { margin: 0; }
+.image-panel-heading span,
+.image-preview-group h5 { color: #5e6664; font-size: .85rem; }
+.image-preview-group { margin-bottom: 1rem; }
+.image-preview-group h5 { margin-bottom: .5rem; }
+.image-panel-message { margin: 0 0 .75rem; }
+.image-retry { margin-left: .4rem; border: 0; background: transparent; color: #4358b4; cursor: pointer; text-decoration: underline; }
+.image-removal-note { margin: 0 0 .75rem; color: #8a2525; font-size: .85rem; }
+.transaction-footer-actions { justify-content: space-between; align-items: center; flex-wrap: wrap; }
+.transaction-save-actions { display: flex; gap: .5rem; margin-left: auto; }
+@media (max-width: 700px) {
+  .form-container { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+  .transaction-image-panel { grid-row: 1; padding: .8rem; }
+  .transaction-primary-fields { grid-row: 2; }
+  .transaction-footer-actions { gap: .6rem; }
+}
+@media (max-width: 480px) {
+  .transaction-save-actions { width: 100%; justify-content: flex-end; }
 }
 /* タグセレクター */
 .tag-selector {
@@ -665,18 +816,16 @@ onMounted(async () => {
 /* 画像アップロード */
 .image-upload-area {
   width: 100%;
-  min-height: 120px;
+  min-height: 100px;
   border: 2px dashed rgba(102, 126, 234, 0.4);
   border-radius: 12px;
-  padding: 16px;
+  padding: 12px;
   text-align: center;
-  transition: all 0.2s;
-  cursor: pointer;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 4px;
   background: rgba(102, 126, 234, 0.03);
   box-sizing: border-box;
 }
@@ -688,51 +837,57 @@ onMounted(async () => {
   border-color: rgba(106, 168, 79, 0.8);
   background: rgba(106, 168, 79, 0.08);
 }
+.image-upload-area span,
+.image-upload-area small { color: #5e6664; font-size: .8rem; }
+.image-add-button {
+  border: 0;
+  border-radius: .55rem;
+  padding: .55rem .9rem;
+  background: #667eea;
+  color: white;
+  font: inherit;
+  cursor: pointer;
+}
+.image-add-button:hover { background: #5268cf; }
+.image-add-button:disabled { opacity: .55; cursor: not-allowed; }
 .image-previews {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: .6rem;
 }
 .image-preview {
-  position: relative;
-  width: 60px;
-  height: 60px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0;
+  padding: .5rem;
+  border: 1px solid #dce2f5;
+  border-radius: .65rem;
+  background: #fff;
 }
 .image-preview img {
   width: 100%;
-  height: 100%;
-  object-fit: cover;
+  height: 104px;
+  object-fit: contain;
   border-radius: 6px;
-  border: 1px solid #ddd;
+  background: #f2f3f6;
 }
+.image-preview figcaption { margin: .4rem 0; font-size: .8rem; overflow-wrap: anywhere; }
+.image-preview.pending-removal img { opacity: .4; }
+.image-preview.pending-removal { border-color: #e6a2a2; background: #fff6f6; }
+.image-unavailable { display: grid; place-items: center; height: 104px; font-size: .8rem; color: #8a2525; }
 .image-remove {
-  position: absolute;
-  top: -6px;
-  right: -6px;
-  background: #dc3545;
-  border: 2px solid white;
-  color: white;
-  border-radius: 50%;
-  width: 20px;
-  height: 20px;
-  font-size: 11px;
+  margin-top: auto;
+  padding: .4rem .35rem;
+  border: 1px solid #db8f8f;
+  border-radius: .5rem;
+  background: #fff;
+  color: #982626;
+  font: inherit;
+  font-size: .8rem;
   cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
 }
-.image-upload-placeholder {
-  color: #999;
-  font-size: 0.85em;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-}
-.upload-icon {
-  font-size: 2em;
-}
+.image-remove:hover { background: #fff0f0; }
 .delete-confirm-label {
   font-size: 0.8em;
   color: #d32f2f;

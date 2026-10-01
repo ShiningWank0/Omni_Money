@@ -8,7 +8,8 @@ const api = vi.hoisted(() => ({
   getTransactionLinks: vi.fn(),
   addTransactionLink: vi.fn(),
   removeTransactionLink: vi.fn(),
-  getTransactions: vi.fn()
+  getTransactions: vi.fn(),
+  getTransactionImages: vi.fn()
 }))
 
 vi.mock('../../src/utils/api', () => ({ ...api, isWailsMode: false }))
@@ -36,6 +37,7 @@ beforeEach(() => {
   api.getTags.mockResolvedValue([])
   api.getTransactionLinks.mockResolvedValue([])
   api.getTransactions.mockResolvedValue([])
+  api.getTransactionImages.mockResolvedValue([])
 })
 
 async function mountModal(props = {}) {
@@ -53,6 +55,46 @@ function fillRequiredFields(wrapper) {
 }
 
 describe('TransactionModal', () => {
+  it('keeps a new nested tag local until save', async () => {
+    api.getTags.mockResolvedValueOnce([{ id: 4, name: 'Food', children: [] }])
+    api.createTag.mockClear()
+    api.createTagByPath.mockClear()
+    const wrapper = await mountModal()
+    await fillRequiredFields(wrapper)
+    await wrapper.get('.tag-select').setValue(4)
+    await wrapper.get('.new-tag-input').setValue('Lunch')
+    await wrapper.get('.new-tag-row .add-tag-btn').trigger('click')
+
+    expect(wrapper.get('.tag-badge').text()).toContain('Food/Lunch')
+    expect(api.createTag).not.toHaveBeenCalled()
+    expect(api.createTagByPath).not.toHaveBeenCalled()
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('save')[0][0].new_tag_paths).toEqual(['Food/Lunch'])
+  })
+
+  it('stages a saved image removal until update and lets the user undo it', async () => {
+    api.getTransactionImages.mockResolvedValueOnce([{
+      id: 13,
+      filename: 'receipt.png',
+      data_url: 'data:image/png;base64,AAAA'
+    }])
+    const wrapper = await mountModal({
+      isEditMode: true,
+      initialRemoveImageId: 13,
+      transaction: { id: 1, date: '2026-01-01', account: 'cash', item: 'purchase', type: 'expense', amount: 100 }
+    })
+
+    expect(wrapper.get('.image-preview.pending-removal').text()).toContain('receipt.png')
+    await wrapper.get('.image-preview button').trigger('click')
+    expect(wrapper.find('.image-preview.pending-removal').exists()).toBe(false)
+    await wrapper.get('.image-preview button').trigger('click')
+    await wrapper.get('form').trigger('submit')
+
+    expect(wrapper.emitted('save')).toHaveLength(1)
+    expect(wrapper.emitted('save')[0][0].delete_image_ids).toEqual([13])
+    expect(api.getTransactionImages).toHaveBeenCalledWith(1)
+  })
+
   it('does not emit save while an image is still being read, then includes it after completion', async () => {
     let reader
     vi.spyOn(FileReader.prototype, 'readAsDataURL').mockImplementation(function () {
@@ -83,7 +125,9 @@ describe('TransactionModal', () => {
     }])
   })
 
-  it('limits link candidates to counterpart accounts and keeps link state on API failures', async () => {
+  it('limits link candidates and stages link changes until the transaction is saved', async () => {
+    api.addTransactionLink.mockClear()
+    api.removeTransactionLink.mockClear()
     api.getTransactionLinks.mockResolvedValue([linkedTransaction])
     api.getTransactions.mockResolvedValue([
       { id: 1, account: 'card', item: 'current' },
@@ -107,16 +151,17 @@ describe('TransactionModal', () => {
     expect(candidates).toHaveLength(1)
     expect(candidates[0].text()).toContain('new payment')
 
-    api.addTransactionLink.mockRejectedValueOnce(new Error('link failed'))
     await candidates[0].trigger('click')
     await flushPromises()
-    expect(wrapper.get('.form-error').text()).toContain('link failed')
-    expect(wrapper.find('.link-search-results').exists()).toBe(true)
+    expect(wrapper.findAll('.linked-item')).toHaveLength(2)
+    expect(api.addTransactionLink).not.toHaveBeenCalled()
 
-    api.removeTransactionLink.mockRejectedValueOnce(new Error('unlink failed'))
+    await wrapper.findAll('.link-remove')[1].trigger('click')
+    expect(wrapper.findAll('.linked-item')).toHaveLength(1)
     await wrapper.get('.link-remove').trigger('click')
-    await flushPromises()
-    expect(wrapper.get('.form-error').text()).toContain('unlink failed')
-    expect(wrapper.find('.linked-item').exists()).toBe(true)
+    expect(api.removeTransactionLink).not.toHaveBeenCalled()
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('save')[0][0].link_remove_ids).toEqual([linkedTransaction.id])
+    expect(wrapper.emitted('save')[0][0].link_add_ids).toBeUndefined()
   })
 })
