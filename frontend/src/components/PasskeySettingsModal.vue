@@ -117,7 +117,11 @@ async function register() {
     clearPassword()
     name.value = ''
     infoMessage.value = 'パスキーを登録しました。次回からパスワードまたはパスキーでログインできます'
-    passkeys.value = await listPasskeys()
+    try {
+      passkeys.value = await listPasskeys()
+    } catch {
+      infoMessage.value = 'パスキーを登録しましたが、一覧を更新できませんでした。更新を押してください'
+    }
   } catch (error) {
     errorMessage.value = error?.message || 'パスキーを登録できませんでした'
   } finally {

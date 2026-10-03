@@ -255,6 +255,82 @@ func TestPasskeyRegistrationWithCreateTimePRFStillPersists(t *testing.T) {
 	}
 }
 
+func TestNewPasskeyLogsInWithoutEmailWithOneAssertion(t *testing.T) {
+	dek := bytes.Repeat([]byte{37}, keyenvelope.DEKSize)
+	service, store := newRegistrationTestService(t, dek)
+	ctx := context.Background()
+	registration, err := service.BeginPasskeyRegistration(ctx, serverAuthTestUserID, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(registrationPRFSalt(t, registration), discoverablePRFSalt[:]) {
+		t.Fatal("registration did not use the discoverable PRF input")
+	}
+	if registration.Options.Response.AuthenticatorSelection.ResidentKey != protocol.ResidentKeyRequirementRequired {
+		t.Fatal("registration did not require a discoverable credential")
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialID := bytes.Repeat([]byte{0x23}, 32)
+	prfResult := bytes.Repeat([]byte{0x27}, keyenvelope.PasskeySecretSize)
+	attestation := signedRegistrationAttestation(t, registration, key, credentialID, "https://money.example.test", true, prfResult)
+	if _, err := service.FinishPasskeyRegistration(ctx, serverAuthTestUserID, FinishPasskeyRegistrationInput{
+		CeremonyID: registration.CeremonyID, ClientKey: "client", Name: "Discoverable",
+		Password: []byte(registrationTestPassword), CredentialJSON: attestation, PRFResult: prfResult,
+	}, serverAuthTestNow); err != nil {
+		t.Fatal(err)
+	}
+	wrongBegin, err := service.BeginDiscoverablePasskeyLogin(ctx, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongAssertion := signedPrivacyAssertion(t, wrongBegin, store.records[0], key, "https://money.example.test", true)
+	if session, err := service.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{
+		CeremonyID: wrongBegin.CeremonyID, ClientKey: "client", CredentialJSON: wrongAssertion,
+		PRFResult: bytes.Repeat([]byte{0x28}, keyenvelope.PasskeySecretSize),
+	}, serverAuthTestNow); !errors.Is(err, ErrInvalidCredentials) || session != nil {
+		t.Fatalf("wrong PRF opened the vault: session=%v, err=%v", session, err)
+	}
+	if store.records[0].Credential.Authenticator.SignCount != 0 {
+		t.Fatal("failed login advanced the signature counter")
+	}
+
+	begin, err := service.BeginDiscoverablePasskeyLogin(ctx, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(begin.Options.Response.AllowedCredentials) != 0 || begin.Options.Response.UserVerification != protocol.VerificationRequired {
+		t.Fatal("discoverable login must not require an email or credential allowlist")
+	}
+	prf := browserPRFInputs(t, begin.Options.Response.Extensions)
+	salt, err := base64.RawURLEncoding.DecodeString(prf.Eval["first"])
+	if err != nil || len(prf.EvalByCredential) != 0 || !bytes.Equal(salt, discoverablePRFSalt[:]) {
+		t.Fatal("discoverable login did not evaluate the registration PRF input")
+	}
+	assertion := signedPrivacyAssertion(t, begin, store.records[0], key, "https://money.example.test", true)
+	session, err := service.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{
+		CeremonyID: begin.CeremonyID, ClientKey: "client", CredentialJSON: assertion, PRFResult: prfResult,
+	}, serverAuthTestNow)
+	if err != nil || session == nil || session.UserID != serverAuthTestUserID {
+		t.Fatalf("single-assertion login failed: session=%v, err=%v", session, err)
+	}
+	if store.records[0].Credential.Authenticator.SignCount != 1 {
+		t.Fatal("single-assertion login did not persist the signature counter")
+	}
+	replayBegin, err := service.BeginDiscoverablePasskeyLogin(ctx, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayAssertion := signedPrivacyAssertion(t, replayBegin, store.records[0], key, "https://money.example.test", true)
+	if replaySession, err := service.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{
+		CeremonyID: replayBegin.CeremonyID, ClientKey: "client", CredentialJSON: replayAssertion, PRFResult: prfResult,
+	}, serverAuthTestNow); !errors.Is(err, ErrInvalidCredentials) || replaySession != nil {
+		t.Fatalf("replayed counter opened the vault: session=%v, err=%v", replaySession, err)
+	}
+}
+
 func TestPasskeyRegistrationAssertionWithoutCreateTimePRF(t *testing.T) {
 	dek := bytes.Repeat([]byte{37}, keyenvelope.DEKSize)
 	service, store := newRegistrationTestService(t, dek)
@@ -280,10 +356,9 @@ func TestPasskeyRegistrationAssertionWithoutCreateTimePRF(t *testing.T) {
 	if bytes.Equal(assertBegin.Options.Response.Challenge, begin.Options.Response.Challenge) {
 		t.Fatal("registration assertion reused the creation challenge")
 	}
-	encodedID := base64.RawURLEncoding.EncodeToString(credentialID)
 	prf := browserPRFInputs(t, assertBegin.Options.Response.Extensions)
-	salt, err := base64.RawURLEncoding.DecodeString(prf.EvalByCredential[encodedID]["first"])
-	if err != nil || len(prf.EvalByCredential) != 1 || !bytes.Equal(salt, registrationSalt) {
+	salt, err := base64.RawURLEncoding.DecodeString(prf.Eval["first"])
+	if err != nil || len(prf.EvalByCredential) != 0 || !bytes.Equal(salt, registrationSalt) {
 		t.Fatal("assertion did not reuse the registration PRF salt")
 	}
 

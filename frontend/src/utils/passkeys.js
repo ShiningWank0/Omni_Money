@@ -40,6 +40,9 @@ function parseRequestOptions(options) {
   const parsed = structuredClone(options)
   parsed.challenge = base64urlToBytes(parsed.challenge)
   parsed.allowCredentials = (parsed.allowCredentials || []).map(item => ({ ...item, id: base64urlToBytes(item.id) }))
+  const evaluation = parsed.extensions?.prf?.eval
+  if (typeof evaluation?.first === 'string') evaluation.first = base64urlToBytes(evaluation.first)
+  if (typeof evaluation?.second === 'string') evaluation.second = base64urlToBytes(evaluation.second)
   const evalByCredential = parsed.extensions?.prf?.evalByCredential || {}
   for (const values of Object.values(evalByCredential)) {
     if (typeof values?.first === 'string') values.first = base64urlToBytes(values.first)

@@ -308,6 +308,7 @@ func handleServerLogout(dependencies ServerDependencies) http.HandlerFunc {
 			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		middleware.ReleaseRequestVaultLease(r.Context())
 		if session, ok := middleware.SessionFromContext(r.Context()); ok {
 			dependencies.Sessions.DeleteSession(session.ID)
 		}

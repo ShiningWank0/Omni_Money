@@ -180,6 +180,18 @@ test('passkey authentication decodes per-credential PRF salts', async () => {
   assert.equal(result.prfResult.byteLength, 32)
 })
 
+test('discoverable passkey authentication decodes a PRF input without a credential list', async () => {
+  const result = await authenticatePasskey({ publicKey: {
+    challenge: 'AQID',
+    allowCredentials: [],
+    extensions: { prf: { eval: { first: 'CgsM' } } }
+  } })
+
+  assert.deepEqual(getOptions.publicKey.allowCredentials, [])
+  assert.deepEqual([...getOptions.publicKey.extensions.prf.eval.first], [10, 11, 12])
+  assert.equal(result.prfResult.byteLength, 32)
+})
+
 test('passkeys fail closed outside a secure context', async () => {
   window.isSecureContext = false
   assert.equal(passkeysSupported(), false)

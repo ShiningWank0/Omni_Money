@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -24,9 +25,15 @@ const (
 	passkeyCeremonyRegistration          = "registration"
 	passkeyCeremonyRegistrationAssertion = "registration_assertion"
 	passkeyCeremonyLogin                 = "login"
+	passkeyCeremonyDiscoverableLogin     = "discoverable_login"
 	passkeyCeremonyReauth                = "reauthentication"
 	maxPasskeyCeremonies                 = 4096
 )
+
+// PRF outputs are bound to the credential. A stable, public, domain-separated
+// input lets the browser evaluate the PRF before the user has been identified.
+// The result remains secret and is required to unwrap the vault key.
+var discoverablePRFSalt = sha256.Sum256([]byte("Omni Money WebAuthn PRF discoverable login v1"))
 
 var (
 	ErrPasskeysUnavailable = errors.New("passkey authentication is not configured")
@@ -112,15 +119,12 @@ func (s *Service) BeginPasskeyRegistration(ctx context.Context, userID, clientKe
 	if user.user.State != control.UserActive {
 		return PasskeyRegistrationBegin{}, ErrInvalidCredentials
 	}
-	prfSalt, err := randomPasskeyBytes(keyenvelope.PasskeySecretSize)
-	if err != nil {
-		return PasskeyRegistrationBegin{}, err
-	}
+	prfSalt := bytes.Clone(discoverablePRFSalt[:])
 	creation, session, err := s.webauthn.BeginRegistration(
 		user,
-		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementPreferred),
+		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
 		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
-			ResidentKey:      protocol.ResidentKeyRequirementPreferred,
+			ResidentKey:      protocol.ResidentKeyRequirementRequired,
 			UserVerification: protocol.VerificationRequired,
 		}),
 		webauthn.WithConveyancePreference(protocol.PreferNoAttestation),
@@ -249,15 +253,12 @@ func (s *Service) BeginPasskeyRegistrationAssertion(
 		unlock()
 		return PasskeyLoginBegin{}, ErrPasskeyCeremony
 	}
-	evalByCredential := map[string]protocol.PRFValues{
-		base64.RawURLEncoding.EncodeToString(credential.ID): {
-			First: protocol.URLEncodedBase64(bytes.Clone(ceremony.PRFSalt)),
-		},
-	}
 	assertion, session, err := s.webauthn.BeginLogin(
 		webAuthnUser{user: user.user, credentials: []webauthn.Credential{*credential}},
 		webauthn.WithUserVerification(protocol.VerificationRequired),
-		webauthn.WithAssertionExtensions(webauthn.WithExtensionPRFByCredential(evalByCredential, nil)),
+		webauthn.WithAssertionExtensions(webauthn.WithExtensionPRF(protocol.PRFValues{
+			First: protocol.URLEncodedBase64(bytes.Clone(ceremony.PRFSalt)),
+		})),
 	)
 	unlock()
 	if err != nil {
@@ -350,6 +351,128 @@ func (s *Service) BeginPasskeyLogin(ctx context.Context, email, clientKey string
 		return PasskeyLoginBegin{}, ErrPasskeysUnavailable
 	}
 	return s.beginPrivatePasskeyLogin(ctx, email, clientKey)
+}
+
+// BeginDiscoverablePasskeyLogin does not need an account name. Every newly
+// registered passkey uses the same public PRF input, so the browser can return
+// the vault-unwrapping result in the credential selection assertion itself.
+func (s *Service) BeginDiscoverablePasskeyLogin(_ context.Context, clientKey string) (PasskeyLoginBegin, error) {
+	if !s.passkeysReady() {
+		return PasskeyLoginBegin{}, ErrPasskeysUnavailable
+	}
+	assertion, session, err := s.webauthn.BeginDiscoverableLogin(
+		webauthn.WithUserVerification(protocol.VerificationRequired),
+		webauthn.WithAssertionExtensions(webauthn.WithExtensionPRF(protocol.PRFValues{
+			First: protocol.URLEncodedBase64(discoverablePRFSalt[:]),
+		})),
+	)
+	if err != nil {
+		return PasskeyLoginBegin{}, fmt.Errorf("begin discoverable passkey login: %w", err)
+	}
+	ceremonyID, err := s.storePasskeyCeremony(passkeyCeremony{
+		Kind: passkeyCeremonyDiscoverableLogin, ClientKey: clientKey, Session: *session,
+	})
+	if err != nil {
+		return PasskeyLoginBegin{}, err
+	}
+	return PasskeyLoginBegin{CeremonyID: ceremonyID, Options: assertion}, nil
+}
+
+func (s *Service) FinishDiscoverablePasskeyLogin(ctx context.Context, input FinishPasskeyLoginInput, now time.Time) (*middleware.Session, error) {
+	if !s.passkeysReady() {
+		return nil, ErrPasskeysUnavailable
+	}
+	started := time.Now()
+	session, err := s.finishDiscoverablePasskeyLogin(ctx, input, now)
+	if err != nil {
+		holdPasskeyLoginFloor(ctx, started)
+	}
+	return session, err
+}
+
+func (s *Service) finishDiscoverablePasskeyLogin(ctx context.Context, input FinishPasskeyLoginInput, now time.Time) (result *middleware.Session, err error) {
+	ceremony, err := s.takePasskeyCeremony(input.CeremonyID, passkeyCeremonyDiscoverableLogin, input.ClientKey)
+	if err != nil || len(input.PRFResult) != keyenvelope.PasskeySecretSize {
+		return nil, ErrInvalidCredentials
+	}
+	parsed, err := protocol.ParseCredentialRequestResponseBytes(input.CredentialJSON)
+	if err != nil || len(parsed.Response.UserHandle) == 0 {
+		return nil, ErrInvalidCredentials
+	}
+	userID := string(parsed.Response.UserHandle)
+	unlock, err := s.lockAccount("user:" + userID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	adapter, records, err := s.loadPasskeyUser(ctx, userID)
+	if err != nil || adapter.user.State != control.UserActive {
+		return nil, ErrInvalidCredentials
+	}
+	throttleKey := LoginThrottleKey(adapter.user.Email)
+	if retryAfter, throttleErr := s.checkLoginThrottle(ctx, throttleKey, now); throttleErr != nil {
+		return nil, throttleErr
+	} else if retryAfter > 0 {
+		return nil, &LoginThrottledError{RetryAfter: retryAfter}
+	}
+	defer func() {
+		switch {
+		case err == nil:
+			s.clearLoginFailures(ctx, throttleKey)
+		case errors.Is(err, ErrInvalidCredentials):
+			s.recordLoginFailure(ctx, throttleKey, now)
+		}
+	}()
+	var expected *control.PasskeyCredential
+	for index := range records {
+		if bytes.Equal(records[index].ID, parsed.RawID) && bytes.Equal(records[index].PRFSalt, discoverablePRFSalt[:]) {
+			expected = &records[index]
+			break
+		}
+	}
+	if expected == nil {
+		return nil, ErrInvalidCredentials
+	}
+	handler := func(rawID, userHandle []byte) (webauthn.User, error) {
+		if !bytes.Equal(userHandle, []byte(userID)) || !bytes.Equal(rawID, expected.ID) {
+			return nil, ErrInvalidCredentials
+		}
+		return adapter, nil
+	}
+	_, updated, err := s.webauthn.ValidatePasskeyLogin(handler, ceremony.Session, parsed)
+	if err != nil || updated == nil || updated.Authenticator.CloneWarning || !bytes.Equal(updated.ID, expected.ID) {
+		return nil, ErrInvalidCredentials
+	}
+	vaultID, err := s.store.LookupVaultID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	dek, err := keyenvelope.UnwrapWithPasskey(&expected.VaultEnvelope, input.PRFResult,
+		keyenvelope.Context{UserID: userID, VaultID: vaultID})
+	if err != nil {
+		clear(dek)
+		return nil, ErrInvalidCredentials
+	}
+	defer clear(dek)
+	key, err := securedb.NewRawKey(dek)
+	if err != nil {
+		return nil, err
+	}
+	defer key.Destroy()
+	if err := s.passkeyStore.RecordSuccessfulPasskeyUse(ctx, *expected, *updated, now, true); err != nil {
+		if errors.Is(err, control.ErrCredentialConflict) || errors.Is(err, control.ErrForbidden) {
+			return nil, ErrInvalidCredentials
+		}
+		return nil, err
+	}
+	session, err := s.openSession(adapter.user, vaultID, &key)
+	if err != nil {
+		return nil, fmt.Errorf("open discoverable passkey vault session: %w", err)
+	}
+	if session == nil {
+		return nil, errors.New("open discoverable passkey vault session returned no session")
+	}
+	return session, nil
 }
 
 func (s *Service) BeginPasskeyReauthentication(ctx context.Context, userID, clientKey string) (PasskeyLoginBegin, error) {

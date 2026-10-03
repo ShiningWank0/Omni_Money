@@ -213,6 +213,21 @@ describe('PasskeySettingsModal', () => {
     expect(wrapper.get('[role="alert"]').text()).toContain('passkey registration failed')
   })
 
+  it('does not report registration failure when the list refresh fails afterward', async () => {
+    api.listPasskeys.mockResolvedValueOnce([])
+    api.listPasskeys.mockRejectedValueOnce(new Error('refresh failed'))
+    const wrapper = await mountPasskey()
+    await wrapper.get('input[type="text"]').setValue('MacBook')
+    await wrapper.get('input[type="password"]').setValue('correct horse battery staple')
+
+    await wrapper.get('.registration-form').trigger('submit')
+    await flushPromises()
+
+    expect(api.registerPasskey).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(wrapper.get('[role="status"].info').text()).toContain('パスキーを登録しました')
+  })
+
   it('clears the registration password before the post-registration list refresh completes', async () => {
     const refresh = deferred()
     api.listPasskeys.mockResolvedValueOnce([])
