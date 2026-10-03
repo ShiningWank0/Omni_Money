@@ -9,7 +9,7 @@
     />
     <template v-else>
     <div v-if="idleScreenLocked" class="idle-lock-curtain" role="status" aria-live="polite">
-      <div class="idle-lock-message">{{ isWailsMode ? '保管庫を保護しています…' : '無操作タイムアウトのため画面をロックしました' }}</div>
+      <div class="idle-lock-message">{{ logoutInProgress ? 'ログアウトしています…' : isWailsMode ? '保管庫を保護しています…' : '無操作タイムアウトのため画面をロックしました' }}</div>
     </div>
     <!-- ヘッダーエリア -->
     <div class="card header">
@@ -379,6 +379,7 @@ import {
   getBalanceHistoryFiltered,
   isWailsMode,
   logout as apiLogout,
+  waitForPendingWrites,
   getAuthStatus,
   getDesktopVaultStatus,
   lockDesktopVault,
@@ -427,6 +428,7 @@ const serverFeatures = ref({ admin: false, ai: false, snapshots: isWailsMode, pa
 const canUsePasskeyReauth = computed(() => !isWailsMode && serverFeatures.value.passkeys && passkeysSupported())
 const currentServerUserId = ref('')
 const idleScreenLocked = ref(false)
+const logoutInProgress = ref(false)
 const desktopVaultStatus = ref(null)
 const desktopVaultLoading = ref(isWailsMode)
 const desktopVaultError = ref('')
@@ -868,14 +870,23 @@ function handleCredentialSignedOut(outcome = {}) {
 }
 
 async function logout() {
+  if (logoutInProgress.value) return
   showMenu.value = false
+  logoutInProgress.value = true
+  idleLockInProgress = true
+  idleScreenLocked.value = true
   try {
+    if (!await waitForPendingWrites()) {
+      throw new Error('保存処理を確認できませんでした')
+    }
     await apiLogout()
-  } catch (e) {
-    console.error('ログアウトエラー:', e)
-  } finally {
     clearSensitiveStateForIdle()
     window.location.replace('/login')
+  } catch (error) {
+    idleScreenLocked.value = false
+    idleLockInProgress = false
+    logoutInProgress.value = false
+    showToast(error?.message || 'ログアウトを確認できませんでした', 'error', 5000)
   }
 }
 

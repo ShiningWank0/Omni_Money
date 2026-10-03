@@ -71,6 +71,28 @@ test('keepalive accepts only 204 and retains best-effort no-navigation behavior'
   await assert.rejects(api.keepAlive(), error => error.code === 'invalid_response')
 })
 
+test('logout wait does not discard an in-flight financial write', async () => {
+  let finishWrite
+  globalThis.fetch = () => new Promise(resolve => { finishWrite = resolve })
+  const write = api.apiFetch('/api/transactions', { method: 'POST' })
+  let waitFinished = false
+  const pending = api.waitForPendingWrites().then(result => {
+    waitFinished = true
+    return result
+  })
+  await Promise.resolve()
+  assert.equal(waitFinished, false)
+  finishWrite(Response.json({ success: true }))
+  await write
+  assert.equal(await pending, true)
+
+  globalThis.fetch = async () => Response.json({ error: 'not saved' }, { status: 500 })
+  const failedWrite = api.apiFetch('/api/transactions', { method: 'POST' })
+  const failedPending = api.waitForPendingWrites()
+  await failedWrite
+  assert.equal(await failedPending, false)
+})
+
 test('credential response loss stays ambiguous while definitive rejection remains marked', async () => {
   const input = { currentPassword: 'current', newPassword: 'new', revokePasskeys: false }
   for (const status of [200, 503]) {

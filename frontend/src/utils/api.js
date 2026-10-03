@@ -47,6 +47,8 @@ async function desktopFinancialCall(invoke) {
 // cookie that JavaScript can read.
 let csrfToken = null
 let pendingReauthentication = null
+const pendingWriteRequests = new Set()
+let waitingForLogoutWrites = false
 
 // Restore revokes the server session. Callers must also discard this
 // in-memory bearer of the CSRF capability before navigating to login.
@@ -108,7 +110,37 @@ function getPathname(url) {
   }
 }
 
-export async function apiFetch(url, options = {}, config = {}) {
+// Logout waits for already-submitted writes to receive a server response.
+// Authentication traffic is excluded so logout never waits on itself.
+export async function waitForPendingWrites() {
+  if (pendingReauthentication) return false
+  waitingForLogoutWrites = true
+  try {
+    const results = []
+    while (pendingWriteRequests.size > 0) {
+      results.push(...await Promise.allSettled([...pendingWriteRequests]))
+    }
+    return results.every(result => result.status === 'fulfilled' && result.value.ok)
+  } finally {
+    waitingForLogoutWrites = false
+  }
+}
+
+export function apiFetch(url, options = {}, config = {}) {
+  const request = apiFetchCore(url, options, config)
+  const method = (options.method || 'GET').toUpperCase()
+  const path = getPathname(url)
+  if (isUnsafeMethod(method) && path.startsWith('/api/') && !path.startsWith('/api/auth/')) {
+    pendingWriteRequests.add(request)
+    request.then(
+      () => pendingWriteRequests.delete(request),
+      () => pendingWriteRequests.delete(request)
+    )
+  }
+  return request
+}
+
+async function apiFetchCore(url, options = {}, config = {}) {
   const { skipAuthRedirect = false, skipReauth = false } = config
   const method = (options.method || 'GET').toUpperCase()
   const headers = new Headers(options.headers || {})
@@ -134,6 +166,7 @@ export async function apiFetch(url, options = {}, config = {}) {
 
   if (!isWailsMode && !skipReauth && response.status === 428 &&
       !['/api/auth/login', '/api/auth/reauth', '/api/auth/status'].includes(path)) {
+    if (waitingForLogoutWrites) return response
     await requestReauthentication()
     // The original request body is retained in `options` (all current API
     // callers use replayable strings or Blobs).  Retry exactly once after fresh auth.
@@ -278,18 +311,14 @@ export async function login(email, password) {
   return data
 }
 
-export async function loginWithPasskey(email) {
+export async function loginWithPasskey() {
   if (isWails) throw new Error('パスキー認証はサーバーモード専用です')
-  const begin = await apiFetch('/api/auth/passkeys/login/begin', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email })
-  }, { skipAuthRedirect: true, skipReauth: true })
+  const begin = await apiFetch('/api/auth/passkeys/discover/begin', { method: 'POST' }, { skipAuthRedirect: true, skipReauth: true })
   await throwIfNotOk(begin, 'パスキー認証を開始できませんでした')
   const ceremony = await expectJSON(begin, schema.ceremony)
   const assertion = await authenticatePasskey(ceremony.options)
   try {
-    const finish = await apiFetch('/api/auth/passkeys/login/finish', {
+    const finish = await apiFetch('/api/auth/passkeys/discover/finish', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -344,10 +373,8 @@ export async function registerPasskey({ name, password }) {
     if (created.prfResult) {
       return await finishPasskeyRegistration('/api/auth/passkeys/register/finish', ceremony.ceremony_id, created.credential, created.prfResult, name, password)
     }
-    if (!created.prfEnabled) {
-      throw new Error(created.prfPresent
-        ? 'このパスキーはOmni MoneyのVault復号に必要なPRF機能へ対応していません。PRF対応のパスキー保存先で登録してください'
-        : 'このパスキー保存先はPRF機能の結果を返さないため、Vault復号用のパスキーとして登録できません')
+    if (created.prfPresent && !created.prfEnabled) {
+      throw new Error('このパスキーはVault復号に必要なPRF機能へ対応していません。保存先に作成されたパスキーはOmni Moneyに登録されていないため、保存先から削除してください')
     }
     // prf.enabled=true でも作成時に結果を返さない認証器向けに、同じ salt で
     // 追加 assertion を実行してから登録を完了する。
@@ -358,7 +385,14 @@ export async function registerPasskey({ name, password }) {
     }, { skipReauth: true })
     await throwIfNotOk(assertionBegin, 'パスキー登録の追加確認を開始できませんでした')
     const assertionCeremony = await expectJSON(assertionBegin, schema.ceremony)
-    stepUp = await assertPasskeyPRF(assertionCeremony.options)
+    try {
+      stepUp = await assertPasskeyPRF(assertionCeremony.options)
+    } catch (error) {
+      if (error?.message?.includes('PRF出力')) {
+        throw new Error('パスキーのPRF出力を取得できず、Omni Moneyへの登録は完了していません。保存先に作成されたパスキーを削除してください', { cause: error })
+      }
+      throw error
+    }
     return await finishPasskeyRegistration('/api/auth/passkeys/register/assert/finish', assertionCeremony.ceremony_id, stepUp.credential, stepUp.prfResult, name, password)
   } finally {
     created.prfResult?.fill(0)

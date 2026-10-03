@@ -93,6 +93,48 @@ func handlePasskeyLoginFinish(dependencies ServerDependencies, passkeys ServerPa
 	}
 }
 
+func handleDiscoverablePasskeyLoginBegin(passkeys ServerPasskeyService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		result, err := passkeys.BeginDiscoverablePasskeyLogin(r.Context(), middleware.ClientIPFromRequest(r))
+		if err != nil {
+			auditAuth("server_passkey_login_failed", middleware.ClientIPFromRequest(r), "discover_begin_rejected")
+			writePasskeyError(w, err, true)
+			return
+		}
+		jsonResponse(w, result, http.StatusOK)
+	}
+}
+
+func handleDiscoverablePasskeyLoginFinish(dependencies ServerDependencies, passkeys ServerPasskeyService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var request passkeyFinishRequest
+		if !decodeStrictServerJSONLimit(w, r, &request, maxPasskeyRequestBody) {
+			return
+		}
+		defer request.clear()
+		session, err := passkeys.FinishDiscoverablePasskeyLogin(r.Context(), serverauth.FinishPasskeyLoginInput{
+			CeremonyID: request.CeremonyID, ClientKey: middleware.ClientIPFromRequest(r),
+			CredentialJSON: request.CredentialJSON, PRFResult: request.PRFResult,
+		}, dependencies.now())
+		if err != nil {
+			auditAuth("server_passkey_login_failed", middleware.ClientIPFromRequest(r), "discover_finish_rejected")
+			writePasskeyError(w, err, true)
+			return
+		}
+		dependencies.Sessions.SetSessionCookie(w, r, session)
+		auditAuth("server_passkey_login_succeeded", middleware.ClientIPFromRequest(r), "")
+		writeServerAuthenticatedResponse(w, session, "パスキーでログインしました")
+	}
+}
+
 func handlePasskeyRegistrationBegin(dependencies ServerDependencies, passkeys ServerPasskeyService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

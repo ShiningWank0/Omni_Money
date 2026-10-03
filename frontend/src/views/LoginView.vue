@@ -14,6 +14,14 @@
           <button type="button" :class="{ active: mode === 'reset' }" @click="setMode('reset')">再設定を完了</button>
         </div>
 
+        <div v-if="mode === 'login' && !setupRequired" class="passkey-login-entry">
+          <button type="button" class="passkey-button" :disabled="loading || !canUsePasskeys" @click="handlePasskeyLogin">
+            パスキーでログイン
+          </button>
+          <p v-if="!canUsePasskeys" class="field-hint passkey-hint">パスキーはHTTPS接続の対応ブラウザで利用できます。</p>
+          <div class="auth-divider"><span>または</span></div>
+        </div>
+
         <form @submit.prevent="handleSubmit">
           <div v-if="errorMessage" class="error-message" role="alert">{{ errorMessage }}</div>
           <div v-if="infoMessage" class="info-message" role="status">{{ infoMessage }}</div>
@@ -84,15 +92,6 @@
             <span>{{ submitLabel }}</span>
           </button>
 
-          <template v-if="mode === 'login' && !setupRequired">
-            <div class="auth-divider"><span>または</span></div>
-            <button type="button" class="passkey-button" :disabled="loading || !canUsePasskeys" @click="handlePasskeyLogin">
-              パスキーでログイン
-            </button>
-            <p v-if="!canUsePasskeys" class="field-hint passkey-hint">
-              パスキーはHTTPS接続の対応ブラウザで利用できます。
-            </p>
-          </template>
         </form>
       </div>
     </div>
@@ -308,15 +307,11 @@ async function handleSubmit() {
 }
 
 async function handlePasskeyLogin() {
-  if (!email.value.trim()) {
-    errorMessage.value = 'メールアドレスを入力してください'
-    return
-  }
   loading.value = true
   errorMessage.value = ''
   infoMessage.value = ''
   try {
-    await loginWithPasskey(email.value.trim())
+    await loginWithPasskey()
     forceLoginRequired = false
     window.location.href = '/'
   } catch (error) {
