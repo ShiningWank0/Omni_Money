@@ -49,7 +49,6 @@
 
       <section class="admin-section" aria-labelledby="capabilities-title">
         <div class="section-title-row"><h3 id="capabilities-title">発行済みtoken</h3><button type="button" class="secondary" :disabled="busy" @click="loadCapabilities">更新</button></div>
-        <p>token本体やhashは一覧へ表示しません。pendingのtokenだけを必要に応じて取り消せます。</p>
         <h4>招待</h4>
         <ul class="capability-list">
           <li v-for="item in invitations" :key="item.id"><span>{{ item.email }} / {{ stateLabel(item.state) }} / 期限 {{ formatDate(item.expires_at) }}</span><button v-if="item.state === 'pending'" type="button" class="danger" :disabled="busy || Boolean(issuedToken)" @click="revokeInvitation(item)">取消</button></li>
@@ -96,12 +95,17 @@
           </table>
         </div>
       </section>
+      <section class="admin-section app-info" aria-labelledby="app-info-title">
+        <h3 id="app-info-title">情報</h3>
+        <p>バージョン: {{ buildInfoLabel }}</p>
+      </section>
     </section>
   </div>
 </template>
 
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { buildInfoLabel } from '../utils/buildInfo'
 import {
   createServerInvitation,
   createServerPasswordReset,
@@ -313,6 +317,7 @@ td span { display: block; color: #666; overflow-wrap: anywhere; }
 .message.error { color: #a51d1d; background: #fff0f0; }
 .message.info { color: #176b2c; background: #edfff1; }
 .loading { margin-top: 0.75rem; }
+.app-info p { margin: 0.75rem 0 0; color: #555; }
 .capability-list { display:grid; gap:.5rem; padding:0; list-style:none; }.capability-list li { display:flex; align-items:center; justify-content:space-between; gap:.75rem; padding:.5rem; border-bottom:1px solid #e5e7f2; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (max-width: 760px) { .invite-form { grid-template-columns: 1fr; } .admin-card { padding: 1rem; } }

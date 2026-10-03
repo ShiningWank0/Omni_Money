@@ -17,8 +17,6 @@
           </select>
         </div>
       </div>
-      <p class="graph-gesture-hint">縦ドラッグで表示範囲を移動、ホイール・ピンチで拡大縮小できます</p>
-      <p class="graph-scroll-hint" :class="{ 'is-hidden': !isHorizontallyScrollable }">グラフは左右にスクロールできます</p>
       <div ref="chartViewport" class="graph-scroll" :class="{ 'is-dragging': isDraggingY }" tabindex="0" role="region" aria-label="残高推移グラフ" @scroll="onChartScroll" @wheel="onChartWheel" @pointerdown="startYAxisPan" @pointermove="moveYAxisPan" @pointerup="stopYAxisPan" @pointercancel="stopYAxisPan" @lostpointercapture="stopYAxisPan" @touchstart="startTouchGesture" @touchmove="moveTouchGesture" @touchend="endTouchGesture" @touchcancel="endTouchGesture">
         <div class="graph-track" :style="virtualChartWidth ? { width: virtualChartWidth } : null">
           <div class="graph-container" :style="chartWindowWidth ? { width: chartWindowWidth } : null">
@@ -618,20 +616,6 @@ onUnmounted(() => {
   left: 0;
   background: #f8fafc;
   border-radius: 8px;
-}
-
-.graph-scroll-hint {
-  margin: 0 0 .4rem;
-  color: #5e6664;
-  font-size: .8rem;
-}
-
-.graph-scroll-hint.is-hidden { visibility: hidden; }
-
-.graph-gesture-hint {
-  margin: 0 0 .25rem;
-  color: #5e6664;
-  font-size: .8rem;
 }
 
 .graph-empty {

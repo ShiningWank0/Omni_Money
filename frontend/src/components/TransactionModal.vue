@@ -104,7 +104,6 @@
             <label>紐付け:</label>
             <div class="link-section">
               <div class="link-hint">{{ linkHint }}</div>
-              <div class="link-hint">紐付けの変更は「更新」を押した時に確定します。</div>
               <div v-if="linkedTransactions.length > 0" class="linked-list">
                 <div v-for="lt in linkedTransactions" :key="lt.id" class="linked-item">
                   <div class="linked-info">
@@ -175,7 +174,6 @@
             <div class="image-upload-area" :class="{ 'drag-over': isDragOver }"
               @dragover.prevent="onImageDragOver" @dragleave="isDragOver = false" @drop.prevent="onImageDrop">
               <button type="button" class="image-add-button" :disabled="imagesLoading || imagesError" @click="triggerFileSelect">画像を追加</button>
-              <span>またはここにドラッグ＆ドロップ</span>
               <small>JPEG / PNG / GIF / WebP、1枚5 MiB・最大10枚</small>
               <input ref="fileInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple
                 aria-label="追加する画像を選択" @change="onFileSelect" hidden>
@@ -836,7 +834,6 @@ onBeforeUnmount(() => {
   border-color: rgba(106, 168, 79, 0.8);
   background: rgba(106, 168, 79, 0.08);
 }
-.image-upload-area span,
 .image-upload-area small { color: #5e6664; font-size: .8rem; }
 .image-add-button {
   border: 0;

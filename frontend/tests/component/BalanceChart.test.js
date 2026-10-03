@@ -76,14 +76,12 @@ it('sizes the chart from distinct transaction dates instead of viewport height',
   await wrapper.vm.$nextTick()
   expect(chartWidth(wrapper)).toBe('375px')
   expect(wrapper.get('.graph-container').element.style.width).toBe('375px')
-  expect(wrapper.get('.graph-scroll-hint').classes()).toContain('is-hidden')
 
   // 1〜2日分の点では縦長画面だけを理由に横スクロールしない。
   await wrapper.setProps({ balanceHistory: historyFor([recentDate(1), recentDate(0)]) })
   notifyResize()
   await wrapper.vm.$nextTick()
   expect(chartWidth(wrapper)).toBe('375px')
-  expect(wrapper.get('.graph-scroll-hint').classes()).toContain('is-hidden')
 
   // スマホ幅で約5日分はスクロールなしで見える。
   const fiveDates = [40, 30, 20, 10, 0].map(recentDate)
@@ -91,7 +89,6 @@ it('sizes the chart from distinct transaction dates instead of viewport height',
   notifyResize()
   await wrapper.vm.$nextTick()
   expect(chartWidth(wrapper)).toBe('375px')
-  expect(wrapper.get('.graph-scroll-hint').classes()).toContain('is-hidden')
 
   // 点が増えたときだけ点間隔に応じて横スクロールになる。
   const tenDates = Array.from({ length: 10 }, (_, index) => recentDate(90 - index * 10))
@@ -101,7 +98,6 @@ it('sizes the chart from distinct transaction dates instead of viewport height',
   await wrapper.vm.$nextTick()
   await wrapper.vm.$nextTick()
   expect(chartWidth(wrapper)).toBe('620px')
-  expect(wrapper.get('.graph-scroll-hint').classes()).not.toContain('is-hidden')
   expect(wrapper.get('.graph-scroll').element.scrollLeft).toBe(245)
   expect(Number(wrapper.get('.line-chart').attributes('data-x-max'))).toBe(9)
 
@@ -110,7 +106,6 @@ it('sizes the chart from distinct transaction dates instead of viewport height',
   notifyResize()
   await wrapper.vm.$nextTick()
   expect(chartWidth(wrapper)).toBe('1400px')
-  expect(wrapper.get('.graph-scroll-hint').classes()).toContain('is-hidden')
   wrapper.unmount()
 })
 
@@ -136,7 +131,6 @@ it('keeps every transaction date at the minimum spacing with a viewport-sized ca
   )
   expect(wrapper.get('.line-chart').attributes('data-first-amount')).toBe('100')
   expect(wrapper.get('.line-chart').attributes('data-tooltip-date')).toBe(dates[0])
-  expect(wrapper.get('.graph-scroll-hint').classes()).not.toContain('is-hidden')
   wrapper.unmount()
 
   // PC幅でも同じ点間隔を使い、最初は最新側を表示する。
@@ -157,12 +151,10 @@ it('recalculates the required width when the display period changes', async () =
   notifyResize()
   await wrapper.vm.$nextTick()
   expect(chartWidth(wrapper)).toBe('740px')
-  expect(wrapper.get('.graph-scroll-hint').classes()).not.toContain('is-hidden')
 
   await wrapper.get('#balance-chart-period').setValue('90')
   await wrapper.vm.$nextTick()
   expect(chartWidth(wrapper)).toBe('375px')
-  expect(wrapper.get('.graph-scroll-hint').classes()).toContain('is-hidden')
   wrapper.unmount()
 })
 

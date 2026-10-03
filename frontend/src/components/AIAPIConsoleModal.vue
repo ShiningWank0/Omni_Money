@@ -6,13 +6,6 @@
         <button class="close-btn" type="button" @click="$emit('close')">&times;</button>
       </div>
 
-      <div class="security-note">
-        <strong>管理者向けAPI入力画面</strong>
-        <p>送信内容は、通常Webのセッション認証を通過した後、サーバー内部からAI専用リスナーへ転送されます。AI用Bearer tokenはブラウザへ渡されません。</p>
-        <p>分析は既定で許可口座・期間内の集計だけを返します。取引明細やメモを含めるには、資格情報側の追加scopeが必要です。</p>
-        <p>ローカルLLMやクラウドLLMは、この画面へAPIキーを入力せず、別のローカル仲介プロセスからAI専用ポートを呼び出してください。</p>
-      </div>
-
       <div class="form-row">
         <label for="ai-operation">操作:</label>
         <select id="ai-operation" v-model="operation" :disabled="sending">
@@ -31,6 +24,7 @@
           autocomplete="off"
           :disabled="sending"
         ></textarea>
+        <p class="api-key-warning">APIキーは入力しないでください。</p>
       </div>
 
       <div class="button-row">
@@ -189,19 +183,7 @@ onBeforeUnmount(() => {
   font-size: 1.8rem;
 }
 
-.security-note {
-  margin-bottom: 1rem;
-  padding: 0.9rem;
-  border: 1px solid #b8c4ff;
-  border-radius: 10px;
-  background: #f3f5ff;
-  color: #333;
-  font-size: 0.9rem;
-}
-
-.security-note p {
-  margin: 0.35rem 0 0;
-}
+.api-key-warning { margin: 0.4rem 0 0; color: #8a2525; font-size: 0.85rem; }
 
 .form-row {
   margin-bottom: 1rem;

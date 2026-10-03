@@ -154,8 +154,6 @@
       </div>
     </div>
 
-    <BuildInfo />
-
     <TransactionDetailsModal
       v-if="viewingTransaction && !showAddTransactionModal"
       :transaction="viewingTransaction"
@@ -260,7 +258,6 @@
     <div v-if="showDesktopIdleSettings" class="reauth-overlay" @click.self="closeDesktopIdleSettings">
       <form class="reauth-card" role="dialog" aria-modal="true" aria-labelledby="desktop-idle-title" @submit.prevent="saveDesktopIdleSettings">
         <h3 id="desktop-idle-title">Desktop 自動ロック</h3>
-        <p class="reauth-description">操作がない状態が続いたときに、暗号化保管庫を自動的にロックします。</p>
         <label class="reauth-label" for="desktop-idle-minutes">無操作時間（5〜120分）</label>
         <input
           id="desktop-idle-minutes"
@@ -291,7 +288,6 @@
     <div v-if="showReauthModal" class="reauth-overlay" @click.self="cancelReauthentication">
       <div class="reauth-card" role="dialog" aria-modal="true" aria-labelledby="reauth-title">
         <h3 id="reauth-title">重要な操作の確認</h3>
-        <p class="reauth-description">ユーザー管理、一括取り込み・書き出し、復元など重要な操作を実行するため、パスワードまたは登録済みパスキーで確認してください。</p>
         <form @submit.prevent="submitReauthentication">
           <label class="reauth-label" for="reauth-password">パスワード</label>
           <input
@@ -342,7 +338,6 @@ import { ref, computed, defineAsyncComponent, onMounted, onBeforeUnmount, watch,
 import { useAppStore } from './store/index'
 import TransactionModal from './components/TransactionModal.vue'
 import DesktopVaultGate from './components/DesktopVaultGate.vue'
-import BuildInfo from './components/BuildInfo.vue'
 import { csvExportWarning } from './utils/csvSafety'
 import { isDesktopVaultUnlocked } from './utils/desktopVaultSafety'
 import {
@@ -1521,12 +1516,6 @@ onBeforeUnmount(() => {
 .reauth-card h3 {
   margin: 0 0 0.6rem;
   color: #333;
-}
-
-.reauth-description {
-  margin: 0 0 1.25rem;
-  color: #666;
-  font-size: 0.9rem;
 }
 
 .reauth-label {

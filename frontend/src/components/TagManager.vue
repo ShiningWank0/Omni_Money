@@ -5,7 +5,6 @@
         <h3>タグ管理</h3>
         <button type="button" class="modal-close" aria-label="閉じる" @click="$emit('close')">×</button>
       </div>
-      <p class="tag-manager-help">タグ名を変更したり、不要なタグ（子タグを含む）を削除できます。</p>
       <div v-if="errorMessage" class="form-error" role="alert">{{ errorMessage }}</div>
       <div v-if="rows.length === 0" class="tag-empty">タグはまだありません。</div>
       <div v-for="row in rows" :key="row.id" class="tag-manager-row" :style="{ paddingLeft: `${row.depth * 20 + 8}px` }">
@@ -97,7 +96,6 @@ async function remove(row) {
 .tag-manager-header { display: flex; align-items: center; justify-content: space-between; }
 .tag-manager-header h3 { margin: 0; }
 .modal-close { border: 0; background: transparent; font-size: 1.5rem; cursor: pointer; }
-.tag-manager-help { color: #5d6570; font-size: 0.9rem; }
 .tag-manager-row { display: flex; align-items: center; gap: 8px; min-height: 44px; border-bottom: 1px solid #e6e9ef; }
 .tag-name-input { flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid #cfd5dd; border-radius: 5px; }
 .tag-level { color: #687386; font-size: 0.8rem; width: 28px; }
