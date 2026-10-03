@@ -17,7 +17,7 @@
             {{ displayText }} ▼
           </button>
           <div v-if="showDropdown" class="select-dropdown">
-            <div class="dropdown-hint">{{ dropdownHint }}</div>
+            <div v-if="dropdownHint" class="dropdown-hint">{{ dropdownHint }}</div>
             <label v-for="item in fundItems" :key="item" class="dropdown-item"
               :class="{ selected: localSelected.includes(item) }">
               <input :disabled="saving" type="checkbox" :checked="localSelected.includes(item)" @change="toggleItem(item)">
@@ -50,7 +50,7 @@ import { ref, computed, onMounted } from 'vue'
 const props = defineProps({
   title: { type: String, default: 'クレジットカード設定' },
   itemLabel: { type: String, default: 'クレジットカード項目' },
-  dropdownHint: { type: String, default: '利用可能な資金項目から選択してください' },
+  dropdownHint: { type: String, default: '' },
   infoLines: {
     type: Array,
     default: () => [
