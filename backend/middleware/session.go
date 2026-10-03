@@ -1116,7 +1116,8 @@ func isPublicServerAuthRequest(r *http.Request) bool {
 		return true
 	case r.URL.Path == "/api/auth/login" && r.Method == http.MethodPost:
 		return true
-	case (r.URL.Path == "/api/auth/passkeys/login/begin" || r.URL.Path == "/api/auth/passkeys/login/finish") && r.Method == http.MethodPost:
+	case (r.URL.Path == "/api/auth/passkeys/login/begin" || r.URL.Path == "/api/auth/passkeys/login/finish" ||
+		r.URL.Path == "/api/auth/passkeys/discover/begin" || r.URL.Path == "/api/auth/passkeys/discover/finish") && r.Method == http.MethodPost:
 		return true
 	case r.URL.Path == "/api/auth/setup" && r.Method == http.MethodPost:
 		return true
