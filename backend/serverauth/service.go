@@ -106,6 +106,10 @@ type Dependencies struct {
 	// PasskeyPrivacyKey must be a persistent, purpose-derived 32-byte secret.
 	// Rotating it changes decoy IDs, so a fresh per-process key is not suitable.
 	PasskeyPrivacyKey []byte
+	// PasskeyCustodyKey is persistent, purpose-derived server custody material,
+	// distinct from the privacy key. It permits offline decryption by its owner.
+	PasskeyCustodyKey []byte
+	SessionVaultKey   func(context.Context, string) (securedb.RawKey, error)
 }
 
 // Service is the sole mutation coordinator for server account lifecycle. All
@@ -127,6 +131,8 @@ type Service struct {
 	passkeyMu         sync.Mutex
 	ceremonies        map[string]passkeyCeremony
 	passkeyPrivacyKey [32]byte
+	passkeyCustodyKey [32]byte
+	sessionVaultKey   func(context.Context, string) (securedb.RawKey, error)
 }
 
 type accountLock struct {
@@ -157,6 +163,12 @@ func NewService(dependencies Dependencies) (*Service, error) {
 	if dependencies.WebAuthn != nil && (len(dependencies.PasskeyPrivacyKey) != 32 || bytes.Equal(dependencies.PasskeyPrivacyKey, make([]byte, 32))) {
 		return nil, errors.New("passkey authentication requires a nonzero 32-byte privacy key")
 	}
+	if dependencies.WebAuthn != nil && (len(dependencies.PasskeyCustodyKey) != 32 || bytes.Equal(dependencies.PasskeyCustodyKey, make([]byte, 32))) {
+		return nil, errors.New("passkey authentication requires a nonzero 32-byte custody key")
+	}
+	if dependencies.SessionVaultKey == nil {
+		dependencies.SessionVaultKey = middleware.CopyRequestVaultKey
+	}
 	dummy, err := newDummyPasswordEnvelope()
 	if err != nil {
 		return nil, fmt.Errorf("initialize constant-work password verifier: %w", err)
@@ -176,6 +188,8 @@ func NewService(dependencies Dependencies) (*Service, error) {
 		ceremonies:   make(map[string]passkeyCeremony),
 	}
 	copy(service.passkeyPrivacyKey[:], dependencies.PasskeyPrivacyKey)
+	copy(service.passkeyCustodyKey[:], dependencies.PasskeyCustodyKey)
+	service.sessionVaultKey = dependencies.SessionVaultKey
 	return service, nil
 }
 
@@ -410,6 +424,10 @@ func (s *Service) Login(ctx context.Context, email string, password []byte, now 
 		if errors.Is(err, control.ErrCredentialConflict) || errors.Is(err, control.ErrForbidden) {
 			return nil, ErrInvalidCredentials
 		}
+		return nil, err
+	}
+	if err := s.upgradePasskeyEnvelopes(ctx, user.ID, vaultID, dek, now); err != nil {
+		clear(dek)
 		return nil, err
 	}
 	s.clearLoginFailures(ctx, throttleKey)

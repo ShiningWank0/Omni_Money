@@ -26,12 +26,18 @@ digests, password-verification material, and encrypted vault-key envelopes. It
 does not contain balances, account names, transactions, receipt images, or a raw
 vault key.
 
-Each vault has an independent random 256-bit data-encryption key (DEK). The
-server control key never wraps a vault DEK. A user's password-derived key,
-recovery-derived key, and each registered WebAuthn PRF output wrap the DEK
-independently with AES-256-GCM. The envelope
-authenticates the user ID, vault ID, purpose, and format version as associated
-data, so moving an envelope to another account or vault fails authentication.
+Each vault has an independent random 256-bit data-encryption key (DEK). A user's
+password-derived key and recovery-derived key wrap the DEK with AES-256-GCM.
+Passkey registration uses the already authenticated request's open vault key;
+the browser neither supplies nor receives a plaintext DEK. Standard passkeys
+use a persistent custody key derived with a dedicated HKDF purpose from the
+control key. Custody envelopes authenticate the user ID, vault ID, credential
+ID, purpose, and version. Existing PRF envelopes remain readable for migration.
+
+Server-managed passkeys change the offline protection boundary: a server operator
+with the control key and control database can recover the DEK of an account with
+a custody envelope. This is not a zero-knowledge mode. Application administrators
+still have no API for selecting or opening another user's financial vault.
 
 ## Password and recovery derivation
 
@@ -41,9 +47,10 @@ values. Purpose-specific keys are then derived with HKDF-SHA-256 so an
 authentication verifier cannot be reused as a vault-wrapping key.
 
 Recovery uses an independently generated 256-bit secret shown to the user once.
-Only a verifier and an AES-GCM envelope are stored. Losing both the password and
-recovery secret makes the existing vault unrecoverable; an administrator cannot
-bypass that property by resetting the account.
+Only a verifier and an AES-GCM envelope are stored. Without a usable passkey, password, or recovery secret, users cannot open their
+vault. An application administrator cannot bypass recovery through a reset API.
+Server operators with custody material have the separate offline capability
+described above.
 
 An administrator-initiated password reset therefore creates a short-lived,
 single-use reset ticket. The user must also present the recovery secret to keep
@@ -52,11 +59,78 @@ deleted or replaced.
 
 ## Passkey authentication
 
-Passkeys are an alternative login path, not a replacement for password or recovery. Registration first verifies the current password, performs a WebAuthn ceremony with user verification required, and requires the authenticator's PRF extension. A credential-specific random salt produces a 32-byte PRF result; a purpose-separated HKDF key derived from that result wraps the unchanged vault DEK. The PRF result and plaintext DEK are never stored.
+Registration requires an authenticated vault session and a WebAuthn creation
+ceremony with user verification. It does not request an account password or a
+second PRF assertion. New registrations store a server-custody envelope and
+work with standard providers, including providers that return no PRF output.
+The original password login remains available.
 
-Login begins after normalizing the supplied email so the server can send only that user's allowed credential IDs and credential-specific PRF salts. A signed WebAuthn assertion, required user verification, the correct PRF result, and the matching envelope are all needed before the Vault opens. The same assertion and envelope proof can satisfy recent reauthentication without creating a second Vault session. Ceremony state is one-use, short-lived, stored only in memory, and bound to the requesting client address. Authenticator counters are updated with a compare-and-swap transaction, and clone warnings fail authentication.
+Login verifies the signature, challenge, RP ID, origin, user handle, and user
+verification before unwrapping the credential-bound custody envelope. Ceremony
+state is one-use, short-lived, stored only in memory, and bound to the requesting
+client address; registration ceremonies also bind the initiating session.
+Counters are committed with compare-and-swap and clone warnings fail
+verification. Reauthentication needs only a valid assertion for the current
+account and never needs to decrypt a vault again.
 
-Control-plane listings expose only a base64url credential ID, user-chosen name, creation time, and last-use time. Public keys, PRF salts, counters, and wrapped Vault keys remain server-side. Password login remains available after registration, and recovery still requires the separately saved recovery code.
+Legacy PRF and password-required credentials are upgraded with compare-and-swap
+after a successful password login or when opening passkey settings in an already
+unlocked session. No user input or re-registration is needed for server-registered
+credentials. A passkey saved only in a provider after a previously failed
+registration has no server record and must be registered again.
+
+Control-plane listings expose only credential ID, name, legacy password-required
+status, and timestamps. Public keys, PRF salts, counters, and encrypted DEKs
+remain server-side.
+
+Ordinary logout revokes its session family synchronously, including concurrent
+reauthentication rotations, and deletes its cookie before responding. Root
+cleanup runs in the background; already admitted writes keep their own request
+lease until they finish. Freshly authenticated logins prove the same DEK and can
+reuse the live instance during that work. Automatic snapshot cleanup does not
+block a new session; the final database close is serialized before any fresh
+instance can open. Explicit credential-revocation, disable, restore, and shutdown
+drains remain fail-closed and cannot be adopted by a new login.
+
+The browser purges private UI state immediately on logout and rejects late API
+responses. Before revoking the session it waits for outstanding transaction-save
+receipts, then navigates after the revocation response. An unconfirmed upload or
+revocation keeps the screen locked and offers a retry.
+
+## Durable transaction-save receipts
+
+Server-mode transaction create/update uses `/api/transaction-saves`. Each user
+save intent has a UUID, and retrying that operation preserves both its UUID and
+immutable payload. The request also binds the authenticated user ID; a rotated
+cookie cannot send an old user's pending input into another user's vault.
+Identical contents with different IDs remain separate transactions. Reusing an
+ID with different contents is rejected with 409. Receipt IDs are scoped to the
+user vault, and completed/failed tombstones remain for safe replay.
+
+The complete input, including image uploads, is committed to the user's
+SQLCipher ledger with FULL synchronous durability before returning 202. Image
+decoding, validation, ledger mutations, and automatic snapshots run afterward
+on an instance-owned worker. Logout waits for receipt confirmation only; it
+does not wait for that processing. Each ledger mutation and its completed
+receipt are committed in one SQL transaction. A disconnect or logout cannot
+cancel accepted work. Closing the vault joins its worker before destroying the
+key. A pending receipt after a process crash resumes when that user's vault is
+next unlocked, because the worker needs the vault DEK.
+
+Schema version 6 adds this queue. Each input is bounded to 32 MiB, with at most
+32 retained inputs and 128 MiB per vault, including unacknowledged failed input.
+Only the owner can query processing notices or dismiss a failed notice. Failed
+input stays encrypted until explicitly dismissed; dismissal keeps the receipt
+ID/hash tombstone. Notices expose text metadata without downloading image data.
+The browser shows pending/failed notices after login and refreshes the ledger
+after pending work completes.
+
+There is no persistent offline browser outbox. Unconfirmed upload input is held
+in memory for retry, so logout cannot silently declare success before receipt.
+Closing/reloading the browser before receipt confirmation can lose that local
+input. CSV imports and the other synchronous ledger APIs retain their existing
+request behavior; this receipt protocol covers the transaction editor's create
+and update operations.
 
 Users can rotate their password or recovery code after proving the current password. Both operations unwrap the DEK only inside the authenticated account service and rewrap the unchanged DEK; the control store commits an exact-envelope/revision compare-and-swap. Password rotation explicitly chooses whether passkeys remain valid or are deleted in the same transaction. Successful credential revocation invalidates all sessions before the Vault manager begins draining that user's leases. Individual and bulk passkey revocation use the same session-and-vault shutdown boundary.
 
@@ -83,7 +157,7 @@ The following invariants apply:
 - invitation and reset tokens are random, short-lived, single-use, and stored only as digests;
 - administrative token lists expose IDs, state, subject, and timestamps only; token values, digests, and envelopes are never returned;
 - a server request receives its database instance from the authenticated principal; financial APIs do not accept a caller-supplied user ID;
-- the control key, an administrator password, or an administrator session alone cannot open another user's vault.
+- an administrator password or application administrator session cannot open another user's vault through an API; server custody keys provide the offline capability described above.
 
 A live server session owns one root vault lease. Each authenticated request
 borrows a child lease and receives only a guarded business service, never the

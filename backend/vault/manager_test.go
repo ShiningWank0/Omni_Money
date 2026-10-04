@@ -1047,3 +1047,71 @@ func TestConcurrentBorrowReleaseAndClose(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestFreshLoginReusesVaultWhileRevokedSessionWriteFinishes(t *testing.T) {
+	manager := newPlainTestManager(t)
+	defer manager.Close(context.Background())
+	root, err := manager.Acquire("user-1", testVaultID, testKey(21))
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := root.Borrow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := leaseInstance(child)
+	if _, err := instance.DB().Exec("CREATE TABLE logout_pending_write (value INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := instance.DB().Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("INSERT INTO logout_pending_write VALUES (17)"); err != nil {
+		t.Fatal(err)
+	}
+	root.Release()
+	if _, err := root.Borrow(); !errors.Is(err, ErrLeaseReleased) {
+		t.Fatal("revoked root borrowed another request")
+	}
+	if _, err := manager.Acquire("user-1", testVaultID, testKey(22)); !errors.Is(err, ErrBindingMismatch) {
+		t.Fatal("wrong key adopted retiring vault")
+	}
+	fresh, err := manager.Acquire("user-1", testVaultID, testKey(21))
+	if err != nil {
+		t.Fatalf("fresh login blocked by admitted write: %v", err)
+	}
+	if leaseInstance(fresh) != instance {
+		t.Fatal("login opened a second instance")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("admitted write did not finish: %v", err)
+	}
+	var value int
+	if err := leaseInstance(fresh).DB().QueryRow("SELECT value FROM logout_pending_write").Scan(&value); err != nil || value != 17 {
+		t.Fatalf("fresh login lost admitted write: %d, %v", value, err)
+	}
+	service, err := child.Service()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.GetAccounts(); err != nil {
+		t.Fatalf("admitted request failed: %v", err)
+	}
+	child.Release()
+	if _, err := fresh.Service(); err != nil {
+		t.Fatalf("old request release revoked new login: %v", err)
+	}
+	wait, err := manager.BeginUserDrain("user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Acquire("user-1", testVaultID, testKey(21)); !errors.Is(err, ErrDraining) {
+		t.Fatal("login bypassed explicit security drain")
+	}
+	fresh.Release()
+	if err := wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}

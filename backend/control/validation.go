@@ -200,7 +200,7 @@ func validateKeyEnvelope(envelope *keyenvelope.Envelope, kind keyenvelope.Kind) 
 		if envelope.KDF != recoveryEnvelopeKDF || envelope.Profile != (keyenvelope.Argon2idProfile{}) || len(envelope.Verifier) != 0 {
 			return errors.New("recovery key envelope KDF profile is invalid")
 		}
-	case keyenvelope.KindPasskey:
+	case keyenvelope.KindPasskey, keyenvelope.KindServerPasskey:
 		if envelope.KDF != passkeyEnvelopeKDF || envelope.Profile != (keyenvelope.Argon2idProfile{}) || len(envelope.Verifier) != 0 {
 			return errors.New("passkey key envelope KDF profile is invalid")
 		}

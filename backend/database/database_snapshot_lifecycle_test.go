@@ -1375,3 +1375,51 @@ func TestCopyFileRefusesExistingDestination(t *testing.T) {
 		t.Fatalf("destination changed after failed copy: %q", contents)
 	}
 }
+
+func TestWaitingForBackgroundSnapshotsDoesNotCloseOrLockLiveDatabase(t *testing.T) {
+	instance, err := OpenPlainInstance(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		instance.snapshotMu.Lock()
+		instance.snapshotRunning = false
+		instance.snapshotCond.Broadcast()
+		instance.snapshotMu.Unlock()
+		instance.Close()
+	}()
+	instance.ensureSnapshotCond()
+	instance.snapshotMu.Lock()
+	instance.snapshotRunning = true
+	instance.snapshotMu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	drained := make(chan error, 1)
+	go func() { drained <- instance.WaitForAutoSnapshots(ctx) }()
+	if _, err := instance.DB().Exec("CREATE TABLE background_logout_write (value INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-drained:
+		t.Fatal("wait completed while snapshot work was pending")
+	default:
+	}
+	cancel()
+	select {
+	case err := <-drained:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("wait cancellation: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("snapshot wait ignored cancellation")
+	}
+	instance.snapshotMu.Lock()
+	instance.snapshotRunning = false
+	instance.snapshotCond.Broadcast()
+	instance.snapshotMu.Unlock()
+	if err := instance.WaitForAutoSnapshots(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if instance.DB() == nil {
+		t.Fatal("background drain closed the live database")
+	}
+}

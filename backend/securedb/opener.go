@@ -88,6 +88,11 @@ func (o *Opener) Destroy() {
 	o.destroyed = true
 }
 
+// CopyKey returns a short-lived server-internal copy. The caller must destroy it.
+func (o *Opener) CopyKey() (RawKey, error) {
+	return o.copyKey()
+}
+
 func (o *Opener) copyKey() (RawKey, error) {
 	if o == nil {
 		return RawKey{}, ErrDestroyed

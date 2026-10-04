@@ -17,6 +17,7 @@ import (
 
 	"omni_money/backend/control"
 	"omni_money/backend/core"
+	"omni_money/backend/securedb"
 	"omni_money/backend/vault"
 
 	"omni_money/backend/httpjson"
@@ -127,6 +128,7 @@ func durationEnv(name string, unit, fallback, minimum, maximum time.Duration) (t
 // Session is a request-scoped copy of server-side state. CSRFToken is returned
 // only in authenticated no-store responses and never serialized implicitly.
 type Session struct {
+	familyID          string
 	ID                string       `json:"-"`
 	Username          string       `json:"username"`
 	UserID            string       `json:"user_id,omitempty"`
@@ -158,6 +160,7 @@ type sessionVaultRoot struct {
 }
 
 type requestVaultLease struct {
+	copyKey        func() (securedb.RawKey, error)
 	service        *core.Service
 	createSnapshot func(context.Context) (string, error)
 	listSnapshots  func(context.Context) ([]string, error)
@@ -215,6 +218,7 @@ func newSessionVaultRoot(lease *vault.Lease) (*sessionVaultRoot, error) {
 		}
 		return &requestVaultLease{
 			service:        service,
+			copyKey:        child.CopyVaultKey,
 			createSnapshot: child.CreateSnapshotContext,
 			listSnapshots:  child.ListSnapshotsContext,
 			release:        child.Release,
@@ -263,6 +267,7 @@ func (lease *requestVaultLease) Release() {
 			lease.release()
 		}
 		lease.service = nil
+		lease.copyKey = nil
 		lease.createSnapshot = nil
 		lease.listSnapshots = nil
 		lease.release = nil
@@ -468,6 +473,7 @@ func (m *SessionManager) createSession(username string, user *control.UserSummar
 	now := m.now()
 	session := Session{
 		ID:                sessionID,
+		familyID:          sessionID,
 		Username:          username,
 		CreatedAt:         now,
 		LastSeenAt:        now,
@@ -560,6 +566,28 @@ func (m *SessionManager) DeleteSession(sessionID string) {
 	root := m.deleteRecordLocked(sessionID)
 	m.mu.Unlock()
 	root.Release()
+}
+
+// RevokeSession removes this login and every concurrent rotation of it before
+// returning. Independent later logins have a new family and are unaffected.
+// Slow root cleanup is dispatched only after authentication has been revoked.
+func (m *SessionManager) RevokeSession(session *Session) {
+	if m == nil || session == nil || !isCanonicalSessionSecret(session.ID) {
+		return
+	}
+	m.mu.Lock()
+	var roots []*sessionVaultRoot
+	for id, record := range m.sessions {
+		if id == session.ID || (session.familyID != "" && record.session.familyID == session.familyID) {
+			roots = append(roots, m.deleteRecordLocked(id))
+		}
+	}
+	m.mu.Unlock()
+	for _, root := range roots {
+		if root != nil {
+			go root.Release()
+		}
+	}
 }
 
 func (m *SessionManager) DeleteAllSessions(username string) int {
@@ -994,6 +1022,18 @@ func VaultSessionAuthMiddleware(sessionManager *SessionManager, users CurrentUse
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Logout needs identity and CSRF only. It must remain available while
+		// the vault is busy and must not borrow a child it would then drain.
+		if r.URL.Path == "/api/auth/logout" && r.Method == http.MethodPost {
+			session, ok := sessionManager.sessionForVaultRequest(r)
+			if !ok {
+				writeAuthRequired(w)
+				return
+			}
+			ctx := context.WithValue(r.Context(), sessionKey, session)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
 		// Restore is intentionally the one route that authenticates the identity
 		// without borrowing a child lease.  The handler later acquires the
 		// root-only restore operation after CSRF and recent-auth checks; borrowing
@@ -1046,6 +1086,28 @@ func VaultSessionAuthMiddleware(sessionManager *SessionManager, users CurrentUse
 		ctx = context.WithValue(ctx, snapshotServiceContextKey{}, child)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// CopyRequestVaultKey cannot select another user's vault. Only authenticated
+// middleware supplies the lease, and early release removes this capability.
+func CopyRequestVaultKey(ctx context.Context, userID string) (securedb.RawKey, error) {
+	if ctx == nil {
+		return securedb.RawKey{}, ErrInvalidVaultSession
+	}
+	session, ok := SessionFromContext(ctx)
+	if !ok || session.UserID != userID || userID == "" {
+		return securedb.RawKey{}, ErrInvalidVaultSession
+	}
+	lease, ok := ctx.Value(coreServiceContextKey{}).(*requestVaultLease)
+	if !ok || lease == nil {
+		return securedb.RawKey{}, ErrInvalidVaultSession
+	}
+	lease.mu.RLock()
+	defer lease.mu.RUnlock()
+	if lease.copyKey == nil {
+		return securedb.RawKey{}, ErrInvalidVaultSession
+	}
+	return lease.copyKey()
 }
 
 // ReleaseRequestVaultLease releases the request-scoped vault child when a

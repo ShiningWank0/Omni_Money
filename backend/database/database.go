@@ -31,7 +31,7 @@ import (
 )
 
 const defaultSnapshotMaxTotalBytes int64 = 2 * 1024 * 1024 * 1024
-const ledgerSchemaVersion = 5
+const ledgerSchemaVersion = 6
 
 // application_id is the SQLite file identity for Omni Money ledgers. Zero is
 // accepted only for legacy files that predate the identity marker; another
@@ -60,10 +60,11 @@ var umask sync.Once
 // (for example, one encrypted vault per server user) without sharing mutable
 // package state. An Instance must not be copied after first use.
 type Instance struct {
-	db     *sql.DB
-	path   string
-	opener *securedb.Opener
-	mu     sync.RWMutex
+	ledgerWork ledgerWork
+	db         *sql.DB
+	path       string
+	opener     *securedb.Opener
+	mu         sync.RWMutex
 
 	// snapshotLifecycle serializes database lifecycle changes with snapshot
 	// operations. A snapshot keeps a database handle and path for the whole
@@ -226,6 +227,7 @@ func (i *Instance) initialize(path string, opener *securedb.Opener, migratePlain
 		opener.Destroy()
 		return fmt.Errorf("データベースinstanceが初期化されていません")
 	}
+	i.stopLedgerWork()
 	i.ensureSnapshotCond()
 	i.beginDBLifecycle()
 	defer i.endDBLifecycle()
@@ -243,6 +245,7 @@ func (i *Instance) initialize(path string, opener *securedb.Opener, migratePlain
 		opener.Destroy()
 		return err
 	}
+	i.resetLedgerWork()
 	return nil
 }
 
@@ -357,12 +360,51 @@ func CloseDB() {
 	_ = defaultInstance.Close()
 }
 
+// CopyVaultKey is restricted to the server's authenticated vault capability.
+// It never serializes the key; callers must destroy the returned copy.
+func (i *Instance) CopyVaultKey() (securedb.RawKey, error) {
+	if i == nil {
+		return securedb.RawKey{}, securedb.ErrDestroyed
+	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.db == nil || i.opener == nil {
+		return securedb.RawKey{}, securedb.ErrDestroyed
+	}
+	return i.opener.CopyKey()
+}
+
+// WaitForAutoSnapshots drains background work without closing the database or
+// preventing a freshly authenticated session from using the same instance.
+func (i *Instance) WaitForAutoSnapshots(ctx context.Context) error {
+	if i == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	i.ensureSnapshotCond()
+	stop := context.AfterFunc(ctx, func() {
+		i.snapshotMu.Lock()
+		i.snapshotCond.Broadcast()
+		i.snapshotMu.Unlock()
+	})
+	defer stop()
+	i.snapshotMu.Lock()
+	defer i.snapshotMu.Unlock()
+	for i.snapshotRunning && ctx.Err() == nil {
+		i.snapshotCond.Wait()
+	}
+	return ctx.Err()
+}
+
 // Close waits for snapshots, closes the connection, and destroys the opener's
 // in-memory key. It is safe to call more than once.
 func (i *Instance) Close() error {
 	if i == nil {
 		return nil
 	}
+	i.stopLedgerWork()
 	i.ensureSnapshotCond()
 	i.beginDBLifecycle()
 	defer i.endDBLifecycle()
@@ -685,6 +727,8 @@ func createTablesOnContext(ctx context.Context, target *sql.DB) error {
 				SELECT RAISE(ABORT, 'transaction amount out of range');
 			END`, validation.MaxTransactionAmount),
 	}
+
+	statements = append(statements, TransactionSaveTableSQL, transactionSaveIndexSQL)
 
 	// Version 0 includes both a brand-new database and databases created by
 	// older releases before schema versions were recorded. Reapplying the
@@ -1112,7 +1156,7 @@ func validateLedgerSchemaContextInternal(ctx context.Context, target schemaQuery
 	if err := requireColumnsContext(ctx, target, "transactions", []string{"id", "account", "date", "item", "type", "amount", "balance", "memo"}); err != nil {
 		return fmt.Errorf("ledger minimum schema: %w", err)
 	}
-	if version == ledgerSchemaVersion {
+	if version == ledgerSchemaVersion || version == 5 {
 		strict := strictCurrent
 		if strictCurrent && identity == 0 {
 			// application_id=0 is never a compatibility marker. A historical
@@ -1560,11 +1604,19 @@ func validateFullLedgerSchema(target schemaQueryer, strictConstraints bool) erro
 }
 
 func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, strictConstraints bool) error {
+	var version int
+	if err := target.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
+	queueRequired := version >= 6
 	allowedTables := map[string]bool{
 		"transactions": true, "transaction_links": true, "transaction_images": true,
 		"transaction_archive_amounts": true, "transaction_image_archive": true,
 		"tags": true, "transaction_tags": true, "ai_transaction_idempotency": true,
 		"ai_daily_transaction_usage": true, "settings": true,
+	}
+	if queueRequired {
+		allowedTables["transaction_save_requests"] = true
 	}
 	rows, err := target.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND "+sqliteUserTablePredicate)
 	if err != nil {
@@ -1615,6 +1667,12 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 		{"trigger", "trg_transaction_images_quota_insert"}, {"trigger", "trg_transaction_images_immutable_update"},
 		{"trigger", "trg_transaction_image_archive_quota_insert"},
 		{"trigger", "validate_transactions_amount_insert"}, {"trigger", "validate_transactions_amount_update"},
+	}
+	if queueRequired {
+		objects = append(objects, struct{ typ, name string }{"index", "idx_transaction_saves_pending"})
+		if err := validateTransactionSaveSchema(ctx, target); err != nil {
+			return err
+		}
 	}
 	allowedPersistentObjects := make(map[string]struct{}, len(objects))
 	for _, object := range objects {
@@ -3129,6 +3187,10 @@ func (i *Instance) RestoreSnapshotContext(ctx context.Context, snapshotDir, snap
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := i.WaitForLedgerWork(ctx); err != nil {
+		return err
+	}
+	defer i.WakeLedgerWorker()
 	// Drain/lifecycle comes before process-wide admission. An auto-snapshot
 	// worker may already be marked running while waiting for that admission;
 	// taking the gate first would make this restore wait for the worker while

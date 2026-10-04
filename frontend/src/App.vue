@@ -9,7 +9,17 @@
     />
     <template v-else>
     <div v-if="idleScreenLocked" class="idle-lock-curtain" role="status" aria-live="polite">
-      <div class="idle-lock-message">{{ logoutInProgress ? 'ログアウトしています…' : isWailsMode ? '保管庫を保護しています…' : '無操作タイムアウトのため画面をロックしました' }}</div>
+      <div class="idle-lock-message">{{ logoutError || (logoutInProgress ? 'ログアウトしています…' : isWailsMode ? '保管庫を保護しています…' : '無操作タイムアウトのため画面をロックしました') }}</div>
+      <button v-if="logoutError" type="button" @click="logout">ログアウトを再試行</button>
+    </div>
+    <div v-if="!idleScreenLocked && transactionSaveNotices.length" class="card save-notices" role="status" aria-live="polite">
+      <p v-if="transactionSaveNotices.some(save => save.state === 'pending')">受け付けた取引を保存しています。完了すると取引一覧に反映されます。</p>
+      <div v-for="save in transactionSaveNotices.filter(save => save.state === 'failed')" :key="save.request_id">
+        <p>{{ save.error }} 入力内容は保管されています。</p>
+        <p>{{ save.request.date }} {{ save.request.account }} / {{ save.request.item }} / {{ formatExactCurrency(save.request.amount) }}</p>
+        <p v-if="save.request.memo">{{ save.request.memo }}</p>
+        <button type="button" @click="dismissSaveNotice(save.request_id)">確認して通知を削除</button>
+      </div>
     </div>
     <!-- ヘッダーエリア -->
     <div class="card header">
@@ -367,6 +377,8 @@ const CredentialSettingsModal = defineAsyncComponent(() => import('./components/
 import {
   addTransaction,
   updateTransaction,
+  getTransactionSaveNotices,
+  dismissFailedTransactionSave,
   deleteTransaction as apiDeleteTransaction,
   backupToCSVFile as apiBackupToCSVFile,
   saveCreditCardSettings as apiSaveCreditCardSettings,
@@ -374,7 +386,6 @@ import {
   getBalanceHistoryFiltered,
   isWailsMode,
   logout as apiLogout,
-  waitForPendingWrites,
   getAuthStatus,
   getDesktopVaultStatus,
   lockDesktopVault,
@@ -424,6 +435,10 @@ const canUsePasskeyReauth = computed(() => !isWailsMode && serverFeatures.value.
 const currentServerUserId = ref('')
 const idleScreenLocked = ref(false)
 const logoutInProgress = ref(false)
+const logoutError = ref('')
+let transactionSaveIntent = null
+const transactionSaveNotices = ref([])
+let transactionSaveNoticeTimer = null
 const desktopVaultStatus = ref(null)
 const desktopVaultLoading = ref(isWailsMode)
 const desktopVaultError = ref('')
@@ -597,14 +612,21 @@ function hideAddModal() {
 async function handleSaveTransaction(data) {
   if (transactionSaving.value) return
   const generation = financialUIGeneration
+  const targetID = isEditMode.value && editingTransaction.value ? editingTransaction.value.id : 0
+  const intentBody = JSON.stringify({ targetID, data })
+  if (transactionSaveIntent?.body !== intentBody) {
+    transactionSaveIntent = { body: intentBody, id: isWailsMode ? null : globalThis.crypto.randomUUID() }
+  }
+  const saveOptions = { requestID: transactionSaveIntent.id }
   transactionSaving.value = true
   try {
     if (isEditMode.value && editingTransaction.value) {
-      await updateTransaction(editingTransaction.value.id, data)
+      await updateTransaction(editingTransaction.value.id, data, saveOptions)
     } else {
-      await addTransaction(data)
+      await addTransaction(data, saveOptions)
     }
     if (generation !== financialUIGeneration) return
+    transactionSaveIntent = null
     hideAddModal()
     viewingTransaction.value = null
     await refreshLedger()
@@ -613,7 +635,10 @@ async function handleSaveTransaction(data) {
       showToast('取引の保存を確認できませんでした: ' + error.message, 'error', 5000)
     }
   } finally {
-    if (generation === financialUIGeneration) transactionSaving.value = false
+    if (generation === financialUIGeneration) {
+      transactionSaving.value = false
+      if (!isWailsMode) void refreshSaveNotices()
+    }
   }
 }
 
@@ -868,20 +893,16 @@ async function logout() {
   if (logoutInProgress.value) return
   showMenu.value = false
   logoutInProgress.value = true
+  logoutError.value = ''
   idleLockInProgress = true
   idleScreenLocked.value = true
+  clearSensitiveStateForIdle()
   try {
-    if (!await waitForPendingWrites()) {
-      throw new Error('保存処理を確認できませんでした')
-    }
     await apiLogout()
-    clearSensitiveStateForIdle()
-    window.location.replace('/login')
+    replaceLocation('/login')
   } catch (error) {
-    idleScreenLocked.value = false
-    idleLockInProgress = false
     logoutInProgress.value = false
-    showToast(error?.message || 'ログアウトを確認できませんでした', 'error', 5000)
+    logoutError.value = error?.message || 'ログアウトを確認できませんでした。再試行してください'
   }
 }
 
@@ -926,6 +947,10 @@ function stopIdleLock() {
 // navigating away. The v-if guards also unmount open modals and clear their
 // component-local form state.
 function clearSensitiveStateForIdle(preserveCredentialSettings = false) {
+  transactionSaveIntent = null
+  transactionSaveNotices.value = []
+  clearTimeout(transactionSaveNoticeTimer)
+  transactionSaveNoticeTimer = null
   financialUIGeneration++
   transactionSaving.value = false
   retryingData.value = false
@@ -976,6 +1001,8 @@ function clearSensitiveStateForIdle(preserveCredentialSettings = false) {
 
 async function fetchPrivateData() {
   const generation = financialUIGeneration
+  if (!isWailsMode) await refreshSaveNotices()
+  if (generation !== financialUIGeneration) throw new Error('データの読み込みは終了しました')
   await store.fetchAccounts({ throwOnError: true })
   if (generation !== financialUIGeneration) throw new Error('データの読み込みは終了しました')
   await Promise.all([
@@ -984,6 +1011,38 @@ async function fetchPrivateData() {
     store.fetchTransactions({ throwOnError: true })
   ])
   if (generation !== financialUIGeneration) throw new Error('データの読み込みは終了しました')
+}
+
+async function refreshSaveNotices() {
+  if (isWailsMode || !componentMounted || idleScreenLocked.value) return
+  const generation = financialUIGeneration
+  clearTimeout(transactionSaveNoticeTimer)
+  transactionSaveNoticeTimer = null
+  try {
+    const hadPending = transactionSaveNotices.value.some(save => save.state === 'pending')
+    const notices = await getTransactionSaveNotices()
+    if (generation !== financialUIGeneration || !componentMounted || idleScreenLocked.value) return
+    transactionSaveNotices.value = notices
+    const hasPending = notices.some(save => save.state === 'pending')
+    if (hadPending && !hasPending) await refreshLedger()
+    if (generation !== financialUIGeneration || !componentMounted || idleScreenLocked.value) return
+    if (hasPending) transactionSaveNoticeTimer = setTimeout(refreshSaveNotices, 1000)
+  } catch {
+    if (generation === financialUIGeneration && componentMounted && !idleScreenLocked.value) {
+      transactionSaveNoticeTimer = setTimeout(refreshSaveNotices, 5000)
+    }
+  }
+}
+
+async function dismissSaveNotice(requestID) {
+  if (!window.confirm('保存できなかった取引の入力内容と画像を削除します。よろしいですか？')) return
+  const generation = financialUIGeneration
+  try {
+    await dismissFailedTransactionSave(requestID)
+    if (generation === financialUIGeneration) await refreshSaveNotices()
+  } catch {
+    if (generation === financialUIGeneration) showToast('通知を削除できませんでした', 'error')
+  }
 }
 
 async function handleDesktopVaultUnlocked() {
@@ -1459,6 +1518,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  clearTimeout(transactionSaveNoticeTimer)
   financialUIGeneration++
   store.resetState()
   componentMounted = false
@@ -1479,6 +1539,12 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.save-notices {
+  margin: 1rem;
+  padding: 1rem;
+  overflow-wrap: anywhere;
+}
+
 .load-error {
   margin: 1rem;
   padding: 0.75rem 1rem;

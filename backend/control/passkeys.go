@@ -19,6 +19,10 @@ import (
 // MaxPasskeysPerUser also bounds the padded public login credential list.
 const MaxPasskeysPerUser = 10
 
+// The existing JSON column can represent a credential that authenticates
+// with WebAuthn but needs the account password to unlock the vault.
+const legacyUnlockMarker = `{"unlock":"password"}`
+
 func (s *Store) CreatePasskeyCredential(ctx context.Context, input PasskeyCredentialInput, now time.Time) (PasskeyCredential, error) {
 	prepared, credentialJSON, envelopeJSON, err := preparePasskeyCredential(input)
 	if err != nil {
@@ -243,13 +247,17 @@ func preparePasskeyCredential(input PasskeyCredentialInput) (PasskeyCredential, 
 	if err != nil || len(credentialJSON) < 2 || len(credentialJSON) > 1<<20 {
 		return PasskeyCredential{}, "", "", fmt.Errorf("encode passkey credential: %w", err)
 	}
-	envelopeJSON, err := encodeKeyEnvelope(input.VaultEnvelope, keyenvelope.KindPasskey)
-	if err != nil {
-		return PasskeyCredential{}, "", "", err
+	envelopeJSON := legacyUnlockMarker
+	if !input.PasswordRequired {
+		envelopeJSON, err = encodePasskeyEnvelope(input.VaultEnvelope)
+		if err != nil {
+			return PasskeyCredential{}, "", "", err
+		}
 	}
 	result := PasskeyCredential{
 		ID: append([]byte(nil), input.Credential.ID...), UserID: userID, Name: name,
 		Credential: input.Credential, PRFSalt: append([]byte(nil), input.PRFSalt...), VaultEnvelope: input.VaultEnvelope,
+		PasswordRequired: input.PasswordRequired,
 	}
 	return result, string(credentialJSON), envelopeJSON, nil
 }
@@ -274,9 +282,13 @@ func scanPasskeyCredential(scanner passkeyScanner) (PasskeyCredential, error) {
 		return PasskeyCredential{}, errors.New("stored passkey credential ID mismatch")
 	}
 	var err error
-	result.VaultEnvelope, err = decodeKeyEnvelope(envelopeJSON, keyenvelope.KindPasskey)
-	if err != nil {
-		return PasskeyCredential{}, fmt.Errorf("decode passkey envelope: %w", err)
+	if envelopeJSON == legacyUnlockMarker {
+		result.PasswordRequired = true
+	} else {
+		result.VaultEnvelope, err = decodePasskeyEnvelope(envelopeJSON)
+		if err != nil {
+			return PasskeyCredential{}, fmt.Errorf("decode passkey envelope: %w", err)
+		}
 	}
 	result.ID = append([]byte(nil), result.ID...)
 	result.PRFSalt = append([]byte(nil), result.PRFSalt...)
@@ -299,6 +311,60 @@ func validatePasskeyCredentialID(id []byte) error {
 func (credential PasskeyCredential) Summary() PasskeySummary {
 	return PasskeySummary{
 		ID: base64.RawURLEncoding.EncodeToString(credential.ID), Name: credential.Name,
-		CreatedAt: credential.CreatedAt, LastUsedAt: credential.LastUsedAt,
+		PasswordRequired: credential.PasswordRequired,
+		CreatedAt:        credential.CreatedAt, LastUsedAt: credential.LastUsedAt,
 	}
+}
+
+func encodePasskeyEnvelope(envelope keyenvelope.Envelope) (string, error) {
+	if envelope.Kind != keyenvelope.KindPasskey && envelope.Kind != keyenvelope.KindServerPasskey {
+		return "", errors.New("invalid passkey envelope kind")
+	}
+	return encodeKeyEnvelope(envelope, envelope.Kind)
+}
+
+func decodePasskeyEnvelope(encoded string) (keyenvelope.Envelope, error) {
+	if len(encoded) < 2 || len(encoded) > 8192 {
+		return keyenvelope.Envelope{}, errors.New("stored passkey envelope has invalid size")
+	}
+	var metadata struct {
+		Kind keyenvelope.Kind `json:"kind"`
+	}
+	if err := json.Unmarshal([]byte(encoded), &metadata); err != nil {
+		return keyenvelope.Envelope{}, err
+	}
+	if metadata.Kind != keyenvelope.KindPasskey && metadata.Kind != keyenvelope.KindServerPasskey {
+		return keyenvelope.Envelope{}, errors.New("invalid passkey envelope kind")
+	}
+	return decodeKeyEnvelope(encoded, metadata.Kind)
+}
+
+// ReplacePasskeyEnvelope upgrades only an existing, unchanged, active user's
+// credential. It cannot resurrect a deleted credential or modify its public key.
+func (s *Store) ReplacePasskeyEnvelope(ctx context.Context, expected PasskeyCredential, envelope keyenvelope.Envelope, now time.Time) error {
+	if expected.Revision < 1 {
+		return ErrCredentialConflict
+	}
+	encoded, err := encodeKeyEnvelope(envelope, keyenvelope.KindServerPasskey)
+	if err != nil {
+		return err
+	}
+	db, err := s.database()
+	if err != nil {
+		return err
+	}
+	result, err := db.ExecContext(ctx, `UPDATE passkey_credentials SET vault_envelope_json = ?, revision = revision + 1, updated_at_ms = ?
+		WHERE user_id = ? AND credential_id = ? AND revision = ? AND EXISTS (SELECT 1 FROM users WHERE id = ? AND state = 'active')`,
+		encoded, now.UTC().UnixMilli(), expected.UserID, expected.ID, expected.Revision, expected.UserID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrCredentialConflict
+	}
+	return nil
 }

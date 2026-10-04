@@ -208,7 +208,7 @@ onMounted(async () => {
   }
 })
 
-onBeforeUnmount(() => clearFormSecrets())
+onBeforeUnmount(clearFormSecrets)
 
 async function copyRecoveryCode() {
   try {

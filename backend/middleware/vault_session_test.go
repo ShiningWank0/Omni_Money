@@ -14,6 +14,7 @@ import (
 	"omni_money/backend/control"
 	"omni_money/backend/core"
 	"omni_money/backend/database"
+	"omni_money/backend/securedb"
 	"omni_money/backend/vault"
 )
 
@@ -736,5 +737,117 @@ func TestVaultSessionRotateDeleteRaceReleasesRootOnce(t *testing.T) {
 		if got := released.Load(); got != 1 {
 			t.Fatalf("iteration %d: root releases = %d, want 1", iteration, got)
 		}
+	}
+}
+
+func TestLogoutRevokesRotatedSessionBeforeSlowCleanupAndKeepsFreshLogin(t *testing.T) {
+	manager := NewSessionManagerWithConfig(securityTestSessionConfig())
+	defer manager.Close()
+	user := testControlUser(testVaultSessionUserID)
+	cleanupStarted, finishCleanup, cleaned := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	root := &sessionVaultRoot{userID: user.ID, release: func() {
+		close(cleanupStarted)
+		<-finishCleanup
+		close(cleaned)
+	}}
+	original := createTestVaultSession(t, manager, user, root)
+	rotated, err := manager.RotateAfterReauthentication(original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := createTestVaultSession(t, manager, user, countingSessionRoot(user.ID, &atomic.Int32{}))
+	manager.RevokeSession(original)
+	if _, ok := manager.GetSession(rotated.ID); ok {
+		t.Fatal("rotation escaped logout")
+	}
+	if manager.ValidateCSRF(rotated.ID, rotated.CSRFToken) {
+		t.Fatal("rotated CSRF retained authority")
+	}
+	if _, ok := manager.GetSession(fresh.ID); !ok {
+		t.Fatal("logout revoked independent fresh login")
+	}
+	<-cleanupStarted
+	if _, err := manager.RotateAfterReauthentication(rotated.ID); err == nil {
+		t.Fatal("revoked login was rotated again")
+	}
+	close(finishCleanup)
+	select {
+	case <-cleaned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background cleanup did not finish")
+	}
+	if _, ok := manager.GetSession(fresh.ID); !ok {
+		t.Fatal("old cleanup invalidated new login")
+	}
+}
+
+func TestCopyRequestVaultKeyRequiresOwnLiveAuthenticatedLease(t *testing.T) {
+	var copied int
+	lease := &requestVaultLease{copyKey: func() (securedb.RawKey, error) {
+		copied++
+		return securedb.RawKey{7}, nil
+	}}
+	ctx := context.WithValue(context.Background(), sessionKey, &Session{UserID: testVaultSessionUserID})
+	ctx = context.WithValue(ctx, coreServiceContextKey{}, lease)
+	for _, candidate := range []struct {
+		ctx  context.Context
+		user string
+	}{{nil, testVaultSessionUserID}, {context.Background(), testVaultSessionUserID}, {ctx, "another-user"}, {ctx, ""}} {
+		if _, err := CopyRequestVaultKey(candidate.ctx, candidate.user); !errors.Is(err, ErrInvalidVaultSession) {
+			t.Fatalf("unauthorized key copy: %v", err)
+		}
+	}
+	key, err := CopyRequestVaultKey(ctx, testVaultSessionUserID)
+	if err != nil || key[0] != 7 || copied != 1 {
+		t.Fatalf("own live lease key unavailable: %v", err)
+	}
+	key.Destroy()
+	lease.Release()
+	if _, err := CopyRequestVaultKey(ctx, testVaultSessionUserID); !errors.Is(err, ErrInvalidVaultSession) || copied != 1 {
+		t.Fatalf("released lease retained key capability: %v", err)
+	}
+}
+
+func TestLogoutMiddlewareSkipsVaultAccessButStillRequiresCSRF(t *testing.T) {
+	manager := NewSessionManagerWithConfig(securityTestSessionConfig())
+	defer manager.Close()
+	user := testControlUser(testVaultSessionUserID)
+	session := createTestVaultSession(t, manager, user, &sessionVaultRoot{
+		userID: user.ID,
+		borrow: func() (*requestVaultLease, error) {
+			t.Fatal("logout borrowed a vault")
+			return nil, ErrInvalidVaultSession
+		},
+	})
+	// No control store is supplied: logout must work independently of vault
+	// and control-plane database availability.
+	called := false
+	handler := VaultSessionAuthMiddleware(manager, nil, CSRFMiddleware(manager, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current, ok := SessionFromContext(r.Context())
+		if !ok || current.ID != session.ID {
+			t.Fatal("logout lost authenticated identity")
+		}
+		called = true
+		manager.RevokeSession(current)
+		w.WriteHeader(http.StatusNoContent)
+	})))
+	for _, valid := range []bool{false, true} {
+		r := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/auth/logout", nil)
+		r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: session.ID})
+		if valid {
+			r.Header.Set(CSRFHeaderName, session.CSRFToken)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		want := http.StatusForbidden
+		if valid {
+			want = http.StatusNoContent
+		}
+		if w.Code != want || called != valid {
+			t.Fatalf("valid=%v: status=%d called=%v", valid, w.Code, called)
+		}
+	}
+	if _, ok := manager.GetSession(session.ID); ok {
+		t.Fatal("logout retained server authority")
 	}
 }

@@ -5,6 +5,8 @@ import { beforeEach, expect, it, vi } from 'vitest'
 const api = vi.hoisted(() => ({
   addTransaction: vi.fn(),
   updateTransaction: vi.fn(),
+  getTransactionSaveNotices: vi.fn(),
+  dismissFailedTransactionSave: vi.fn(),
   deleteTransaction: vi.fn(),
   backupToCSVFile: vi.fn(),
   saveCreditCardSettings: vi.fn(),
@@ -68,6 +70,7 @@ async function clickButton(wrapper, label) {
 }
 
 beforeEach(() => {
+  api.getTransactionSaveNotices.mockResolvedValue([])
   api.getAuthStatus.mockResolvedValue({
     authenticated: true,
     idle_timeout_seconds: 0,
@@ -92,6 +95,38 @@ beforeEach(() => {
     conflict_count: 0,
     replace_impact: null
   })
+})
+
+it('shows failed saves after login and purges their private input on logout', async () => {
+  api.getTransactions.mockResolvedValue([])
+  api.getTransactionSaveNotices.mockResolvedValueOnce([{ request_id: 'save-id', state: 'failed', error: '保存に失敗しました', request: { date: '2026-10-04', account: 'cash', item: 'private failed input', amount: 100 } }])
+  const wrapper = mount(App, { global: { plugins: [createPinia()] } })
+  await flushPromises()
+  expect(wrapper.get('.save-notices').text()).toContain('private failed input')
+  await wrapper.get('.hamburger-menu').trigger('click')
+  api.logout.mockResolvedValueOnce()
+  await clickButton(wrapper, 'ログアウト')
+  await flushPromises()
+  expect(wrapper.find('.save-notices').exists()).toBe(false)
+  expect(wrapper.text()).not.toContain('private failed input')
+  wrapper.unmount()
+})
+
+it('rejects a notice response arriving after logout purges the screen', async () => {
+  const lateNotices = deferred()
+  api.getTransactionSaveNotices.mockReturnValueOnce(lateNotices.promise)
+  const wrapper = mount(App, { global: { plugins: [createPinia()] } })
+  await flushPromises()
+  expect(api.getTransactionSaveNotices).toHaveBeenCalled()
+  api.logout.mockResolvedValueOnce()
+  await wrapper.get('.hamburger-menu').trigger('click')
+  await clickButton(wrapper, 'ログアウト')
+  await flushPromises()
+  lateNotices.resolve([{ request_id: 'late', state: 'failed', error: 'error', request: { item: 'late private input' } }])
+  await flushPromises()
+  expect(wrapper.find('.save-notices').exists()).toBe(false)
+  expect(wrapper.text()).not.toContain('late private input')
+  wrapper.unmount()
 })
 
 it('routes a server restore through App session expiry and rejects late private data', async () => {
@@ -517,4 +552,49 @@ it('rehydrates after browser cache restoration with a fresh authenticated sessio
   expect(useAppStore(wrapper.vm.$pinia).accounts).toEqual(['after-cache'])
   expect(wrapper.text()).not.toContain('取引を読み込んでいます')
   expect(wrapper.find('.load-error').exists()).toBe(false)
+})
+
+it('purges private state immediately on logout and discards late reads', async () => {
+  const lateTransactions = deferred()
+  const logout = deferred()
+  api.getTransactions.mockReturnValueOnce(lateTransactions.promise)
+  api.logout.mockReturnValueOnce(logout.promise)
+  const pinia = createPinia()
+  const wrapper = mount(App, { global: { plugins: [pinia] } })
+  const store = useAppStore(pinia)
+  await flushPromises()
+  expect(store.accounts).toEqual(['cash'])
+  await wrapper.get('.hamburger-menu').trigger('click')
+  await clickButton(wrapper, 'ログアウト')
+  expect(api.logout).toHaveBeenCalled()
+  expect(store.accounts).toEqual([])
+  expect(wrapper.find('.idle-lock-curtain').exists()).toBe(true)
+  lateTransactions.resolve([{ id: 91, account: 'private-account' }])
+  await flushPromises()
+  expect(store.transactions).toEqual([])
+  expect(navigation.replaceLocation).not.toHaveBeenCalled()
+  logout.resolve()
+  await flushPromises()
+  expect(navigation.replaceLocation).toHaveBeenCalledWith('/login')
+  wrapper.unmount()
+})
+
+it('keeps private state purged and permits logout retry after a network failure', async () => {
+  api.getTransactions.mockResolvedValueOnce([])
+  api.logout.mockRejectedValueOnce(new Error('通信に失敗しました'))
+  const pinia = createPinia()
+  const wrapper = mount(App, { global: { plugins: [pinia] } })
+  const store = useAppStore(pinia)
+  await flushPromises()
+  await wrapper.get('.hamburger-menu').trigger('click')
+  await clickButton(wrapper, 'ログアウト')
+  await flushPromises()
+  expect(store.accounts).toEqual([])
+  expect(wrapper.get('.idle-lock-curtain').text()).toContain('通信に失敗しました')
+  expect(navigation.replaceLocation).not.toHaveBeenCalled()
+  api.logout.mockResolvedValueOnce()
+  await wrapper.get('.idle-lock-curtain button').trigger('click')
+  await flushPromises()
+  expect(navigation.replaceLocation).toHaveBeenCalledWith('/login')
+  wrapper.unmount()
 })

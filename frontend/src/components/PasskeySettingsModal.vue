@@ -4,7 +4,7 @@
       <header class="passkey-header">
         <div>
           <h2 id="passkey-settings-title">パスキー設定</h2>
-          <p>パスワードに加えて、端末の生体認証や画面ロックでログインできます。</p>
+          <p>パスキーを使うと、パスワードを入力せずにログインできます。</p>
         </div>
         <button type="button" class="icon-close" aria-label="閉じる" :disabled="busy" @click="close">×</button>
       </header>
@@ -18,17 +18,12 @@
       <section class="passkey-section" aria-labelledby="register-passkey-title">
         <h3 id="register-passkey-title">新しいパスキーを登録</h3>
         <p class="section-description">
-          Vault鍵をこのパスキーでも安全に開けるようにするため、現在のパスワードを一度だけ確認します。
-          パスキーの保存先によっては、登録確認のあとにPRF出力取得のためのもう一度の確認が表示されます。
+          このアカウントにパスキーを登録します。保存先の確認画面に従ってください。
         </p>
         <form class="registration-form" @submit.prevent="register">
           <label>
             パスキー名
             <input v-model.trim="name" type="text" autocomplete="off" maxlength="120" placeholder="例: MacBook Touch ID" :disabled="busy || !supported" required>
-          </label>
-          <label>
-            現在のパスワード
-			<input v-model="password" type="password" autocomplete="current-password" maxlength="1024" :disabled="busy || !supported" required>
           </label>
           <button type="submit" :disabled="busy || !supported">{{ registering ? '登録中...' : 'パスキーを登録' }}</button>
         </form>
@@ -44,6 +39,7 @@
           <li v-for="passkey in passkeys" :key="passkey.id">
             <div>
               <strong>{{ passkey.name }}</strong>
+              <span>パスキーでログインできます</span>
               <span>登録: {{ formatDate(passkey.created_at) }}</span>
               <span>最終利用: {{ passkey.last_used_at ? formatDate(passkey.last_used_at) : '未使用' }}</span>
             </div>
@@ -61,16 +57,14 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { deleteAllPasskeys, deletePasskey, listPasskeys, registerPasskey } from '../utils/api'
 import { replaceLocation } from '../utils/navigation'
 import { passkeysSupported } from '../utils/passkeys'
-import { validatePasswordBytes } from '../utils/passwordPolicy'
 
 const emit = defineEmits(['close'])
 const passkeys = ref([])
 const name = ref('')
-const password = ref('')
 const loading = ref(false)
 const registering = ref(false)
 const deleting = ref(false)
@@ -79,18 +73,12 @@ const infoMessage = ref('')
 const supported = passkeysSupported()
 const busy = ref(false)
 
-function clearPassword() {
-  password.value = ''
-}
-
 function close() {
   if (busy.value) return
-  clearPassword()
   emit('close')
 }
 
 onMounted(load)
-onBeforeUnmount(clearPassword)
 
 async function load() {
   loading.value = true
@@ -110,13 +98,11 @@ async function register() {
   registering.value = true
   busy.value = true
   errorMessage.value = ''
-	infoMessage.value = ''
-	try {
-	  validatePasswordBytes(password.value)
-	  await registerPasskey({ name: name.value, password: password.value })
-    clearPassword()
+  infoMessage.value = ''
+  try {
+    await registerPasskey({ name: name.value })
     name.value = ''
-    infoMessage.value = 'パスキーを登録しました。次回からパスワードまたはパスキーでログインできます'
+    infoMessage.value = 'パスキーを登録しました'
     try {
       passkeys.value = await listPasskeys()
     } catch {
@@ -125,7 +111,6 @@ async function register() {
   } catch (error) {
     errorMessage.value = error?.message || 'パスキーを登録できませんでした'
   } finally {
-    clearPassword()
     registering.value = false
     busy.value = deleting.value
   }
