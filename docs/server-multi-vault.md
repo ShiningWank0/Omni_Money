@@ -92,9 +92,45 @@ block a new session; the final database close is serialized before any fresh
 instance can open. Explicit credential-revocation, disable, restore, and shutdown
 drains remain fail-closed and cannot be adopted by a new login.
 
-The browser purges private UI state immediately on logout, rejects late API
-responses, and waits only for the revocation response before navigating. An
-unconfirmed network failure keeps the screen locked and offers a retry.
+The browser purges private UI state immediately on logout and rejects late API
+responses. Before revoking the session it waits for outstanding transaction-save
+receipts, then navigates after the revocation response. An unconfirmed upload or
+revocation keeps the screen locked and offers a retry.
+
+## Durable transaction-save receipts
+
+Server-mode transaction create/update uses `/api/transaction-saves`. Each user
+save intent has a UUID, and retrying that operation preserves both its UUID and
+immutable payload. The request also binds the authenticated user ID; a rotated
+cookie cannot send an old user's pending input into another user's vault.
+Identical contents with different IDs remain separate transactions. Reusing an
+ID with different contents is rejected with 409. Receipt IDs are scoped to the
+user vault, and completed/failed tombstones remain for safe replay.
+
+The complete input, including image uploads, is committed to the user's
+SQLCipher ledger with FULL synchronous durability before returning 202. Image
+decoding, validation, ledger mutations, and automatic snapshots run afterward
+on an instance-owned worker. Logout waits for receipt confirmation only; it
+does not wait for that processing. Each ledger mutation and its completed
+receipt are committed in one SQL transaction. A disconnect or logout cannot
+cancel accepted work. Closing the vault joins its worker before destroying the
+key. A pending receipt after a process crash resumes when that user's vault is
+next unlocked, because the worker needs the vault DEK.
+
+Schema version 6 adds this queue. Each input is bounded to 32 MiB, with at most
+32 retained inputs and 128 MiB per vault, including unacknowledged failed input.
+Only the owner can query processing notices or dismiss a failed notice. Failed
+input stays encrypted until explicitly dismissed; dismissal keeps the receipt
+ID/hash tombstone. Notices expose text metadata without downloading image data.
+The browser shows pending/failed notices after login and refreshes the ledger
+after pending work completes.
+
+There is no persistent offline browser outbox. Unconfirmed upload input is held
+in memory for retry, so logout cannot silently declare success before receipt.
+Closing/reloading the browser before receipt confirmation can lose that local
+input. CSV imports and the other synchronous ledger APIs retain their existing
+request behavior; this receipt protocol covers the transaction editor's create
+and update operations.
 
 Users can rotate their password or recovery code after proving the current password. Both operations unwrap the DEK only inside the authenticated account service and rewrap the unchanged DEK; the control store commits an exact-envelope/revision compare-and-swap. Password rotation explicitly chooses whether passkeys remain valid or are deleted in the same transaction. Successful credential revocation invalidates all sessions before the Vault manager begins draining that user's leases. Individual and bulk passkey revocation use the same session-and-vault shutdown boundary.
 

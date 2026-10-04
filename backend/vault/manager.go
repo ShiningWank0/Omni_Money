@@ -746,6 +746,9 @@ func (m *Manager) closeEntry(ctx context.Context, current *entry) error {
 		autoRetiring := current.autoRetiring && current.references == 0 && current.closing == nil
 		m.mu.Unlock()
 		if autoRetiring && instanceToDrain != nil {
+			if err := instanceToDrain.WaitForLedgerWork(ctx); err != nil {
+				return err
+			}
 			if err := instanceToDrain.WaitForAutoSnapshots(ctx); err != nil {
 				return err
 			}

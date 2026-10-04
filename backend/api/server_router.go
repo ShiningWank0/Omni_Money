@@ -159,6 +159,8 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 	mux.HandleFunc("/api/admin/password-resets/", handleServerPasswordResetAction(dependencies))
 
 	registerFinancialRoutes(mux)
+	mux.HandleFunc("/api/transaction-saves", handleTransactionSaves)
+	mux.HandleFunc("/api/transaction-saves/", handleTransactionSaveStatus)
 	if dependencies.Snapshots == nil {
 		// Keep a fail-closed boundary for test/degraded configurations that do
 		// not provide the root-only manager capability.

@@ -13,11 +13,12 @@ func serverPasskeyAAD(binding Context, credentialID []byte) ([]byte, error) {
 	if err := validateContext(binding); err != nil {
 		return nil, err
 	}
-	if len(credentialID) < 16 || len(credentialID) > 1024 {
+	credentialLength := len(credentialID)
+	if credentialLength < 16 || credentialLength > 1024 {
 		return nil, ErrInvalidContext
 	}
 	aad := authenticatedData(binding, KindServerPasskey, CurrentVersion)
-	aad = binary.BigEndian.AppendUint32(aad, uint32(len(credentialID)))
+	aad = binary.BigEndian.AppendUint32(aad, uint32(credentialLength))
 	return append(aad, credentialID...), nil
 }
 

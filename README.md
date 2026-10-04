@@ -127,6 +127,8 @@ DesktopとserverのDB、WAL、snapshotはSQLCipher 4.18.0で暗号化し、所�
 - Windows: `%APPDATA%/OmniMoney/vaults/<vault-id>/omni_money.db`
 - Linux: `$XDG_DATA_HOME/OmniMoney/vaults/<vault-id>/omni_money.db`（未設定時は `~/.local/share/OmniMoney`）
 
+server版の取引編集は、保存操作ごとの要求IDで再送を識別し、画像を含む入力を暗号化保管庫へ先に受け付けます。ログアウトは送信・受付確認とsession失効まで待ち、画像処理やスナップショットの完了は待ちません。受付済みの保存処理はサーバーで継続し、次回ログイン時に処理状況や失敗した入力を確認できます。詳細は[利用ガイド](docs/how-to-use.md)を参照してください。
+
 ## サーバーモードで起動
 
 フロントエンドをビルドしてから、`server` ビルドタグ付きで Go サーバーを起動します。

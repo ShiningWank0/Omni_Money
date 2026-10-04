@@ -21,7 +21,7 @@ const MaxPasskeysPerUser = 10
 
 // The existing JSON column can represent a credential that authenticates
 // with WebAuthn but needs the account password to unlock the vault.
-const passwordRequiredPasskeyEnvelope = `{"unlock":"password"}`
+const legacyUnlockMarker = `{"unlock":"password"}`
 
 func (s *Store) CreatePasskeyCredential(ctx context.Context, input PasskeyCredentialInput, now time.Time) (PasskeyCredential, error) {
 	prepared, credentialJSON, envelopeJSON, err := preparePasskeyCredential(input)
@@ -247,7 +247,7 @@ func preparePasskeyCredential(input PasskeyCredentialInput) (PasskeyCredential, 
 	if err != nil || len(credentialJSON) < 2 || len(credentialJSON) > 1<<20 {
 		return PasskeyCredential{}, "", "", fmt.Errorf("encode passkey credential: %w", err)
 	}
-	envelopeJSON := passwordRequiredPasskeyEnvelope
+	envelopeJSON := legacyUnlockMarker
 	if !input.PasswordRequired {
 		envelopeJSON, err = encodePasskeyEnvelope(input.VaultEnvelope)
 		if err != nil {
@@ -282,7 +282,7 @@ func scanPasskeyCredential(scanner passkeyScanner) (PasskeyCredential, error) {
 		return PasskeyCredential{}, errors.New("stored passkey credential ID mismatch")
 	}
 	var err error
-	if envelopeJSON == passwordRequiredPasskeyEnvelope {
+	if envelopeJSON == legacyUnlockMarker {
 		result.PasswordRequired = true
 	} else {
 		result.VaultEnvelope, err = decodePasskeyEnvelope(envelopeJSON)

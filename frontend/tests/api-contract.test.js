@@ -16,7 +16,6 @@ const tag = { id: 1, name: 'food', parent_id: null, level: 1 }
 const entity = { id: 'user-1' }
 const cases = [
   ['getAccounts', [], ['cash']], ['getItems', [], ['coffee']], ['getTransactions', [], [tx]],
-  ['addTransaction', [tx], { message: 'added', transaction: tx }], ['updateTransaction', [1, tx], { message: 'updated', transaction: tx }],
   ['deleteTransaction', [1], { message: 'deleted' }],
   ['getBalanceHistory', [], { accounts: ['cash'], dates: ['2026-01-01'], balances: { cash: [-100] } }],
   ['getBalanceHistoryFiltered', [['cash']], { accounts: [], dates: [], balances: {} }],
