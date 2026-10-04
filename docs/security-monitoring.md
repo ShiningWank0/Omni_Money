@@ -11,9 +11,9 @@
 | npm audit | frontendの依存関係。high以上で失敗 |
 | Trivy | Omni MoneyイメージのOS・ライブラリ。修正版のあるHIGH/CRITICALで失敗。`ignore-unfixed: true`のため未修正の問題は除外。Docker Releaseでは各アーキテクチャを**タグなしのdigestとしてpushしてから**スキャンし、両方成功した後にのみrelease tagを公開する |
 
-Docker公開前にもこれらの検査を実行する。Docker Releaseは次の順序を守る: タグなしdigest push → アーキテクチャ毎のTrivyスキャン → staging index作成 → build provenance attestation付与 → `gh attestation verify`（署名workflow・source ref・GitHub-hosted runnerを固定）→ version/latestタグ公開。スキャン・attestation・検証のいずれかが失敗するとrelease tagは作られない。配備側は`scripts/resolve-image-digest.sh --verify --repo OWNER/REPO`でprovenance検証を必須とする。
+Goのgovulncheck/gosec等はPRと週次scheduleで実行し、main pushではGo checksジョブを省略する。各jobの条件は `ci.yml` を正とする。Docker Releaseは各アーキテクチャのTrivyを公開前に実行し、次の順序を守る: タグなしdigest push → アーキテクチャ毎のTrivyスキャン → staging index作成 → build provenance attestation付与 → `gh attestation verify`（署名workflow・source ref・GitHub-hosted runnerを固定）→ version/latestタグ公開。スキャン・attestation・検証のいずれかが失敗するとrelease tagは作られない。配備側は`scripts/resolve-image-digest.sh --verify --repo OWNER/REPO`でprovenance検証を必須とする。
 
-`release-docker.yml`は`workflow_dispatch`で**リハーサル**実行できる。releaseと同じビルド・スキャン・attestation・検証を行い、version/latestタグは公開しない（`rehearsal-staging`タグのみ更新）。VERSION変更を伴う本番Releaseの前に、`gh workflow run release-docker.yml --ref <branch>`で経路全体を検証する。CI成功は、未修正の既知問題や静的解析で分からない設計上の問題がないことを保証しない。Pangolin、Newt、Gerbil、Traefik、Badger、VPS/TrueNASそのものは別配備のため、このCIの検査対象ではない。
+`release-docker.yml`は`workflow_dispatch`で**リハーサル**実行できる。releaseと同じビルド・スキャン・attestation・検証を行い、version/latestタグは公開しない（`rehearsal-staging`タグのみ更新）。VERSION変更を伴う本番Releaseの前に、GitHub Actions画面のRun workflowで対象branchを選び、経路全体を検証する。CI成功は、未修正の既知問題や静的解析で分からない設計上の問題がないことを保証しない。Pangolin、Newt、Gerbil、Traefik、Badger、VPS/TrueNASそのものは別配備のため、このCIの検査対象ではない。
 
 ## 定期検査のIssue報告
 
@@ -49,10 +49,14 @@ Issue報告ジョブは同じ実行・同じattemptのartifactだけを読む。
 
 ## パスキーログインの情報漏えい対策と限界
 
-有効なメール形式について、アカウント不存在・無効化・パスキー未登録でも、公開login/beginは架空の候補を含む認証開始応答を返す。候補数は登録上限の10件に揃え、transport情報を省略する。架空IDとPRF saltは目的分離した永続秘密鍵と正規化メールから決定的に生成する。login/beginは関数全体に、login/finishは全ての失敗応答（架空ceremonyを含む）に100msの応答時間下限を設け、成功時のみ下限を適用しない。秘密鍵は既存control DB鍵からHKDFで導出するため、追加設定・DB移行は不要。
+現行Frontendのパスキーログインは `/api/auth/passkeys/discover/begin` と `/finish` を使用する。メール入力なしのdiscoverable ceremonyを開始し、開始応答にuser別のcredential候補を含めない。選択されたcredentialの署名、challenge、RP/origin、user handle、user verification、期限、一回限りの利用を検証してから本人のVaultを開く。標準パスキーはserver-custody envelopeを使用し、PRF出力を要求しない。旧形式の互換処理と自動移行は [server安全モデル](server-multi-vault.md#passkey-authentication) を参照。
 
-架空候補はサーバー側の認証許可リストに入れず、架空アカウントのceremonyはfinishで拒否する。本物の署名、RP/origin、user verification、本人のcredential、PRFによるvault鍵の復号、期限、一回限りの利用を引き続き検証する。
+### メール指定の互換login API
 
-この変更はHTTP成否・候補数・架空値の使い回し方からの直接的な判別を抑える。既存の非discoverableパスキーとの互換性のため、実credential IDとその長さ、PRF saltをブラウザーへ渡す方式は維持する。既知IDとの照合、認証器固有の形式・長さの統計的推測、登録変更前後やcontrol DB鍵のローテーション前後の比較、負荷時の時間差まで隠すものではない。完全なcredential情報非開示には、discoverable credentialを必須化するか、WebAuthn開始前の別認証が必要であり、既存パスキーの利用条件が変わる。
+有効なメール形式について、アカウント不存在・無効化・パスキー未登録でも、メール指定の公開login/beginは架空の候補を含む認証開始応答を返す。候補数は登録上限の10件に揃え、transport情報を省略する。架空IDとPRF saltは目的分離した永続秘密鍵と正規化メールから決定的に生成する。login/beginは関数全体に、login/finishは全ての失敗応答（架空ceremonyを含む）に100msの応答時間下限を設け、成功時のみ下限を適用しない。秘密鍵は既存control DB鍵からHKDFで導出するため、追加設定・DB移行は不要。
+
+架空候補はサーバー側の認証許可リストに入れず、架空アカウントのceremonyはfinishで拒否する。本物の署名、challenge、RP/origin、user verification、本人のcredential、期限、一回限りの利用を引き続き検証する。検証後は標準パスキーのcustody envelopeを開き、旧PRF envelopeの互換経路ではPRF出力でVault鍵を開く。
+
+この変更はHTTP成否・候補数・架空値の使い回し方からの直接的な判別を抑える。既存の非discoverableパスキーとの互換性のため、実credential IDとその長さ、PRF saltをブラウザーへ渡す方式は維持する。既知IDとの照合、認証器固有の形式・長さの統計的推測、登録変更前後やcontrol DB鍵のローテーション前後の比較、負荷時の時間差まで隠すものではない。この限界はメール指定の互換APIに対するもので、現行Frontendのdiscoverable開始応答にはuser別のallowCredentialsを含めない。
 
 [WebAuthnのUsername Enumeration / Privacy leak via credential IDs](https://www.w3.org/TR/webauthn/#sctn-username-enumeration) に沿った互換性を維持する緩和策として扱う。

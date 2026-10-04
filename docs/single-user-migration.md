@@ -26,7 +26,7 @@ Issue #148は、既存のDesktop移行とCSV v3を使うoperator runbookに範�
 1. 元環境と同じversionを外部公開しない複製環境で起動し、対応していればCSV v3を出力します。旧認証・AI設定を現行serverへ持ち込みません。
 2. 平文旧DBのDesktop経由変換では、既存Desktopデータのない専用OSアカウントを使用します。そのアカウントのapplication data directoryに作業用複製だけを配置し、現行Desktopの移行案内に従います。元データをこのdirectoryへ移動してはいけません。Desktop移行は作業用複製の平文を整理・削除し、journalで中断復旧します。passwordとrecovery code保存確認を完了してCSV v3を出力します。
 3. 別のdata rootと新しいcontrol keyを持つ現行serverを起動します。新Adminのsetup、移行先userの招待・password・recovery code保存を行います。共有旧ledgerを誰が所有するかを先に決め、移行する本人でloginします。Adminが他人のvaultへ代理注入する手順はありません。
-4. 空の移行先vaultへCSV v3を「置換」で取り込みます。置換警告（プレビュー対応版では分類・削除件数の事前確認）に同意してから実行します。途中エラーでは全体がrollbackします。appendで再試行すると重複するため使用しません。
+4. 空の移行先vaultへCSV v3を「置換」で取り込みます。現行serverではプレビューで分類・削除件数を確認し、置換に同意してから実行します。プレビュー後にCSVや対象が変わると409で中止するため、再プレビューと再同意が必要です。途中エラーでは全体がrollbackします。appendで再試行すると重複するため使用しません。
 5. 取引・金額・残高・メモ、画像内容、タグ階層と紐付け、カード/銀行リンク、2種類のledger設定を照合します。IDは再採番されるためIDそのものでは比較しません。別userとAdminのsessionから移行先取引が見えないことも確認します。
 6. 新vaultのsnapshotを作成し、隔離環境で復元を試します。restore後は再loginが必要です。旧snapshotは新DEKで開けないため新vaultへ直接コピーせず、旧環境の保全セットに残します。
 
