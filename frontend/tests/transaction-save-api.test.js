@@ -8,9 +8,9 @@ globalThis.window = {
 }
 const transaction = { id: 5, date: '2026-10-04', account: 'cash', item: 'lunch', type: 'expense', amount: 100 }
 let moduleID = 0
-async function freshAPI() {
+async function freshAPI(status = { authenticated: true, user: { id: 'owner' }, csrf_token: 'csrf' }) {
   const api = await import(`../src/utils/api.js?save-test=${moduleID++}`)
-  globalThis.fetch = async () => Response.json({ authenticated: true, user_id: 'owner', csrf_token: 'csrf' })
+  globalThis.fetch = async () => Response.json(status)
   await api.getAuthStatus()
   return api
 }
@@ -94,10 +94,12 @@ test('unconfirmed receipt stops logout and a retry retains the original operatio
 })
 
 test('CSRF rotation refreshes the token without changing the operation ID', async () => {
-  const api = await freshAPI()
+  // Login/reauthentication use a flat user_id; status after reload/CSRF rotation
+  // uses user.id. Both responses must identify the same account.
+  const api = await freshAPI({ authenticated: true, user_id: 'owner', csrf_token: 'csrf' })
   let attempts = 0, originalBody
   globalThis.fetch = async (url, options) => {
-    if (url === '/api/auth/status') return Response.json({ authenticated: true, user_id: 'owner', csrf_token: 'new-csrf' })
+    if (url === '/api/auth/status') return Response.json({ authenticated: true, user: { id: 'owner' }, csrf_token: 'new-csrf' })
     if (++attempts === 1) { originalBody = options.body; return Response.json({ error: 'CSRF' }, { status: 403 }) }
     assert.equal(options.body, originalBody)
     assert.equal(new Headers(options.headers).get('X-CSRF-Token'), 'new-csrf')
@@ -111,7 +113,7 @@ test('account switching cannot redirect an old pending save to another user', as
   const api = await freshAPI()
   let posts = 0
   globalThis.fetch = async url => {
-    if (url === '/api/auth/status') return Response.json({ authenticated: true, user_id: 'different-user', csrf_token: 'other-csrf' })
+    if (url === '/api/auth/status') return Response.json({ authenticated: true, user: { id: 'different-user' }, csrf_token: 'other-csrf' })
     posts++; return Response.json({ error: 'CSRF' }, { status: 403 })
   }
   await assert.rejects(api.addTransaction(transaction), error => error.code === 'save_account_mismatch')
@@ -125,6 +127,25 @@ test('queued validation failure is reported as failure rather than saved', async
     : Response.json({ request_id: JSON.parse(options.body).request_id, state: 'failed', error: '画像形式が無効です' })
   await assert.rejects(api.addTransaction(transaction), error => error.code === 'save_failed')
   await api.logout()
+})
+
+test('a save after page reload retries a temporary outage with the same account and operation ID', async () => {
+  const api = await freshAPI()
+  const id = '7616712d-b63e-4dfa-9fa2-707b6b3c0d9a'
+  const bodies = []
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body)
+    assert.equal(body.user_id, 'owner')
+    assert.equal(body.request_id, id)
+    bodies.push(options.body)
+    if (bodies.length <= 2) return Response.json({ error: '一時停止' }, { status: 503 })
+    return completed(id)
+  }
+  await assert.rejects(api.addTransaction(transaction, { requestID: id }), error => error.status === 503)
+  const result = await api.addTransaction(transaction, { requestID: id })
+  assert.equal(result.transaction.id, 5)
+  assert.equal(bodies.length, 3)
+  assert.equal(new Set(bodies).size, 1)
 })
 
 test('save notices validate their envelope and dismiss only the specified ID', async () => {

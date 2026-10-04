@@ -61,8 +61,14 @@ export function clearSessionSecrets() {
   pendingReauthentication = null
 }
 
+function authResponseUserID(data) {
+  // Login/reauthentication return user_id; status returns a user summary.
+  const id = data?.user_id ?? data?.user?.id
+  return typeof id === 'string' && id.length > 0 ? id : null
+}
+
 function rememberAuthToken(data) {
-  if (typeof data?.user_id === 'string') authenticatedUserID = data.user_id
+  if (data?.authenticated === true) authenticatedUserID = authResponseUserID(data)
   if (typeof data?.csrf_token === 'string' && data.csrf_token.length > 0) {
     csrfToken = data.csrf_token
   } else if (data?.authenticated === false) {
@@ -826,7 +832,7 @@ function sendSaveReceipt(entry) {
       if (res.status === 403) {
         const statusResponse = await apiFetch('/api/auth/status', { signal: controller.signal }, { skipAuthRedirect: true, skipReauth: true, logoutRecovery: true })
         const status = await expectJSON(statusResponse, schema.auth)
-        if (!status.authenticated || status.user_id !== entry.userID) throw new ApiError('保存要求のアカウントが一致しません', { status: 403, code: 'save_account_mismatch' })
+        if (!status.authenticated || !entry.userID || authResponseUserID(status) !== entry.userID) throw new ApiError('保存要求のアカウントが一致しません', { status: 403, code: 'save_account_mismatch' })
         rememberAuthToken(status)
         res = await post()
       }
