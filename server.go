@@ -124,7 +124,12 @@ func newServerRuntime(
 	}
 	opener := securedb.NewEncryptedOpener(controlKey)
 	privacyKey, privacyErr := hkdf.Key(sha256.New, controlKey[:], nil, "omni-money/passkey-login-privacy/v1", 32)
+	custodyKey, custodyErr := hkdf.Key(sha256.New, controlKey[:], nil, "omni-money/passkey-vault-custody/v1", 32)
 	controlKey.Destroy()
+	defer clear(custodyKey)
+	if custodyErr != nil {
+		return nil, fmt.Errorf("derive passkey custody key: %w", custodyErr)
+	}
 	if privacyErr != nil {
 		return nil, fmt.Errorf("derive passkey privacy key: %w", privacyErr)
 	}
@@ -182,6 +187,7 @@ func newServerRuntime(
 		MaxConcurrentKDF:  serverConfig.AuthKDFConcurrency,
 		WebAuthn:          passkeyVerifier,
 		PasskeyPrivacyKey: privacyKey,
+		PasskeyCustodyKey: custodyKey,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("server authenticationを初期化できません: %w", err)

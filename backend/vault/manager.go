@@ -52,6 +52,8 @@ type entry struct {
 	references     int
 	rootReferences int
 	draining       bool
+	autoRetiring   bool
+	retired        chan struct{}
 	idle           chan struct{}
 	closing        chan struct{}
 	closeErr       error
@@ -145,13 +147,30 @@ func (m *Manager) Acquire(userID, vaultID string, key securedb.RawKey) (*Lease, 
 			return nil, ErrClosed
 		}
 		if current := m.entries[userID]; current != nil {
-			if current.draining {
+			if current.draining && !current.autoRetiring {
 				m.mu.Unlock()
 				return nil, ErrDraining
 			}
 			if current.vaultID != vaultID || subtle.ConstantTimeCompare(current.keyFingerprint[:], fingerprint[:]) != 1 {
 				m.mu.Unlock()
 				return nil, ErrBindingMismatch
+			}
+			if current.autoRetiring {
+				if current.closing != nil {
+					// Only the close itself remains; never open the same database
+					// twice while the previous instance is being destroyed.
+					done := current.retired
+					m.mu.Unlock()
+					<-done
+					continue
+				}
+				// A fresh login proved the identical DEK. It may share the live
+				// instance with old admitted writes, which remain serialized by
+				// SQLite. This grants no authority to the revoked session.
+				current.draining = false
+				current.autoRetiring = false
+				close(current.retired)
+				current.retired = nil
 			}
 			if current.ready != nil {
 				ready := current.ready
@@ -300,6 +319,24 @@ func (l *Lease) Service() (*core.Service, error) {
 	instance := l.entry.instance
 	l.state.mu.RUnlock()
 	return core.NewGuardedService(instance, l.isLive)
+}
+
+// CopyVaultKey only reads the key of this live, already acquired lease.
+func (l *Lease) CopyVaultKey() (securedb.RawKey, error) {
+	if l == nil || l.state == nil {
+		return securedb.RawKey{}, ErrLeaseReleased
+	}
+	l.state.mu.RLock()
+	defer l.state.mu.RUnlock()
+	if l.state.released || l.manager == nil || l.entry == nil {
+		return securedb.RawKey{}, ErrLeaseReleased
+	}
+	l.manager.mu.Lock()
+	defer l.manager.mu.Unlock()
+	if l.manager.entries[l.entry.userID] != l.entry || l.entry.instance == nil {
+		return securedb.RawKey{}, ErrLeaseReleased
+	}
+	return l.entry.instance.CopyVaultKey()
 }
 
 // CreateSnapshot creates an encrypted snapshot through this lease's bound
@@ -578,10 +615,9 @@ func (l *Lease) Release() {
 			if root && current.rootReferences > 0 {
 				current.rootReferences--
 				if current.rootReferences == 0 && !current.draining {
-					// A root lease represents an unlocked session. Once the last
-					// root disappears, reject new acquisitions immediately and
-					// let the final outstanding reference close the entry.
 					current.draining = true
+					current.autoRetiring = true
+					current.retired = make(chan struct{})
 				}
 			}
 			if current.references == 0 {
@@ -616,6 +652,7 @@ func (m *Manager) BeginUserDrain(userID string) (func(context.Context) error, er
 		return noOp, nil
 	}
 	current.draining = true
+	current.autoRetiring = false
 	m.mu.Unlock()
 	return func(ctx context.Context) error {
 		return m.closeEntry(ctx, current)
@@ -642,6 +679,7 @@ func (m *Manager) Close(ctx context.Context) error {
 	entries := make([]*entry, 0, len(m.entries))
 	for _, current := range m.entries {
 		current.draining = true
+		current.autoRetiring = false
 		entries = append(entries, current)
 	}
 	m.mu.Unlock()
@@ -665,6 +703,10 @@ func (m *Manager) closeEntry(ctx context.Context, current *entry) error {
 			closeErr := current.closeErr
 			m.mu.Unlock()
 			return closeErr
+		}
+		if !current.draining {
+			m.mu.Unlock()
+			return nil
 		}
 		ready := current.ready
 		idle := current.idle
@@ -699,7 +741,21 @@ func (m *Manager) closeEntry(ctx context.Context, current *entry) error {
 		}
 
 		m.mu.Lock()
-		if m.entries[current.userID] != current || current.ready != nil || current.references != 0 || current.closing != nil {
+		retired := current.retired
+		instanceToDrain := current.instance
+		autoRetiring := current.autoRetiring && current.references == 0 && current.closing == nil
+		m.mu.Unlock()
+		if autoRetiring && instanceToDrain != nil {
+			if err := instanceToDrain.WaitForAutoSnapshots(ctx); err != nil {
+				return err
+			}
+		}
+		m.mu.Lock()
+		if autoRetiring && (current.retired != retired || !current.autoRetiring) {
+			m.mu.Unlock()
+			return nil
+		}
+		if m.entries[current.userID] != current || !current.draining || current.ready != nil || current.references != 0 || current.closing != nil {
 			m.mu.Unlock()
 			continue
 		}
@@ -722,6 +778,10 @@ func (m *Manager) closeEntry(ctx context.Context, current *entry) error {
 		}
 		clear(current.keyFingerprint[:])
 		close(current.closing)
+		if current.retired != nil {
+			close(current.retired)
+			current.retired = nil
+		}
 		m.mu.Unlock()
 		return closeErr
 	}

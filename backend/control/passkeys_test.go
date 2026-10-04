@@ -120,3 +120,36 @@ func TestPasskeySummaryCannotExposeVaultMaterial(t *testing.T) {
 		}
 	}
 }
+
+func TestLegacyPasskeyEnvelopeUpgradeUsesCASAndCannotResurrectDeletion(t *testing.T) {
+	store := openTestStore(t)
+	admin := bootstrapTestAdmin(t, store)
+	ctx := context.Background()
+	input := testPasskeyInput(admin.ID, "Bitwarden", 51)
+	input.PasswordRequired = true
+	record, err := store.CreatePasskeyCredential(ctx, input, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := keyenvelope.Context{UserID: admin.ID, VaultID: "vault-binding"}
+	envelope, err := keyenvelope.WrapWithServerPasskey(bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), binding, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplacePasskeyEnvelope(ctx, record, *envelope, testNow); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := store.GetPasskeyCredential(ctx, admin.ID, record.ID)
+	if err != nil || upgraded.PasswordRequired || upgraded.VaultEnvelope.Kind != keyenvelope.KindServerPasskey || upgraded.Revision != record.Revision+1 {
+		t.Fatalf("upgrade failed: %v", err)
+	}
+	if err := store.ReplacePasskeyEnvelope(ctx, record, *envelope, testNow); !errors.Is(err, ErrCredentialConflict) {
+		t.Fatal("stale upgrade succeeded")
+	}
+	if err := store.DeletePasskeyCredential(ctx, admin.ID, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplacePasskeyEnvelope(ctx, upgraded, *envelope, testNow); !errors.Is(err, ErrCredentialConflict) {
+		t.Fatal("deleted credential was resurrected")
+	}
+}

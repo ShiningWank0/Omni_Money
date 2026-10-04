@@ -76,7 +76,7 @@ func privacyTestService(t *testing.T, store *privacyTestStore) *Service {
 		t.Fatal(err)
 	}
 	service, err := NewService(Dependencies{
-		Store: store, WebAuthn: verifier, PasskeyPrivacyKey: bytes.Repeat([]byte{71}, 32),
+		Store: store, WebAuthn: verifier, PasskeyPrivacyKey: bytes.Repeat([]byte{71}, 32), PasskeyCustodyKey: bytes.Repeat([]byte{72}, 32),
 		Sessions: &fakeSessionInvalidator{}, Vaults: &fakeVaultDrainer{},
 		OpenSession: func(user control.UserSummary, vaultID string, key *securedb.RawKey) (*middleware.Session, error) {
 			defer key.Destroy()
@@ -399,7 +399,7 @@ func TestPasskeyPrivacyRequiresPersistentSecretAndSeparatesEmails(t *testing.T) 
 	store := &privacyTestStore{user: control.UserSummary{ID: serverAuthTestUserID, Email: "person@example.test", State: control.UserActive}}
 	service := privacyTestService(t, store)
 	for _, key := range [][]byte{nil, make([]byte, 32), bytes.Repeat([]byte{1}, 31)} {
-		if _, err := NewService(Dependencies{Store: store, WebAuthn: service.webauthn, PasskeyPrivacyKey: key,
+		if _, err := NewService(Dependencies{Store: store, WebAuthn: service.webauthn, PasskeyPrivacyKey: key, PasskeyCustodyKey: bytes.Repeat([]byte{72}, 32),
 			OpenSession: service.openSession, Sessions: service.sessions, Vaults: service.vaults}); err == nil {
 			t.Fatal("passkey service accepted a missing or invalid privacy key")
 		}

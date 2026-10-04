@@ -79,7 +79,7 @@ type PasswordCredential struct {
 	UpdatedAt time.Time
 }
 
-// PasskeyCredential binds a verified WebAuthn credential and its PRF-derived
+// PasskeyCredential binds a verified WebAuthn credential and its encrypted
 // vault envelope. PRFSalt and VaultEnvelope are sensitive authentication
 // metadata and must never be returned from an administrative listing API.
 type PasskeyCredential struct {

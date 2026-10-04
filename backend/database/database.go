@@ -357,6 +357,44 @@ func CloseDB() {
 	_ = defaultInstance.Close()
 }
 
+// CopyVaultKey is restricted to the server's authenticated vault capability.
+// It never serializes the key; callers must destroy the returned copy.
+func (i *Instance) CopyVaultKey() (securedb.RawKey, error) {
+	if i == nil {
+		return securedb.RawKey{}, securedb.ErrDestroyed
+	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.db == nil || i.opener == nil {
+		return securedb.RawKey{}, securedb.ErrDestroyed
+	}
+	return i.opener.CopyKey()
+}
+
+// WaitForAutoSnapshots drains background work without closing the database or
+// preventing a freshly authenticated session from using the same instance.
+func (i *Instance) WaitForAutoSnapshots(ctx context.Context) error {
+	if i == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	i.ensureSnapshotCond()
+	stop := context.AfterFunc(ctx, func() {
+		i.snapshotMu.Lock()
+		i.snapshotCond.Broadcast()
+		i.snapshotMu.Unlock()
+	})
+	defer stop()
+	i.snapshotMu.Lock()
+	defer i.snapshotMu.Unlock()
+	for i.snapshotRunning && ctx.Err() == nil {
+		i.snapshotCond.Wait()
+	}
+	return ctx.Err()
+}
+
 // Close waits for snapshots, closes the connection, and destroys the opener's
 // in-memory key. It is safe to call more than once.
 func (i *Instance) Close() error {

@@ -1,5 +1,6 @@
-// Package keyenvelope wraps per-vault data-encryption keys without giving the
-// server administrator a key that can decrypt a user's vault.
+// Package keyenvelope wraps per-vault data-encryption keys. Password, recovery,
+// and PRF envelopes use user-held secrets; server passkey envelopes explicitly
+// permit server-managed key custody.
 //
 // Passwords and recovery secrets passed to this package remain owned by the
 // caller and should be cleared as soon as they are no longer needed. Returned

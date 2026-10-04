@@ -151,7 +151,7 @@ LD_LIBRARY_PATH="$PWD/.build/sqlcipher/lib" \
 go run -tags 'server libsqlite3 sqlite_omit_load_extension' ./server.go
 ```
 
-control鍵とinitial-admin setup tokenは別々のowner-only secretとして生成します。setup tokenは32 byte以上のbase64url文字列にしてください。初回アクセスではブラウザがユーザーvault用の回復コードを生成して、保存確認後に最初のAdminを作成します。ログイン後は「サーバーユーザー管理」から招待、password reset tokenの発行・取消、userの無効化・再有効化・role変更を行えます。各ユーザーは「認証情報の管理」でpassword/recovery code、全sessionを管理し、「パスキー設定」でパスキーを登録・個別/一括失効できます。PRF非対応の保存先ではVaultを開くためにログイン時のパスワードも必要です。credential変更や失効後は全sessionと開いているVaultを閉じます。invite/reset tokenはURLに含めず本人へ安全に渡してください。Adminのパスワードやcontrol鍵だけでは他ユーザーのvaultを開けません。
+control鍵とinitial-admin setup tokenは別々のowner-only secretとして生成します。setup tokenは32 byte以上のbase64url文字列にしてください。初回アクセスではブラウザがユーザーvault用の回復コードを生成して、保存確認後に最初のAdminを作成します。ログイン後は「サーバーユーザー管理」から招待、password reset tokenの発行・取消、userの無効化・再有効化・role変更を行えます。各ユーザーは「認証情報の管理」でpassword/recovery code、全sessionを管理し、「パスキー設定」でパスキーを登録・個別/一括失効できます。パスキーの登録・ログインにパスワードの追加入力やPRF対応は必要ありません。credential変更や失効後は全sessionと開いているVaultを閉じます。invite/reset tokenはURLに含めず本人へ安全に渡してください。アプリのAdmin権限では他ユーザーのvaultを開けません。パスキー用のVault鍵はサーバー管理の専用鍵で暗号化して保存するため、control鍵とcontrol DBを持つサーバー運用者には復号可能です。
 
 直接起動した公開Webは標準で `127.0.0.1:4000` で待ち受けます。`ALLOWED_HOSTS` は直接起動でも必須です。非loopback平文HTTPは許可されず、TLSまたは固定したtrusted proxy経由のHTTPSが必要です。同梱のComposeはPangolin/Newt専用構成で、ホストへポートを公開しません。ローカル利用時だけ `compose.local.yaml` を重ねます。
 

@@ -9,7 +9,8 @@
     />
     <template v-else>
     <div v-if="idleScreenLocked" class="idle-lock-curtain" role="status" aria-live="polite">
-      <div class="idle-lock-message">{{ logoutInProgress ? 'ログアウトしています…' : isWailsMode ? '保管庫を保護しています…' : '無操作タイムアウトのため画面をロックしました' }}</div>
+      <div class="idle-lock-message">{{ logoutError || (logoutInProgress ? 'ログアウトしています…' : isWailsMode ? '保管庫を保護しています…' : '無操作タイムアウトのため画面をロックしました') }}</div>
+      <button v-if="logoutError" type="button" @click="logout">ログアウトを再試行</button>
     </div>
     <!-- ヘッダーエリア -->
     <div class="card header">
@@ -423,6 +424,7 @@ const canUsePasskeyReauth = computed(() => !isWailsMode && serverFeatures.value.
 const currentServerUserId = ref('')
 const idleScreenLocked = ref(false)
 const logoutInProgress = ref(false)
+const logoutError = ref('')
 const desktopVaultStatus = ref(null)
 const desktopVaultLoading = ref(isWailsMode)
 const desktopVaultError = ref('')
@@ -867,17 +869,16 @@ async function logout() {
   if (logoutInProgress.value) return
   showMenu.value = false
   logoutInProgress.value = true
+  logoutError.value = ''
   idleLockInProgress = true
   idleScreenLocked.value = true
+  clearSensitiveStateForIdle()
   try {
     await apiLogout()
-    clearSensitiveStateForIdle()
-    window.location.replace('/login')
+    replaceLocation('/login')
   } catch (error) {
-    idleScreenLocked.value = false
-    idleLockInProgress = false
     logoutInProgress.value = false
-    showToast(error?.message || 'ログアウトを確認できませんでした', 'error', 5000)
+    logoutError.value = error?.message || 'ログアウトを確認できませんでした。再試行してください'
   }
 }
 

@@ -135,8 +135,14 @@ func newRegistrationTestService(t *testing.T, dek []byte) (*Service, *registrati
 		t.Fatal(err)
 	}
 	service, err := NewService(Dependencies{
-		Store: store, WebAuthn: verifier, PasskeyPrivacyKey: bytes.Repeat([]byte{71}, 32),
+		Store: store, WebAuthn: verifier, PasskeyPrivacyKey: bytes.Repeat([]byte{71}, 32), PasskeyCustodyKey: bytes.Repeat([]byte{72}, 32),
 		Sessions: &fakeSessionInvalidator{}, Vaults: &fakeVaultDrainer{},
+		SessionVaultKey: func(_ context.Context, id string) (securedb.RawKey, error) {
+			if id != user.ID {
+				return securedb.RawKey{}, ErrInvalidCredentials
+			}
+			return securedb.NewRawKey(dek)
+		},
 		OpenSession: func(user control.UserSummary, vaultID string, key *securedb.RawKey) (*middleware.Session, error) {
 			defer key.Destroy()
 			if user.ID != serverAuthTestUserID || vaultID != serverAuthTestVaultID || !bytes.Equal(key[:], dek) {
@@ -269,7 +275,7 @@ func TestPasskeyRegistrationWithCreateTimePRFStillPersists(t *testing.T) {
 	}
 }
 
-func TestPasskeyWithoutPRFRegistersAndRequiresPasswordAfterAssertion(t *testing.T) {
+func TestPasskeyWithoutPRFRegistersAndLogsInWithoutPassword(t *testing.T) {
 	dek := bytes.Repeat([]byte{37}, keyenvelope.DEKSize)
 	service, store := newRegistrationTestService(t, dek)
 	ctx := context.Background()
@@ -281,59 +287,52 @@ func TestPasskeyWithoutPRFRegistersAndRequiresPasswordAfterAssertion(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	credentialID := bytes.Repeat([]byte{0x71}, 32)
-	attestation := signedRegistrationAttestationWithoutPRF(t, begin, key, credentialID, "https://money.example.test")
+	id := bytes.Repeat([]byte{0x71}, 32)
+	attestation := signedRegistrationAttestationWithoutPRF(t, begin, key, id, "https://money.example.test")
 	summary, err := service.FinishPasskeyRegistration(ctx, serverAuthTestUserID, FinishPasskeyRegistrationInput{
-		CeremonyID: begin.CeremonyID, ClientKey: "client", Name: "Bitwarden",
-		Password: []byte(registrationTestPassword), CredentialJSON: attestation,
+		CeremonyID: begin.CeremonyID, ClientKey: "client", Name: "Bitwarden", CredentialJSON: attestation,
 	}, serverAuthTestNow)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !summary.PasswordRequired || len(store.records) != 1 || !store.records[0].PasswordRequired {
-		t.Fatal("PRF-less passkey was not registered for password unlock")
+	if summary.PasswordRequired || len(store.records) != 1 || store.records[0].VaultEnvelope.Kind != keyenvelope.KindServerPasskey {
+		t.Fatal("PRF-less passkey was not registered for passwordless login")
+	}
+	// The active vault is gone; login must use only the persisted encrypted
+	// envelope, never the previous session's plaintext key or a password.
+	service.sessionVaultKey = func(context.Context, string) (securedb.RawKey, error) {
+		return securedb.RawKey{}, ErrInvalidCredentials
+	}
+	for _, invalid := range []struct {
+		origin string
+		uv     bool
+	}{{"https://evil.example", true}, {"https://money.example.test", false}} {
+		login, err := service.BeginDiscoverablePasskeyLogin(ctx, "client")
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertion := signedPrivacyAssertion(t, login, store.records[0], key, invalid.origin, invalid.uv)
+		if session, err := service.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{
+			CeremonyID: login.CeremonyID, ClientKey: "client", CredentialJSON: assertion,
+		}, serverAuthTestNow); !errors.Is(err, ErrInvalidCredentials) || session != nil {
+			t.Fatalf("invalid assertion opened vault: %v", err)
+		}
 	}
 	login, err := service.BeginDiscoverablePasskeyLogin(ctx, "client")
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertion := signedPrivacyAssertion(t, login, store.records[0], key, "https://money.example.test", true)
-	if session, err := service.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{
-		CeremonyID: login.CeremonyID, ClientKey: "client", CredentialJSON: assertion,
-	}, serverAuthTestNow); !errors.Is(err, ErrInvalidCredentials) || session != nil {
-		t.Fatalf("passwordless unlock of PRF-less credential: session=%v err=%v", session, err)
-	}
-	if err := store.ClearLoginFailures(ctx, LoginThrottleKey("person@example.test")); err != nil {
-		t.Fatal(err)
-	}
-	login, err = service.BeginDiscoverablePasskeyLogin(ctx, "client")
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertion = signedPrivacyAssertion(t, login, store.records[0], key, "https://money.example.test", true)
-	if session, err := service.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{
-		CeremonyID: login.CeremonyID, ClientKey: "client", CredentialJSON: assertion,
-		Password: []byte("wrong password"),
-	}, serverAuthTestNow); !errors.Is(err, ErrInvalidCredentials) || session != nil {
-		t.Fatalf("wrong password opened vault: session=%v err=%v", session, err)
-	}
-	store.throttleMu.Lock()
-	failures := store.throttle[LoginThrottleKey("person@example.test")].failures
-	store.throttleMu.Unlock()
-	if failures != 1 {
-		t.Fatalf("one rejected password counted as %d login failures", failures)
-	}
-	login, err = service.BeginDiscoverablePasskeyLogin(ctx, "client")
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertion = signedPrivacyAssertion(t, login, store.records[0], key, "https://money.example.test", true)
 	session, err := service.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{
 		CeremonyID: login.CeremonyID, ClientKey: "client", CredentialJSON: assertion,
-		Password: []byte(registrationTestPassword),
 	}, serverAuthTestNow)
 	if err != nil || session == nil {
-		t.Fatalf("signed passkey plus password failed: session=%v err=%v", session, err)
+		t.Fatalf("passwordless login failed: session=%v err=%v", session, err)
+	}
+	if _, err := service.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{
+		CeremonyID: login.CeremonyID, ClientKey: "client", CredentialJSON: assertion,
+	}, serverAuthTestNow); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatal("ceremony replay succeeded")
 	}
 }
 
@@ -659,5 +658,92 @@ func TestPasskeyRegistrationAssertionRequiresThirtyTwoBytePRF(t *testing.T) {
 	}
 	if len(store.created) != 0 {
 		t.Fatal("short PRF result persisted a credential")
+	}
+}
+
+func TestRegistrationCannotSubstitutePasswordForAuthenticatedVault(t *testing.T) {
+	service, store := newRegistrationTestService(t, bytes.Repeat([]byte{37}, 32))
+	begin, err := service.BeginPasskeyRegistration(context.Background(), serverAuthTestUserID, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attestation := signedRegistrationAttestationWithoutPRF(t, begin, key, bytes.Repeat([]byte{73}, 32), "https://money.example.test")
+	service.sessionVaultKey = middleware.CopyRequestVaultKey
+	_, err = service.FinishPasskeyRegistration(context.Background(), serverAuthTestUserID, FinishPasskeyRegistrationInput{
+		CeremonyID: begin.CeremonyID, ClientKey: "client", Name: "Rejected", CredentialJSON: attestation, Password: []byte(registrationTestPassword),
+	}, serverAuthTestNow)
+	if !errors.Is(err, ErrInvalidCredentials) || len(store.created) != 0 {
+		t.Fatalf("registration without authenticated vault succeeded: %v", err)
+	}
+}
+
+func (s *registrationTestStore) ReplacePasskeyEnvelope(_ context.Context, expected control.PasskeyCredential, envelope keyenvelope.Envelope, _ time.Time) error {
+	for index, record := range s.records {
+		if record.UserID == expected.UserID && bytes.Equal(record.ID, expected.ID) && record.Revision == expected.Revision {
+			s.records[index].VaultEnvelope = envelope
+			s.records[index].PasswordRequired = false
+			s.records[index].Revision++
+			return nil
+		}
+	}
+	return control.ErrCredentialConflict
+}
+
+func TestPasswordLoginUpgradesLegacyPasskeyThenPasskeyWorksAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	dek := bytes.Repeat([]byte{37}, 32)
+	service, store := newRegistrationTestService(t, dek)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	begin, err := service.BeginPasskeyRegistration(ctx, serverAuthTestUserID, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attestation := signedRegistrationAttestationWithoutPRF(t, begin, key, bytes.Repeat([]byte{75}, 32), "https://money.example.test")
+	_, err = service.FinishPasskeyRegistration(ctx, serverAuthTestUserID, FinishPasskeyRegistrationInput{
+		CeremonyID: begin.CeremonyID, ClientKey: "client", Name: "Legacy", CredentialJSON: attestation,
+	}, serverAuthTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the legacy password-only marker saved by the preceding PR.
+	store.records[0].VaultEnvelope = keyenvelope.Envelope{}
+	store.records[0].PasswordRequired = true
+	store.recordSuccessfulLoginFn = func(_ context.Context, userID string, _ control.PasswordCredential, _ time.Time) error {
+		if userID != serverAuthTestUserID {
+			t.Fatal("password login committed another user's credentials")
+		}
+		return nil
+	}
+	if _, err := service.Login(ctx, "person@example.test", []byte(registrationTestPassword), serverAuthTestNow); err != nil {
+		t.Fatal(err)
+	}
+	if store.records[0].PasswordRequired || store.records[0].VaultEnvelope.Kind != keyenvelope.KindServerPasskey {
+		t.Fatal("password login did not upgrade legacy credential")
+	}
+	restarted, err := NewService(Dependencies{Store: store, WebAuthn: service.webauthn,
+		PasskeyPrivacyKey: bytes.Repeat([]byte{71}, 32), PasskeyCustodyKey: bytes.Repeat([]byte{72}, 32),
+		Sessions: service.sessions, Vaults: service.vaults, OpenSession: service.openSession,
+		// There is no unlocked session after restart.
+		SessionVaultKey: middleware.CopyRequestVaultKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	login, err := restarted.BeginDiscoverablePasskeyLogin(ctx, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertion := signedPrivacyAssertion(t, login, store.records[0], key, "https://money.example.test", true)
+	if session, err := restarted.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{
+		CeremonyID: login.CeremonyID, ClientKey: "client", CredentialJSON: assertion,
+	}, serverAuthTestNow); err != nil || session == nil {
+		t.Fatalf("migrated passkey could not login after restart: %v", err)
 	}
 }

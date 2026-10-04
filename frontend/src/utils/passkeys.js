@@ -110,9 +110,19 @@ function readPRFResult(value) {
   return result
 }
 
+async function requestCredential(operation, options) {
+  try { return await navigator.credentials[operation](options) }
+  catch (error) {
+    if (error?.name === 'NotAllowedError') {
+      throw new Error('パスキーの操作がキャンセルされたか、確認の有効期限が切れました。もう一度お試しください', { cause: error })
+    }
+    throw error
+  }
+}
+
 export async function createPasskey(options) {
   requirePasskeySupport()
-  const credential = await navigator.credentials.create({ publicKey: parseCreationOptions(options.publicKey) })
+  const credential = await requestCredential('create', { publicKey: parseCreationOptions(options.publicKey) })
   if (!credential) throw new Error('パスキー登録がキャンセルされました')
   const prf = credential.getClientExtensionResults()?.prf
   return {
@@ -126,7 +136,7 @@ export async function createPasskey(options) {
 // returning results until a follow-up assertion with the ceremony's salt.
 export async function assertPasskeyPRF(options) {
   requirePasskeySupport()
-  const credential = await navigator.credentials.get({ publicKey: parseRequestOptions(options.publicKey) })
+  const credential = await requestCredential('get', { publicKey: parseRequestOptions(options.publicKey) })
   if (!credential) throw new Error('パスキー登録の確認がキャンセルされました')
   const result = readPRFResult(credential.getClientExtensionResults()?.prf?.results?.first)
   return { credential: credentialToJSON(credential), prfResult: result }
@@ -134,7 +144,7 @@ export async function assertPasskeyPRF(options) {
 
 export async function authenticatePasskey(options) {
   requirePasskeySupport()
-  const credential = await navigator.credentials.get({ publicKey: parseRequestOptions(options.publicKey) })
+  const credential = await requestCredential('get', { publicKey: parseRequestOptions(options.publicKey) })
   if (!credential) throw new Error('パスキー認証がキャンセルされました')
   return { credential: credentialToJSON(credential), prfResult: readPRFResult(credential.getClientExtensionResults()?.prf?.results?.first) }
 }
