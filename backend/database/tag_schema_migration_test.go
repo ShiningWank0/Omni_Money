@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"path/filepath"
@@ -69,6 +70,48 @@ func TestTagRootPartialUniqueIndexExistsOnNewLedger(t *testing.T) {
 		t.Fatal("duplicate root tag was accepted")
 	} else if errors.Is(err, sql.ErrNoRows) {
 		t.Fatal("unexpected no rows error")
+	}
+}
+
+func TestVersionFiveLedgerMigratesSaveQueueWithoutWeakeningValidation(t *testing.T) {
+	for _, forged := range []bool{false, true} {
+		t.Run(map[bool]string{false: "valid", true: "forged"}[forged], func(t *testing.T) {
+			instance, err := OpenPlainInstance(filepath.Join(t.TempDir(), "v5.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer instance.Close()
+			for _, statement := range []string{"DROP TABLE transaction_save_requests", "PRAGMA user_version = 5", "INSERT INTO transactions(account, date, item, type, amount, balance, memo) VALUES('cash', '2026-10-04 00:00:00', 'existing', 'income', 100, 100, '')"} {
+				if _, err := instance.DB().Exec(statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if forged {
+				if _, err := instance.DB().Exec("DROP INDEX idx_tags_root_name_unique; CREATE INDEX idx_tags_root_name_unique ON tags(name)"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = createTablesOn(instance.DB())
+			if forged {
+				if err == nil {
+					t.Fatal("v5 forged schema passed the migration trust boundary")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var version, count int
+			if err := instance.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != ledgerSchemaVersion {
+				t.Fatalf("version=%d error=%v", version, err)
+			}
+			if err := instance.DB().QueryRow("SELECT COUNT(*) FROM transactions WHERE item='existing'").Scan(&count); err != nil || count != 1 {
+				t.Fatalf("existing rows=%d error=%v", count, err)
+			}
+			if err := validateTransactionSaveSchema(context.Background(), instance.DB()); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

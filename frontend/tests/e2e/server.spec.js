@@ -98,7 +98,7 @@ test('server round trip: bootstrap admin, persist a transaction, CSV v3 export a
   await modal.locator('input[placeholder="例: 給与、食費、交通費"]').fill(ITEM_NAME)
   await modal.locator('input[inputmode="numeric"]').fill(AMOUNT)
   // Failed mutations preserve the draft and may be retried explicitly.
-  await page.route('**/api/transactions', async route => {
+  await page.route('**/api/transaction-saves', async route => {
     if (route.request().method() !== 'POST') return route.continue()
     await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'E2E一時停止', code: 'temporarily_unavailable' }) })
   })
@@ -106,7 +106,7 @@ test('server round trip: bootstrap admin, persist a transaction, CSV v3 export a
   await expect(page.getByRole('alert')).toContainText('E2E一時停止')
   await expect(modal).toBeVisible()
   await expect(modal.locator('input[placeholder="例: 給与、食費、交通費"]')).toHaveValue(ITEM_NAME)
-  await page.unroute('**/api/transactions')
+  await page.unroute('**/api/transaction-saves')
   await modal.locator('.ok-btn').click()
   await expect(modal).toBeHidden()
   const transactionRow = page

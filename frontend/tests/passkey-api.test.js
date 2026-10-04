@@ -78,6 +78,27 @@ test('passkey login starts discovery without sending an email', async () => {
   ])
 })
 
+test('passkey login submits a provider assertion without PRF or password', async () => {
+  const requests = []
+  const priorGet = navigator.credentials.get
+  navigator.credentials.get = async () => ({
+    toJSON: () => ({ id: 'bitwarden-passkey', type: 'public-key', response: { signature: 'AA' } }),
+    getClientExtensionResults: () => ({})
+  })
+  try {
+    globalThis.fetch = async (url, options = {}) => {
+      requests.push(url)
+      if (url.endsWith('/begin')) return Response.json({ ceremony_id: 'login', options: { publicKey: { challenge: 'AQID' } } })
+      const body = JSON.parse(options.body)
+      assert.equal(body.prf_result_b64, '')
+      assert.equal(body.password_b64, undefined)
+      return Response.json({ authenticated: true, csrf_token: 'login-csrf' })
+    }
+    assert.equal((await loginWithPasskey()).authenticated, true)
+    assert.deepEqual(requests, ['/api/auth/passkeys/discover/begin', '/api/auth/passkeys/discover/finish'])
+  } finally { navigator.credentials.get = priorGet }
+})
+
 test('passkey registration finishes directly when creation returns a PRF result', async () => {
   createCredential = {
     toJSON: () => ({
@@ -94,7 +115,7 @@ test('passkey registration finishes directly when creation returns a PRF result'
     if (url === '/api/auth/passkeys/register/begin') {
       return Response.json({
         ceremony_id: 'register-ceremony',
-        options: { publicKey: { challenge: 'AQID', user: { id: 'BAUG' }, extensions: { prf: { eval: { first: 'CgsM' } } } } }
+        options: { publicKey: { challenge: 'AQID', user: { id: 'BAUG' }, extensions: { prf: {} } } }
       })
     }
     if (url === '/api/auth/passkeys/register/finish') {
@@ -103,7 +124,8 @@ test('passkey registration finishes directly when creation returns a PRF result'
       assert.equal(body.name, 'MacBook')
       assert.equal(body.credential.id, 'create-id')
       assertCredentialCarriesNoPRF(body)
-      assert.equal(Uint8Array.from(atob(body.prf_result_b64), character => character.charCodeAt(0)).byteLength, 32)
+      assert.equal(body.prf_result_b64, undefined)
+      assert.equal(body.password_b64, undefined)
       return Response.json({ passkey: { id: 1, name: 'MacBook' } })
     }
     throw new Error(`unexpected request: ${url}`)
@@ -117,69 +139,26 @@ test('passkey registration finishes directly when creation returns a PRF result'
   ])
 })
 
-test('passkey registration tries a PRF assertion when creation reports no extension result', async () => {
-  createCredential = {
-    toJSON: () => ({ id: 'create-id', type: 'public-key', response: { attestationObject: 'AA' } }),
-    getClientExtensionResults: () => ({})
-  }
-  const requests = []
-  globalThis.fetch = async (url, options = {}) => {
-    requests.push({ url, options })
-    if (url === '/api/auth/passkeys/register/begin') {
-      return Response.json({
-        ceremony_id: 'register-ceremony',
-        options: { publicKey: { challenge: 'AQID', user: { id: 'BAUG' }, extensions: { prf: { eval: { first: 'CgsM' } } } } }
-      })
+for (const extensions of [{}, { prf: { enabled: true } }]) {
+  test(`registration completes with one creation prompt and no password: ${JSON.stringify(extensions)}`, async () => {
+    createCredential = {
+      toJSON: () => ({ id: 'create-id', type: 'public-key', response: {} }),
+      getClientExtensionResults: () => extensions
     }
-    if (url === '/api/auth/passkeys/register/assert/begin') {
+    const requests = []
+    globalThis.fetch = async (url, options = {}) => {
+      requests.push(url)
+      if (url.endsWith('/begin')) return Response.json({ ceremony_id: 'registration', options: { publicKey: { challenge: 'AQID', user: { id: 'BAUG' } } } })
+      assert.equal(url, '/api/auth/passkeys/register/finish')
       const body = JSON.parse(options.body)
-      assert.equal(body.ceremony_id, 'register-ceremony')
-      assert.equal(body.credential.id, 'create-id')
-      return Response.json({
-        ceremony_id: 'assert-ceremony',
-        options: { publicKey: { challenge: 'BwgJ', allowCredentials: [{ id: 'BwgJ', type: 'public-key' }], extensions: { prf: { eval: { first: 'CgsM' } } } } }
-      })
+      assert.equal(body.password_b64, undefined)
+      assert.equal(body.prf_result_b64, undefined)
+      return Response.json({ passkey: { id: 'create-id', name: 'Bitwarden', password_required: false } })
     }
-    if (url === '/api/auth/passkeys/register/assert/finish') {
-      const body = JSON.parse(options.body)
-      assert.equal(body.ceremony_id, 'assert-ceremony')
-      assert.equal(body.name, 'Bitwarden')
-      assert.equal(body.credential.id, 'passkey-id')
-      assertCredentialCarriesNoPRF(body)
-      assert.equal(Uint8Array.from(atob(body.prf_result_b64), character => character.charCodeAt(0)).byteLength, 32)
-      return Response.json({ passkey: { id: 2, name: 'Bitwarden' } })
-    }
-    throw new Error(`unexpected request: ${url}`)
-  }
-
-  const result = await registerPasskey({ name: 'Bitwarden', password: 'correct horse battery staple' })
-  assert.equal(result.passkey.name, 'Bitwarden')
-  assert.deepEqual(requests.map(request => request.url), [
-    '/api/auth/passkeys/register/begin',
-    '/api/auth/passkeys/register/assert/begin',
-    '/api/auth/passkeys/register/assert/finish'
-  ])
-})
-
-test('passkey registration rejects explicitly unsupported PRF without finishing', async () => {
-  createCredential = {
-    toJSON: () => ({ id: 'create-id', type: 'public-key', response: {} }),
-    getClientExtensionResults: () => ({ prf: { enabled: false } })
-  }
-  const requests = []
-  globalThis.fetch = async (url, options = {}) => {
-    requests.push({ url, options })
-    if (url === '/api/auth/passkeys/register/begin') {
-      return Response.json({
-        ceremony_id: 'register-ceremony',
-        options: { publicKey: { challenge: 'AQID', user: { id: 'BAUG' }, extensions: { prf: { eval: { first: 'CgsM' } } } } }
-      })
-    }
-    throw new Error(`unexpected request: ${url}`)
-  }
-  await assert.rejects(registerPasskey({ name: 'Unsupported', password: 'correct horse battery staple' }), /PRF/)
-  assert.deepEqual(requests.map(request => request.url), ['/api/auth/passkeys/register/begin'])
-})
+    assert.equal((await registerPasskey({ name: 'Bitwarden' })).passkey.password_required, false)
+    assert.deepEqual(requests, ['/api/auth/passkeys/register/begin', '/api/auth/passkeys/register/finish'])
+  })
+}
 
 test('passkey reauthentication rotates auth state through the two-step API', async () => {
   const requests = []

@@ -46,6 +46,12 @@ func newService(instance *database.Instance, available func() bool) (*Service, e
 	if db == nil {
 		return nil, ErrServiceUnavailable
 	}
+	instance.RegisterLedgerWorker(func() {
+		if currentDB := instance.DB(); currentDB != nil {
+			worker := &Service{instance: instance, db: currentDB, snapshot: instance.StartAutoSnapshot}
+			worker.processTransactionSaves()
+		}
+	})
 	return &Service{
 		instance:  instance,
 		db:        db,

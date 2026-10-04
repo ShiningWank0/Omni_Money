@@ -1,6 +1,6 @@
 import { ApiError, responseError, checkStatus, expectJSON, expectList, expectVoid, schema, validateData, isObject } from './apiResponse.js'
 export { ApiError } from './apiResponse.js'
-import { assertPasskeyPRF, authenticatePasskey, createPasskey } from './passkeys.js'
+import { authenticatePasskey, createPasskey } from './passkeys.js'
 
 // Wailsバインディングへのラッパー関数
 // デスクトップモード時はWailsのGoバインディングを直接呼び出し、
@@ -46,22 +46,40 @@ async function desktopFinancialCall(invoke) {
 // server after authentication and are never persisted in localStorage or a
 // cookie that JavaScript can read.
 let csrfToken = null
+let authenticatedUserID = null
+const pendingSaveReceipts = new Set()
+let clientSessionGeneration = 0
+let logoutPending = false
 let pendingReauthentication = null
-const pendingWriteRequests = new Set()
-let waitingForLogoutWrites = false
 
 // Restore revokes the server session. Callers must also discard this
 // in-memory bearer of the CSRF capability before navigating to login.
 export function clearSessionSecrets() {
+  clientSessionGeneration++
   csrfToken = null
+  authenticatedUserID = null
   pendingReauthentication = null
 }
 
+function authResponseUserID(data) {
+  // Login/reauthentication return user_id; status returns a user summary.
+  const id = data?.user_id ?? data?.user?.id
+  return typeof id === 'string' && id.length > 0 ? id : null
+}
+
 function rememberAuthToken(data) {
+  if (data?.authenticated === true) authenticatedUserID = authResponseUserID(data)
   if (typeof data?.csrf_token === 'string' && data.csrf_token.length > 0) {
     csrfToken = data.csrf_token
   } else if (data?.authenticated === false) {
     csrfToken = null
+    authenticatedUserID = null
+  }
+}
+
+function requireSessionGeneration(generation) {
+  if (generation !== clientSessionGeneration) {
+    throw new ApiError('セッションが終了したため、応答を破棄しました', { code: 'session_invalidated' })
   }
 }
 
@@ -110,37 +128,17 @@ function getPathname(url) {
   }
 }
 
-// Logout waits for already-submitted writes to receive a server response.
-// Authentication traffic is excluded so logout never waits on itself.
-export async function waitForPendingWrites() {
-  if (pendingReauthentication) return false
-  waitingForLogoutWrites = true
-  try {
-    const results = []
-    while (pendingWriteRequests.size > 0) {
-      results.push(...await Promise.allSettled([...pendingWriteRequests]))
-    }
-    return results.every(result => result.status === 'fulfilled' && result.value.ok)
-  } finally {
-    waitingForLogoutWrites = false
-  }
-}
-
 export function apiFetch(url, options = {}, config = {}) {
-  const request = apiFetchCore(url, options, config)
-  const method = (options.method || 'GET').toUpperCase()
-  const path = getPathname(url)
-  if (isUnsafeMethod(method) && path.startsWith('/api/') && !path.startsWith('/api/auth/')) {
-    pendingWriteRequests.add(request)
-    request.then(
-      () => pendingWriteRequests.delete(request),
-      () => pendingWriteRequests.delete(request)
-    )
-  }
-  return request
+  return apiFetchCore(url, options, config)
 }
 
 async function apiFetchCore(url, options = {}, config = {}) {
+  const generation = clientSessionGeneration
+  const path = getPathname(url)
+  const isLogout = path === '/api/auth/logout'
+  if (logoutPending && !isLogout && !config.logoutRecovery && !config.saveReceipt) {
+    throw new ApiError('ログアウト中のため、この操作は終了しました', { code: 'session_invalidated' })
+  }
   const { skipAuthRedirect = false, skipReauth = false } = config
   const method = (options.method || 'GET').toUpperCase()
   const headers = new Headers(options.headers || {})
@@ -162,12 +160,15 @@ async function apiFetchCore(url, options = {}, config = {}) {
     throw new ApiError('通信に失敗しました', { code: 'network_error', cause })
   }
 
-  const path = getPathname(url)
+  if (!isLogout && !config.saveReceipt && generation !== clientSessionGeneration) {
+    try { await response.body?.cancel() } catch { /* response already consumed */ }
+    throw new ApiError('セッションが終了したため、応答を破棄しました', { code: 'session_invalidated' })
+  }
 
   if (!isWailsMode && !skipReauth && response.status === 428 &&
       !['/api/auth/login', '/api/auth/reauth', '/api/auth/status'].includes(path)) {
-    if (waitingForLogoutWrites) return response
     await requestReauthentication()
+    requireSessionGeneration(generation)
     // The original request body is retained in `options` (all current API
     // callers use replayable strings or Blobs).  Retry exactly once after fresh auth.
     return await apiFetch(url, options, { ...config, skipReauth: true })
@@ -238,8 +239,10 @@ export async function getAuthStatus() {
     return { ...status, authenticated }
   }
 
+  const generation = clientSessionGeneration
   const res = await apiFetch('/api/auth/status', {}, { skipAuthRedirect: true })
   const data = await expectJSON(res, schema.auth)
+  requireSessionGeneration(generation)
   rememberAuthToken(data)
   return data
 }
@@ -300,6 +303,7 @@ export async function login(email, password) {
     return { authenticated: true, message: 'デスクトップモードでは認証不要です' }
   }
 
+  const generation = clientSessionGeneration
   const res = await apiFetch('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -307,33 +311,41 @@ export async function login(email, password) {
   }, { skipAuthRedirect: true })
 
   const data = await expectJSON(res, schema.authenticated)
+  requireSessionGeneration(generation)
   rememberAuthToken(data)
   return data
 }
 
 export async function loginWithPasskey() {
   if (isWails) throw new Error('パスキー認証はサーバーモード専用です')
+  const generation = clientSessionGeneration
   const begin = await apiFetch('/api/auth/passkeys/discover/begin', { method: 'POST' }, { skipAuthRedirect: true, skipReauth: true })
   await throwIfNotOk(begin, 'パスキー認証を開始できませんでした')
   const ceremony = await expectJSON(begin, schema.ceremony)
   const assertion = await authenticatePasskey(ceremony.options)
+  return await finishDiscoverablePasskeyLogin(ceremony, assertion, generation)
+}
+
+async function finishDiscoverablePasskeyLogin(ceremony, assertion, generation) {
   try {
+    requireSessionGeneration(generation)
     const finish = await apiFetch('/api/auth/passkeys/discover/finish', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ceremony_id: ceremony.ceremony_id,
         credential: assertion.credential,
-        prf_result_b64: bytesToBase64(assertion.prfResult)
+        prf_result_b64: assertion.prfResult ? bytesToBase64(assertion.prfResult) : ''
       })
     }, { skipAuthRedirect: true, skipReauth: true })
     const data = await readJSONOnce(finish)
+    requireSessionGeneration(generation)
     if (!finish.ok) throw responseError(finish, data, 'パスキー認証に失敗しました')
     validateData(data, schema.authenticated, finish)
     rememberAuthToken(data)
     return data
   } finally {
-    assertion.prfResult.fill(0)
+    assertion.prfResult?.fill(0)
   }
 }
 
@@ -346,57 +358,21 @@ export async function listPasskeys() {
   return data.passkeys ?? []
 }
 
-async function finishPasskeyRegistration(path, ceremonyID, credential, prfResult, name, password) {
-  const finish = await apiFetch(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ceremony_id: ceremonyID,
-      name,
-      password_b64: textToBase64(password),
-      credential,
-      prf_result_b64: bytesToBase64(prfResult)
-    })
-  }, { skipReauth: true })
-  await throwIfNotOk(finish, 'パスキーを登録できませんでした')
-  return await expectJSON(finish, schema.passkey)
-}
-
-export async function registerPasskey({ name, password }) {
+export async function registerPasskey({ name }) {
   if (isWails) throw new Error('パスキー登録はサーバーモード専用です')
   const begin = await apiFetch('/api/auth/passkeys/register/begin', { method: 'POST' })
   await throwIfNotOk(begin, 'パスキー登録を開始できませんでした')
   const ceremony = await expectJSON(begin, schema.ceremony)
   const created = await createPasskey(ceremony.options)
-  let stepUp = null
   try {
-    if (created.prfResult) {
-      return await finishPasskeyRegistration('/api/auth/passkeys/register/finish', ceremony.ceremony_id, created.credential, created.prfResult, name, password)
-    }
-    if (created.prfPresent && !created.prfEnabled) {
-      throw new Error('このパスキーはVault復号に必要なPRF機能へ対応していません。保存先に作成されたパスキーはOmni Moneyに登録されていないため、保存先から削除してください')
-    }
-    // prf.enabled=true でも作成時に結果を返さない認証器向けに、同じ salt で
-    // 追加 assertion を実行してから登録を完了する。
-    const assertionBegin = await apiFetch('/api/auth/passkeys/register/assert/begin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ceremony_id: ceremony.ceremony_id, credential: created.credential })
+    const finish = await apiFetch('/api/auth/passkeys/register/finish', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ceremony_id: ceremony.ceremony_id, name, credential: created.credential })
     }, { skipReauth: true })
-    await throwIfNotOk(assertionBegin, 'パスキー登録の追加確認を開始できませんでした')
-    const assertionCeremony = await expectJSON(assertionBegin, schema.ceremony)
-    try {
-      stepUp = await assertPasskeyPRF(assertionCeremony.options)
-    } catch (error) {
-      if (error?.message?.includes('PRF出力')) {
-        throw new Error('パスキーのPRF出力を取得できず、Omni Moneyへの登録は完了していません。保存先に作成されたパスキーを削除してください', { cause: error })
-      }
-      throw error
-    }
-    return await finishPasskeyRegistration('/api/auth/passkeys/register/assert/finish', assertionCeremony.ceremony_id, stepUp.credential, stepUp.prfResult, name, password)
+    await throwIfNotOk(finish, 'パスキーを登録できませんでした')
+    return await expectJSON(finish, schema.passkey)
   } finally {
     created.prfResult?.fill(0)
-    stepUp?.prfResult?.fill(0)
   }
 }
 
@@ -492,12 +468,14 @@ export async function setupInitialAdmin({ setupToken, email, displayName, passwo
 export async function reauthenticate(password) {
   if (isWails) return { authenticated: true }
 
+  const generation = clientSessionGeneration
   const res = await apiFetch('/api/auth/reauth', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ password_b64: textToBase64(password) })
   }, { skipAuthRedirect: true, skipReauth: true })
   const data = await readJSONOnce(res)
+  requireSessionGeneration(generation)
   // A wrong password should keep the confirmation dialog open, but the
   // session can expire while that dialog is displayed. In that case the
   // server marks the 401 explicitly and there is no session left to confirm;
@@ -518,6 +496,7 @@ export async function reauthenticate(password) {
 
 export async function reauthenticateWithPasskey() {
   if (isWails) return { authenticated: true }
+  const generation = clientSessionGeneration
   const begin = await apiFetch('/api/auth/passkeys/reauth/begin', {
     method: 'POST'
   }, { skipAuthRedirect: true, skipReauth: true })
@@ -525,16 +504,18 @@ export async function reauthenticateWithPasskey() {
   const ceremony = await expectJSON(begin, schema.ceremony)
   const assertion = await authenticatePasskey(ceremony.options)
   try {
+    requireSessionGeneration(generation)
     const finish = await apiFetch('/api/auth/passkeys/reauth/finish', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ceremony_id: ceremony.ceremony_id,
         credential: assertion.credential,
-        prf_result_b64: bytesToBase64(assertion.prfResult)
+        prf_result_b64: assertion.prfResult ? bytesToBase64(assertion.prfResult) : ''
       })
     }, { skipAuthRedirect: true, skipReauth: true })
     const data = await readJSONOnce(finish)
+    requireSessionGeneration(generation)
     if (finish.status === 401 && data?.login_required) {
       expireClientSession()
       throw responseError(finish, data, 'セッションの有効期限が切れました')
@@ -544,7 +525,7 @@ export async function reauthenticateWithPasskey() {
     rememberAuthToken(data)
     return data
   } finally {
-    assertion.prfResult.fill(0)
+    assertion.prfResult?.fill(0)
   }
 }
 
@@ -570,12 +551,40 @@ export async function keepAlive() {
  */
 export async function logout() {
   if (isWails) return
-
-  const res = await apiFetch('/api/auth/logout', {
-    method: 'POST'
-  }, { skipAuthRedirect: true })
-  await expectVoid(res, schema.success)
-  csrfToken = null
+  logoutPending = true
+  clientSessionGeneration++
+  try {
+    // Wait only for durable receipts. Polling for image/ledger processing and
+    // automatic snapshots is deliberately outside this logout boundary.
+    const results = await Promise.allSettled([...pendingSaveReceipts].map(entry => entry.error ? sendSaveReceipt(entry) : entry.receipt))
+    if (results.some(result => result.status === 'rejected')) {
+      throw new ApiError('取引の送信を確認できませんでした。ログアウトを再試行してください', { code: 'save_receipt_unconfirmed' })
+    }
+  } catch (error) {
+    logoutPending = false
+    throw error
+  }
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 8000)
+  try {
+    const revoke = () => apiFetch('/api/auth/logout', { method: 'POST', signal: controller.signal }, { skipAuthRedirect: true, skipReauth: true })
+    let res = await revoke()
+    if (res.status === 403) {
+      // An already admitted reauthentication may have rotated the cookie
+      // before logout reached CSRF verification. Fetch the new session token
+      // and retry the rejected request once; never reopen the private screen.
+      const statusResponse = await apiFetch('/api/auth/status', { signal: controller.signal }, { skipAuthRedirect: true, skipReauth: true, logoutRecovery: true })
+      const status = await expectJSON(statusResponse, schema.auth)
+      if (status.authenticated === false) { clearSessionSecrets(); return }
+      rememberAuthToken(status)
+      res = await revoke()
+    }
+    if (res.status !== 401) await expectVoid(res, schema.success)
+    clearSessionSecrets()
+  } finally {
+    clearTimeout(timeout)
+    logoutPending = false
+  }
 }
 
 /**
@@ -766,17 +775,11 @@ export async function getTransactions(account = '', search = '') {
  * @param {object} data
  * @returns {Promise<object>}
  */
-export async function addTransaction(data) {
+export async function addTransaction(data, options = {}) {
   if (isWails) {
     return await desktopFinancialCall(() => window.go.main.App.AddTransaction(data))
   }
-  const res = await apiFetch('/api/transactions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
-  })
-  await throwIfNotOk(res, '取引の追加に失敗しました')
-  return await expectJSON(res, schema.transactionResult)
+  return await saveTransaction(data, 0, options.requestID)
 }
 
 /**
@@ -785,17 +788,99 @@ export async function addTransaction(data) {
  * @param {object} data
  * @returns {Promise<object>}
  */
-export async function updateTransaction(id, data) {
+export async function updateTransaction(id, data, options = {}) {
   if (isWails) {
     return await desktopFinancialCall(() => window.go.main.App.UpdateTransaction(id, data))
   }
-  const res = await apiFetch(`/api/transactions/${id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
+  return await saveTransaction(data, id, options.requestID)
+}
+
+export async function getTransactionSaveNotices() {
+  if (isWails) return []
+  const res = await apiFetch('/api/transaction-saves')
+  const data = await expectJSON(res, value => isObject(value) && Array.isArray(value.saves) &&
+    value.saves.length <= 32 && value.saves.every(save => isObject(save) &&
+      typeof save.request_id === 'string' && ['pending', 'failed'].includes(save.state) &&
+      isObject(save.request) && (save.state !== 'failed' || typeof save.error === 'string')))
+  return data.saves
+}
+
+export async function dismissFailedTransactionSave(requestID) {
+  if (isWails) return
+  const res = await apiFetch(`/api/transaction-saves/${encodeURIComponent(requestID)}`, { method: 'DELETE' })
+  await expectVoid(res, schema.success)
+}
+
+function validSaveReceipt(value, requestID) {
+  return isObject(value) && value.request_id === requestID &&
+    ['pending', 'completed', 'failed'].includes(value.state) &&
+    (value.state !== 'completed' || schema.transaction(value.transaction)) &&
+    (value.state !== 'failed' || typeof value.error === 'string')
+}
+
+function sendSaveReceipt(entry) {
+  entry.error = null
+  const attempt = async () => {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 45000)
+    try {
+      const post = () => apiFetch('/api/transaction-saves', {
+        method: 'POST', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json' }, body: entry.body
+      }, { skipAuthRedirect: true, skipReauth: true, saveReceipt: true })
+      let res = await post()
+      if (res.status === 403) {
+        const statusResponse = await apiFetch('/api/auth/status', { signal: controller.signal }, { skipAuthRedirect: true, skipReauth: true, logoutRecovery: true })
+        const status = await expectJSON(statusResponse, schema.auth)
+        if (!status.authenticated || !entry.userID || authResponseUserID(status) !== entry.userID) throw new ApiError('保存要求のアカウントが一致しません', { status: 403, code: 'save_account_mismatch' })
+        rememberAuthToken(status)
+        res = await post()
+      }
+      return await expectJSON(res, value => validSaveReceipt(value, entry.id))
+    } finally { clearTimeout(timeout) }
+  }
+  entry.receipt = (async () => {
+    // Receipt loss is ambiguous: retry the identical ID and immutable body.
+    try { return await attempt() } catch (error) {
+      if (error.code === 'network_error' || error.code === 'invalid_response' || error.retryable) return await attempt()
+      throw error
+    }
+  })().then(result => {
+    pendingSaveReceipts.delete(entry)
+    entry.body = null
+    return result
   })
-  await throwIfNotOk(res, '取引の更新に失敗しました')
-  return await expectJSON(res, schema.transactionResult)
+  // Keep an ambiguous unreceived operation for a logout retry. Definitive
+  // validation rejections are reported to the editor and cannot be accepted.
+  entry.receipt.catch(error => {
+    entry.error = error
+    if ([400, 409, 413].includes(error.status)) pendingSaveReceipts.delete(entry)
+  })
+  return entry.receipt
+}
+
+async function saveTransaction(data, targetID, requestID) {
+  if (logoutPending) throw new ApiError('ログアウト中のため、この操作は終了しました', { code: 'session_invalidated' })
+  const generation = clientSessionGeneration
+  const id = requestID || globalThis.crypto.randomUUID()
+  const body = JSON.stringify({ request_id: id, user_id: authenticatedUserID, target_id: targetID, transaction: data })
+  let entry = [...pendingSaveReceipts].find(entry => entry.id === id)
+  if (entry && entry.body !== body) throw new ApiError('保存要求が別の操作に使用されています', { code: 'save_request_conflict' })
+  if (!entry) { entry = { id, body, userID: authenticatedUserID }; pendingSaveReceipts.add(entry); sendSaveReceipt(entry) }
+  else if (entry.error) sendSaveReceipt(entry)
+  let receipt = await entry.receipt
+  requireSessionGeneration(generation)
+  // Ordinary save UX can await the result. Logout only awaits entry.receipt,
+  // and its generation change terminates this foreground polling path.
+  while (receipt.state === 'pending') {
+    await new Promise(resolve => setTimeout(resolve, 250))
+    requireSessionGeneration(generation)
+    const response = await apiFetch(`/api/transaction-saves/${id}`)
+    receipt = await expectJSON(response, value => validSaveReceipt(value, id))
+    requireSessionGeneration(generation)
+  }
+  if (receipt.state === 'failed') throw new ApiError(receipt.error, { code: 'save_failed' })
+  return { transaction: receipt.transaction }
 }
 
 /**

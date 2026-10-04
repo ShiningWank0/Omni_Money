@@ -377,6 +377,19 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 		return nil, fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
 	defer tx.Rollback()
+	resp, err := updatePreparedTransactionIn(tx, id, req, date, preparedImages)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("トランザクションコミットエラー: %w", err)
+	}
+	resp.Tags, _ = s.GetTransactionTags(id)
+	s.autoSnapshot()
+	return resp, nil
+}
+
+func updatePreparedTransactionIn(tx *sql.Tx, id int64, req models.TransactionRequest, date time.Time, preparedImages []preparedTransactionImage) (*models.TransactionResponse, error) {
 	tagIDs, err := resolveTransactionTagIDsIn(tx, req.Tags, req.NewTagPaths)
 	if err != nil {
 		return nil, err
@@ -457,13 +470,8 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 	if err := pruneInvalidTransactionLinksIn(tx, settings); err != nil {
 		return nil, fmt.Errorf("紐付け整合性チェックエラー: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("トランザクションコミットエラー: %w", err)
-	}
 	t.Date = parseDate(dateStr)
 	resp := t.ToResponse()
-	resp.Tags, _ = s.GetTransactionTags(int64(t.ID))
-	s.autoSnapshot()
 	return &resp, nil
 }
 

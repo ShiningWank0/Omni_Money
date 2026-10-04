@@ -16,7 +16,6 @@ const tag = { id: 1, name: 'food', parent_id: null, level: 1 }
 const entity = { id: 'user-1' }
 const cases = [
   ['getAccounts', [], ['cash']], ['getItems', [], ['coffee']], ['getTransactions', [], [tx]],
-  ['addTransaction', [tx], { message: 'added', transaction: tx }], ['updateTransaction', [1, tx], { message: 'updated', transaction: tx }],
   ['deleteTransaction', [1], { message: 'deleted' }],
   ['getBalanceHistory', [], { accounts: ['cash'], dates: ['2026-01-01'], balances: { cash: [-100] } }],
   ['getBalanceHistoryFiltered', [['cash']], { accounts: [], dates: [], balances: {} }],
@@ -71,26 +70,9 @@ test('keepalive accepts only 204 and retains best-effort no-navigation behavior'
   await assert.rejects(api.keepAlive(), error => error.code === 'invalid_response')
 })
 
-test('logout wait does not discard an in-flight financial write', async () => {
-  let finishWrite
-  globalThis.fetch = () => new Promise(resolve => { finishWrite = resolve })
-  const write = api.apiFetch('/api/transactions', { method: 'POST' })
-  let waitFinished = false
-  const pending = api.waitForPendingWrites().then(result => {
-    waitFinished = true
-    return result
-  })
-  await Promise.resolve()
-  assert.equal(waitFinished, false)
-  finishWrite(Response.json({ success: true }))
-  await write
-  assert.equal(await pending, true)
-
-  globalThis.fetch = async () => Response.json({ error: 'not saved' }, { status: 500 })
-  const failedWrite = api.apiFetch('/api/transactions', { method: 'POST' })
-  const failedPending = api.waitForPendingWrites()
-  await failedWrite
-  assert.equal(await failedPending, false)
+test('logout accepts an already expired session and clears its local token', async () => {
+  globalThis.fetch = async () => Response.json({ error: '認証が必要です', login_required: true }, { status: 401 })
+  await api.logout()
 })
 
 test('credential response loss stays ambiguous while definitive rejection remains marked', async () => {
@@ -117,4 +99,75 @@ test('428 retries a Blob once after reauthentication and keeps the raw response 
   const response = await api.apiFetch('/api/ai-console/analysis', { method: 'POST', body: blob })
   assert.equal(await response.text(), 'raw body')
   assert.equal(calls, 2)
+})
+
+test('logout rejects late responses and prevents new requests during revocation', async () => {
+  let finishRead, finishLogout
+  globalThis.fetch = url => {
+    if (url === '/api/auth/logout') return new Promise(resolve => { finishLogout = resolve })
+    return new Promise(resolve => { finishRead = resolve })
+  }
+  const read = api.getAccounts()
+  const logout = api.logout()
+  await assert.rejects(api.getAccounts(), error => error.code === 'session_invalidated')
+  finishRead(Response.json(['private-account']))
+  await assert.rejects(read, error => error.code === 'session_invalidated')
+  finishLogout(Response.json({ success: true }))
+  await logout
+})
+
+test('logout recovers once when concurrent reauthentication rotated its CSRF token', async () => {
+  let attempts = 0
+  globalThis.fetch = async (url, options) => {
+    if (url === '/api/auth/status') return Response.json({ authenticated: true, csrf_token: 'rotated-csrf' })
+    assert.equal(url, '/api/auth/logout')
+    if (++attempts === 1) return Response.json({ error: 'CSRF rejected' }, { status: 403 })
+    assert.equal(new Headers(options.headers).get('X-CSRF-Token'), 'rotated-csrf')
+    return Response.json({ success: true })
+  }
+  await api.logout()
+  assert.equal(attempts, 2)
+})
+
+test('authentication JSON arriving after logout cannot restore the CSRF token', async () => {
+  let finishJSON, enteredJSON
+  const reading = new Promise(resolve => { enteredJSON = resolve })
+  let sentToken
+  globalThis.fetch = async (url, options) => {
+    if (url === '/api/auth/status') {
+      const response = Response.json({ authenticated: true })
+      response.json = () => { enteredJSON(); return new Promise(resolve => { finishJSON = resolve }) }
+      return response
+    }
+    if (url === '/api/auth/logout') return Response.json({ success: true })
+    sentToken = new Headers(options.headers).get('X-CSRF-Token')
+    return Response.json({ success: true })
+  }
+  const status = api.getAuthStatus()
+  await reading
+  await api.logout()
+  finishJSON({ authenticated: true, csrf_token: 'revoked-token' })
+  await assert.rejects(status, error => error.code === 'session_invalidated')
+  await api.apiFetch('/api/probe', { method: 'POST' })
+  assert.equal(sentToken, null)
+})
+
+test('reauthentication pending at logout cannot replay its original write', async () => {
+  let resumeReauthentication, requested
+  const waiting = new Promise(resolve => { requested = resolve })
+  window.dispatchEvent = event => {
+    if (event.type === 'omni-money:reauth-required') { resumeReauthentication = event.detail.resolve; requested() }
+  }
+  let writes = 0
+  globalThis.fetch = async url => {
+    if (url === '/api/auth/logout') return Response.json({ success: true })
+    writes++
+    return Response.json({ error: 'reauth' }, { status: 428 })
+  }
+  const write = api.apiFetch('/api/sensitive', { method: 'POST' })
+  await waiting
+  await api.logout()
+  resumeReauthentication()
+  await assert.rejects(write, error => error.code === 'session_invalidated')
+  assert.equal(writes, 1)
 })

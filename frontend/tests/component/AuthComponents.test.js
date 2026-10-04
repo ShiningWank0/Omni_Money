@@ -186,30 +186,26 @@ describe('ServerAccountAdminModal', () => {
 })
 
 describe('PasskeySettingsModal', () => {
-  it('clears the registration password after success', async () => {
+  it('registers without a password field or password argument', async () => {
     const wrapper = await mountPasskey()
-    const password = wrapper.get('input[type="password"]')
     await wrapper.get('input[type="text"]').setValue('MacBook')
-    await password.setValue('correct horse battery staple')
 
     await wrapper.get('.registration-form').trigger('submit')
     await flushPromises()
 
-    expect(api.registerPasskey).toHaveBeenCalledWith({ name: 'MacBook', password: 'correct horse battery staple' })
-    expect(password.element.value).toBe('')
+    expect(api.registerPasskey).toHaveBeenCalledWith({ name: 'MacBook' })
+    expect(wrapper.find('input[type="password"]').exists()).toBe(false)
   })
 
-  it('clears the registration password after failure', async () => {
+  it('reports registration failure without requesting a password', async () => {
     api.registerPasskey.mockRejectedValueOnce(new Error('passkey registration failed'))
     const wrapper = await mountPasskey()
-    const password = wrapper.get('input[type="password"]')
     await wrapper.get('input[type="text"]').setValue('MacBook')
-    await password.setValue('correct horse battery staple')
 
     await wrapper.get('.registration-form').trigger('submit')
     await flushPromises()
 
-    expect(password.element.value).toBe('')
+    expect(wrapper.find('input[type="password"]').exists()).toBe(false)
     expect(wrapper.get('[role="alert"]').text()).toContain('passkey registration failed')
   })
 
@@ -218,7 +214,6 @@ describe('PasskeySettingsModal', () => {
     api.listPasskeys.mockRejectedValueOnce(new Error('refresh failed'))
     const wrapper = await mountPasskey()
     await wrapper.get('input[type="text"]').setValue('MacBook')
-    await wrapper.get('input[type="password"]').setValue('correct horse battery staple')
 
     await wrapper.get('.registration-form').trigger('submit')
     await flushPromises()
@@ -228,20 +223,18 @@ describe('PasskeySettingsModal', () => {
     expect(wrapper.get('[role="status"].info').text()).toContain('パスキーを登録しました')
   })
 
-  it('clears the registration password before the post-registration list refresh completes', async () => {
+  it('reports success while the post-registration list refresh is pending', async () => {
     const refresh = deferred()
     api.listPasskeys.mockResolvedValueOnce([])
     api.listPasskeys.mockReturnValueOnce(refresh.promise)
     const wrapper = await mountPasskey()
-    const password = wrapper.get('input[type="password"]')
     await wrapper.get('input[type="text"]').setValue('MacBook')
-    await password.setValue('correct horse battery staple')
 
     await wrapper.get('.registration-form').trigger('submit')
     await flushPromises()
 
     expect(api.listPasskeys).toHaveBeenCalledTimes(2)
-    expect(password.element.value).toBe('')
+    expect(wrapper.find('input[type="password"]').exists()).toBe(false)
 
     refresh.resolve([])
     await flushPromises()
@@ -252,7 +245,6 @@ describe('PasskeySettingsModal', () => {
     api.registerPasskey.mockReturnValueOnce(registration.promise)
     const wrapper = await mountPasskey()
     await wrapper.get('input[type="text"]').setValue('MacBook')
-    await wrapper.get('input[type="password"]').setValue('correct horse battery staple')
 
     await wrapper.get('.registration-form').trigger('submit')
     expect(wrapper.get('.icon-close').element.disabled).toBe(true)

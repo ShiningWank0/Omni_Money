@@ -91,6 +91,25 @@ func TestPasskeyCredentialLifecycleAndCAS(t *testing.T) {
 	}
 }
 
+func TestPasswordRequiredPasskeyRoundTripsWithoutVaultEnvelope(t *testing.T) {
+	store := openTestStore(t)
+	admin := bootstrapTestAdmin(t, store)
+	input := testPasskeyInput(admin.ID, "Bitwarden", 31)
+	input.PasswordRequired = true
+	input.VaultEnvelope = keyenvelope.Envelope{}
+	created, err := store.CreatePasskeyCredential(context.Background(), input, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.GetPasskeyCredential(context.Background(), admin.ID, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.PasswordRequired || !loaded.Summary().PasswordRequired || loaded.VaultEnvelope.Kind != "" {
+		t.Fatalf("password-required passkey did not round-trip: %+v", loaded.Summary())
+	}
+}
+
 func TestPasskeySummaryCannotExposeVaultMaterial(t *testing.T) {
 	typeInfo := reflect.TypeOf(PasskeySummary{})
 	for _, forbidden := range []string{"credential", "public", "salt", "envelope", "vault", "key"} {
@@ -99,5 +118,38 @@ func TestPasskeySummaryCannotExposeVaultMaterial(t *testing.T) {
 				t.Fatalf("PasskeySummary exposes forbidden field %q", typeInfo.Field(index).Name)
 			}
 		}
+	}
+}
+
+func TestLegacyPasskeyEnvelopeUpgradeUsesCASAndCannotResurrectDeletion(t *testing.T) {
+	store := openTestStore(t)
+	admin := bootstrapTestAdmin(t, store)
+	ctx := context.Background()
+	input := testPasskeyInput(admin.ID, "Bitwarden", 51)
+	input.PasswordRequired = true
+	record, err := store.CreatePasskeyCredential(ctx, input, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := keyenvelope.Context{UserID: admin.ID, VaultID: "vault-binding"}
+	envelope, err := keyenvelope.WrapWithServerPasskey(bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), binding, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplacePasskeyEnvelope(ctx, record, *envelope, testNow); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := store.GetPasskeyCredential(ctx, admin.ID, record.ID)
+	if err != nil || upgraded.PasswordRequired || upgraded.VaultEnvelope.Kind != keyenvelope.KindServerPasskey || upgraded.Revision != record.Revision+1 {
+		t.Fatalf("upgrade failed: %v", err)
+	}
+	if err := store.ReplacePasskeyEnvelope(ctx, record, *envelope, testNow); !errors.Is(err, ErrCredentialConflict) {
+		t.Fatal("stale upgrade succeeded")
+	}
+	if err := store.DeletePasskeyCredential(ctx, admin.ID, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplacePasskeyEnvelope(ctx, upgraded, *envelope, testNow); !errors.Is(err, ErrCredentialConflict) {
+		t.Fatal("deleted credential was resurrected")
 	}
 }
