@@ -1,6 +1,6 @@
 # Agent.md: Omni Money 開発・運用仕様（現行契約）
 
-本資料は Omni Money の現行実装と運用境界を示す。実装の真実は Go/Vue ソース、`compose.yaml`、`.env.example`、Dockerfile、CI workflow とする。旧設計と `legacy_reference/` は参照専用であり、production capability ではない。
+本資料は Omni Money の現行実装と運用境界を示す。実装の真実は Go/Vue ソース、`compose.yaml`、`.env.example`、Dockerfile、CI workflow とする。旧Python版のソースは現行ツリーに含まれない。将来設計とproduction capabilityを区別する。
 
 ### 現行モード契約
 
@@ -16,12 +16,12 @@
 
 server の金融 API は authenticated principal に束縛された vault lease のみを受け取り、Desktop/global DBへfallbackしない。`/api/v1/ai/*` と `/api/ai-console/*` はproductionで404、feature statusのAIはfalseである。
 
-現行の責務は `backend/api`（router/CSV/snapshot）、`backend/control`（identity/role/envelope metadata）、`backend/core`（vault-bound service）、`backend/database`（ledger/CSV/snapshot lifecycle）、`backend/desktopaccount`（local lifecycle）、`backend/keyenvelope`（Argon2id/AES-GCM）、`backend/serverauth`、`backend/securedb`、`backend/vault`（lease/drain）に分かれる。`frontend/src` はUIとDesktop idle-lock、`scripts` は固定SQLCipherとsafe-update、`legacy_reference` は非実行参照、`compose*.yaml` と `Dockerfile` はserver配備を担当する。
+現行の責務は `backend/api`（router/CSV/snapshot/save receipt）、`backend/control`（identity/role/envelope metadata）、`backend/core`（vault-bound service）、`backend/database`（ledger/CSV/snapshot/save worker）、`backend/desktopaccount`（local lifecycle）、`backend/keyenvelope`（Argon2id/AES-GCM）、`backend/serverauth`、`backend/securedb`、`backend/vault`（lease/drain）に分かれる。`frontend/src` はUIとDesktop idle-lock、`scripts` は固定SQLCipherとsafe-update、`compose*.yaml` と `Dockerfile` はserver配備を担当する。
 
 `core.Service` は各Desktop/server vault instanceの `StartAutoSnapshot` に束縛され、財務mutation成功後に非同期snapshotを作成する。これはwall-clock schedulerではなく、時刻・retention policy・失敗通知を利用者が設定する製品機能はない。
 
 ## 1. プロジェクト概要
-Go/Vueで構成された ledger を、利用者端末の Desktop と Docker/headless の multi-user server の2モードで提供する。旧Python版は `legacy_reference/` の参照資料に限る。
+Go/Vueで構成された ledger を、利用者端末の Desktop と Docker/headless の multi-user server の2モードで提供する。
 
 * **画面側（フロントエンド）**: Vue.js 3 (Composition API)
 * **サーバー側（バックエンド）**: Go
@@ -32,9 +32,9 @@ Go/Vueで構成された ledger を、利用者端末の Desktop と Docker/head
 ## 2. 開発の手順と複数作業領域（git worktree）の活用
 本計画は、主軸のコードを破壊しないよう、以下の手順に従って安全に開発を進めること。
 
-1. **複数作業領域（git worktree）の活用**: AIエージェントの自律的な開発や検証においては、`git worktree` を積極的に使用すること。これにより、主軸（`main` ブランチ）の作業状態を汚染することなく、複数の分岐（ブランチ）での作業を安全に並行して進める。
-2. **分岐（ブランチ）の作成**: 利用者が指定したworktree/branchだけを使用する。勝手なbranch作成・自動merge・GitHub操作は行わず、`gh`を前提にしない。
-3. **実装**: 仕様に基づきプログラムを作成する。
+1. **作業領域の選択**: 既存の作業状態を確認し、利用者が指定または作成を許可したworktree/branchを使用する。既存の未コミット変更を上書きしない。
+2. **分岐（ブランチ）の作成**: 利用者の明示的な依頼に従う。GitHub上のPR・Issue・branch操作はGitHub連携ツールを使い、`gh`は使用しない。
+3. **実装**: 利用者が承認した変更の範囲で、現行仕様に基づき編集する。
 4. **変更要求（Pull Request / PR）の作成**: 利用者から明示的に依頼された場合だけ、指定のGitHub連携手段で行う。
 5. **確認（レビュー）と修正**: 人間による確認を受け、必要に応じて修正を行う。
 6. **統合（マージ）**: 承認後、`main` ブランチに統合する。
@@ -57,23 +57,21 @@ Go/Vueで構成された ledger を、利用者端末の Desktop と Docker/head
 │   ├── api/               # APIの接続口定義、通信経路（ルーティング）
 │   ├── core/              # アプリケーションの主要な論理処理（ビジネスロジック）
 │   ├── database/          # SQLite接続、ledger、CSV、snapshot lifecycle
-│   ├── control/           # server identity、role、session metadata、key envelope
+│   ├── control/           # server identity、role、token metadata、key envelope
 │   ├── desktopaccount/    # Desktop local password/recovery/lock lifecycle
 │   ├── keyenvelope/       # Argon2id、AES-GCM、password/recovery/passkey envelope
 │   ├── serverauth/        # server password/passkey/invite/reset authentication
 │   ├── securedb/          # SQLCipher open/validation
 │   ├── vault/             # per-user vault manager、lease、drain、zeroize
-│   ├── models/            # データベースの構造定義（ORMモデル）
+│   ├── models/            # 取引等の構造体・request/response型（ORMではない）
 │   └── middleware/        # session、CSRF、proxy、rate/security boundary
 ├── frontend/              # Vue.js 画面側（フロントエンド）
 │   ├── src/
 │   │   ├── assets/        # 既存アプリから引き継ぐCSS、画像
 │   │   ├── components/    # 再利用可能な画面部品
-│   │   ├── views/         # 各画面（ページ）
 │   │   ├── store/         # 状態管理（口座選択状態などの保持）
 │   │   └── utils/         # 通信処理などの補助機能
 │   └── package.json
-├── legacy_reference/      # 参照専用。productionに組み込まない
 ├── build/                 # Wails用のアイコン等 構築用資材
 ├── Dockerfile             # サーバーモード用のコンテナ定義
 ├── VERSION                # アプリバージョン（セマンティックバージョニング、CI/CDトリガー）
@@ -86,18 +84,11 @@ Go/Vueで構成された ledger を、利用者端末の Desktop と Docker/head
 
 ## 5. 既存画面設計（UIデザイン）の踏襲と解析（重要）
 
-開発用エージェントは視覚的なデザインを確認できないため、既存のデザインを維持するために以下の手順を厳守すること。
+現行の `frontend/src/components/` と `frontend/src/assets/` を画面設計の基準とする。変更前にCSS変数、クラス名、モーダル、レスポンシブ表示、Desktopのwindow操作を確認する。
 
-1. **既存資産の解析と移行**:
-* `legacy_reference/` フォルダ内に配置された旧アプリのコードを必ず参照し、仕様を解析すること。
-* 特に `legacy_reference/static/css/style.css` およびHTML雛形（`legacy_reference/templates/*.html`）を解析対象とする。
-* 使用されているCSS変数（例：色、文字の大きさ）、クラス名、HTMLの文書構造を正確に把握する。
-* `frontend/src/assets/` に既存のCSSを配置し、Vueの構成部品内でそれを読み込んで使用する。
-* すりガラス調（グラスモーフィズム）の表現に必要な半透明設定、背景ぼかし（`backdrop-filter`）などのCSS属性を完全に維持すること。
-
-
-2. **部品化（コンポーネント化）時の注意**:
-* Vueの構成部品に分割する際も、既存のHTML構造とクラス名との対応関係を壊さないように注意する。
+* 既存の色、背景ぼかし、半透明設定、文字サイズ、操作感を尊重する。
+* コンポーネントを分割してもDOM構造とCSSの対応を維持する。
+* UI変更ではcomponent testと、利用可能なブラウザで表示・操作を確認する。ローカルDockerを必要とする検証は、明示的な依頼がある場合だけ行う。
 
 
 
@@ -166,7 +157,8 @@ HTTP middleware（session、CSRF、proxy、security headers、CORS、rate limit�
 * **認証方式**: セッションベース認証を基本とする。Cookieにセッション識別子を格納し、サーバー側でセッション状態を管理する。
 * **パスワード**: 現行は固定 Argon2id profile と暗号化 envelope を使用し、`AUTH_PASSWORD_HASH`（bcrypt）は受け付けない。旧設定は値が存在すれば production 起動を拒否する。
 * **セッション**: server-side session、CSRF、recent reauthentication、idle/absolute expiry、session concurrency は `backend/middleware/session.go` と関連テストを source of truth とする。高影響操作には現行実装が要求する再認証を適用し、AI操作という未提供機能を追加しない。
-* **passkey**: WebAuthn PRF の鍵で vault DEK を別 envelope に包む。旧 `AUTH_TOTP_SECRET_FILE` / `AUTH_REQUIRE_TOTP` は現行仕様外で、値が存在すれば production 起動を拒否する。
+* **passkey**: 認証済みrequest leaseの開いたVault鍵を、control鍵から用途分離した専用鍵でwrapする。登録にアカウントpasswordの再入力やPRF assertionを要求しない。loginはWebAuthn署名・challenge・RP/origin・user handle・user verificationを検証してからcredentialに束縛したenvelopeを開く。旧PRF/password-required形式はpassword loginまたはログイン済みの設定画面で自動移行する。control鍵とcontrol DBを持つhost operatorにはcustody envelopeのDEKが復号可能だが、application Admin APIは他userのVaultを開けない。旧 `AUTH_TOTP_SECRET_FILE` / `AUTH_REQUIRE_TOTP` は設定時にproduction起動を拒否する。
+* **ログアウト**: 通常logoutはsession family（並行する再認証rotationを含む）を失効してcookieを削除し、Vault cleanupは非同期に行う。受付済みwriteは自身のleaseで継続し、同じDEKを証明した新loginは処理中のinstanceを再利用できる。credential失効・disable・restore・shutdownの明示drainは新loginによる再利用を許可しない。frontendは私的状態を直ちに消去し、遅れて到着した応答をgenerationで拒否する。
 * **公開 allowlist**: unauthenticated route は `backend/middleware/session.go` の exact allowlist と server router を source of truth とする。代表例は静的配信、login/status、初回 bootstrap、passkey login options/finish、invite acceptance、password-reset completion であり、その他の API は認証必須である。allowlistを文書で再実装しない。
 
 #### 6.7.2. HTTPS / TLS およびリバースプロキシ対応
@@ -190,7 +182,17 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
 
 ## 7. データベース設計（SQLite）
 
-既存の構成を拡張し、以下の構造体（テーブル）を実装すること。
+ledger schema versionは6。構造・migration・index/trigger検証は `backend/database/database.go` と `backend/database/transaction_save_schema.go` を正とする。以下は主要なledgerデータで、control DBのuser/token/envelopeや廃止機能の互換テーブルとは区別する。
+
+### サーバーの取引保存受付
+
+`transaction_save_requests` は保存操作のUUID、内容hash、対象ID、state、入力、結果をVault DB内に保持する。取引エディターの作成・更新は `/api/transaction-saves` で入力をFULL synchronousで永続化し、202で受付を確認してからworkerが処理する。UUIDは操作単位で固定し、同じ内容の別操作は許可する。同じUUIDと異なる内容は409。取引反映とcompleted記録は同一SQL transactionで確定する。
+
+ログアウトが待つのは送信・受付確認とsession失効までで、取引反映・画像処理・自動snapshotは待たない。処理中・失敗入力は本人だけが参照し、失敗入力と画像は本人による通知削除まで暗号化して保持する。ID/hashの再送防止記録は残す。再起動後のpendingは次回Vault unlockで再開する。通常HTTP bodyの上限は10 MiB、UIの画像原データは合計7 MiBまで。queue内部は1入力32 MiB、保持入力32件/合計128 MiBの上限を持つが、HTTP上限を緩和しない。
+
+CSV v3はこの受付queueと再送防止記録を含まない。schema 6のsnapshotとwhole-data-root archiveはDB内の記録も保全する。過去のsnapshotへのrestoreは後の受付記録も巻き戻す。ブラウザの未確認入力はメモリのみで、永続offline outboxは提供しない。詳細は [API契約](docs/api-errors.md) と [server安全モデル](docs/server-multi-vault.md) を参照する。
+
+### 主要なledgerデータ
 
 * **Transactions（取引）**
   * `id`: 主キー
@@ -241,7 +243,7 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
 リポジトリのルートに `VERSION` ファイルを配置し、セマンティックバージョニング（`MAJOR.MINOR.PATCH`）で管理する。
 
 * **`VERSION` ファイルの形式**: ファイルには `0.1.0` のようなバージョン文字列のみを1行で記載する。改行以外の余分な文字は含めない。
-* **初期値**: `0.1.0` から開始する。
+* **現行値**: リポジトリの `VERSION` を参照する。
 * **更新規則**:
   - `PATCH`（例: 0.1.0 → 0.1.1）: バグ修正、軽微な改修
   - `MINOR`（例: 0.1.1 → 0.2.0）: 機能追加、画面変更
@@ -270,36 +272,17 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
 
 * **Go側**: `main.go` にパッケージ変数 `var version = "dev"` を定義する。CI/CDでのビルド時に `-ldflags` でこの変数を上書きする。ローカル開発時は `"dev"` のまま動作する。
 * **フロントエンド側**: ビルド時に `VITE_APP_VERSION` を渡し、Vue.jsから `import.meta.env.VITE_APP_VERSION` で表示する。
-* **Docker**: `Dockerfile` 内で `ARG VERSION=dev` を定義し、 ビルド時の `--build-arg` で渡す。環境変数として実行時にも参照可能にする。
+* **server / Docker**: `server.go` にも `var version = "dev"` があり、Dockerfileは `ARG VERSION=dev` をfrontendの `VITE_APP_VERSION`、Goの `-ldflags`、runtimeの `VERSION` へ渡す。配布workflowがルートの `VERSION` から同じ値を供給する。
 
 
-## 9. 開発端末の導入済み環境について
-本計画を自律的に進めるにあたり、実行環境（M4 Proチップ搭載 Mac / zsh環境）には以下の技術要素が既に導入済みである。AIエージェントはこれらを前提として各種命令を実行し、動作確認やプログラムの構築（ビルド）を行うこと。
+## 9. 開発環境と検証範囲
+端末のCPU、OS、Docker実装、導入済みCLIを固定して仮定しない。Goは `go.mod`、Nodeは `.node-version`、npm依存は `frontend/package-lock.json`、Wailsは `go.mod` の指定版を基準とする。Frontendの依存導入には `npm ci --ignore-scripts` を使用する。
 
-1. **Go言語 (`go`)**
-   - **用途**: サーバー側の開発、およびWailsを介したデスクトップアプリの構築。
-   - **使用方法**: 依存関係の解決とGo検証に使用する。server確認はDockerfile、または固定SQLCipherと`server libsqlite3 sqlite_omit_load_extension` tags/CGO設定で行い、通常SQLiteのserver起動は行わない。
-
-2. **Node.js および npm (`node`, `npm`)**
-   - **用途**: 画面側（Vue.js）の構成部品の取得、および静的ファイルの構築。
-   - **使用方法**: `frontend` フォルダ内での `npm install`（依存関係の追加）や `npm run build`（画面側の構築）に使用すること。
-
-3. **C言語翻訳プログラム（Xcode Command Line Tools / `clang` または `gcc`）**
-   - **用途**: SQLiteデータベースをGoで動かすための仕組み（cgo）の利用、およびMac向けWailsアプリの画面描画処理の構築に必須となる。
-   - **使用方法**: 固定SQLCipher build script と workflow の固定 tags/CGO 設定から利用する。通常SQLiteへのfallbackはしない。
-
-4. **Wails（`go.mod` 指定版）**
-   - **用途**: Desktop 4 artifactの固定版build。
-   - **使用方法**: release workflowと同じ固定版・SQLCipher・build tagsを使う。latest tagやbare CLIを使わない。
-
-5. **Docker仮想化環境（OrbStack / `docker`）**
-   - **用途**: サーバーモード（Dockerコンテナ）の動作確認およびイメージ構築。
-   - **使用方法**: 端末はApple Silicon（M4 Pro）であるため、ARM構造（`linux/arm64`）での動作を基本とすること。`Dockerfile` の動作検証として `docker build` や `docker run` を適宜実行し、サーバー単独での正常動作を確認すること。
-
+正式なSQLCipher・Desktop・Docker buildとserver/browser E2EはGitHub Actionsで検証する。ローカルDockerの起動・buildやSQLCipherのsource buildは、利用者が明示的に依頼した場合だけ行う。変更に応じた検証を選び、負荷の高いbuild/race testを無断で並列実行しない。ドキュメントだけの変更では、リンク、現行ソースとの照合、CIのdocumentation contract、`git diff --check` を確認する。
 
 ## 10. 今後の変更時のguardrails
 
 - mode、auth、vault、CSV、snapshot、AI、releaseの変更は、先に現行 source/test とこの文書の capability matrixを照合する。
 - Desktop は roleのない local vault、server は control/vault分離を維持する。旧 single-DB server、bcrypt/TOTP、旧AI envを復活させない。
 - production AIは現状非提供である。自動server snapshotはmutation連動で提供済みだが、時刻schedule・可変retention・失敗通知を追加する場合は、既存のuser-vault bindingと暗号化境界を保ち、別設計、明示的な承認、security testを必須にする。
-- 配布は固定SQLCipher/Wails/Docker workflowを使い、通常Go/Nodeテスト、frontend build、security tests、actionlint、`git diff --check`を通す。
+- 配布は固定SQLCipher/Wails/Docker workflowを使う。コード変更に必要なGo/Nodeテスト、frontend build、security tests、actionlintは変更範囲に応じて実施し、ローカルの負荷と実行許可を確認する。全変更で `git diff --check` を確認する。

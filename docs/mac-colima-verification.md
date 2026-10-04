@@ -1,6 +1,8 @@
 # Mac + Colima で公開済み Docker イメージを隔離検証する
 
-この手順は、公開済みの Omni Money 2.0.0 イメージを Mac で試験データだけを使って確認するためのものです。TrueNAS のデータ移行、Pangolin/TLS、TrueNAS の ACL、Linux 専用の `safe-update.sh` は別途検証します。通常の `compose.yaml` と `compose.local.yaml` だけで起動するとホストの `data` を書き込み可能で bind mount するため、この手順では使いません。
+この手順は、対象バージョンの公開済み Omni Money イメージを Mac で試験データだけを使って確認するためのものです。TrueNAS のデータ移行、Pangolin/TLS、TrueNAS の ACL、Linux 専用の `safe-update.sh` は別途検証します。通常の `compose.yaml` と `compose.local.yaml` だけで起動するとホストの `data` を書き込み可能で bind mount するため、この手順では使いません。
+
+この手順は運用者が明示的にローカルDocker検証を選ぶ場合だけ使用します。通常の開発検証はCI/CDで行います。VERSIONと一致するRelease成果物が公開されていることを確認し、未公開の版を公開済みとして扱わないでください。
 
 ## 1. Mac 側の準備
 
@@ -30,7 +32,7 @@ context 名が違う場合は置き換えます。`docker context inspect "$CONT
 
 ## 2. 公開済みイメージと秘密ファイル
 
-[Docker Release workflow](../.github/workflows/release-docker.yml) の 2.0.0 実行結果から、公開された `ghcr.io/shiningwank0/omni_money@sha256:<64 桁>` を確認します。`latest` やタグだけを使わず、ワークフローの job summary と registry の digest が一致することを確認してください。Apple Silicon の Colima では `linux/arm64` を含む公開イメージの digest を使います。Mac 用 ZIP の SHA-256 や build job の単一アーキテクチャ digest は、この手順の公開イメージ digest と区別してください。手元で `--build` すると Dockerfile の既定バージョンは `dev` となり、公開成果物そのものの検証になりません。
+[Docker Release workflow](../.github/workflows/release-docker.yml) の対象バージョンの実行結果から、公開された `ghcr.io/shiningwank0/omni_money@sha256:<64 桁>` を確認します。`latest` やタグだけを使わず、ワークフローの job summary と registry の digest が一致することを確認してください。Apple Silicon の Colima では `linux/arm64` を含む公開イメージの digest を使います。Mac 用 ZIP の SHA-256 や build job の単一アーキテクチャ digest は、この手順の公開イメージ digest と区別してください。手元で `--build` すると Dockerfile の既定バージョンは `dev` となり、公開成果物そのものの検証になりません。
 
 次の二つのファイルは Mac 上の専用ディレクトリに初回だけ作ります。ブロック内の `set -eC` はエラー時に中止し、既存ファイルへの上書きを禁止します。既存の鍵を上書きすると DB を復号できなくなるため、再実行時は既存ファイルを残します。`sudo chown` は実行しません。秘密ファイルの中身をチャット、Issue、PR、ログへ貼らないでください。Mac 側の `0600` ファイルはコンテナの UID `10001` から読めるとは限らないため、後で Colima VM 内の専用 volume に取り込みます。
 
@@ -152,7 +154,7 @@ docker --context "$CONTEXT" compose \
 
 少なくとも次を確認し、違えば起動を中止します。
 
-- `image` が公開された 2.0.0 の完全な digest で、`build` がない。
+- `image` が対象バージョンの公開済みの完全な digest で、`build` がない。
 - `/app/data` が `type: volume`、`/run/secrets` が読み取り専用の `type: volume`、`/tmp` が `type: tmpfs`。Mac のパスを指す書き込み可能な bind mount がない。
 - Web ポートの宣言が **`127.0.0.1:4000` の一つだけ**。`4001` や `0.0.0.0` の宣言がない。この `config` 出力だけでは実際のポート公開は確認できません。
 - `pangolin_target` が `internal: true`、service がその network 一つだけに接続されている。
@@ -214,6 +216,7 @@ docker --context "$CONTEXT" run --rm --network none --read-only --user 0:0 \
 - `docker --context "$CONTEXT" port omni-money 4000/tcp` と Mac の `lsof -nP -iTCP:4000 -sTCP:LISTEN` で実際の公開先を確認します。SSH トンネル使用中は Mac の `127.0.0.1:4000` だけが待ち受けていることを確かめ、同じ LAN の別端末から Mac の LAN アドレスの 4000 番に接続できないことを実測します。
 - ブラウザの開発者ツールの Network で、アプリ操作中に意図しない外部ホストへの通信がないことを確認します。試験データを使い、ログやエラー応答に setup token、鍵、取引内容が出ないことを確認します。
 - 試験用の二人のユーザーで、自分の家計簿だけを参照でき、Admin が他ユーザーの取引内容を閲覧できないことを確認します。
+- 試験用ユーザーでパスキー登録時のアカウントpassword再入力が不要で、PRF出力なしでもログインできることを確認します。取引保存直後のlogoutでは受付確認とsession失効だけを待ち、再loginで取引反映・処理中/失敗通知を確認します。
 - この Mac の HTTP 検証は TrueNAS/Pangolin の TLS、公開 FQDN、ACL、更新・復旧手順の代わりにはなりません。TrueNAS に既存データがある場合は、暗号化済みの複製を使った隔離環境で更新経路を別途試します。
 
 停止時は SSH トンネルを使っていた場合、そのターミナルで `Ctrl+C` を押します。その後、bootstrap を外した構成で `down` を使い、named volume は保持します。

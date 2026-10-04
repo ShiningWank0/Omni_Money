@@ -11,6 +11,7 @@ attestation file自身と、filesystem rootからその親directoryまでの各c
 ## 対象
 
 - server modeのcontrol DB、ユーザーvault、SQLite WAL/SHM、ユーザーごとのSQLCipher snapshot
+- schema version 6のVault内にある取引保存受付、処理中・失敗した入力と画像、再送防止記録
 - volumeの複製、host snapshot、外部backup
 - serverから取得したCSVを保存する媒体
 

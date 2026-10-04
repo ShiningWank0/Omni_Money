@@ -1,12 +1,12 @@
 # Omni Money 利用ガイド（Desktop / Docker / TrueNAS）
 
-このガイドは現在のmulti-user server構成を対象にしています。旧`AUTH_PASSWORD_HASH`、TOTP、`DB_PATH`、`DB_ENCRYPTION_KEY_FILE`、`compose.ai.yaml`を使う単一DB server手順は廃止され、設定されている場合は安全のため起動を拒否します。
+このガイドは現行のDesktopとmulti-user serverを対象にしています。旧`AUTH_PASSWORD_HASH`、TOTP、`DB_PATH`、`DB_ENCRYPTION_KEY_FILE`、`compose.ai.yaml`を使う単一DB server手順は廃止され、設定されている場合は安全のため起動を拒否します。
 
 ## 1. Desktopアプリ
 
 ### インストールと起動
 
-ReleasesからOS向けartifactを取得します。配布artifactは固定版SQLCipherを静的に組み込み、暗号化DBの作成、誤った鍵の拒否、平文headerとcanaryの不在、load extensionの無効化をCIでartifact自身に実行させてから公開します。
+[GitHub Releases](https://github.com/ShiningWank0/Omni_Money/releases)からOS向けartifactを取得します。配布artifactは固定版SQLCipherを静的に組み込み、暗号化DBの作成、誤った鍵の拒否、平文headerとcanaryの不在、load extensionの無効化をCIでartifact自身に実行させてから公開します。
 
 開発buildでも通常SQLiteや未固定のDesktop CLIへ切り替えないでください。各OS向けの `scripts/build-sqlcipher-*.sh` でSQLCipherを作成し、release workflowと同じ `libsqlite3,sqlite_omit_load_extension` build tagとCGO設定で起動します。SQLCipherが不足・不正な場合、Desktopは平文DBへfallbackせず起動を拒否します。[SQLCipher鍵の運用](sqlcipher-key-operations.md)も参照してください。
 
@@ -14,7 +14,7 @@ Desktop版はroleを持たない単一local vault運用です。初回起動でp
 
 - macOS: `~/Library/Application Support/OmniMoney/vaults/<vault-id>/omni_money.db`
 - Windows: `%APPDATA%/OmniMoney/vaults/<vault-id>/omni_money.db`
-- Linux: `~/.local/share/OmniMoney/vaults/<vault-id>/omni_money.db`
+- Linux: `$XDG_DATA_HOME/OmniMoney/vaults/<vault-id>/omni_money.db`（未設定時は `~/.local/share/OmniMoney`）
 
 旧versionのroot直下 `omni_money.db`がある場合は、password入力後に明示的な移行を行います。元DBとsnapshotを検証しながらSQLCipher vaultへ複写し、移行後のrecovery codeを保存したことを確認するまでvaultは利用できません。FileVault、BitLocker、LUKS等のfull-disk encryptionも、アプリの鍵を窃取できる別processや未暗号化の一時領域に対するdefense in depthとして有効にしてください。
 
@@ -36,10 +36,11 @@ Desktopでは従来どおり「インポート実行」でOSのファイル選�
 
 serverは次の領域を分離します。
 
-- control DB: user、role、session、invite、password reset、暗号化済みkey envelopeだけを保持するSQLCipher DB
+- control DB: user、role、invite/reset tokenのdigest、password検証情報、暗号化済みkey envelopeを保持するSQLCipher DB
 - user vault: userごとの取引データを保持する独立SQLCipher DB
 - control DB key: user vaultのDEKとは独立したowner-only secret
 - recovery code: browserが生成し、userだけが保存するvault復旧用secret
+- session: サーバーのメモリで管理し、再起動で失効する。control DBに永続化しない
 
 Adminはuserの追加・無効化等を管理できますが、アプリのAdmin権限では他user vaultの中身を復号できません。パスキー用のサーバー管理envelopeが存在する場合、control鍵とcontrol DBを持つサーバー運用者にはそのVault鍵を復号可能です。serverのsnapshot APIも本人のrequest leaseに束縛されるため、application Admin/APIでも他user vaultの平文を列挙・復号・復元できません。ただし同じservice UID、host root/operator、差し替え可能なbinary、process memoryはtrust boundary内です。手動APIに加え、`core.Service`経由のledger mutation成功後にuser vault単位の自動snapshotを非同期作成します。自動処理はburstをcoalesceして30世代と容量上限を維持しますが、時刻schedule・retention policy・失敗通知を管理する製品UIはありません。snapshot restore後は全sessionが失効し、再ログインが必要です。
 
@@ -50,6 +51,8 @@ Adminはuserの追加・無効化等を管理できますが、アプリのAdmin
 AIはDesktop/serverのproductionで提供していません。user-vault-bound AIはStage 4のplanned/unshipped設計であり、旧AI packageや追加portを運用へ持ち込まないでください。
 
 ## 3. Docker Composeでローカル確認
+
+この節は、運用者が明示的にローカル検証する場合の手順です。開発時のDocker build・server E2Eは原則CI/CDで行います。
 
 Mac + Colimaで公開済みDockerイメージを検証する場合は、[Mac + Colima の隔離検証手順](mac-colima-verification.md)を使用してください。以下の`sudo chown`とbind mountの準備例はネイティブLinux向けです。macOSでそのまま実行しないでください。
 
@@ -68,10 +71,13 @@ Mac + Colimaで公開済みDockerイメージを検証する場合は、[Mac + C
 cp .env.example .env
 umask 077
 mkdir -p data secrets
-openssl rand -hex 32 > secrets/control-database.key
-openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n' > secrets/initial-admin-setup.token
+test -s secrets/control-database.key || openssl rand -hex 32 > secrets/control-database.key
+test -s secrets/initial-admin-setup.token || \
+  openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n' > secrets/initial-admin-setup.token
 chmod 600 secrets/control-database.key secrets/initial-admin-setup.token
 ```
+
+既存のcontrol鍵を上書きしないでください。再実行時は既存の秘密ファイルと `.env` を維持し、必要な設定だけを変更します。
 
 `.env`で少なくとも次を実環境に合わせます。
 
@@ -109,7 +115,7 @@ docker compose -f compose.yaml -f compose.bootstrap.yaml -f compose.local.yaml u
 2. Adminのemail、表示名、十分に長いpassword
 3. browserが生成するrecovery codeの保存確認
 
-recovery codeはpassword manager等へ保存してください。serverは平文recovery codeを保存せず、Admin passwordやcontrol keyだけでuser vaultを復旧できません。
+recovery codeはpassword manager等へ保存してください。serverは平文recovery codeを保存しません。初回作成時はpassword/recovery codeでVault鍵を開きます。パスキー登録後にサーバー管理envelopeが存在する場合は、control鍵とcontrol DBを持つ運用者にもVault鍵の復号が可能です。アプリにAdminによる代行復旧APIはありません。
 
 最初のAdminを作成したらbootstrap overlayを外してcontainerを再作成します。起動確認後、host側setup tokenを安全にretireできます。
 
@@ -130,13 +136,21 @@ invite/reset tokenはURLへ入れず、安全な別経路で本人へ渡して�
 password resetにはAdminのtokenに加えて本人だけが保持する既存recovery codeが必要です。Admin UIが扱うのはaccount状態だけで、
 他userの取引、vault path、password、recovery code、暗号鍵を表示または復号する機能はありません。
 
-各userはログイン後の「パスキー設定」で、passwordを再入力せずにパスキーを登録できます。BitwardenなどPRF出力を返さない保存先でも、パスキーだけでログインできます。既にサーバーへ登録済みの旧形式のパスキーは、通常のpasswordログインか、ログイン済み状態で「パスキー設定」を開いたときに自動移行します。以前の登録失敗で保存先にだけ残ったパスキーは、改めて登録してください。Vault鍵はサーバー管理の専用鍵で暗号化して保存します。この方式ではcontrol鍵とcontrol DBを持つサーバー運用者には復号可能ですが、アプリのAdmin権限で他userのVaultを開くAPIはありません。登録後もpassword認証は無効にならず、login画面と重要操作の再認証でpasswordまたはpasskeyを選べます。passkeyはPangolin経由のHTTPS originに紐付くため、`PASSKEY_RP_ID`や公開FQDNを変更すると既存passkeyは使えなくなります。passwordとrecovery codeは引き続き安全に保管してください。
+### パスキーの登録とログイン
+
+各userはログイン後の「パスキー設定」で、passwordを再入力せずにパスキーを登録できます。Bitwardenなどの標準パスキー保存先を利用でき、PRF出力がない場合もパスキーだけでログインできます。パスキー保存先のロック解除や本人確認が表示されることはありますが、Omni Moneyのアカウントpasswordの追加入力は要求しません。既にサーバーへ登録済みの旧形式のパスキーは、通常のpasswordログインか、ログイン済み状態で「パスキー設定」を開いたときに自動移行します。以前の登録失敗で保存先にだけ残ったパスキーは、改めて登録してください。Vault鍵はサーバー管理の専用鍵で暗号化して保存します。この方式ではcontrol鍵とcontrol DBを持つサーバー運用者には復号可能ですが、アプリのAdmin権限で他userのVaultを開くAPIはありません。登録後もpassword認証は無効にならず、login画面と重要操作の再認証でpasswordまたはpasskeyを選べます。passkeyはPangolin経由のHTTPS originに紐付くため、`PASSKEY_RP_ID`や公開FQDNを変更すると既存passkeyは使えなくなります。passwordとrecovery codeは引き続き安全に保管してください。
+
+### 認証情報の更新・失効
 
 「認証情報の管理」では、現在のpasswordを確認してpasswordまたはrecovery codeを更新できます。どちらもVaultのDEKは変えず、新しいenvelopeへatomicに置き換えます。serverでの更新後は全sessionと開いているVaultを失効させるため、再ログインが必要です。password変更時は既存passkeyを残すか全失効するかを明示的に選びます。「パスキー設定」で個別または一括失効した場合も全端末からログアウトします。「全端末からログアウト」はpasswordとpasskeyを変更せずsessionだけを終了します。
 
-取引の「保存」を押すと、画像を含む入力をサーバーの暗号化保管庫へ先に受け付け、その後に取引一覧へ反映します。同じ保存操作の再送は一度だけ反映されますが、別の操作で同じ内容の取引を登録することはできます。ログアウト時は送信と受付確認まで待ち、画像処理やスナップショットの完了は待ちません。受付済みの処理はログアウト後も続き、再ログインして確認できます。サーバーが処理途中で再起動した場合は、そのユーザーの次回ログインで再開します。
+### 取引の保存とログアウト
 
-処理中の取引や保存に失敗した入力は、ログイン後の画面に通知します。失敗した入力と画像は、本人が通知の削除を確認するまで暗号化して保管します。通信障害で受付を確認できない場合はログアウト完了として遷移せず、画面を保護して再試行を表示します。受付前の入力はブラウザのメモリにあるため、送信未確認のままリロードやタブを閉じる操作は避けてください。
+取引エディターの新規作成・更新で「保存」を押すと、画像を含む入力をサーバーの暗号化保管庫へ先に受け付け、その後に取引一覧へ反映します。保存操作ごとにUUIDを生成し、再送では同じUUIDと同じ入力を使用します。同じ保存操作の再送は一度だけ反映されますが、別の操作で同じ内容の取引を登録することはできます。ログアウトを押すと私的な画面データを直ちに消去します。送信・受付確認とセッション失効まで待ち、画像処理やスナップショットの完了は待ちません。受付済みの処理はログアウト後も続き、再ログインして確認できます。サーバーが処理途中で再起動した場合は、そのユーザーの次回ログインで再開します。直後の再ログインは同じVaultを安全に再利用し、古い応答が新しい画面へ戻らないようにします。CSVインポートや取引削除等はこの非同期受付の対象外です。
+
+通常の保存操作では取引反映まで待ってフォームを閉じます。ログアウト時にはその完了を待ちません。処理中の取引や保存に失敗した入力は、ログイン後の画面に通知します。失敗した入力と画像は、本人が通知の削除を確認するまで暗号化して保管します。通知には日付・資金項目・項目・金額・メモを表示し、画像本文は取得しません。通知削除は保管した入力・画像を削除しますが、再送を二重反映しないためのID/hash記録は残します。通信障害で受付を確認できない場合はログアウト完了として遷移せず、画面を保護して再試行を表示します。受付前の入力はブラウザのメモリにあるため、送信未確認のままリロードやタブを閉じる操作は避けてください。
+
+通常HTTPリクエスト全体はBase64込みで10 MiBまで、画面の画像原データは合計7 MiBまでです。保存queue内部の上限は1入力32 MiB、未確認の失敗入力を含め32件/合計128 MiBであり、HTTP上限とは別です。混雑時は受付を拒否するため、入力を保持して再試行してください。
 
 ### 停止、再開、安全な更新
 
@@ -148,7 +162,7 @@ docker compose -f compose.yaml -f compose.local.yaml logs --tail=200 omni-money
 
 `down -v`は使用しないでください。bind mountのdataを削除しなくても、control key、recovery code、暗号化volumeの復旧情報を失うと復号できません。
 
-Pangolin/TrueNAS本番のversion更新は、通常の`up --build`ではなく、digest固定したimageを`./scripts/safe-update.sh`へ渡します。tagは可変のため受け付けません。digestは`./scripts/resolve-image-digest.sh <image:tag>`で解決できます。data migrationはtransactionalに実行され、scriptは停止後のoffline checkpointを検証してからcandidateをingressに接続します。candidateがhealthyになる前に失敗した場合だけ、旧dataと旧imageへrollbackします。要件と復旧時の挙動は[安全な更新と限定ロールバック](safe-update.md)を参照してください。
+Pangolin/TrueNAS本番のversion更新は、通常の`up --build`ではなく、digest固定したimageを`./scripts/safe-update.sh`へ渡します。tagは可変のため受け付けません。digestは `./scripts/resolve-image-digest.sh --verify --repo ShiningWank0/Omni_Money <image:tag>` でprovenanceを検証して解決します。data migrationはtransactionalに実行され、scriptは停止後のoffline checkpointを検証してからcandidateをingressに接続します。candidateがhealthyになる前に失敗した場合だけ、旧dataと旧imageへrollbackします。要件と復旧時の挙動は[安全な更新と限定ロールバック](safe-update.md)を参照してください。
 
 ## 4. Pangolin / TrueNAS
 
@@ -174,6 +188,8 @@ snapshot単体はDR setではありません。次の全てを別々の安全な
 - 暗号化volumeのkey/recovery material、attestation、復旧・更新手順
 - 各userが保持するrecovery code
 
+CSV v3には保存queue（処理中・失敗入力と再送防止記録）を含みません。schema version 6のVault DBを含むsnapshot・whole-server backupにはこれらの記録も含まれます。過去のsnapshotへ復元すると、その後の取引と受付記録も巻き戻ります。サーバー再起動時のpendingは本人がVaultを解錠した後に再開します。
+
 backup取得だけでは不十分です。本番とは隔離した環境で定期的に復旧し、control DB/key、vault/snapshot、volume recovery material、recovery codeが揃ってcontrol DBが開くこと、user本人のrecovery codeで対象vaultだけが開くこと、別userやAdminからは開けないことを確認します。元snapshotは変更しません。
 
 server全体の冷間backupは `sudo bash scripts/backup-data-root.sh` で取得できます（service停止中のdata root全体tar、member/sha256/平文header検査、manifest付与、`--verify` モード付き）。取得手順、archiveと鍵materialの分離保管、restore手順、復元演習の詳細は [Disaster Recovery runbook](disaster-recovery.md) を参照してください。
@@ -195,10 +211,6 @@ server全体の冷間backupは `sudo bash scripts/backup-data-root.sh` で取得
 
 ## 7. 開発時の確認
 
-```bash
-go test ./...
-go test -tags server .
-cd frontend && npm run build
-```
+変更範囲に応じてGoの関連package test、Frontendのunit/component test・buildを選びます。固定版と実行例は [Frontend README](../frontend/README.md)、配布条件は [Desktopビルド資材](../build/README.md)、作業時の許可・負荷管理は [AGENT_WORKFLOW.md](../AGENT_WORKFLOW.md) を参照してください。
 
-serverの実buildはrepositoryのDockerfileとGitHub ActionsがSQLCipher 4.18.0をsource buildして検証します。
+server/Desktopの本番暗号化とDocker build・server/browser E2EはGitHub Actionsが固定SQLCipherと同じbuild tags/CGO設定で検証します。ローカルDockerやSQLCipher source buildは明示的に依頼された場合だけ実行します。ドキュメントだけの変更にコードbuildは不要です。

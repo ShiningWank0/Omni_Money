@@ -26,6 +26,10 @@ digests, password-verification material, and encrypted vault-key envelopes. It
 does not contain balances, account names, transactions, receipt images, or a raw
 vault key.
 
+Sessions and one-use WebAuthn ceremonies live in server memory, not the control
+database. A server restart invalidates sessions; the durable save queue lives in
+each encrypted user ledger and survives independently.
+
 Each vault has an independent random 256-bit data-encryption key (DEK). A user's
 password-derived key and recovery-derived key wrap the DEK with AES-256-GCM.
 Passkey registration uses the already authenticated request's open vault key;
@@ -117,13 +121,20 @@ cancel accepted work. Closing the vault joins its worker before destroying the
 key. A pending receipt after a process crash resumes when that user's vault is
 next unlocked, because the worker needs the vault DEK.
 
-Schema version 6 adds this queue. Each input is bounded to 32 MiB, with at most
+Schema version 6 adds this queue. The ordinary HTTP body limit remains 10 MiB
+including Base64, and the browser limits new image data to 7 MiB total. These are
+separate from the internal queue bounds. Each stored input is bounded to 32 MiB, with at most
 32 retained inputs and 128 MiB per vault, including unacknowledged failed input.
 Only the owner can query processing notices or dismiss a failed notice. Failed
 input stays encrypted until explicitly dismissed; dismissal keeps the receipt
 ID/hash tombstone. Notices expose text metadata without downloading image data.
 The browser shows pending/failed notices after login and refreshes the ledger
 after pending work completes.
+
+CSV v3 exports ledger contents, not save receipts, retained failed input, or
+replay tombstones. Schema-6 snapshots and whole-data-root archives include the
+queue as part of the ledger database. Restoring an earlier snapshot also rolls
+back receipts and replay records created after that snapshot.
 
 There is no persistent offline browser outbox. Unconfirmed upload input is held
 in memory for retry, so logout cannot silently declare success before receipt.

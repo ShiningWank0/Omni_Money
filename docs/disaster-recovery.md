@@ -2,8 +2,10 @@
 
 Issue #152 の縮小実装として、service停止中のwhole data-root冷間archive、整合性検証、
 off-host保管runbook、復元演習手順を提供する。online incremental backup engine、
-admin restore HTTP API、DEK escrow、独自remote uploaderは意図的に実装しない
+admin restore HTTP API、Admin向けDEK取得API、独自remote uploaderは提供しない
 （docs/server-multi-vault.md の脅威モデルを参照）。
+
+標準パスキーのためのserver-custody envelopeは実装済みであり、control鍵とcontrol DBを持つhost operatorにはそのVault鍵を復号可能。アプリのAdmin権限による復旧と区別する。
 
 ## 復旧対象（DR set）
 
@@ -12,13 +14,13 @@ archiveに含まれるもの（`scripts/backup-data-root.sh` がdata root全体�
 | 対象 | path（data root相対） | 内容 |
 | --- | --- | --- |
 | control DB | `control/omni_control.db` | user registry、credential envelope、vault metadata（SQLCipher ciphertext） |
-| 各user vault | `vaults/<vault-id>/ledger.db` | 財務ledger本体（各userのDEKで暗号化） |
+| 各user vault | `vaults/<vault-id>/ledger.db` | 財務ledger本体とschema 6の保存受付・失敗入力・再送防止記録（各userのDEKで暗号化） |
 | 各vaultのsnapshot | `vaults/<vault-id>/snapshots/*.db` | vault DEKで暗号化された時点復元用ciphertext |
 
 archiveに**含まれない**もの（契約上data root外に置かれる。別途、archiveとは異なる
 保管先へ複製すること）:
 
-- control DB key file（`root:10001` mode `0440`。漏洩するとcontrol DBが復号される）
+- control DB key file（`root:10001` mode `0440`。漏洩するとcontrol DB、およびそこに存在するpasskey custody envelopeのVault鍵が復号可能）
 - data-at-rest attestation file（`root:root` mode `0444`）
 - initial admin setup token file（bootstrap後は不要）
 - 各userのrecovery code（server側に存在しない。user各自が保管）
@@ -31,8 +33,9 @@ archiveに**含まれない**もの（契約上data root外に置かれる。別
   （例: archiveは暗号化off-host storage A、鍵materialはpassword manager/別媒体B）
 - host rootを持つ攻撃者や稼働中serverのmemoryからは保護できない。DRはat-rest
   保管と運用分離の対策であり、compromised hostへの対策ではない
-- user vault単位の復旧（key loss）は不可逆。recovery codeが失われたvaultは
-  key materialが揃っても平文化できない
+- recovery codeの紛失だけではVault鍵を失ったとは限らない。有効なpasswordまたはpasskeyがあれば通常の解錠は可能。いずれも使えずcustody envelopeもない場合や、必要な鍵・DB自体を失った場合は復旧できない。Adminによる代行復旧APIはない
+
+CSV v3には保存queue・失敗入力・再送防止記録は含まれない。保全にはVault DBを含むsnapshotまたは本archiveを使用する。復元時のpendingは本人の次回Vault unlockで再開する。過去世代への復元では、その時点以降の取引・受付・再送防止記録も巻き戻る。
 
 ## RPO / RTO
 
@@ -104,13 +107,13 @@ restoreは自動化しない。破壊的な置換は必ず手順書に従い手�
 
 ## 復元演習（restore drill）
 
-最低でも半に一度、以下を隔離環境（本番hostではない隔離machine/VM）で実施する:
+最低でも半年に一度、以下を隔離環境（本番hostではない隔離machine/VM）で実施する:
 
 1. 最新generationと鍵materialのコピーを隔離環境へ持込み、`--verify` を通す
 2. 上記restore手順を隔離data rootに対して実施する
 3. server起動後、既知の最新取引が閲覧できること、admin consoleが機能することを
-   確認する。user本人でloginし、`PRAGMA integrity_check` 相当の健全性は
-   snapshot一覧とledger閲覧で確認する（平文化はしない）
+   確認する。user本人でloginし、DBを開く際のintegrity/schema検証が成功することと、
+   取引・画像・タグ、保存queueの再開と本人への通知を確認する（平文DBへexportしない）
 4. 意図的に壊したarchive（1byte改変、鍵不一致、manifest削除）が `--verify` と
    restoreでfail closedになることも確認する
 5. 所要時間（RTO実測）と問題点を記録する。鍵・path・財務内容はlogに残さない

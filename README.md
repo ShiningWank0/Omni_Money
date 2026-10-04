@@ -13,11 +13,19 @@ Wails によるデスクトップアプリとして使えるほか、Docker で�
 | Schema / legacy migration | schema migrationと明示的な旧root DB移行 | schema migrationのみ。旧single-DB serverからmulti-userへの自動移行は非提供、CSV v3による手動移行が必要 |
 | safe-update | server用safe-update対象外。固定artifactをrelease workflowで検証 | project `omni-money` のcompose/env/digestを固定検証し、固定imageをatomic更新 |
 
-旧 Python 版の `legacy_reference/` は参照専用です。現行の取引管理、複数口座、CSV ledger、snapshot復元、タグ分析を Go/Vue 構成で提供します。
+現行の取引管理、複数口座、CSV ledger、snapshot復元、タグ分析を Go/Vue 構成で提供します。旧Python版のソースは現行ツリーに含まれません。
 
 ## 使い方
 
-Mac + Colima で公開済みDockerイメージを検証する場合は[隔離検証手順](docs/mac-colima-verification.md)を使用してください。macOS デスクトップアプリと TrueNAS Custom App の導入・アクセス・バックアップ手順は[利用ガイド](docs/how-to-use.md)を参照してください。
+Desktopアプリと Docker / TrueNAS の導入・アクセス・バックアップ手順は[利用ガイド](docs/how-to-use.md)を参照してください。Mac + Colima で公開済みDockerイメージを明示的にローカル検証する場合は[隔離検証手順](docs/mac-colima-verification.md)を使用してください。
+
+| 目的 | ドキュメント |
+| --- | --- |
+| 認証・Vault・取引保存の実装境界 | [server multi-vault security model](docs/server-multi-vault.md)、[APIエラーと保存受付の契約](docs/api-errors.md) |
+| 鍵・保存媒体・復旧 | [SQLCipher鍵の運用](docs/sqlcipher-key-operations.md)、[保存時暗号化volume](docs/at-rest-encryption.md)、[DR runbook](docs/disaster-recovery.md) |
+| サーバー更新・旧版からの移行 | [安全な更新](docs/safe-update.md)、[旧single-user server移行](docs/single-user-migration.md) |
+| 開発・配布・依存更新 | [開発仕様](Agent.md)、[作業手順](AGENT_WORKFLOW.md)、[Frontend](frontend/README.md)、[Desktopビルド資材](build/README.md)、[依存更新](docs/dependency-updates.md) |
+| セキュリティ検査・将来のAI設計 | [セキュリティ監視](docs/security-monitoring.md)、[AI roadmap（未提供）](docs/ai-integration-roadmap.md) |
 
 ## 主な機能
 
@@ -27,6 +35,7 @@ Mac + Colima で公開済みDockerイメージを検証する場合は[隔離検
 - 取引日時、項目、種別、金額、残高、メモの管理
 - クレジットカード扱いの項目を残高計算とグラフから除外
 - CSV バックアップと CSV インポート
+- サーバーのCSVインポートプレビュー、重複・競合候補と置換件数の確認
 - 残高推移グラフ
 - SQLite データベースのスナップショット作成、一覧表示、復元
 - 取引画像の添付、一覧取得、削除
@@ -35,6 +44,18 @@ Mac + Colima で公開済みDockerイメージを検証する場合は[隔離検
 - AI は両モードの production で提供していません（旧実装は dormant legacy）
 - GitHub Actions による VERSION 起点のデスクトップ版リリースと Docker イメージリリース
 
+### サーバーのパスキーとログイン・ログアウト
+
+ログイン済みの「パスキー設定」で登録し、以後はパスキーだけでログインできます。アカウントのパスワード再入力やPRF出力は登録・ログインの必須条件ではありません。署名、チャレンジ、RP ID、origin、ユーザー検証を確認してからVaultを開きます。既にサーバーへ登録済みの旧形式は、パスワードログインまたはログイン済みの設定画面で自動移行します。
+
+Vault鍵はcontrol鍵から用途別に導出した専用鍵で暗号化して保存します。アプリのAdmin権限では他ユーザーのVaultを開けませんが、control鍵とcontrol DBを持つサーバー運用者には復号可能です。Desktopはパスワード・回復コードによる単一local vault運用です。
+
+### サーバーの取引保存と再送
+
+取引エディターの作成・更新は、保存操作ごとに生成するUUIDと固定した入力で送信します。同じIDの再送は同じ処理として扱い、別IDなら同じ内容の取引も登録できます。同じIDで内容を変えた要求はHTTP 409で拒否します。
+
+画像を含む入力をSQLCipher Vaultへ永続化してHTTP 202を返し、画像処理・取引反映はサーバーで続行します。ログアウト時は送信・受付確認とセッション失効まで待ち、取引反映や自動snapshotの完了は待ちません。画面の私的データは直ちに消去し、再ログイン後に処理中・失敗の通知を確認できます。通信障害で受付を確認できない場合は、保護画面で再試行します。受付前の入力はブラウザのメモリにあるため、未確認のままタブを閉じたりリロードしたりすると失われる場合があります。詳細は[利用ガイド](docs/how-to-use.md)を参照してください。
+
 ### CSV 完全バックアップ（v3）
 
 CSV出力は常にv3の完全ledger形式です。transactions、images、tags、links、ledger settingsを含み、画像はファイル名・検証済みMIMEタイプ・Base64バイナリとして別レコードに格納します。タグ・リンクは元IDを参照して復元時に安全に再採番します。CSVと画像のBase64は常に平文であり、auth/control DB、credential、DEK/key、snapshot、volume recovery materialは含みません。旧クライアント互換のtransactions-only v2が必要な場合だけ、明示的な `BackupToCSVV2` 互換APIを使用してください。v2は完全バックアップではなくappend用途に限られます。
@@ -42,6 +63,8 @@ CSV出力は常にv3の完全ledger形式です。transactions、images、tags�
 v1/v2（`id,account,date,item,type,amount,balance[,memo]`）は引き続きappendインポートできます。旧形式のreplaceは、画像・タグ・リンクなどを表現できず安全な完全置換にならないため拒否されます。完全置換にはCSV v3を使用してください。v3ではバージョン、レコード種別、Base64画像を厳格に検証し、サイズ・MIME・重複ID・CSV式注入を拒否します。v3 export末尾には全record typeの件数とcanonical digestを含むmanifestを必ず付け、replaceでは公式完全ヘッダーとmanifestが一致しない入力をDB変更前に拒否します。CSV v3のreplaceインポートは全レコードと設定を1つのSQLite transactionで処理し、画像や関連付けの途中失敗を含め完全にrollbackします。appendは既存の取引関連データとledger設定を保持し、CSVのallowlist設定が既存値と異なる場合は競合としてatomicに中止します。既存の取引リンクを自動削除することはありません。ストリーミングのraw CSVは512 MiB、解析済みテキストは64 MiB、行数は100万行までです。後方互換のWails/JSON文字列経路は64 MiBに制限されるため、完全バックアップにはDesktopのファイルダイアログまたはserverのraw CSV uploadを使用してください。
 
 CSVは画像を含め常に暗号化されない平文です。DesktopではダイアログでFileVault・BitLocker・LUKS等に保護された保存先を選び、serverではブラウザのダウンロード先が暗号化volume上であることを確認してください。保存先や共有先の安全性はアプリから検証できません。
+
+CSV v3には取引保存の受付ID、処理中・失敗した入力、再送防止記録を含みません。それらの保全にはschema version 6のVault DBを含む暗号化snapshotまたはwhole-server backupを使用してください。過去のsnapshotへの復元では、その時点以降の取引と受付記録が戻る点にも注意してください。
 
 ### 画像添付の安全上限
 
@@ -71,7 +94,7 @@ CSVは画像を含め常に暗号化されない平文です。Desktopではダ�
 │   ├── api/              # サーバーモード用 REST API
 │   ├── core/             # ビジネスロジック
 │   ├── database/         # ledger、CSV v3、snapshot lifecycle
-│   ├── control/          # server identity、role、session、envelope metadata
+│   ├── control/          # server identity、role、token、envelope metadata
 │   ├── desktopaccount/   # Desktop local password/recovery/lock lifecycle
 │   ├── keyenvelope/      # Argon2id、AES-GCM、password/recovery/passkey envelope
 │   ├── serverauth/       # multi-user password/passkey/invite/reset
@@ -84,7 +107,6 @@ CSVは画像を含め常に暗号化されない平文です。Desktopではダ�
 │       ├── components/   # 画面部品
 │       ├── store/        # Pinia store
 │       └── utils/        # Wails/API 通信ラッパー
-├── legacy_reference/     # 旧 Python 版の参照用コード
 ├── build/                # Wails ビルド資材
 ├── main.go               # Wails デスクトップアプリ起動点
 ├── server.go             # サーバーモード起動点
@@ -101,14 +123,14 @@ CSVは画像を含め常に暗号化されない平文です。Desktopではダ�
 - Node.js: ビルド用固定版は `.node-version` を参照
 - npm
 - 固定版 Wails（`go.mod` の指定版を配布workflowが導入）
-- Docker
+- Docker（サーバー配備または明示的なローカル検証を行う場合）
 
 Desktopの開発・配布は、[利用ガイド](docs/how-to-use.md)と[SQLCipher鍵の運用](docs/sqlcipher-key-operations.md)に記載した固定SQLCipher手順、および固定版Wailsを使ってください。未固定版やタグなしのWails CLIを実行しないでください。
 
 ## セットアップ
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/ShiningWank0/Omni_Money.git
 cd Omni_Money
 cd frontend
 npm ci --ignore-scripts
@@ -126,8 +148,6 @@ DesktopとserverのDB、WAL、snapshotはSQLCipher 4.18.0で暗号化し、所�
 - macOS: `~/Library/Application Support/OmniMoney/vaults/<vault-id>/omni_money.db`
 - Windows: `%APPDATA%/OmniMoney/vaults/<vault-id>/omni_money.db`
 - Linux: `$XDG_DATA_HOME/OmniMoney/vaults/<vault-id>/omni_money.db`（未設定時は `~/.local/share/OmniMoney`）
-
-server版の取引編集は、保存操作ごとの要求IDで再送を識別し、画像を含む入力を暗号化保管庫へ先に受け付けます。ログアウトは送信・受付確認とsession失効まで待ち、画像処理やスナップショットの完了は待ちません。受付済みの保存処理はサーバーで継続し、次回ログイン時に処理状況や失敗した入力を確認できます。詳細は[利用ガイド](docs/how-to-use.md)を参照してください。
 
 ## サーバーモードで起動
 
@@ -169,14 +189,17 @@ serverの環境変数は [.env.example](.env.example) を唯一の雛形とし�
 
 ## Docker で起動
 
+以下はローカルDocker検証を明示的に行う場合の例です。開発時のDocker build・server E2Eは原則CI/CDで実行します。既存のcontrol鍵を上書きせず、初回だけsetup tokenを用意してください。
+
 ```bash
 docker build -t omni-money .
 # 先に docs/at-rest-encryption.md に従って暗号化volumeと
 # secrets/omni_data_at_rest.json、control鍵、initial setup tokenを準備する。
 umask 077
 mkdir -p data secrets
-openssl rand -hex 32 > secrets/control-database.key
-openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n' > secrets/initial-admin-setup.token
+test -s secrets/control-database.key || openssl rand -hex 32 > secrets/control-database.key
+test -s secrets/initial-admin-setup.token || \
+  openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n' > secrets/initial-admin-setup.token
 docker run --rm \
   --user "$(id -u):$(id -g)" \
   -e ALLOWED_HOSTS='localhost:4000,127.0.0.1:4000' \
@@ -260,18 +283,18 @@ AI資格情報はまだcontrol userとvault DEKに結び付いていません。
 
 ## 開発時の確認
 
-Go のテスト:
+変更に関係するGo packageのテストと、必要なFrontendのunit/component test・buildを実行します。固定版・詳細な手順は [Frontend README](frontend/README.md) と [作業手順](AGENT_WORKFLOW.md) を参照してください。
 
-```bash
-go test ./...
-```
-
-フロントエンドのビルド:
+Frontend変更時の例:
 
 ```bash
 cd frontend
+npm run test:unit
+npm run test:component
 npm run build
 ```
+
+SQLCipher・Desktop配布・Docker・server/browser E2Eの本番条件はGitHub Actionsで検証します。ドキュメントだけの変更ではソース・リンク・documentation contractと `git diff --check` の照合を行い、コードbuildは不要です。
 
 ## リリース
 
@@ -287,11 +310,11 @@ npm run build
 
 今後追加・強化したい機能の候補です。
 
-- 取引画像のプレビュー UI とドラッグアンドドロップ操作の改善
-- タグ分析グラフの期間フィルタとドリルダウン操作の拡充
+- 既存の画像プレビューと添付操作の改善
+- 既存のタグ期間フィルタとドリルダウン操作の拡充
 - 取引紐付けの検索・候補表示 UI の改善
 - スナップショット作成タイミングの設定化
-- CSV インポート時の差分確認、重複検出、プレビュー機能
+- CSVプレビューの差分表示の拡充（現行serverは候補表示のみで、自動スキップは行わない）
 - 将来の user-vault-bound AI 設計（Stage 4、未出荷）の検討
 
 ## ライセンス

@@ -31,7 +31,7 @@ CIの整合性チェックとGoテストは、Dockerだけの更新による固�
 
 ## マージ前の確認
 
-通常のCIに加え、Wails更新は4構成のdesktop buildとSQLCipher検証、WebAuthn更新はPRFを含む登録・ログイン・ユーザー列挙防止のテストを確認する。
+通常のCIに加え、Wails更新は4構成のdesktop buildとSQLCipher検証、WebAuthn更新はPRFなしの登録・discoverable login・再認証、server-custody envelope、旧形式移行、ユーザー列挙防止のテストを確認する。PRFを標準パスキーの必須条件へ戻さない。
 フロントエンドのmajor更新はdesktopモードの画面・ストア操作とserver E2Eを確認する。
 
 Docker release workflowはPR上で、本番と同じBuildx/build-push Actionによるamd64/arm64ビルド、SBOM/provenance生成を行う。レジストリへのpush、ログイン、署名公開は行わない。
