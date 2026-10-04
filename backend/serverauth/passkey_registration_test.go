@@ -36,7 +36,7 @@ func (s *registrationTestStore) CreatePasskeyCredential(_ context.Context, input
 	record := control.PasskeyCredential{
 		ID: input.Credential.ID, UserID: input.UserID, Name: input.Name,
 		Credential: input.Credential, PRFSalt: append([]byte(nil), input.PRFSalt...),
-		VaultEnvelope: input.VaultEnvelope, CreatedAt: now,
+		VaultEnvelope: input.VaultEnvelope, PasswordRequired: input.PasswordRequired, CreatedAt: now,
 	}
 	s.records = append(s.records, record)
 	s.created = append(s.created, input)
@@ -208,14 +208,28 @@ func signedRegistrationAttestation(t *testing.T, begin PasskeyRegistrationBegin,
 	return response
 }
 
-func registrationPRFSalt(t *testing.T, begin PasskeyRegistrationBegin) []byte {
+func signedRegistrationAttestationWithoutPRF(t *testing.T, begin PasskeyRegistrationBegin, key *ecdsa.PrivateKey, credentialID []byte, origin string) json.RawMessage {
+	t.Helper()
+	response := signedRegistrationAttestation(t, begin, key, credentialID, origin, true, nil)
+	var payload map[string]any
+	if err := json.Unmarshal(response, &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["clientExtensionResults"] = map[string]any{}
+	response, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func registrationPRFSalt(t *testing.T, service *Service, begin PasskeyRegistrationBegin) []byte {
 	t.Helper()
 	prf := browserPRFInputs(t, begin.Options.Response.Extensions)
-	salt, err := base64.RawURLEncoding.DecodeString(prf.Eval["first"])
-	if err != nil || len(salt) != keyenvelope.PasskeySecretSize {
-		t.Fatal("registration PRF salt is invalid")
+	if len(prf.Eval) != 0 || len(prf.EvalByCredential) != 0 {
+		t.Fatal("registration must probe PRF without evaluating at creation")
 	}
-	return salt
+	return bytes.Clone(service.ceremonies[begin.CeremonyID].PRFSalt)
 }
 
 func beginRegistrationAssertion(t *testing.T, service *Service, begin PasskeyRegistrationBegin, attestation json.RawMessage) PasskeyLoginBegin {
@@ -250,8 +264,76 @@ func TestPasskeyRegistrationWithCreateTimePRFStillPersists(t *testing.T) {
 	}, serverAuthTestNow); err != nil {
 		t.Fatalf("create-time PRF registration failed: %v", err)
 	}
-	if len(store.records) != 1 || !bytes.Equal(store.records[0].PRFSalt, registrationPRFSalt(t, begin)) {
+	if len(store.records) != 1 || !bytes.Equal(store.records[0].PRFSalt, discoverablePRFSalt[:]) {
 		t.Fatal("create-time PRF registration did not persist the original salt")
+	}
+}
+
+func TestPasskeyWithoutPRFRegistersAndRequiresPasswordAfterAssertion(t *testing.T) {
+	dek := bytes.Repeat([]byte{37}, keyenvelope.DEKSize)
+	service, store := newRegistrationTestService(t, dek)
+	ctx := context.Background()
+	begin, err := service.BeginPasskeyRegistration(ctx, serverAuthTestUserID, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialID := bytes.Repeat([]byte{0x71}, 32)
+	attestation := signedRegistrationAttestationWithoutPRF(t, begin, key, credentialID, "https://money.example.test")
+	summary, err := service.FinishPasskeyRegistration(ctx, serverAuthTestUserID, FinishPasskeyRegistrationInput{
+		CeremonyID: begin.CeremonyID, ClientKey: "client", Name: "Bitwarden",
+		Password: []byte(registrationTestPassword), CredentialJSON: attestation,
+	}, serverAuthTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !summary.PasswordRequired || len(store.records) != 1 || !store.records[0].PasswordRequired {
+		t.Fatal("PRF-less passkey was not registered for password unlock")
+	}
+	login, err := service.BeginDiscoverablePasskeyLogin(ctx, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertion := signedPrivacyAssertion(t, login, store.records[0], key, "https://money.example.test", true)
+	if session, err := service.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{
+		CeremonyID: login.CeremonyID, ClientKey: "client", CredentialJSON: assertion,
+	}, serverAuthTestNow); !errors.Is(err, ErrInvalidCredentials) || session != nil {
+		t.Fatalf("passwordless unlock of PRF-less credential: session=%v err=%v", session, err)
+	}
+	if err := store.ClearLoginFailures(ctx, LoginThrottleKey("person@example.test")); err != nil {
+		t.Fatal(err)
+	}
+	login, err = service.BeginDiscoverablePasskeyLogin(ctx, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertion = signedPrivacyAssertion(t, login, store.records[0], key, "https://money.example.test", true)
+	if session, err := service.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{
+		CeremonyID: login.CeremonyID, ClientKey: "client", CredentialJSON: assertion,
+		Password: []byte("wrong password"),
+	}, serverAuthTestNow); !errors.Is(err, ErrInvalidCredentials) || session != nil {
+		t.Fatalf("wrong password opened vault: session=%v err=%v", session, err)
+	}
+	store.throttleMu.Lock()
+	failures := store.throttle[LoginThrottleKey("person@example.test")].failures
+	store.throttleMu.Unlock()
+	if failures != 1 {
+		t.Fatalf("one rejected password counted as %d login failures", failures)
+	}
+	login, err = service.BeginDiscoverablePasskeyLogin(ctx, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertion = signedPrivacyAssertion(t, login, store.records[0], key, "https://money.example.test", true)
+	session, err := service.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{
+		CeremonyID: login.CeremonyID, ClientKey: "client", CredentialJSON: assertion,
+		Password: []byte(registrationTestPassword),
+	}, serverAuthTestNow)
+	if err != nil || session == nil {
+		t.Fatalf("signed passkey plus password failed: session=%v err=%v", session, err)
 	}
 }
 
@@ -263,7 +345,7 @@ func TestNewPasskeyLogsInWithoutEmailWithOneAssertion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(registrationPRFSalt(t, registration), discoverablePRFSalt[:]) {
+	if !bytes.Equal(registrationPRFSalt(t, service, registration), discoverablePRFSalt[:]) {
 		t.Fatal("registration did not use the discoverable PRF input")
 	}
 	if registration.Options.Response.AuthenticatorSelection.ResidentKey != protocol.ResidentKeyRequirementRequired {
@@ -339,7 +421,7 @@ func TestPasskeyRegistrationAssertionWithoutCreateTimePRF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registrationSalt := registrationPRFSalt(t, begin)
+	registrationSalt := registrationPRFSalt(t, service, begin)
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)

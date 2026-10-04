@@ -25,9 +25,10 @@ type passkeyFinishRequest struct {
 	CeremonyID     string          `json:"ceremony_id"`
 	CredentialJSON json.RawMessage `json:"credential"`
 	PRFResult      []byte          `json:"prf_result_b64"`
+	Password       []byte          `json:"password_b64"`
 }
 
-func (request *passkeyFinishRequest) clear() { clear(request.PRFResult) }
+func (request *passkeyFinishRequest) clear() { clear(request.PRFResult); clear(request.Password) }
 
 type passkeyRegistrationAssertionBeginRequest struct {
 	CeremonyID     string          `json:"ceremony_id"`
@@ -80,7 +81,7 @@ func handlePasskeyLoginFinish(dependencies ServerDependencies, passkeys ServerPa
 		defer request.clear()
 		session, err := passkeys.FinishPasskeyLogin(r.Context(), serverauth.FinishPasskeyLoginInput{
 			CeremonyID: request.CeremonyID, ClientKey: middleware.ClientIPFromRequest(r),
-			CredentialJSON: request.CredentialJSON, PRFResult: request.PRFResult,
+			CredentialJSON: request.CredentialJSON, PRFResult: request.PRFResult, Password: request.Password,
 		}, dependencies.now())
 		if err != nil {
 			auditAuth("server_passkey_login_failed", middleware.ClientIPFromRequest(r), "finish_rejected")
@@ -122,7 +123,7 @@ func handleDiscoverablePasskeyLoginFinish(dependencies ServerDependencies, passk
 		defer request.clear()
 		session, err := passkeys.FinishDiscoverablePasskeyLogin(r.Context(), serverauth.FinishPasskeyLoginInput{
 			CeremonyID: request.CeremonyID, ClientKey: middleware.ClientIPFromRequest(r),
-			CredentialJSON: request.CredentialJSON, PRFResult: request.PRFResult,
+			CredentialJSON: request.CredentialJSON, PRFResult: request.PRFResult, Password: request.Password,
 		}, dependencies.now())
 		if err != nil {
 			auditAuth("server_passkey_login_failed", middleware.ClientIPFromRequest(r), "discover_finish_rejected")
@@ -280,7 +281,7 @@ func handlePasskeyReauthenticationFinish(dependencies ServerDependencies, passke
 		defer request.clear()
 		if err := passkeys.FinishPasskeyReauthentication(r.Context(), session.UserID, serverauth.FinishPasskeyLoginInput{
 			CeremonyID: request.CeremonyID, ClientKey: middleware.ClientIPFromRequest(r),
-			CredentialJSON: request.CredentialJSON, PRFResult: request.PRFResult,
+			CredentialJSON: request.CredentialJSON, PRFResult: request.PRFResult, Password: request.Password,
 		}, dependencies.now()); err != nil {
 			auditAuth("server_passkey_reauthentication_failed", middleware.ClientIPFromRequest(r), "rejected")
 			writePasskeyError(w, err, false)

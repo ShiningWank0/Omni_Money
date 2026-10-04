@@ -96,6 +96,7 @@ type FinishPasskeyLoginInput struct {
 	ClientKey      string
 	CredentialJSON json.RawMessage
 	PRFResult      []byte
+	Password       []byte
 }
 
 type webAuthnUser struct {
@@ -128,10 +129,9 @@ func (s *Service) BeginPasskeyRegistration(ctx context.Context, userID, clientKe
 			UserVerification: protocol.VerificationRequired,
 		}),
 		webauthn.WithConveyancePreference(protocol.PreferNoAttestation),
-		webauthn.WithExtensions(
-			// The response outlives the temporary salt, which is cleared below.
-			webauthn.WithExtensionPRF(protocol.PRFValues{First: protocol.URLEncodedBase64(bytes.Clone(prfSalt))}),
-		),
+		// A bare PRF probe avoids asking providers to evaluate a newly created
+		// credential before they have saved it. Evaluation follows in an assertion.
+		webauthn.WithExtensions(webauthn.WithExtensionPRFSupport()),
 	)
 	if err != nil {
 		clear(prfSalt)
@@ -163,7 +163,7 @@ func (s *Service) FinishPasskeyRegistration(
 		return control.PasskeySummary{}, ErrPasskeyCeremony
 	}
 	defer clear(ceremony.PRFSalt)
-	if len(input.PRFResult) != keyenvelope.PasskeySecretSize {
+	if len(input.PRFResult) != 0 && len(input.PRFResult) != keyenvelope.PasskeySecretSize {
 		return control.PasskeySummary{}, ErrPasskeyPRFRequired
 	}
 	parsed, err := protocol.ParseCredentialCreationResponseBytes(input.CredentialJSON)
@@ -184,32 +184,7 @@ func (s *Service) FinishPasskeyRegistration(
 	if err != nil || credential == nil {
 		return control.PasskeySummary{}, ErrPasskeyCeremony
 	}
-	dek, vaultID, err := s.unwrapVaultWithPassword(ctx, userID, input.Password, now)
-	if err != nil {
-		clear(dek)
-		return control.PasskeySummary{}, err
-	}
-	defer clear(dek)
-	binding := keyenvelope.Context{UserID: userID, VaultID: vaultID}
-	passkeyEnvelope, err := keyenvelope.WrapWithPasskey(dek, input.PRFResult, binding)
-	if err != nil {
-		return control.PasskeySummary{}, err
-	}
-	// Verify the newly persisted unlock path before committing the credential.
-	verifiedDEK, err := keyenvelope.UnwrapWithPasskey(passkeyEnvelope, input.PRFResult, binding)
-	if err != nil || !bytes.Equal(verifiedDEK, dek) {
-		clear(verifiedDEK)
-		return control.PasskeySummary{}, ErrPasskeyPRFRequired
-	}
-	clear(verifiedDEK)
-	record, err := s.passkeyStore.CreatePasskeyCredential(ctx, control.PasskeyCredentialInput{
-		UserID: userID, Name: input.Name, Credential: *credential,
-		PRFSalt: ceremony.PRFSalt, VaultEnvelope: *passkeyEnvelope,
-	}, now)
-	if err != nil {
-		return control.PasskeySummary{}, err
-	}
-	return record.Summary(), nil
+	return s.persistVerifiedPasskey(ctx, userID, input.Name, input.Password, input.PRFResult, ceremony.PRFSalt, *credential, now)
 }
 
 // BeginPasskeyRegistrationAssertion continues a registration whose
@@ -294,7 +269,7 @@ func (s *Service) FinishPasskeyRegistrationAssertion(
 		return control.PasskeySummary{}, ErrPasskeyCeremony
 	}
 	defer clear(ceremony.PRFSalt)
-	if len(input.PRFResult) != keyenvelope.PasskeySecretSize {
+	if len(input.PRFResult) != 0 && len(input.PRFResult) != keyenvelope.PasskeySecretSize {
 		return control.PasskeySummary{}, ErrPasskeyPRFRequired
 	}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(input.CredentialJSON)
@@ -318,28 +293,37 @@ func (s *Service) FinishPasskeyRegistrationAssertion(
 	if err != nil || updated == nil || updated.Authenticator.CloneWarning || !bytes.Equal(updated.ID, candidate.ID) {
 		return control.PasskeySummary{}, ErrPasskeyCeremony
 	}
-	dek, vaultID, err := s.unwrapVaultWithPassword(ctx, userID, input.Password, now)
+	return s.persistVerifiedPasskey(ctx, userID, input.Name, input.Password, input.PRFResult, ceremony.PRFSalt, *updated, now)
+}
+
+// A provider can create valid WebAuthn credentials without exposing PRF.
+// Such credentials still require the account password to open the vault.
+func (s *Service) persistVerifiedPasskey(ctx context.Context, userID, name string, password, prfResult, salt []byte, credential webauthn.Credential, now time.Time) (control.PasskeySummary, error) {
+	dek, vaultID, err := s.unwrapVaultWithPassword(ctx, userID, password, now)
 	if err != nil {
 		clear(dek)
 		return control.PasskeySummary{}, err
 	}
 	defer clear(dek)
-	binding := keyenvelope.Context{UserID: userID, VaultID: vaultID}
-	passkeyEnvelope, err := keyenvelope.WrapWithPasskey(dek, input.PRFResult, binding)
-	if err != nil {
-		return control.PasskeySummary{}, err
+	input := control.PasskeyCredentialInput{
+		UserID: userID, Name: name, Credential: credential, PRFSalt: salt,
+		PasswordRequired: len(prfResult) == 0,
 	}
-	// Verify the newly persisted unlock path before committing the credential.
-	verifiedDEK, err := keyenvelope.UnwrapWithPasskey(passkeyEnvelope, input.PRFResult, binding)
-	if err != nil || !bytes.Equal(verifiedDEK, dek) {
+	if !input.PasswordRequired {
+		binding := keyenvelope.Context{UserID: userID, VaultID: vaultID}
+		envelope, err := keyenvelope.WrapWithPasskey(dek, prfResult, binding)
+		if err != nil {
+			return control.PasskeySummary{}, err
+		}
+		verifiedDEK, err := keyenvelope.UnwrapWithPasskey(envelope, prfResult, binding)
+		if err != nil || !bytes.Equal(verifiedDEK, dek) {
+			clear(verifiedDEK)
+			return control.PasskeySummary{}, ErrPasskeyPRFRequired
+		}
 		clear(verifiedDEK)
-		return control.PasskeySummary{}, ErrPasskeyPRFRequired
+		input.VaultEnvelope = *envelope
 	}
-	clear(verifiedDEK)
-	record, err := s.passkeyStore.CreatePasskeyCredential(ctx, control.PasskeyCredentialInput{
-		UserID: userID, Name: input.Name, Credential: *updated,
-		PRFSalt: ceremony.PRFSalt, VaultEnvelope: *passkeyEnvelope,
-	}, now)
+	record, err := s.passkeyStore.CreatePasskeyCredential(ctx, input, now)
 	if err != nil {
 		return control.PasskeySummary{}, err
 	}
@@ -392,7 +376,7 @@ func (s *Service) FinishDiscoverablePasskeyLogin(ctx context.Context, input Fini
 
 func (s *Service) finishDiscoverablePasskeyLogin(ctx context.Context, input FinishPasskeyLoginInput, now time.Time) (result *middleware.Session, err error) {
 	ceremony, err := s.takePasskeyCeremony(input.CeremonyID, passkeyCeremonyDiscoverableLogin, input.ClientKey)
-	if err != nil || len(input.PRFResult) != keyenvelope.PasskeySecretSize {
+	if err != nil || (len(input.PRFResult) != 0 && len(input.PRFResult) != keyenvelope.PasskeySecretSize) {
 		return nil, ErrInvalidCredentials
 	}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(input.CredentialJSON)
@@ -415,11 +399,12 @@ func (s *Service) finishDiscoverablePasskeyLogin(ctx context.Context, input Fini
 	} else if retryAfter > 0 {
 		return nil, &LoginThrottledError{RetryAfter: retryAfter}
 	}
+	passwordChecked := false
 	defer func() {
 		switch {
 		case err == nil:
 			s.clearLoginFailures(ctx, throttleKey)
-		case errors.Is(err, ErrInvalidCredentials):
+		case errors.Is(err, ErrInvalidCredentials) && !passwordChecked:
 			s.recordLoginFailure(ctx, throttleKey, now)
 		}
 	}()
@@ -447,8 +432,16 @@ func (s *Service) finishDiscoverablePasskeyLogin(ctx context.Context, input Fini
 	if err != nil {
 		return nil, err
 	}
-	dek, err := keyenvelope.UnwrapWithPasskey(&expected.VaultEnvelope, input.PRFResult,
-		keyenvelope.Context{UserID: userID, VaultID: vaultID})
+	var dek []byte
+	if len(input.PRFResult) == keyenvelope.PasskeySecretSize && !expected.PasswordRequired {
+		dek, err = keyenvelope.UnwrapWithPasskey(&expected.VaultEnvelope, input.PRFResult,
+			keyenvelope.Context{UserID: userID, VaultID: vaultID})
+	} else if len(input.Password) != 0 {
+		passwordChecked = true // unwrapVaultWithPassword accounts for password failures.
+		dek, _, err = s.unwrapVaultWithPassword(ctx, userID, input.Password, now)
+	} else {
+		return nil, ErrInvalidCredentials
+	}
 	if err != nil {
 		clear(dek)
 		return nil, ErrInvalidCredentials
@@ -586,6 +579,7 @@ func (s *Service) validatePasskeyAssertion(
 	if ceremonyErr != nil {
 		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
 	}
+	passwordChecked := false
 	if ceremony.ThrottleKey != "" {
 		retryAfter, throttleErr := s.checkLoginThrottle(ctx, ceremony.ThrottleKey, now)
 		if throttleErr != nil {
@@ -600,12 +594,12 @@ func (s *Service) validatePasskeyAssertion(
 			switch {
 			case err == nil:
 				s.clearLoginFailures(ctx, ceremony.ThrottleKey)
-			case errors.Is(err, ErrInvalidCredentials):
+			case errors.Is(err, ErrInvalidCredentials) && !passwordChecked:
 				s.recordLoginFailure(ctx, ceremony.ThrottleKey, now)
 			}
 		}()
 	}
-	if ceremony.UserID == "" || len(input.PRFResult) != keyenvelope.PasskeySecretSize {
+	if ceremony.UserID == "" || (len(input.PRFResult) != 0 && len(input.PRFResult) != keyenvelope.PasskeySecretSize) {
 		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
 	}
 	if expectedUserID != "" && ceremony.UserID != expectedUserID {
@@ -650,10 +644,22 @@ func (s *Service) validatePasskeyAssertion(
 	if err != nil {
 		return control.UserSummary{}, "", nil, nil, err
 	}
-	dek, err := keyenvelope.UnwrapWithPasskey(
-		&expected.VaultEnvelope, input.PRFResult,
-		keyenvelope.Context{UserID: ceremony.UserID, VaultID: vaultID},
-	)
+	var dek []byte
+	if len(input.PRFResult) == keyenvelope.PasskeySecretSize && !expected.PasswordRequired {
+		dek, err = keyenvelope.UnwrapWithPasskey(
+			&expected.VaultEnvelope, input.PRFResult,
+			keyenvelope.Context{UserID: ceremony.UserID, VaultID: vaultID},
+		)
+	} else if kind == passkeyCeremonyReauth {
+		// A signed, UV-verified assertion is sufficient to refresh an already
+		// open session; no vault key needs to be recovered on this path.
+		dek = nil
+	} else if len(input.Password) != 0 {
+		passwordChecked = true // unwrapVaultWithPassword accounts for password failures.
+		dek, _, err = s.unwrapVaultWithPassword(ctx, ceremony.UserID, input.Password, now)
+	} else {
+		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials
+	}
 	if err != nil {
 		clear(dek)
 		return control.UserSummary{}, "", nil, nil, ErrInvalidCredentials

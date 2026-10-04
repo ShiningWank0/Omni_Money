@@ -110,7 +110,6 @@ test('registration classifies PRF support when creation returns no PRF result', 
   const supported = await createPasskey({ publicKey: { challenge: 'AQID', user: { id: 'BAUG' } } })
   assert.equal(supported.prfResult, null)
   assert.equal(supported.prfEnabled, true)
-  assert.equal(supported.prfPresent, true)
 
   createCredential = {
     toJSON: () => ({ id: 'candidate-id', type: 'public-key', response: {} }),
@@ -119,7 +118,6 @@ test('registration classifies PRF support when creation returns no PRF result', 
   const unsupported = await createPasskey({ publicKey: { challenge: 'AQID', user: { id: 'BAUG' } } })
   assert.equal(unsupported.prfResult, null)
   assert.equal(unsupported.prfEnabled, false)
-  assert.equal(unsupported.prfPresent, true)
 
   createCredential = {
     toJSON: () => ({ id: 'candidate-id', type: 'public-key', response: {} }),
@@ -127,7 +125,6 @@ test('registration classifies PRF support when creation returns no PRF result', 
   }
   const unreported = await createPasskey({ publicKey: { challenge: 'AQID', user: { id: 'BAUG' } } })
   assert.equal(unreported.prfEnabled, false)
-  assert.equal(unreported.prfPresent, false)
 })
 
 test('registration step-up assertion evaluates the candidate credential', async () => {
@@ -160,12 +157,13 @@ test('registration step-up assertion evaluates the candidate credential', async 
   assert.notEqual(assertion.prfResult.buffer, prfBytes.buffer)
 })
 
-test('registration step-up assertion fails closed without a PRF output', async () => {
+test('registration step-up assertion reports a missing PRF output for password fallback', async () => {
   getCredential = {
     toJSON: () => ({ id: 'candidate-id', type: 'public-key', response: {} }),
     getClientExtensionResults: () => ({ prf: { enabled: true } })
   }
-  await assert.rejects(assertPasskeyPRF({ publicKey: { challenge: 'AQID' } }), /PRF出力/)
+  const result = await assertPasskeyPRF({ publicKey: { challenge: 'AQID' } })
+  assert.equal(result.prfResult, null)
 })
 
 test('passkey authentication decodes per-credential PRF salts', async () => {

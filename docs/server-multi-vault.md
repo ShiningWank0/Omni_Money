@@ -28,7 +28,7 @@ vault key.
 
 Each vault has an independent random 256-bit data-encryption key (DEK). The
 server control key never wraps a vault DEK. A user's password-derived key,
-recovery-derived key, and each registered WebAuthn PRF output wrap the DEK
+recovery-derived key, and each available WebAuthn PRF output wrap the DEK
 independently with AES-256-GCM. The envelope
 authenticates the user ID, vault ID, purpose, and format version as associated
 data, so moving an envelope to another account or vault fails authentication.
@@ -52,11 +52,11 @@ deleted or replaced.
 
 ## Passkey authentication
 
-Passkeys are an alternative login path, not a replacement for password or recovery. Registration first verifies the current password, performs a WebAuthn ceremony with user verification required, and requires the authenticator's PRF extension. A credential-specific random salt produces a 32-byte PRF result; a purpose-separated HKDF key derived from that result wraps the unchanged vault DEK. The PRF result and plaintext DEK are never stored.
+Passkeys are an alternative login path, not a replacement for password or recovery. Registration first verifies the current password and performs a WebAuthn ceremony with user verification required. A PRF-capable authenticator can produce a 32-byte result from the stored PRF input; a purpose-separated HKDF key derived from that result wraps the unchanged vault DEK. New discoverable credentials use a purpose-separated fixed input so login can request PRF before knowing which credential the user will select. A credential without PRF can still be registered, but requires the account password to open the vault after passkey authentication. The PRF result and plaintext DEK are never stored.
 
-Login begins after normalizing the supplied email so the server can send only that user's allowed credential IDs and credential-specific PRF salts. A signed WebAuthn assertion, required user verification, the correct PRF result, and the matching envelope are all needed before the Vault opens. The same assertion and envelope proof can satisfy recent reauthentication without creating a second Vault session. Ceremony state is one-use, short-lived, stored only in memory, and bound to the requesting client address. Authenticator counters are updated with a compare-and-swap transaction, and clone warnings fail authentication.
+Login begins with a discoverable WebAuthn assertion. The server checks its signature, user verification, and the registered credential. The vault then opens through either the matching PRF envelope or a verified account password when PRF is unavailable. A valid assertion can satisfy recent reauthentication without creating a second Vault session. Ceremony state is one-use, short-lived, stored only in memory, and bound to the requesting client address. Authenticator counters are updated with a compare-and-swap transaction, and clone warnings fail authentication.
 
-Control-plane listings expose only a base64url credential ID, user-chosen name, creation time, and last-use time. Public keys, PRF salts, counters, and wrapped Vault keys remain server-side. Password login remains available after registration, and recovery still requires the separately saved recovery code.
+Control-plane listings expose only a base64url credential ID, user-chosen name, whether a password is needed, creation time, and last-use time. Public keys, PRF salts, counters, and wrapped Vault keys remain server-side. Password login remains available after registration, and recovery still requires the separately saved recovery code.
 
 Users can rotate their password or recovery code after proving the current password. Both operations unwrap the DEK only inside the authenticated account service and rewrap the unchanged DEK; the control store commits an exact-envelope/revision compare-and-swap. Password rotation explicitly chooses whether passkeys remain valid or are deleted in the same transaction. Successful credential revocation invalidates all sessions before the Vault manager begins draining that user's leases. Individual and bulk passkey revocation use the same session-and-vault shutdown boundary.
 

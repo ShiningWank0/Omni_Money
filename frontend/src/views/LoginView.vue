@@ -16,8 +16,10 @@
 
         <div v-if="mode === 'login' && !setupRequired" class="passkey-login-entry">
           <button type="button" class="passkey-button" :disabled="loading || !canUsePasskeys" @click="handlePasskeyLogin">
-            パスキーでログイン
+            {{ passkeyPasswordRequired ? '別のパスキーを選ぶ' : 'パスキーでログイン' }}
           </button>
+          <p v-if="passkeyPasswordRequired" class="field-hint passkey-hint">このパスキーの保存先は Vault の鍵取得に対応していません。続けるにはパスワードを入力してください。</p>
+          <button v-if="passkeyPasswordRequired" type="button" class="secondary-button" @click="usePasswordLogin">通常のパスワードログインに戻る</button>
           <p v-if="!canUsePasskeys" class="field-hint passkey-hint">パスキーはHTTPS接続の対応ブラウザで利用できます。</p>
           <div class="auth-divider"><span>または</span></div>
         </div>
@@ -39,7 +41,7 @@
             <input id="operation-token" v-model.trim="operationToken" type="password" class="form-input" autocomplete="off" maxlength="4096" required>
           </div>
 
-          <div v-if="mode === 'login'" class="form-group">
+          <div v-if="mode === 'login' && !passkeyPasswordRequired" class="form-group">
             <label for="email" class="form-label">メールアドレス</label>
             <input id="email" v-model.trim="email" type="email" class="form-input" autocomplete="username" maxlength="254" required>
           </div>
@@ -108,6 +110,8 @@ import {
   isWailsMode,
   login,
   loginWithPasskey,
+  finishPasskeyLoginWithPassword,
+  cancelPendingPasskeyLogin,
   setupInitialAdmin
 } from '../utils/api'
 import { passkeysSupported } from '../utils/passkeys'
@@ -137,6 +141,7 @@ const loading = ref(false)
 const errorMessage = ref('')
 const infoMessage = ref('')
 const canUsePasskeys = passkeysSupported()
+const passkeyPasswordRequired = ref(false)
 
 const needsNewRecovery = computed(() => setupRequired.value || mode.value === 'invite' || mode.value === 'reset')
 const pageTitle = computed(() => {
@@ -150,7 +155,7 @@ const submitLabel = computed(() => {
   if (setupRequired.value) return '管理者を作成してログイン'
   if (mode.value === 'invite') return '招待を受諾'
   if (mode.value === 'reset') return '再設定を完了'
-  return 'ログイン'
+  return passkeyPasswordRequired.value ? 'パスキー認証を完了' : 'ログイン'
 })
 
 function prepareRecoveryCode() {
@@ -176,6 +181,7 @@ function clearFormSecrets({ clearGenerated = true } = {}) {
 }
 
 function setMode(nextMode, message = '') {
+  usePasswordLogin()
   clearFormSecrets()
   mode.value = nextMode
   errorMessage.value = ''
@@ -208,7 +214,13 @@ onMounted(async () => {
   }
 })
 
-onBeforeUnmount(() => clearFormSecrets())
+onBeforeUnmount(() => { cancelPendingPasskeyLogin(); clearFormSecrets() })
+
+function usePasswordLogin() {
+  cancelPendingPasskeyLogin()
+  passkeyPasswordRequired.value = false
+  infoMessage.value = ''
+}
 
 async function copyRecoveryCode() {
   try {
@@ -284,12 +296,22 @@ async function handleSubmit() {
       setMode('login', '再設定が完了しました。新しいパスワードでログインしてください')
       return
     }
-    await login(email.value, password.value)
+    if (passkeyPasswordRequired.value) {
+      await finishPasskeyLoginWithPassword(password.value)
+      passkeyPasswordRequired.value = false
+    } else {
+      await login(email.value, password.value)
+    }
     forceLoginRequired = false
     completed = true
     window.location.href = '/'
   } catch (error) {
-    errorMessage.value = error?.message || '操作に失敗しました'
+    if (passkeyPasswordRequired.value) {
+      usePasswordLogin()
+      errorMessage.value = `${error?.message || 'パスキー認証に失敗しました'}。パスキーを選び直してください`
+    } else {
+      errorMessage.value = error?.message || '操作に失敗しました'
+    }
   } finally {
     destroySecretBytes(currentRecoveryBytes)
     password.value = ''
@@ -308,10 +330,16 @@ async function handleSubmit() {
 
 async function handlePasskeyLogin() {
   loading.value = true
+  usePasswordLogin()
   errorMessage.value = ''
   infoMessage.value = ''
   try {
-    await loginWithPasskey()
+    const result = await loginWithPasskey()
+    if (result?.password_required) {
+      passkeyPasswordRequired.value = true
+      infoMessage.value = 'パスキーの確認が完了しました。Vaultを開くため、パスワードを入力してください。'
+      return
+    }
     forceLoginRequired = false
     window.location.href = '/'
   } catch (error) {

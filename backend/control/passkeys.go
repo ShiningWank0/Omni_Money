@@ -19,6 +19,10 @@ import (
 // MaxPasskeysPerUser also bounds the padded public login credential list.
 const MaxPasskeysPerUser = 10
 
+// The existing JSON column can represent a credential that authenticates
+// with WebAuthn but needs the account password to unlock the vault.
+const passwordRequiredPasskeyEnvelope = `{"unlock":"password"}`
+
 func (s *Store) CreatePasskeyCredential(ctx context.Context, input PasskeyCredentialInput, now time.Time) (PasskeyCredential, error) {
 	prepared, credentialJSON, envelopeJSON, err := preparePasskeyCredential(input)
 	if err != nil {
@@ -243,13 +247,17 @@ func preparePasskeyCredential(input PasskeyCredentialInput) (PasskeyCredential, 
 	if err != nil || len(credentialJSON) < 2 || len(credentialJSON) > 1<<20 {
 		return PasskeyCredential{}, "", "", fmt.Errorf("encode passkey credential: %w", err)
 	}
-	envelopeJSON, err := encodeKeyEnvelope(input.VaultEnvelope, keyenvelope.KindPasskey)
-	if err != nil {
-		return PasskeyCredential{}, "", "", err
+	envelopeJSON := passwordRequiredPasskeyEnvelope
+	if !input.PasswordRequired {
+		envelopeJSON, err = encodeKeyEnvelope(input.VaultEnvelope, keyenvelope.KindPasskey)
+		if err != nil {
+			return PasskeyCredential{}, "", "", err
+		}
 	}
 	result := PasskeyCredential{
 		ID: append([]byte(nil), input.Credential.ID...), UserID: userID, Name: name,
 		Credential: input.Credential, PRFSalt: append([]byte(nil), input.PRFSalt...), VaultEnvelope: input.VaultEnvelope,
+		PasswordRequired: input.PasswordRequired,
 	}
 	return result, string(credentialJSON), envelopeJSON, nil
 }
@@ -274,9 +282,13 @@ func scanPasskeyCredential(scanner passkeyScanner) (PasskeyCredential, error) {
 		return PasskeyCredential{}, errors.New("stored passkey credential ID mismatch")
 	}
 	var err error
-	result.VaultEnvelope, err = decodeKeyEnvelope(envelopeJSON, keyenvelope.KindPasskey)
-	if err != nil {
-		return PasskeyCredential{}, fmt.Errorf("decode passkey envelope: %w", err)
+	if envelopeJSON == passwordRequiredPasskeyEnvelope {
+		result.PasswordRequired = true
+	} else {
+		result.VaultEnvelope, err = decodeKeyEnvelope(envelopeJSON, keyenvelope.KindPasskey)
+		if err != nil {
+			return PasskeyCredential{}, fmt.Errorf("decode passkey envelope: %w", err)
+		}
 	}
 	result.ID = append([]byte(nil), result.ID...)
 	result.PRFSalt = append([]byte(nil), result.PRFSalt...)
@@ -299,6 +311,7 @@ func validatePasskeyCredentialID(id []byte) error {
 func (credential PasskeyCredential) Summary() PasskeySummary {
 	return PasskeySummary{
 		ID: base64.RawURLEncoding.EncodeToString(credential.ID), Name: credential.Name,
-		CreatedAt: credential.CreatedAt, LastUsedAt: credential.LastUsedAt,
+		PasswordRequired: credential.PasswordRequired,
+		CreatedAt:        credential.CreatedAt, LastUsedAt: credential.LastUsedAt,
 	}
 }

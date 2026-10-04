@@ -91,6 +91,25 @@ func TestPasskeyCredentialLifecycleAndCAS(t *testing.T) {
 	}
 }
 
+func TestPasswordRequiredPasskeyRoundTripsWithoutVaultEnvelope(t *testing.T) {
+	store := openTestStore(t)
+	admin := bootstrapTestAdmin(t, store)
+	input := testPasskeyInput(admin.ID, "Bitwarden", 31)
+	input.PasswordRequired = true
+	input.VaultEnvelope = keyenvelope.Envelope{}
+	created, err := store.CreatePasskeyCredential(context.Background(), input, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.GetPasskeyCredential(context.Background(), admin.ID, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.PasswordRequired || !loaded.Summary().PasswordRequired || loaded.VaultEnvelope.Kind != "" {
+		t.Fatalf("password-required passkey did not round-trip: %+v", loaded.Summary())
+	}
+}
+
 func TestPasskeySummaryCannotExposeVaultMaterial(t *testing.T) {
 	typeInfo := reflect.TypeOf(PasskeySummary{})
 	for _, forbidden := range []string{"credential", "public", "salt", "envelope", "vault", "key"} {

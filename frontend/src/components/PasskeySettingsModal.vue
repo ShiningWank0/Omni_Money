@@ -18,8 +18,8 @@
       <section class="passkey-section" aria-labelledby="register-passkey-title">
         <h3 id="register-passkey-title">新しいパスキーを登録</h3>
         <p class="section-description">
-          Vault鍵をこのパスキーでも安全に開けるようにするため、現在のパスワードを一度だけ確認します。
-          パスキーの保存先によっては、登録確認のあとにPRF出力取得のためのもう一度の確認が表示されます。
+          現在のパスワードを確認して登録します。保存先がPRFに対応する場合は、次回からパスキーだけでVaultを開けます。
+          対応しない場合も登録でき、次回のログイン時にVaultを開くためのパスワードを入力します。
         </p>
         <form class="registration-form" @submit.prevent="register">
           <label>
@@ -44,6 +44,7 @@
           <li v-for="passkey in passkeys" :key="passkey.id">
             <div>
               <strong>{{ passkey.name }}</strong>
+              <span>{{ passkey.password_required ? 'ログイン時にパスワードが必要' : 'パスキーだけでVaultを開けます' }}</span>
               <span>登録: {{ formatDate(passkey.created_at) }}</span>
               <span>最終利用: {{ passkey.last_used_at ? formatDate(passkey.last_used_at) : '未使用' }}</span>
             </div>
@@ -116,7 +117,7 @@ async function register() {
 	  await registerPasskey({ name: name.value, password: password.value })
     clearPassword()
     name.value = ''
-    infoMessage.value = 'パスキーを登録しました。次回からパスワードまたはパスキーでログインできます'
+    infoMessage.value = 'パスキーを登録しました。保存先がPRF非対応の場合はログイン時にパスワードも必要です'
     try {
       passkeys.value = await listPasskeys()
     } catch {

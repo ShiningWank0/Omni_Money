@@ -110,14 +110,6 @@ function readPRFResult(value) {
   return result
 }
 
-function extractPRFResult(credential) {
-  const result = readPRFResult(credential.getClientExtensionResults()?.prf?.results?.first)
-  if (!result) {
-    throw new Error('このパスキーはOmni MoneyのVault復号に必要なPRF機能へ対応していません')
-  }
-  return result
-}
-
 export async function createPasskey(options) {
   requirePasskeySupport()
   const credential = await navigator.credentials.create({ publicKey: parseCreationOptions(options.publicKey) })
@@ -126,23 +118,17 @@ export async function createPasskey(options) {
   return {
     credential: credentialToJSON(credential),
     prfResult: readPRFResult(prf?.results?.first),
-    prfEnabled: prf?.enabled === true,
-    prfPresent: prf !== undefined && prf !== null
+    prfEnabled: prf?.enabled === true
   }
 }
 
-// Some authenticators (Bitwarden's browser extension among them) report
-// prf.enabled=true at credential creation but only return a PRF result during
-// a follow-up assertion. This runs that assertion against the candidate
-// credential with the salt the server bound to the registration ceremony.
+// A PRF-capable authenticator may report enabled=true at creation without
+// returning results until a follow-up assertion with the ceremony's salt.
 export async function assertPasskeyPRF(options) {
   requirePasskeySupport()
   const credential = await navigator.credentials.get({ publicKey: parseRequestOptions(options.publicKey) })
   if (!credential) throw new Error('パスキー登録の確認がキャンセルされました')
   const result = readPRFResult(credential.getClientExtensionResults()?.prf?.results?.first)
-  if (!result) {
-    throw new Error('このパスキーはOmni MoneyのVault復号に必要なPRF出力を返しませんでした')
-  }
   return { credential: credentialToJSON(credential), prfResult: result }
 }
 
@@ -150,7 +136,7 @@ export async function authenticatePasskey(options) {
   requirePasskeySupport()
   const credential = await navigator.credentials.get({ publicKey: parseRequestOptions(options.publicKey) })
   if (!credential) throw new Error('パスキー認証がキャンセルされました')
-  return { credential: credentialToJSON(credential), prfResult: extractPRFResult(credential) }
+  return { credential: credentialToJSON(credential), prfResult: readPRFResult(credential.getClientExtensionResults()?.prf?.results?.first) }
 }
 
 export function passkeysSupported() {

@@ -46,15 +46,16 @@ async function desktopFinancialCall(invoke) {
 // server after authentication and are never persisted in localStorage or a
 // cookie that JavaScript can read.
 let csrfToken = null
+let pendingPasskeyLogin = null
 let pendingReauthentication = null
-const pendingWriteRequests = new Set()
-let waitingForLogoutWrites = false
 
 // Restore revokes the server session. Callers must also discard this
 // in-memory bearer of the CSRF capability before navigating to login.
 export function clearSessionSecrets() {
   csrfToken = null
   pendingReauthentication = null
+  pendingPasskeyLogin?.assertion.prfResult?.fill(0)
+  pendingPasskeyLogin = null
 }
 
 function rememberAuthToken(data) {
@@ -110,34 +111,8 @@ function getPathname(url) {
   }
 }
 
-// Logout waits for already-submitted writes to receive a server response.
-// Authentication traffic is excluded so logout never waits on itself.
-export async function waitForPendingWrites() {
-  if (pendingReauthentication) return false
-  waitingForLogoutWrites = true
-  try {
-    const results = []
-    while (pendingWriteRequests.size > 0) {
-      results.push(...await Promise.allSettled([...pendingWriteRequests]))
-    }
-    return results.every(result => result.status === 'fulfilled' && result.value.ok)
-  } finally {
-    waitingForLogoutWrites = false
-  }
-}
-
 export function apiFetch(url, options = {}, config = {}) {
-  const request = apiFetchCore(url, options, config)
-  const method = (options.method || 'GET').toUpperCase()
-  const path = getPathname(url)
-  if (isUnsafeMethod(method) && path.startsWith('/api/') && !path.startsWith('/api/auth/')) {
-    pendingWriteRequests.add(request)
-    request.then(
-      () => pendingWriteRequests.delete(request),
-      () => pendingWriteRequests.delete(request)
-    )
-  }
-  return request
+  return apiFetchCore(url, options, config)
 }
 
 async function apiFetchCore(url, options = {}, config = {}) {
@@ -166,7 +141,6 @@ async function apiFetchCore(url, options = {}, config = {}) {
 
   if (!isWailsMode && !skipReauth && response.status === 428 &&
       !['/api/auth/login', '/api/auth/reauth', '/api/auth/status'].includes(path)) {
-    if (waitingForLogoutWrites) return response
     await requestReauthentication()
     // The original request body is retained in `options` (all current API
     // callers use replayable strings or Blobs).  Retry exactly once after fresh auth.
@@ -317,6 +291,26 @@ export async function loginWithPasskey() {
   await throwIfNotOk(begin, 'パスキー認証を開始できませんでした')
   const ceremony = await expectJSON(begin, schema.ceremony)
   const assertion = await authenticatePasskey(ceremony.options)
+  if (!assertion.prfResult) {
+    pendingPasskeyLogin = { ceremony, assertion }
+    return { password_required: true }
+  }
+  return await finishDiscoverablePasskeyLogin(ceremony, assertion)
+}
+
+export async function finishPasskeyLoginWithPassword(password) {
+  if (!pendingPasskeyLogin) throw new Error('パスキー認証の有効期限が切れました。最初からやり直してください')
+  const { ceremony, assertion } = pendingPasskeyLogin
+  pendingPasskeyLogin = null
+  return await finishDiscoverablePasskeyLogin(ceremony, assertion, password)
+}
+
+export function cancelPendingPasskeyLogin() {
+  pendingPasskeyLogin?.assertion.prfResult?.fill(0)
+  pendingPasskeyLogin = null
+}
+
+async function finishDiscoverablePasskeyLogin(ceremony, assertion, password = '') {
   try {
     const finish = await apiFetch('/api/auth/passkeys/discover/finish', {
       method: 'POST',
@@ -324,7 +318,8 @@ export async function loginWithPasskey() {
       body: JSON.stringify({
         ceremony_id: ceremony.ceremony_id,
         credential: assertion.credential,
-        prf_result_b64: bytesToBase64(assertion.prfResult)
+        prf_result_b64: assertion.prfResult ? bytesToBase64(assertion.prfResult) : '',
+        password_b64: password ? textToBase64(password) : ''
       })
     }, { skipAuthRedirect: true, skipReauth: true })
     const data = await readJSONOnce(finish)
@@ -333,7 +328,7 @@ export async function loginWithPasskey() {
     rememberAuthToken(data)
     return data
   } finally {
-    assertion.prfResult.fill(0)
+    assertion.prfResult?.fill(0)
   }
 }
 
@@ -355,7 +350,7 @@ async function finishPasskeyRegistration(path, ceremonyID, credential, prfResult
       name,
       password_b64: textToBase64(password),
       credential,
-      prf_result_b64: bytesToBase64(prfResult)
+      prf_result_b64: prfResult ? bytesToBase64(prfResult) : ''
     })
   }, { skipReauth: true })
   await throwIfNotOk(finish, 'パスキーを登録できませんでした')
@@ -373,8 +368,8 @@ export async function registerPasskey({ name, password }) {
     if (created.prfResult) {
       return await finishPasskeyRegistration('/api/auth/passkeys/register/finish', ceremony.ceremony_id, created.credential, created.prfResult, name, password)
     }
-    if (created.prfPresent && !created.prfEnabled) {
-      throw new Error('このパスキーはVault復号に必要なPRF機能へ対応していません。保存先に作成されたパスキーはOmni Moneyに登録されていないため、保存先から削除してください')
+    if (!created.prfEnabled) {
+      return await finishPasskeyRegistration('/api/auth/passkeys/register/finish', ceremony.ceremony_id, created.credential, null, name, password)
     }
     // prf.enabled=true でも作成時に結果を返さない認証器向けに、同じ salt で
     // 追加 assertion を実行してから登録を完了する。
@@ -385,14 +380,7 @@ export async function registerPasskey({ name, password }) {
     }, { skipReauth: true })
     await throwIfNotOk(assertionBegin, 'パスキー登録の追加確認を開始できませんでした')
     const assertionCeremony = await expectJSON(assertionBegin, schema.ceremony)
-    try {
-      stepUp = await assertPasskeyPRF(assertionCeremony.options)
-    } catch (error) {
-      if (error?.message?.includes('PRF出力')) {
-        throw new Error('パスキーのPRF出力を取得できず、Omni Moneyへの登録は完了していません。保存先に作成されたパスキーを削除してください', { cause: error })
-      }
-      throw error
-    }
+    stepUp = await assertPasskeyPRF(assertionCeremony.options)
     return await finishPasskeyRegistration('/api/auth/passkeys/register/assert/finish', assertionCeremony.ceremony_id, stepUp.credential, stepUp.prfResult, name, password)
   } finally {
     created.prfResult?.fill(0)
@@ -531,7 +519,7 @@ export async function reauthenticateWithPasskey() {
       body: JSON.stringify({
         ceremony_id: ceremony.ceremony_id,
         credential: assertion.credential,
-        prf_result_b64: bytesToBase64(assertion.prfResult)
+        prf_result_b64: assertion.prfResult ? bytesToBase64(assertion.prfResult) : ''
       })
     }, { skipAuthRedirect: true, skipReauth: true })
     const data = await readJSONOnce(finish)
@@ -544,7 +532,7 @@ export async function reauthenticateWithPasskey() {
     rememberAuthToken(data)
     return data
   } finally {
-    assertion.prfResult.fill(0)
+    assertion.prfResult?.fill(0)
   }
 }
 
@@ -573,8 +561,10 @@ export async function logout() {
 
   const res = await apiFetch('/api/auth/logout', {
     method: 'POST'
-  }, { skipAuthRedirect: true })
-  await expectVoid(res, schema.success)
+  }, { skipAuthRedirect: true, skipReauth: true })
+  // A concurrent timeout or credential change may have invalidated the
+  // session already. In that case the server has nothing left to revoke.
+  if (res.status !== 401) await expectVoid(res, schema.success)
   csrfToken = null
 }
 

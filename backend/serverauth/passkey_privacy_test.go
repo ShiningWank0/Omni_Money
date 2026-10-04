@@ -234,7 +234,7 @@ func browserPRFInputs(t *testing.T, extensions any) browserPRF {
 	return *decoded.PRF
 }
 
-func TestPasskeyRegistrationPreservesBrowserPRFSalt(t *testing.T) {
+func TestPasskeyRegistrationProbesPRFWithoutCreationEvaluation(t *testing.T) {
 	store := &privacyTestStore{user: control.UserSummary{ID: serverAuthTestUserID, Email: "person@example.test", State: control.UserActive}}
 	service := privacyTestService(t, store)
 	begin, err := service.BeginPasskeyRegistration(context.Background(), store.user.ID, "client")
@@ -242,13 +242,12 @@ func TestPasskeyRegistrationPreservesBrowserPRFSalt(t *testing.T) {
 		t.Fatal(err)
 	}
 	prf := browserPRFInputs(t, begin.Options.Response.Extensions)
-	salt, err := base64.RawURLEncoding.DecodeString(prf.Eval["first"])
-	if err != nil || len(prf.Eval) != 1 || len(prf.EvalByCredential) != 0 || len(salt) != keyenvelope.PasskeySecretSize {
+	if len(prf.Eval) != 0 || len(prf.EvalByCredential) != 0 {
 		t.Fatal("registration PRF JSON is invalid")
 	}
 	storedSalt := service.ceremonies[begin.CeremonyID].PRFSalt
-	if !bytes.Equal(salt, storedSalt) || bytes.Equal(salt, make([]byte, keyenvelope.PasskeySecretSize)) {
-		t.Fatal("browser and stored registration PRF salt differ")
+	if !bytes.Equal(storedSalt, discoverablePRFSalt[:]) {
+		t.Fatal("registration ceremony did not preserve the discoverable PRF salt")
 	}
 }
 

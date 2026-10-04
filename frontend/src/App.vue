@@ -374,7 +374,6 @@ import {
   getBalanceHistoryFiltered,
   isWailsMode,
   logout as apiLogout,
-  waitForPendingWrites,
   getAuthStatus,
   getDesktopVaultStatus,
   lockDesktopVault,
@@ -871,9 +870,6 @@ async function logout() {
   idleLockInProgress = true
   idleScreenLocked.value = true
   try {
-    if (!await waitForPendingWrites()) {
-      throw new Error('保存処理を確認できませんでした')
-    }
     await apiLogout()
     clearSensitiveStateForIdle()
     window.location.replace('/login')
