@@ -2,7 +2,7 @@
 ARG VERSION=dev
 
 # ===== Stage 1: フロントエンドのビルド =====
-FROM node:24.19.0-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS frontend-builder
+FROM node:26.11.1-alpine@sha256:143494b1da2945f061539253adc65e4f1569ddf07da2d384c022c791a9d90a4a AS frontend-builder
 
 ARG VERSION
 
