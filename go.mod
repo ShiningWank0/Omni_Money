@@ -4,7 +4,7 @@ module omni_money
 // GO-2026-6090. CI and release builds use the pinned toolchain below.
 go 1.26.6
 
-toolchain go1.26.7
+toolchain go1.26.9
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.4
@@ -48,6 +48,6 @@ require (
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 )
