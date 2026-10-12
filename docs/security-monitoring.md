@@ -2,7 +2,9 @@
 
 ## CI/CDの検査範囲
 
-`.github/workflows/ci.yml` は全PR、mainへのpush、毎週日曜03:30 UTC（日本時間12:30）のscheduleで実行する。GitHub側の負荷で定刻より遅れる場合がある。
+`.github/workflows/ci.yml` は全PR、mainへのpush、毎週日曜03:30 UTC（日本時間12:30）のschedule、および`workflow_dispatch`による手動実行に対応する。GitHub側の負荷で定刻より遅れる場合がある。
+
+修正後のmainで週次検査をすぐ確認するには、GitHubのActionsで`CI`を開き、`Run workflow`でbranchに`main`を選んで実行する。全検査、safe-update全件、レポート集約、Issue報告を実行する。ほかのbranchの手動実行では検査とartifact保存を行うが、Issue作成・追記は行わない。過去の実行の再実行は元のコミットを使うため、マージ済み修正の確認には新しい手動実行を使う。
 
 | 検査 | 対象と失敗条件 |
 | --- | --- |
@@ -11,13 +13,13 @@
 | npm audit | frontendの依存関係。high以上で失敗 |
 | Trivy | Omni MoneyイメージのOS・ライブラリ。修正版のあるHIGH/CRITICALで失敗。`ignore-unfixed: true`のため未修正の問題は除外。Docker Releaseでは各アーキテクチャを**タグなしのdigestとしてpushしてから**スキャンし、両方成功した後にのみrelease tagを公開する |
 
-Goのgovulncheck/gosec等はPRと週次scheduleで実行し、main pushではGo checksジョブを省略する。各jobの条件は `ci.yml` を正とする。Docker Releaseは各アーキテクチャのTrivyを公開前に実行し、次の順序を守る: タグなしdigest push → アーキテクチャ毎のTrivyスキャン → staging index作成 → build provenance attestation付与 → `gh attestation verify`（署名workflow・source ref・GitHub-hosted runnerを固定）→ version/latestタグ公開。スキャン・attestation・検証のいずれかが失敗するとrelease tagは作られない。配備側は`scripts/resolve-image-digest.sh --verify --repo OWNER/REPO`でprovenance検証を必須とする。
+Goのgovulncheck/gosec等はPR、週次schedule、手動実行で実行し、main pushではGo checksジョブを省略する。各jobの条件は `ci.yml` を正とする。Docker Releaseは各アーキテクチャのTrivyを公開前に実行し、次の順序を守る: タグなしdigest push → アーキテクチャ毎のTrivyスキャン → staging index作成 → build provenance attestation付与 → `gh attestation verify`（署名workflow・source ref・GitHub-hosted runnerを固定）→ version/latestタグ公開。スキャン・attestation・検証のいずれかが失敗するとrelease tagは作られない。配備側は`scripts/resolve-image-digest.sh --verify --repo OWNER/REPO`でprovenance検証を必須とする。
 
 `release-docker.yml`は`workflow_dispatch`で**リハーサル**実行できる。releaseと同じビルド・スキャン・attestation・検証を行い、version/latestタグは公開しない（`rehearsal-staging`タグのみ更新）。VERSION変更を伴う本番Releaseの前に、GitHub Actions画面のRun workflowで対象branchを選び、経路全体を検証する。CI成功は、未修正の既知問題や静的解析で分からない設計上の問題がないことを保証しない。Pangolin、Newt、Gerbil、Traefik、Badger、VPS/TrueNASそのものは別配備のため、このCIの検査対象ではない。
 
-## 定期検査のIssue報告
+## 定期・手動検査のIssue報告
 
-定期実行では検査のJSON結果からIssueを自動作成する。GitHubが自動発行する`GITHUB_TOKEN`を使い、Issue報告ジョブだけに`issues: write`を与える。追加Secretは不要。PR・push・forkではIssue作成を実行しない。
+このリポジトリのmainでの定期・手動実行では検査のJSON結果からIssueを自動作成する。GitHubが自動発行する`GITHUB_TOKEN`を使い、Issue報告ジョブだけに`issues: write`を与える。追加Secretは不要。PR・push・fork・main以外のbranchではIssue作成を実行しない。
 
 ### Issue作成のルール
 
@@ -27,11 +29,11 @@ Goのgovulncheck/gosec等はPRと週次scheduleで実行し、main pushではGo 
 - このワークフローが自動作成した同じ問題のOpen Issueには、内容が変わったときだけコメントする。実行日・run IDの変化だけでは追記しない。既存本文や人間のコメントを上書きしない。手動で作成したIssueは自動照合の対象外。
 - ClosedのIssueを再オープンしない。閉じた問題を再検出した場合は新しいIssueを作る。検出が消えても自動クローズはしないので、対応PR・人間の確認で閉じる。
 - 通信障害、不完全なJSON、先行ステップ失敗、artifact欠落・ダウンロードや整合性検証の失敗は「検査エラー」のIssueにする。脆弱性がないという判定にはしない。一般テストの失敗はActionsの実行結果で確認する。
-- Issue報告のAPIエラーもCIを失敗させる。1回の新規作成・追記は合計25件までとし、超過時は失敗を表示する。残件は次回定期実行またはその定期実行の再実行で処理する。
+- Issue報告のAPIエラーもCIを失敗させる。1回の新規作成・追記は合計25件までとし、超過時は失敗を表示する。残件は次回定期実行、新しい手動実行、またはその実行の再実行で処理する。
 
 Issue報告ジョブは同じ実行・同じattemptのartifactだけを読む。過去のattemptの結果を混在させないため、再試行時は **Re-run all jobs** を選ぶ（失敗ジョブだけを再試行すると、そのattemptで未実行の検査が欠落扱いになる）。スキャナー側は読み取り権限のみで、Issue書き込み用トークンはスキャナーへ渡さない。Issue報告ジョブはレポートをデータとして解釈し、外部の説明文からコマンド・URLを実行しない。公開Issueへソースコード断片や生のstderrは転載しない。レポートの保存期間は7日。
 
-定期実行の同時処理は直列化し、mainへのpushで進行中の定期実行をキャンセルしない。公開リポジトリは60日間活動がないとscheduleが自動無効化されるため、Actions画面で有効状態を確認する。
+同じbranchの定期・手動実行は同じconcurrency groupで直列化し、mainへのpushや新しい定期・手動実行で進行中の検査をキャンセルしない。公開リポジトリは60日間活動がないとscheduleが自動無効化されるため、Actions画面で有効状態を確認する。
 
 ローカル検証は`node --test scripts/security-monitoring.test.mjs`。架空の検出結果と模擬GitHub APIを使用する。
 
