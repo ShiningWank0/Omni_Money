@@ -8,18 +8,20 @@ on:
       - main
   schedule:
     - cron: '30 3 * * 0'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+  # Scheduled and manual scans share the Issue reporter; serialize both.
+  group: ci-${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'security-scan' || github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
 
 jobs:
   go-checks:
     name: Go checks
-    # PR checks require an up-to-date base; retain weekly scans without
+    # PR checks require an up-to-date base; retain weekly/manual scans without
     # repeating the same suite after merging to main.
     if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
     runs-on: ubuntu-latest
@@ -246,7 +248,7 @@ jobs:
           ' "$bootstrap_config"
 
       - name: Upload Go security reports
-        if: ${{ always() && github.event_name == 'schedule' }}
+        if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-go-${{ github.run_attempt }}
@@ -286,9 +288,9 @@ jobs:
           reason="event is outside the safe-update full-matrix policy"
           sha_re='^[0-9a-f]{40}$'
 
-          if [ "$EVENT_NAME" = schedule ]; then
+          if [ "$EVENT_NAME" = schedule ] || [ "$EVENT_NAME" = workflow_dispatch ]; then
             run_full=true
-            reason="weekly scheduled verification"
+            reason="scheduled or manually dispatched verification"
           elif [ "$EVENT_NAME" = push ] && [ "$REF" = refs/heads/main ]; then
             run_full=true
             reason="push to main"
@@ -385,7 +387,7 @@ jobs:
         run: npm run build
 
       - name: Upload frontend security reports
-        if: ${{ always() && github.event_name == 'schedule' }}
+        if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-frontend-${{ github.run_attempt }}
@@ -576,7 +578,7 @@ jobs:
         run: node scripts/security-reports.mjs trivy
 
       - name: Upload image security report
-        if: ${{ always() && github.event_name == 'schedule' }}
+        if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-image-${{ github.run_attempt }}
@@ -622,10 +624,10 @@ jobs:
           test "$SECURITY_AUTOMATION_RESULT" = success
 
   security-issues:
-    name: Report scheduled security findings
+    name: Report security findings
     needs: [go-checks, frontend, docker, security-automation]
     if: >-
-      ${{ always() && github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+      ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
           && github.repository == 'ShiningWank0/Omni_Money' && needs.security-automation.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

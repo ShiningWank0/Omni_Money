@@ -226,8 +226,81 @@ test('PR/push/fork events cannot publish and untrusted run URLs are rejected', a
     { GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money' },
     { GITHUB_EVENT_NAME: 'schedule', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'someone/fork' },
     { GITHUB_EVENT_NAME: 'schedule', GITHUB_REF: 'refs/heads/other', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money' },
+    { GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/other', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money' },
+    { GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/tags/v2.1.2', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money' },
+    { GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'someone/fork' },
+    { GITHUB_EVENT_NAME: 'repository_dispatch', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money' },
   ]) await assert.rejects(main(env), /restricted/);
   await assert.rejects(publish(() => assert.fail('unexpected request'), [], 'https://evil.test'), /invalid run URL/);
+});
+
+test('scheduled and manual main runs publish findings through the same CLI path', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'omni-security-dispatch-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  mkdirSync(join(directory, 'security-reports'));
+  for (const scan of scans) {
+    const value = scan === 'npm' ? normalize('npm', JSON.stringify(npmInput), 1)
+      : { schema: 1, scan, status: 'clean', findings: [] };
+    writeFileSync(join(directory, `security-reports/${scan}.json`), JSON.stringify(value));
+  }
+  const program = `
+    import assert from 'node:assert/strict';
+    import { main } from ${JSON.stringify(new URL('./security-issues.mjs', import.meta.url).href)};
+    let writes = 0;
+    globalThis.fetch = async (url, options) => {
+      assert.equal(options.headers.Authorization, 'Bearer mock-token');
+      if (options.method === 'GET') {
+        assert.equal(url, 'https://api.github.com/repos/ShiningWank0/Omni_Money/issues?state=open&per_page=100&page=1');
+        return { ok: true, json: async () => [] };
+      }
+      assert.equal(options.method, 'POST');
+      assert.equal(url, 'https://api.github.com/repos/ShiningWank0/Omni_Money/issues');
+      const body = JSON.parse(options.body);
+      assert.match(body.title, /GHSA-abcd-1234-5678/);
+      assert.ok(body.body.includes(${JSON.stringify(runURL)}));
+      writes++;
+      return { ok: true, json: async () => ({ number: 1 }) };
+    };
+    await main(process.env);
+    assert.equal(writes, 1);
+  `;
+  for (const event of ['schedule', 'workflow_dispatch']) {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', program], {
+      cwd: directory, encoding: 'utf8',
+      env: { ...process.env, GITHUB_EVENT_NAME: event, GITHUB_REF: 'refs/heads/main',
+        GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money', GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1',
+        GITHUB_TOKEN: 'mock-token', GITHUB_STEP_SUMMARY: '', SECURITY_REPORT_DOWNLOAD_OUTCOME: 'success' },
+    });
+    assert.equal(result.status, 0, `${event}: ${result.stderr}`);
+    assert.match(result.stdout, /"created":1,"updated":0,"unchanged":0/);
+  }
+});
+
+test('workflow coverage runs the full safe-update matrix for scheduled and manual scans', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'omni-security-coverage-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workflow = readFileSync(resolve('.github/workflows/ci.yml'), 'utf8');
+  const coverage = workflow.split('      - name: Determine full-matrix coverage\n')[1]
+    ?.split('      - name: Run safe-update full matrix\n')[0];
+  const block = coverage?.match(/        run: \|\n((?:          .*\n|\n)+)/)?.[1];
+  assert.ok(block, 'workflow coverage script is missing');
+  const program = block.replace(/^          /gm, '');
+  for (const [event, ref, expected] of [
+    ['schedule', 'refs/heads/main', 'true'],
+    ['workflow_dispatch', 'refs/heads/main', 'true'],
+    ['workflow_dispatch', 'refs/heads/review', 'true'],
+    ['push', 'refs/heads/main', 'true'],
+    ['push', 'refs/heads/review', 'false'],
+  ]) {
+    const output = join(directory, `${event}-${expected}-${ref.split('/').at(-1)}`);
+    const result = spawnSync('bash', ['-c', program], {
+      cwd: directory, encoding: 'utf8',
+      env: { ...process.env, EVENT_NAME: event, REF: ref, PR_NUMBER: '', PR_BASE_SHA: '', PR_HEAD_SHA: '',
+        GITHUB_OUTPUT: output },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(output, 'utf8'), `run_full=${expected}\n`);
+  }
 });
 
 test('API uses fixed GitHub endpoint, disallows redirects and surfaces 403 without secrets', async () => {

@@ -80,7 +80,7 @@ export function render(entry, runURL) {
       `- 検査条件: ${clean(d.context.join(', '))}`,
       `- 概要: ${clean(d.summary.join(' / '))}`,
     ].join('\n');
-  const body = `${marker}\n${revision}\n\n${details}\n\n[検査ログ](${runURL})\n\n定期CIによる自動報告です。以降の変化はコメントに記録します。対応内容を確認してから手動または修正PRで閉じてください。自動クローズ・再オープンは行いません。`;
+  const body = `${marker}\n${revision}\n\n${details}\n\n[検査ログ](${runURL})\n\n定期・手動CIによる自動報告です。以降の変化はコメントに記録します。対応内容を確認してから手動または修正PRで閉じてください。自動クローズ・再オープンは行いません。`;
   return { title: title.replaceAll('@', '@\u200b').replace(/[\r\n]/g, ' '), body, marker, revision };
 }
 
@@ -139,8 +139,8 @@ export async function publish(api, findings, runURL) {
 }
 
 export async function main(env = process.env) {
-  if (env.GITHUB_EVENT_NAME !== 'schedule' || env.GITHUB_REF !== 'refs/heads/main' || env.GITHUB_REPOSITORY !== 'ShiningWank0/Omni_Money') {
-    throw new Error('Issue creation is restricted to scheduled main runs of ShiningWank0/Omni_Money');
+  if (!['schedule', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME) || env.GITHUB_REF !== 'refs/heads/main' || env.GITHUB_REPOSITORY !== 'ShiningWank0/Omni_Money') {
+    throw new Error('Issue creation is restricted to scheduled or manually dispatched main runs of ShiningWank0/Omni_Money');
   }
   const reports = collect('security-reports', env.SECURITY_REPORT_DOWNLOAD_OUTCOME === 'success');
   const runURL = `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}/attempts/${env.GITHUB_RUN_ATTEMPT}`;
