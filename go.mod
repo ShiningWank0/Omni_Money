@@ -4,7 +4,7 @@ module omni_money
 // GO-2026-6090. CI and release builds use the pinned toolchain below.
 go 1.26.6
 
-toolchain go1.26.9
+toolchain go1.27.2
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.6
