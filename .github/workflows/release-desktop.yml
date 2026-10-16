@@ -219,7 +219,16 @@ jobs:
             echo "::error::go.mod must pin a stable Wails v2 release"
             exit 1
           }
-          go install "github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION"
+          for attempt in 1 2 3; do
+            if go install "github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Wails CLI installation failed after 3 attempts"
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
 
       - name: Build pinned static SQLCipher on Linux
         if: runner.os == 'Linux'
