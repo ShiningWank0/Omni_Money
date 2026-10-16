@@ -598,3 +598,41 @@ it('keeps private state purged and permits logout retry after a network failure'
   expect(navigation.replaceLocation).toHaveBeenCalledWith('/login')
   wrapper.unmount()
 })
+
+it('keeps signed amount styling tied to transaction type and excludes credit cards from balance cells', async () => {
+  api.getAccounts.mockResolvedValueOnce(['cash', 'card'])
+  api.getCreditCardSettings.mockResolvedValueOnce(['card'])
+  const wrapper = await mountTransactionApp([
+    { ...existingTransaction, id: 8, date: '2026-01-04', item: 'salary', type: 'income', amount: 1000, balance: 1000 },
+    { ...existingTransaction, id: 7, date: '2026-01-03', amount: 200, balance: 800 },
+    { ...existingTransaction, id: 6, date: '2026-01-02', account: 'card', item: 'card purchase', amount: 300, balance: 800 }
+  ])
+  const rows = wrapper.findAll('.transaction-table tbody tr')
+  expect(rows[0].get('.income-cell').text()).toBe('+¥1,000')
+  expect(rows[1].get('.expense-cell').text()).toBe('-¥200')
+  expect(rows[2].get('.expense-cell').text()).toBe('-¥300')
+  expect(rows[2].findAll('td').at(-1).text()).toBe('-')
+  expect(wrapper.get('.balance-amount').text()).toBe('¥1,000')
+  await wrapper.get('.sort-button').trigger('click')
+  const sortedRows = wrapper.findAll('.transaction-table tbody tr')
+  expect(sortedRows[0].text()).toContain('card purchase')
+  expect(sortedRows[0].get('.expense-cell').text()).toBe('-¥300')
+  expect(sortedRows[2].get('.income-cell').text()).toBe('+¥1,000')
+})
+
+it('keeps all server menu actions in the scroll area and logout in a separate footer', async () => {
+  api.getAuthStatus.mockResolvedValueOnce({
+    authenticated: true, idle_timeout_seconds: 0,
+    features: { admin: true, ai: false, snapshots: true, passkeys: true },
+    user: { id: 'test-user' }
+  })
+  const wrapper = await mountTransactionApp([])
+  await wrapper.get('.hamburger-menu').trigger('click')
+  expect(wrapper.get('.side-menu-items').findAll('button').map(button => button.text())).toEqual([
+    'CSVバックアップ', 'CSVインポート', 'クレジットカード設定', '銀行口座設定',
+    '残高推移グラフ表示', 'タグ別分析', 'タグ管理', 'スナップショット管理',
+    '認証情報の管理', 'パスキー設定', 'サーバーユーザー管理'
+  ])
+  expect(wrapper.get('.side-menu > .logout-btn').text()).toBe('ログアウト')
+  expect(wrapper.find('.side-menu-items .logout-btn').exists()).toBe(false)
+})
