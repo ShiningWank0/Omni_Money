@@ -53,7 +53,7 @@ function parseCsvLine(line) {
   return fields
 }
 
-test('server round trip: bootstrap admin, persist a transaction, CSV v3 export and replace import', async ({ page }) => {
+test('server round trip: bootstrap admin, persist a transaction, CSV v3 export and replace import, stored XSS stays inert', async ({ page }) => {
   if (!setupToken || !adminEmail || !adminPassword) {
     throw new Error('E2E_SETUP_TOKEN, E2E_ADMIN_EMAIL and E2E_ADMIN_PASSWORD must be set')
   }
@@ -64,6 +64,7 @@ test('server round trip: bootstrap admin, persist a transaction, CSV v3 export a
   // firing a Playwright download event.
   page.on('dialog', dialog => dialog.accept())
   await page.addInitScript(() => {
+    window.__omniSecurityXSS = 0
     Object.defineProperty(window, 'showSaveFilePicker', {
       value: undefined,
       configurable: true,
@@ -188,4 +189,75 @@ test('server round trip: bootstrap admin, persist a transaction, CSV v3 export a
   } finally {
     fs.rmSync(downloadDir, { recursive: true, force: true })
   }
+
+  await verifyPersistedXSSRendering(page, addBtn)
 })
+
+// Reuse the existing bootstrap within its single-worker scenario. A second
+// bootstrap test against the same disposable server would race first setup.
+async function verifyPersistedXSSRendering(page, addBtn) {
+  const account = 'E2E"><img data-omni-xss src=x onerror="window.__omniSecurityXSS=1">'
+  const item = '<svg data-omni-xss onload="window.__omniSecurityXSS=1">E2E-XSS'
+  const memo = '<script data-omni-xss>window.__omniSecurityXSS=1</script>'
+  const tag = '<img data-omni-xss src=x onerror="window.__omniSecurityXSS=1">'
+  const assertInert = async () => {
+    // CSP can prevent execution while HTML injection is still present. Check
+    // both the DOM and execution sentinel, preserving legitimate icons/images.
+    await expect(page.locator('[data-omni-xss]')).toHaveCount(0)
+    await expect(page.locator('[onerror*="__omniSecurityXSS"], [onload*="__omniSecurityXSS"], [onfocus*="__omniSecurityXSS"]')).toHaveCount(0)
+    expect(await page.evaluate(() => window.__omniSecurityXSS)).toBe(0)
+  }
+
+  await addBtn.click()
+  const modal = page.locator('.transaction-modal')
+  await modal.locator('input[placeholder="資金項目名を入力または選択"]').fill(account)
+  await modal.locator('input[placeholder="例: 給与、食費、交通費"]').fill(item)
+  await modal.locator('input[inputmode="numeric"]').fill('37')
+  await modal.locator('input[placeholder="メモを入力"]').fill(memo)
+  await modal.locator('.new-tag-input').fill(tag)
+  await modal.locator('.new-tag-row .add-tag-btn').click()
+  await expect(modal.locator('.tag-badge')).toContainText(tag)
+  await assertInert()
+  await modal.locator('.ok-btn').click()
+  await expect(modal).toBeHidden()
+
+  // Existing account selections survive a write. Select the new account via
+  // the real dropdown before asserting the row, also testing that rendering.
+  await page.locator('.project-selector-button').click()
+  const accountOption = page.locator('.fund-item-checkbox').filter({ hasText: account })
+  await expect(accountOption.locator('.fund-item-name')).toHaveText(account)
+  await assertInert()
+  // The native input sits below the custom checkmark. Use its visible label,
+  // as a user does, and verify the resulting state without forced clicks.
+  const accountCheckbox = accountOption.locator('input[type="checkbox"]')
+  if (!(await accountCheckbox.isChecked())) await accountOption.click()
+  await expect(accountCheckbox).toBeChecked()
+  await page.locator('.project-selector-button').click()
+
+  const row = page.locator('.transaction-table tbody tr[tabindex="0"]').filter({ hasText: item })
+  await expect(row).toHaveCount(1)
+  await assertInert()
+  await page.reload()
+  await expect(row).toHaveCount(1)
+  await expect(row).toContainText(account)
+  await assertInert()
+
+  await row.click()
+  const details = page.locator('.transaction-details')
+  await expect(details).toBeVisible()
+  await expect(details.locator('.details-item')).toHaveText(item)
+  await expect(details.locator('.details-memo')).toHaveText(memo)
+  await expect(details.locator('.details-fields dd').nth(1)).toHaveText(account)
+  await expect(details.locator('.details-fields dd').nth(4)).toHaveText(tag)
+  await assertInert()
+
+  await details.getByRole('button', { name: '取引を編集', exact: true }).click()
+  await expect(modal).toBeVisible()
+  await expect(modal.locator('input[placeholder="資金項目名を入力または選択"]')).toHaveValue(account)
+  await expect(modal.locator('input[placeholder="例: 給与、食費、交通費"]')).toHaveValue(item)
+  await expect(modal.locator('input[placeholder="メモを入力"]')).toHaveValue(memo)
+  await expect(modal.locator('.tag-badge')).toContainText(tag)
+  await assertInert()
+  await modal.locator('.cancel-btn').click()
+  await expect(modal).toBeHidden()
+}
