@@ -464,17 +464,6 @@ body {
     background-color: #ffffff;
 }
 
-/* 金額セルの条件付きハイライト */
-.income-cell {
-    background-color: #e6ffed !important;
-    color: #155724;
-}
-
-.expense-cell {
-    background-color: #ffe6e6 !important;
-    color: #721c24;
-}
-
 /* 新規追加ボタン */
 .add-btn {
     background: rgba(255, 255, 255, 0.9);
@@ -870,25 +859,10 @@ body {
     color: #333;
     cursor: pointer;
     margin-bottom: 0;
-    transition: background 0.2s;
 }
 
 .menu-btn:hover {
     background: #e0e0e0;
-}
-
-/* ログアウトボタンのスタイル */
-.logout-btn {
-    background: linear-gradient(135deg, #f44336 0%, #d32f2f 100%) !important;
-    color: white !important;
-    margin-top: auto;
-    /* メニューの最下部に配置 */
-}
-
-.logout-btn:hover {
-    background: linear-gradient(135deg, #d32f2f 0%, #c62828 100%) !important;
-    transform: translateY(-1px);
-    box-shadow: 0 4px 8px rgba(244, 67, 54, 0.3);
 }
 
 /* 縦三本線メニューアイコン */
@@ -1701,7 +1675,9 @@ body {
     --omni-primary-dark: #0f654f;
     --omni-focus: #12866a;
     --omni-income: #137a48;
+    --omni-income-surface: #e6f7ed;
     --omni-expense: #b42318;
+    --omni-expense-surface: #fcebea;
     --omni-shadow: 0 12px 34px rgba(40, 83, 67, 0.08);
 }
 
@@ -1983,9 +1959,12 @@ body {
     line-height: 1.4;
 }
 
-.transaction-table tbody tr:nth-child(even),
 .transaction-table tbody tr:nth-child(odd) {
     background: #fff;
+}
+
+.transaction-table tbody tr:nth-child(even) {
+    background: #f2f7f4;
 }
 
 .transaction-table tbody tr:not(.table-status-row) {
@@ -2034,14 +2013,14 @@ body {
     font-weight: 650;
 }
 
-.income-cell {
+.transaction-table td.income-cell {
     color: var(--omni-income);
-    background: transparent !important;
+    background: var(--omni-income-surface);
 }
 
-.expense-cell {
+.transaction-table td.expense-cell {
     color: var(--omni-expense);
-    background: transparent !important;
+    background: var(--omni-expense-surface);
 }
 
 .table-status-row td {
@@ -2058,55 +2037,77 @@ body {
 
 .side-menu {
     width: min(300px, 88vw);
-    gap: 0.45rem;
-    padding: 1.25rem;
+    height: 100vh;
+    height: 100dvh;
+    gap: 0.85rem;
+    padding: max(1.25rem, env(safe-area-inset-top)) 1rem max(1.25rem, env(safe-area-inset-bottom));
     background: #fbfefc;
     border-right: 1px solid var(--omni-border);
     box-shadow: 12px 0 32px rgba(25, 61, 49, 0.12);
+    overflow: hidden;
+}
+
+.side-menu-items {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 0.25rem 0.25rem 0.75rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
 .menu-btn {
-    min-height: 44px;
-    padding: 0.7rem 0.85rem;
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    min-height: 48px;
+    padding: 0.8rem 0.75rem;
     color: var(--omni-text);
-    background: transparent;
-    border: 1px solid transparent;
-    text-align: left;
-    font-size: 0.95rem;
-    font-weight: 600;
+    background: var(--omni-surface-muted);
+    border: 1px solid var(--omni-border);
+    border-radius: 12px;
+    text-align: center;
+    font-size: 1rem;
+    font-weight: 550;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
 }
 
 .menu-btn:hover {
-    background: var(--omni-surface-muted);
-    border-color: var(--omni-border);
+    background: #e8f3ed;
+    border-color: var(--omni-border-strong);
 }
 
 .menu-group-start {
     position: relative;
-    margin-top: 0.75rem;
+    margin-top: 0.65rem;
 }
 
 .menu-group-start::before {
     content: '';
     position: absolute;
-    top: -0.6rem;
+    top: -0.75rem;
     left: 0;
     right: 0;
     border-top: 1px solid var(--omni-border);
 }
 
-.logout-btn {
-    color: #a82b22 !important;
-    background: #fff5f4 !important;
-    border-color: #f0d4d0 !important;
-    box-shadow: none;
+.side-menu > .logout-btn {
+    margin-top: 0;
+    color: #fff;
+    background: linear-gradient(135deg, #d92d20 0%, #b42318 100%);
+    border-color: #b42318;
+    font-weight: 700;
+    --omni-button-shadow-rest: 0 4px 10px rgba(180, 35, 24, 0.24);
+    --omni-button-shadow-hover: 0 6px 14px rgba(180, 35, 24, 0.3);
+    --omni-button-shadow-pressed: inset 0 2px 4px rgba(90, 15, 10, 0.25);
 }
 
-.logout-btn:hover {
-    color: #fff !important;
-    background: #a82b22 !important;
-    transform: none;
-    box-shadow: none;
+.side-menu > .logout-btn:hover {
+    background: linear-gradient(135deg, #c5281c 0%, #9f1f16 100%);
 }
 
 button:focus-visible,
