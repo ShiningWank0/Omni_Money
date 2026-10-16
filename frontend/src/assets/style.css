@@ -485,11 +485,9 @@ body {
     height: 40px;
     font-size: 1.2rem;
     cursor: pointer;
-    transition: all 0.2s ease;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
     backdrop-filter: blur(10px);
     flex-shrink: 0;
 }
@@ -502,13 +500,6 @@ body {
 .add-btn:hover {
     background: rgba(255, 255, 255, 1);
     border-color: #667eea;
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
-    transform: translateY(-1px);
-}
-
-.add-btn:active {
-    transform: translateY(0);
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 /* モーダル関連のスタイル */
@@ -1921,7 +1912,9 @@ body {
     color: #fff;
     background: var(--omni-primary);
     border: 1px solid var(--omni-primary);
-    box-shadow: 0 5px 12px rgba(22, 122, 98, 0.2);
+    --omni-button-shadow-rest: 0 5px 12px rgba(22, 122, 98, 0.2);
+    --omni-button-shadow-hover: 0 7px 16px rgba(22, 122, 98, 0.24);
+    --omni-button-shadow-pressed: inset 0 2px 4px rgba(15, 101, 79, 0.22), 0 1px 2px rgba(22, 122, 98, 0.12);
     backdrop-filter: none;
 }
 
@@ -1929,7 +1922,6 @@ body {
     color: #fff;
     background: var(--omni-primary-dark);
     border-color: var(--omni-primary-dark);
-    box-shadow: 0 7px 16px rgba(22, 122, 98, 0.24);
 }
 
 .content-card {
