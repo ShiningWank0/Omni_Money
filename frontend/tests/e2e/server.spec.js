@@ -227,7 +227,11 @@ async function verifyPersistedXSSRendering(page, addBtn) {
   const accountOption = page.locator('.fund-item-checkbox').filter({ hasText: account })
   await expect(accountOption.locator('.fund-item-name')).toHaveText(account)
   await assertInert()
-  await accountOption.locator('input[type="checkbox"]').check()
+  // The native input sits below the custom checkmark. Use its visible label,
+  // as a user does, and verify the resulting state without forced clicks.
+  const accountCheckbox = accountOption.locator('input[type="checkbox"]')
+  if (!(await accountCheckbox.isChecked())) await accountOption.click()
+  await expect(accountCheckbox).toBeChecked()
   await page.locator('.project-selector-button').click()
 
   const row = page.locator('.transaction-table tbody tr[tabindex="0"]').filter({ hasText: item })
