@@ -88,19 +88,21 @@
     <!-- メニューのドロワー -->
     <div v-if="showMenu" class="side-menu-overlay" @click.self="toggleMenu">
       <nav id="side-menu" class="side-menu" aria-label="アプリケーションメニュー">
-        <button class="menu-btn" @click="backupToCSV">CSVバックアップ</button>
-        <button class="menu-btn" @click="showImportCSVModalMethod">CSVインポート</button>
-        <button class="menu-btn menu-group-start" @click="openCreditCardSettings">クレジットカード設定</button>
-        <button v-if="serverFeatures.ai" class="menu-btn" @click="openAIAPIConsole">AI API操作</button>
-        <button class="menu-btn" @click="openBankAccountSettings">銀行口座設定</button>
-        <button class="menu-btn menu-group-start" @click="showGraphModal">残高推移グラフ表示</button>
-        <button class="menu-btn" @click="openTagChart">タグ別分析</button>
-        <button class="menu-btn" @click="openTagManager">タグ管理</button>
-        <button v-if="serverFeatures.snapshots" class="menu-btn menu-group-start" @click="openSnapshotManager">スナップショット管理</button>
-        <button v-if="isWailsMode" class="menu-btn menu-group-start" @click="openDesktopIdleSettings">自動ロック設定</button>
-		<button class="menu-btn menu-group-start" @click="openCredentialSettings">認証情報の管理</button>
-        <button v-if="!isWailsMode && serverFeatures.passkeys" class="menu-btn menu-group-start" @click="openPasskeySettings">パスキー設定</button>
-        <button v-if="serverFeatures.admin" class="menu-btn menu-group-start" @click="openServerAccountAdmin">サーバーユーザー管理</button>
+        <div class="side-menu-items">
+          <button class="menu-btn" @click="backupToCSV">CSVバックアップ</button>
+          <button class="menu-btn" @click="showImportCSVModalMethod">CSVインポート</button>
+          <button class="menu-btn menu-group-start" @click="openCreditCardSettings">クレジットカード設定</button>
+          <button v-if="serverFeatures.ai" class="menu-btn" @click="openAIAPIConsole">AI API操作</button>
+          <button class="menu-btn" @click="openBankAccountSettings">銀行口座設定</button>
+          <button class="menu-btn menu-group-start" @click="showGraphModal">残高推移グラフ表示</button>
+          <button class="menu-btn" @click="openTagChart">タグ別分析</button>
+          <button class="menu-btn" @click="openTagManager">タグ管理</button>
+          <button v-if="serverFeatures.snapshots" class="menu-btn menu-group-start" @click="openSnapshotManager">スナップショット管理</button>
+          <button v-if="isWailsMode" class="menu-btn menu-group-start" @click="openDesktopIdleSettings">自動ロック設定</button>
+          <button class="menu-btn menu-group-start" @click="openCredentialSettings">認証情報の管理</button>
+          <button v-if="!isWailsMode && serverFeatures.passkeys" class="menu-btn menu-group-start" @click="openPasskeySettings">パスキー設定</button>
+          <button v-if="serverFeatures.admin" class="menu-btn menu-group-start" @click="openServerAccountAdmin">サーバーユーザー管理</button>
+        </div>
         <button v-if="isWailsMode" class="menu-btn logout-btn" @click="lockDesktopVaultNow">保管庫をロック</button>
         <button v-if="!isWailsMode" class="menu-btn logout-btn" @click="logout">ログアウト</button>
       </nav>
