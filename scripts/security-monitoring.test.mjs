@@ -317,6 +317,33 @@ test('API uses fixed GitHub endpoint, disallows redirects and surfaces 403 witho
   assert.equal(request.options.redirect, 'error');
 });
 
+test('gosec CLI uses locked scanner dependencies and rejects incomplete scans in both modes', t => {
+  for (const [input, exitCode, status] of [
+    [{ Stats: { files: 1 }, 'Golang errors': {}, Issues: [] }, 0, 'clean'],
+    [{ Stats: { files: 1 }, 'Golang errors': { 'main.go': ['unsupported export data version'] }, Issues: [] }, 1, 'error'],
+    [gosecInput, 1, 'findings'],
+  ]) {
+    const directory = mkdtempSync(join(tmpdir(), 'omni-gosec-cli-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    mkdirSync(join(directory, 'bin'));
+    writeFileSync(join(directory, 'bin/go'), `#!${process.execPath}\nconst fs = require('node:fs');\nfs.appendFileSync('scanner-args.jsonl', JSON.stringify(process.argv.slice(2)) + '\\n');\nprocess.stdout.write(process.env.MOCK_GOSEC_REPORT);\nprocess.exit(Number(process.env.MOCK_GOSEC_EXIT));\n`, { mode: 0o755 });
+    const result = spawnSync(process.execPath, [resolve('scripts/security-reports.mjs'), 'gosec'], {
+      cwd: directory, encoding: 'utf8',
+      env: { ...process.env, PATH: `${join(directory, 'bin')}:${process.env.PATH}`,
+        MOCK_GOSEC_REPORT: JSON.stringify(input), MOCK_GOSEC_EXIT: String(exitCode) },
+    });
+    assert.equal(result.status, status === 'clean' ? 0 : 1, result.stderr);
+    const calls = readFileSync(join(directory, 'scanner-args.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    const command = ['run', '-mod=readonly', `-modfile=${resolve('scripts/gosec.mod')}`,
+      'github.com/securego/gosec/v2/cmd/gosec', '-terse', '-fmt=json', '-severity=medium'];
+    assert.deepEqual(calls, [[...command, './...'], [...command, '-tags', 'server', './...']]);
+    for (const mode of ['desktop', 'server']) {
+      const report = JSON.parse(readFileSync(join(directory, `security-reports/gosec-${mode}.json`), 'utf8'));
+      assert.equal(report.status, status);
+    }
+  }
+});
+
 test('CLI enforces failure on govulncheck JSON findings even when tool exits successfully', t => {
   const directory = mkdtempSync(join(tmpdir(), 'omni-security-cli-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
