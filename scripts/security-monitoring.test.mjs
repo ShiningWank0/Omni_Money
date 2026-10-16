@@ -231,7 +231,11 @@ test('PR/push/fork events cannot publish and untrusted run URLs are rejected', a
     { GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'someone/fork' },
     { GITHUB_EVENT_NAME: 'repository_dispatch', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money' },
   ]) await assert.rejects(main(env), /restricted/);
-  await assert.rejects(publish(() => assert.fail('unexpected request'), [], 'https://evil.test'), /invalid run URL/);
+  for (const url of [
+    'https://evil.test',
+    'https://github.com.evil.test/ShiningWank0/Omni_Money/actions/runs/123/attempts/1',
+    'https://evil.test/https://github.com/ShiningWank0/Omni_Money/actions/runs/123/attempts/1',
+  ]) await assert.rejects(publish(() => assert.fail('unexpected request'), [], url), /invalid run URL/);
 });
 
 test('scheduled and manual main runs publish findings through the same CLI path', t => {
@@ -355,7 +359,7 @@ test('fuzz reports fail closed without presenting parser failures as known vulne
       assert.deepEqual(report.findings, []);
       const view = render(entries([report])[0], runURL);
       assert.match(view.title, /検査エラー/);
-      assert.ok(view.body.includes(runURL));
+      assert.deepEqual(view.body.split('\n').filter(line => line.startsWith('[検査ログ](')), [`[検査ログ](${runURL})`]);
       assert.doesNotMatch(view.body, /CVE-/);
     }
   }
