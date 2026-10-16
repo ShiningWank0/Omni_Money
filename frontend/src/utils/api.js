@@ -566,23 +566,75 @@ export async function logout() {
   }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 8000)
-  try {
-    const revoke = () => apiFetch('/api/auth/logout', { method: 'POST', signal: controller.signal }, { skipAuthRedirect: true, skipReauth: true })
-    let res = await revoke()
-    if (res.status === 403) {
-      // An already admitted reauthentication may have rotated the cookie
-      // before logout reached CSRF verification. Fetch the new session token
-      // and retry the rejected request once; never reopen the private screen.
-      const statusResponse = await apiFetch('/api/auth/status', { signal: controller.signal }, { skipAuthRedirect: true, skipReauth: true, logoutRecovery: true })
-      const status = await expectJSON(statusResponse, schema.auth)
-      if (status.authenticated === false) { clearSessionSecrets(); return }
-      rememberAuthToken(status)
-      res = await revoke()
+  const statusControllers = new Set()
+  let statusCheck = null
+  let finished = false
+  let confirmationTimer
+
+  // The session can already be revoked when the logout response is lost or
+  // delayed. Confirm that state independently instead of asking the user to
+  // repeat a successful logout. An active session or an unreadable status is
+  // never evidence of success.
+  function confirmSignedOut() {
+    if (statusCheck) return statusCheck
+    statusCheck = (async () => {
+      const statusController = new AbortController()
+      statusControllers.add(statusController)
+      const statusTimeout = setTimeout(() => statusController.abort(), 2000)
+      try {
+        const response = await apiFetch('/api/auth/status', { signal: statusController.signal }, {
+          skipAuthRedirect: true, skipReauth: true, logoutRecovery: true
+        })
+        const status = await expectJSON(response, schema.auth)
+        return status.authenticated === false
+      } finally {
+        clearTimeout(statusTimeout)
+        statusControllers.delete(statusController)
+      }
+    })().finally(() => { statusCheck = null })
+    return statusCheck
+  }
+
+  const revocation = (async () => {
+    try {
+      const revoke = () => apiFetch('/api/auth/logout', { method: 'POST', signal: controller.signal }, { skipAuthRedirect: true, skipReauth: true })
+      let res = await revoke()
+      if (res.status === 403) {
+        // An already admitted reauthentication may have rotated the cookie
+        // before logout reached CSRF verification. Fetch the new session token
+        // and retry the rejected request once; never reopen the private screen.
+        const statusResponse = await apiFetch('/api/auth/status', { signal: controller.signal }, { skipAuthRedirect: true, skipReauth: true, logoutRecovery: true })
+        const status = await expectJSON(statusResponse, schema.auth)
+        if (status.authenticated === false) return
+        rememberAuthToken(status)
+        res = await revoke()
+      }
+      if (res.status !== 401) await expectVoid(res, schema.success)
+    } catch (error) {
+      if (!finished) {
+        try { if (await confirmSignedOut()) return } catch { /* retain the original failure */ }
+      }
+      throw error
     }
-    if (res.status !== 401) await expectVoid(res, schema.success)
+  })()
+
+  const confirmation = new Promise(resolve => {
+    confirmationTimer = setTimeout(async () => {
+      try {
+        if (await confirmSignedOut() && !finished) resolve()
+      } catch { /* the revocation request still decides the outcome */ }
+    }, 500)
+  })
+
+  try {
+    await Promise.race([revocation, confirmation])
     clearSessionSecrets()
   } finally {
+    finished = true
     clearTimeout(timeout)
+    clearTimeout(confirmationTimer)
+    controller.abort()
+    for (const statusController of statusControllers) statusController.abort()
     logoutPending = false
   }
 }
