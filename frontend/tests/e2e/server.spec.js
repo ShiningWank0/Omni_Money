@@ -12,6 +12,7 @@ const adminEmail = process.env.E2E_ADMIN_EMAIL
 const adminPassword = process.env.E2E_ADMIN_PASSWORD
 
 test.skip(!baseURL, 'E2E_BASE_URL is not set; start the suite via tests/e2e/run-server-e2e.sh')
+test.use({ actionTimeout: 10_000, navigationTimeout: 30_000 })
 
 // Exact CSV v3 header from backend/core/service_csv_full.go (csvV3Headers).
 const CSV_V3_HEADER =
@@ -192,8 +193,8 @@ test('server round trip: bootstrap admin, persist a transaction, CSV v3 export a
     fs.rmSync(downloadDir, { recursive: true, force: true })
   }
 
-  await verifyPersistedXSSRendering(page, addBtn)
-  await verifyTransactionTableLayout(page)
+  await test.step('Persisted XSS rendering and transaction details', () => verifyPersistedXSSRendering(page, addBtn))
+  await test.step('Responsive transaction table columns', () => verifyTransactionTableLayout(page))
 })
 
 // Reuse the existing bootstrap within its single-worker scenario. A second
