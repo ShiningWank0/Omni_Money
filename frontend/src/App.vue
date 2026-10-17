@@ -123,6 +123,13 @@
       <div class="transaction-section" :aria-busy="isTableLoading">
         <table class="transaction-table">
           <caption class="sr-only">取引履歴</caption>
+          <colgroup>
+            <col class="compact-column">
+            <col v-if="store.shouldShowFundItemColumn" class="compact-column">
+            <col class="item-column">
+            <col class="compact-column">
+            <col class="compact-column">
+          </colgroup>
           <thead>
             <tr>
               <th scope="col" :aria-sort="dateSortOrder === 'asc' ? 'ascending' : 'descending'">
@@ -154,9 +161,11 @@
                 @keydown.enter="showTransactionDetails(transaction)"
                 @keydown.space.prevent="showTransactionDetails(transaction)"
               >
-                <td class="date-cell">{{ formatDateTime(transaction.date) }}</td>
-                <td v-if="store.shouldShowFundItemColumn">{{ transaction.fundItem || transaction.account }}</td>
-                <td>{{ transaction.item }}</td>
+                <td class="date-cell">
+                  <span class="transaction-datetime"><span class="transaction-date">{{ formatDateTime(transaction.date, 'date') }}</span>{{ ' ' }}<span class="transaction-time">{{ formatDateTime(transaction.date, 'time') }}</span></span>
+                </td>
+                <td v-if="store.shouldShowFundItemColumn" class="fund-item-cell">{{ transaction.fundItem || transaction.account }}</td>
+                <td class="item-cell">{{ transaction.item }}</td>
                 <td class="numeric-cell" :class="getAmountCellClass(transaction.type)">{{ formatAmount(transaction.amount, transaction.type, transaction.amount_exact) }}</td>
                 <td class="numeric-cell">{{ isCreditCardItem(transaction.account || transaction.fundItem) ? '-' : formatCurrency(transaction.balance, transaction.balance_exact) }}</td>
               </tr>
@@ -514,12 +523,13 @@ function formatAmount(amount, type, amountExact) {
   return prefix + formatExactCurrency(amount, amountExact)
 }
 
-function formatDateTime(dateStr) {
+function formatDateTime(dateStr, part = 'full') {
   if (!dateStr) return ''
-  if (dateStr.includes(' ') && !dateStr.endsWith('00:00:00')) {
-    return dateStr
-  }
-  return dateStr.split(' ')[0]
+  const separator = dateStr.indexOf(' ')
+  if (part === 'date') return separator < 0 ? dateStr : dateStr.slice(0, separator)
+  const hasTime = separator >= 0 && !dateStr.endsWith('00:00:00')
+  if (part === 'time') return hasTime ? dateStr.slice(separator + 1) : ''
+  return hasTime || separator < 0 ? dateStr : dateStr.slice(0, separator)
 }
 
 function getAmountCellClass(type) {

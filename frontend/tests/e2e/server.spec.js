@@ -95,6 +95,8 @@ test('server round trip: bootstrap admin, persist a transaction, CSV v3 export a
   await addBtn.click()
   const modal = page.locator('.transaction-modal')
   await expect(modal).toBeVisible()
+  await modal.locator('input[type="date"]').fill('2026-12-31')
+  await modal.locator('input[type="time"]').fill('23:59')
   await modal.locator('input[placeholder="資金項目名を入力または選択"]').fill(ACCOUNT_NAME)
   await modal.locator('input[placeholder="例: 給与、食費、交通費"]').fill(ITEM_NAME)
   await modal.locator('input[inputmode="numeric"]').fill(AMOUNT)
@@ -191,6 +193,7 @@ test('server round trip: bootstrap admin, persist a transaction, CSV v3 export a
   }
 
   await verifyPersistedXSSRendering(page, addBtn)
+  await verifyTransactionTableLayout(page)
 })
 
 // Reuse the existing bootstrap within its single-worker scenario. A second
@@ -260,4 +263,62 @@ async function verifyPersistedXSSRendering(page, addBtn) {
   await assertInert()
   await modal.locator('.cancel-btn').click()
   await expect(modal).toBeHidden()
+}
+
+async function verifyTransactionTableLayout(page) {
+  const table = page.locator('.transaction-table')
+  const timedRow = table.locator('tbody tr[tabindex="0"]').filter({ hasText: ITEM_NAME })
+  await expect(timedRow.locator('.transaction-time')).toHaveText('23:59:00')
+
+  for (const columns of [5, 4]) {
+    if (columns === 4) {
+      await page.locator('.project-selector-button').click()
+      for (const option of await page.locator('.fund-item-checkbox').all()) {
+        const selected = await option.locator('.fund-item-name').textContent() === ACCOUNT_NAME
+        if (await option.locator('input[type="checkbox"]').isChecked() !== selected) await option.click()
+      }
+      await page.locator('.project-selector-button').click()
+    }
+    await expect(table.locator('thead th')).toHaveCount(columns)
+    await expect(table.locator('tbody tr[tabindex="0"]')).toHaveCount(columns === 5 ? 2 : 1)
+
+    for (const width of [1440, 900, 390]) {
+      await page.setViewportSize({ width, height: 900 })
+      await expect.poll(async () => timedRow.locator('.transaction-time').evaluate(element => getComputedStyle(element).display))
+        .toBe(width === 390 ? 'block' : 'inline-block')
+      const geometry = await table.evaluate(element => {
+        const bounds = cell => {
+          const rect = cell.getBoundingClientRect()
+          return { left: rect.left, right: rect.right, width: rect.width, fits: cell.scrollWidth <= cell.clientWidth }
+        }
+        return {
+          headers: [...element.tHead.rows[0].cells].map(bounds),
+          rows: [...element.tBodies[0].rows].map(row => [...row.cells].map(bounds)),
+          pageFits: document.documentElement.scrollWidth <= window.innerWidth,
+        }
+      })
+      expect(geometry.pageFits).toBe(true)
+      for (const cells of geometry.rows) {
+        for (const [index, cell] of cells.entries()) {
+          expect(Math.abs(cell.left - geometry.headers[index].left)).toBeLessThan(1)
+          expect(Math.abs(cell.right - geometry.headers[index].right)).toBeLessThan(1)
+        }
+        expect(cells.at(-2).fits).toBe(true)
+        expect(cells.at(-1).fits).toBe(true)
+      }
+      if (columns === 4 && width === 1440) {
+        expect(geometry.headers[1].width).toBeGreaterThan(geometry.headers[0].width * 2)
+        expect(geometry.headers[1].width).toBeGreaterThan(geometry.headers[2].width * 2)
+        expect(geometry.headers[1].width).toBeGreaterThan(geometry.headers[3].width * 2)
+      }
+    }
+  }
+
+  // A narrow table inside a wide window must also wrap its time. This guards
+  // container-based behavior independently of viewport/device breakpoints.
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.locator('.transaction-section').evaluate(element => { element.style.width = '560px' })
+  await expect.poll(async () => timedRow.locator('.transaction-time').evaluate(element => getComputedStyle(element).display)).toBe('block')
+  await page.locator('.transaction-section').evaluate(element => { element.style.removeProperty('width') })
+  await expect.poll(async () => timedRow.locator('.transaction-time').evaluate(element => getComputedStyle(element).display)).toBe('inline-block')
 }
