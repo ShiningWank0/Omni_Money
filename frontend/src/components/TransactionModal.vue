@@ -58,9 +58,7 @@
               :class="form.type === 'income' ? 'amount-input-income' : 'amount-input-expense'"
               @input="onAmountInput"
               inputmode="numeric"
-              aria-describedby="amount-limit-hint"
               autocomplete="off">
-            <small id="amount-limit-hint">1取引あたり10億円以下</small>
           </div>
           <div class="form-row">
             <label>メモ (任意):</label>
