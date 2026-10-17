@@ -55,6 +55,49 @@ function fillRequiredFields(wrapper) {
 }
 
 describe('TransactionModal', () => {
+  for (const isEditMode of [false, true]) {
+    describe(isEditMode ? 'amount validation when editing' : 'amount validation when creating', () => {
+      async function prepareModal() {
+        const wrapper = await mountModal(isEditMode ? {
+          isEditMode: true,
+          transaction: { id: 1, date: '2026-01-01', account: 'cash', item: 'purchase', type: 'expense', amount: 100 }
+        } : {})
+        await fillRequiredFields(wrapper)
+        return wrapper
+      }
+
+      it('accepts exactly one billion yen without changing the value', async () => {
+        const wrapper = await prepareModal()
+        await wrapper.get('input[inputmode="numeric"]').setValue('1000000000')
+        await wrapper.get('form').trigger('submit')
+
+        expect(wrapper.emitted('save')).toHaveLength(1)
+        expect(wrapper.emitted('save')[0][0].amount).toBe(1000000000)
+      })
+
+      it.each([
+        ['one yen above the limit', '1000000001'],
+        ['beyond safe integer precision', '9007199254740993'],
+        ['a 400-digit value', '9'.repeat(400)]
+      ])('rejects %s and can save after correction', async (_, value) => {
+        const wrapper = await prepareModal()
+        const input = wrapper.get('input[inputmode="numeric"]')
+        await input.setValue(value)
+        await wrapper.get('form').trigger('submit')
+
+        expect(wrapper.emitted('save')).toBeUndefined()
+        expect(wrapper.get('.form-error').text()).toBe('金額は1,000,000,000円以下で指定してください')
+        expect(input.element.value).toBe(value)
+
+        await input.setValue('500')
+        await wrapper.get('form').trigger('submit')
+        expect(wrapper.emitted('save')).toHaveLength(1)
+        expect(wrapper.emitted('save')[0][0].amount).toBe(500)
+        expect(wrapper.find('.form-error').exists()).toBe(false)
+      })
+    })
+  }
+
   it('keeps a new nested tag local until save', async () => {
     api.getTags.mockResolvedValueOnce([{ id: 4, name: 'Food', children: [] }])
     api.createTag.mockClear()
