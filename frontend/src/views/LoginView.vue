@@ -1,5 +1,5 @@
 <template>
-  <div class="login-root">
+  <div class="login-root" :class="{ 'account-flow': isAccountFlow }">
     <div class="login-container">
       <div class="login-card">
         <div class="login-header">
@@ -9,9 +9,9 @@
         </div>
 
         <div v-if="!setupRequired" class="auth-mode-tabs" aria-label="アカウント操作">
-          <button type="button" :class="{ active: mode === 'login' }" @click="setMode('login')">ログイン</button>
-          <button type="button" :class="{ active: mode === 'invite' }" @click="setMode('invite')">招待を受諾</button>
-          <button type="button" :class="{ active: mode === 'reset' }" @click="setMode('reset')">再設定を完了</button>
+          <button type="button" :disabled="loading" :class="{ active: mode === 'login' }" @click="setMode('login')">ログイン</button>
+          <button type="button" :disabled="loading" :class="{ active: mode === 'invite' }" @click="setMode('invite')">招待を受諾</button>
+          <button type="button" :disabled="loading" :class="{ active: mode === 'reset' }" @click="setMode('reset')">パスワード再設定</button>
         </div>
 
         <div v-if="mode === 'login' && !setupRequired" class="passkey-login-entry">
@@ -22,75 +22,94 @@
           <div class="auth-divider"><span>または</span></div>
         </div>
 
-        <form @submit.prevent="handleSubmit">
+        <form :novalidate="isAccountFlow" :aria-busy="loading" @submit.prevent="handleSubmit">
           <div v-if="errorMessage" class="error-message" role="alert">{{ errorMessage }}</div>
           <div v-if="infoMessage" class="info-message" role="status">{{ infoMessage }}</div>
 
-          <div v-if="setupRequired" class="form-group">
-            <label for="setup-token" class="form-label">初期設定トークン</label>
-            <input id="setup-token" v-model="setupToken" type="password" class="form-input" autocomplete="off" maxlength="512" required>
-          </div>
-
-          <div v-if="mode === 'invite' || mode === 'reset'" class="token-notice">
-            管理者から安全な経路で受け取ったtokenを貼り付けてください。tokenをURLへ入れたり、この端末へ保存したりしないでください。
-          </div>
-          <div v-if="mode === 'invite' || mode === 'reset'" class="form-group">
-            <label for="operation-token" class="form-label">{{ mode === 'invite' ? '招待token' : '再設定token' }}</label>
-            <input id="operation-token" v-model.trim="operationToken" type="password" class="form-input" autocomplete="off" maxlength="4096" required>
-          </div>
-
-          <div v-if="mode === 'login'" class="form-group">
-            <label for="email" class="form-label">メールアドレス</label>
-            <input id="email" v-model.trim="email" type="email" class="form-input" autocomplete="username" maxlength="254" required>
-          </div>
-
-          <div v-if="setupRequired || mode === 'invite'" class="form-group">
-            <label for="display-name" class="form-label">表示名</label>
-            <input id="display-name" v-model.trim="displayName" type="text" class="form-input" autocomplete="name" maxlength="120" required>
-          </div>
-
-          <div v-if="mode === 'reset'" class="form-group">
-            <label for="current-recovery" class="form-label">現在の回復コード</label>
-            <input id="current-recovery" v-model.trim="currentRecoveryCode" type="password" class="form-input" autocomplete="off" maxlength="128" required>
-            <p class="field-hint">管理者はこの値を知ることも、代わりに復元することもできません。</p>
-          </div>
-
-          <div class="form-group">
-            <label for="password" class="form-label">{{ mode === 'reset' ? '新しいパスワード' : 'パスワード' }}</label>
-            <input
-              id="password"
-              v-model="password"
-              type="password"
-              class="form-input"
-              :autocomplete="mode === 'login' ? 'current-password' : 'new-password'"
-			  maxlength="1024"
-              required
+          <div class="account-form-layout">
+            <fieldset
+              v-show="!isAccountFlow || !compactLayout || accountStep === 'credentials'"
+              ref="credentialsPanel"
+              class="credentials-panel"
+              :disabled="loading"
+              aria-label="アカウント情報"
             >
+              <div v-if="setupRequired" class="form-group">
+                <label for="setup-token" class="form-label">初期設定トークン</label>
+                <input id="setup-token" v-model="setupToken" type="password" class="form-input" autocomplete="off" maxlength="512" required>
+              </div>
+
+              <div v-if="mode === 'invite' || mode === 'reset'" class="token-notice">
+                管理者から安全な経路で受け取ったtokenを貼り付けてください。tokenをURLへ入れたり、この端末へ保存したりしないでください。
+              </div>
+              <div v-if="mode === 'invite' || mode === 'reset'" class="form-group">
+                <label for="operation-token" class="form-label">{{ mode === 'invite' ? '招待token' : '再設定token' }}</label>
+                <input id="operation-token" v-model.trim="operationToken" type="password" class="form-input" autocomplete="off" maxlength="4096" required>
+              </div>
+
+              <div v-if="mode === 'login'" class="form-group">
+                <label for="email" class="form-label">メールアドレス</label>
+                <input id="email" v-model.trim="email" type="email" class="form-input" autocomplete="username" maxlength="254" required>
+              </div>
+
+              <div v-if="setupRequired || mode === 'invite'" class="form-group">
+                <label for="display-name" class="form-label">表示名</label>
+                <input id="display-name" v-model.trim="displayName" type="text" class="form-input" autocomplete="name" maxlength="120" required>
+              </div>
+
+              <div v-if="mode === 'reset'" class="form-group">
+                <label for="current-recovery" class="form-label">現在の回復コード</label>
+                <input id="current-recovery" v-model.trim="currentRecoveryCode" type="password" class="form-input" autocomplete="off" maxlength="128" required>
+                <p class="field-hint">管理者はこの値を知ることも、代わりに復元することもできません。</p>
+              </div>
+
+              <div class="form-group">
+                <label for="password" class="form-label">{{ mode === 'reset' ? '新しいパスワード' : 'パスワード' }}</label>
+                <input
+                  id="password"
+                  v-model="password"
+                  type="password"
+                  class="form-input"
+                  :autocomplete="mode === 'login' ? 'current-password' : 'new-password'"
+                  maxlength="1024"
+                  required
+                >
+              </div>
+
+              <div v-if="setupRequired || mode !== 'login'" class="form-group">
+                <label for="password-confirmation" class="form-label">パスワード（確認）</label>
+                <input id="password-confirmation" v-model="passwordConfirmation" type="password" class="form-input" autocomplete="new-password" maxlength="1024" required>
+              </div>
+            </fieldset>
+
+            <div
+              v-if="needsNewRecovery"
+              v-show="!isAccountFlow || !compactLayout || accountStep === 'recovery'"
+              ref="recoveryPanel"
+              class="recovery-panel"
+              tabindex="-1"
+            >
+              <div class="form-label">{{ mode === 'reset' ? '新しい回復コード' : '回復コード' }}</div>
+              <p class="recovery-warning">
+                パスワードを忘れた場合に既存データを開く唯一のコードです。管理者でも復元できません。
+                パスワードマネージャー等の安全な場所へ保存してください。
+              </p>
+              <textarea class="recovery-code" :value="newRecoveryCode" readonly rows="3" aria-label="新しい回復コード" @focus="$event.target.select()"></textarea>
+              <button type="button" class="secondary-button" :disabled="loading" @click="copyRecoveryCode">回復コードをコピー</button>
+              <label class="confirmation-label">
+                <input v-model="recoverySaved" type="checkbox" :disabled="loading" required>
+                安全な場所へ保存しました
+              </label>
+            </div>
           </div>
 
-          <div v-if="setupRequired || mode !== 'login'" class="form-group">
-            <label for="password-confirmation" class="form-label">パスワード（確認）</label>
-			<input id="password-confirmation" v-model="passwordConfirmation" type="password" class="form-input" autocomplete="new-password" maxlength="1024" required>
+          <div class="form-actions">
+            <button v-if="isAccountFlow && compactLayout && accountStep === 'recovery'" type="button" class="secondary-button back-button" :disabled="loading" @click="returnToCredentials">戻る</button>
+            <button type="submit" class="login-button" :disabled="loading || (isFinalAccountAction && !recoverySaved)">
+              <span v-if="loading" class="loading-spinner"></span>
+              <span>{{ submitLabel }}</span>
+            </button>
           </div>
-
-          <div v-if="needsNewRecovery" class="recovery-panel">
-            <div class="form-label">{{ mode === 'reset' ? '新しい回復コード' : '回復コード' }}</div>
-            <p class="recovery-warning">
-              パスワードを忘れた場合に既存データを開く唯一のコードです。管理者でも復元できません。
-              パスワードマネージャー等の安全な場所へ保存してください。
-            </p>
-            <textarea class="recovery-code" :value="newRecoveryCode" readonly rows="3" aria-label="新しい回復コード" @focus="$event.target.select()"></textarea>
-            <button type="button" class="secondary-button" @click="copyRecoveryCode">回復コードをコピー</button>
-            <label class="confirmation-label">
-              <input v-model="recoverySaved" type="checkbox" required>
-              安全な場所へ保存しました
-            </label>
-          </div>
-
-          <button type="submit" class="login-button" :disabled="loading">
-            <span v-if="loading" class="loading-spinner"></span>
-            <span>{{ submitLabel }}</span>
-          </button>
 
         </form>
       </div>
@@ -99,7 +118,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import BuildInfo from '../components/BuildInfo.vue'
 import {
   acceptServerInvitation,
@@ -137,7 +156,14 @@ const loading = ref(false)
 const errorMessage = ref('')
 const infoMessage = ref('')
 const canUsePasskeys = passkeysSupported()
+const accountStep = ref('credentials')
+const compactLayout = ref(false)
+const credentialsPanel = ref(null)
+const recoveryPanel = ref(null)
+let layoutQuery = null
 
+const isAccountFlow = computed(() => !setupRequired.value && mode.value !== 'login')
+const isFinalAccountAction = computed(() => isAccountFlow.value && (!compactLayout.value || accountStep.value === 'recovery'))
 const needsNewRecovery = computed(() => setupRequired.value || mode.value === 'invite' || mode.value === 'reset')
 const pageTitle = computed(() => {
   if (setupRequired.value) return '最初の管理者を作成'
@@ -147,6 +173,7 @@ const pageTitle = computed(() => {
 })
 const submitLabel = computed(() => {
   if (loading.value) return '処理中...'
+  if (isAccountFlow.value && compactLayout.value && accountStep.value === 'credentials') return '次へ'
   if (setupRequired.value) return '管理者を作成してログイン'
   if (mode.value === 'invite') return '招待を受諾'
   if (mode.value === 'reset') return '再設定を完了'
@@ -154,7 +181,8 @@ const submitLabel = computed(() => {
 })
 
 function prepareRecoveryCode() {
-  destroySecretBytes(newRecoveryBytes.value)
+  // A late status response must not replace a code already shown or saved.
+  if (newRecoveryBytes.value) return
   const bytes = generateRecoverySecret()
   newRecoveryBytes.value = bytes
   newRecoveryCode.value = recoverySecretToCode(bytes)
@@ -175,8 +203,9 @@ function clearFormSecrets({ clearGenerated = true } = {}) {
   }
 }
 
-function setMode(nextMode, message = '') {
+function applyMode(nextMode, message = '') {
   clearFormSecrets()
+  accountStep.value = 'credentials'
   mode.value = nextMode
   errorMessage.value = ''
   infoMessage.value = message
@@ -185,10 +214,24 @@ function setMode(nextMode, message = '') {
   if (nextMode !== 'login') prepareRecoveryCode()
 }
 
+function setMode(nextMode) {
+  if (!loading.value) applyMode(nextMode)
+}
+
+function updateCompactLayout(event) {
+  compactLayout.value = event.matches
+}
+
 onMounted(async () => {
   if (isWailsMode) {
     window.location.href = '/'
     return
+  }
+  layoutQuery = window.matchMedia?.('(max-width: 56rem)') || null
+  if (layoutQuery) {
+    updateCompactLayout(layoutQuery)
+    if (layoutQuery.addEventListener) layoutQuery.addEventListener('change', updateCompactLayout)
+    else layoutQuery.addListener?.(updateCompactLayout)
   }
   try {
     const status = await getAuthStatus()
@@ -208,9 +251,14 @@ onMounted(async () => {
   }
 })
 
-onBeforeUnmount(clearFormSecrets)
+onBeforeUnmount(() => {
+  if (layoutQuery?.removeEventListener) layoutQuery.removeEventListener('change', updateCompactLayout)
+  else layoutQuery?.removeListener?.(updateCompactLayout)
+  clearFormSecrets()
+})
 
 async function copyRecoveryCode() {
+  if (loading.value) return
   try {
     await navigator.clipboard.writeText(newRecoveryCode.value)
     infoMessage.value = '回復コードをクリップボードへコピーしました。保存後はクリップボードも消去してください'
@@ -219,20 +267,66 @@ async function copyRecoveryCode() {
   }
 }
 
-function requireMatchingNewCredentials() {
-	  validateNewPassword(password.value, passwordConfirmation.value)
-	  if (!recoverySaved.value || !newRecoveryBytes.value) throw new Error('回復コードを安全な場所へ保存してください')
+// Hidden required inputs cannot rely on native form validation. Validate the
+// complete model on both Next and final submit; the server remains authoritative.
+function validateAccountInputs() {
+  if (!operationToken.value || operationToken.value.length > 4096) throw new Error('管理者から受け取ったトークンを入力してください')
+  if (mode.value === 'invite' && (!displayName.value || displayName.value.length > 120)) throw new Error('表示名を入力してください')
+  validateNewPassword(password.value, passwordConfirmation.value)
+  return mode.value === 'reset' ? recoveryCodeToSecret(currentRecoveryCode.value) : null
+}
+
+function requireSavedRecovery() {
+  if (!recoverySaved.value || !newRecoveryBytes.value) throw new Error('回復コードを安全な場所へ保存してください')
+}
+
+async function advanceToRecovery() {
+  if (loading.value) return
+  loading.value = true
+  errorMessage.value = ''
+  infoMessage.value = ''
+  let recoveryBytes = null
+  try {
+    recoveryBytes = validateAccountInputs()
+    accountStep.value = 'recovery'
+    await nextTick()
+    recoveryPanel.value?.focus()
+  } catch (error) {
+    errorMessage.value = error?.message || '入力内容を確認してください'
+  } finally {
+    destroySecretBytes(recoveryBytes)
+    loading.value = false
+  }
+}
+
+async function returnToCredentials() {
+  if (loading.value) return
+  accountStep.value = 'credentials'
+  errorMessage.value = ''
+  infoMessage.value = ''
+  await nextTick()
+  credentialsPanel.value?.querySelector('input')?.focus()
 }
 
 async function handleSubmit() {
+  if (loading.value) return
+  if (isAccountFlow.value && compactLayout.value && accountStep.value === 'credentials') {
+    await advanceToRecovery()
+    return
+  }
   loading.value = true
   errorMessage.value = ''
   infoMessage.value = ''
   let currentRecoveryBytes = null
 	let completed = false
 	try {
-	  if (setupRequired.value || mode.value !== 'login') requireMatchingNewCredentials()
-	  else validatePasswordBytes(password.value)
+    if (isAccountFlow.value) {
+      currentRecoveryBytes = validateAccountInputs()
+      requireSavedRecovery()
+    } else if (setupRequired.value) {
+      validateNewPassword(password.value, passwordConfirmation.value)
+      requireSavedRecovery()
+    } else validatePasswordBytes(password.value)
 	  if (setupRequired.value) {
       await setupInitialAdmin({
         setupToken: setupToken.value,
@@ -269,11 +363,10 @@ async function handleSubmit() {
       })
       email.value = result?.user?.email || ''
       completed = true
-      setMode('login', 'アカウントを作成しました。設定したパスワードでログインしてください')
+      applyMode('login', 'アカウントを作成しました。設定したパスワードでログインしてください')
       return
     }
 	  if (mode.value === 'reset') {
-      currentRecoveryBytes = recoveryCodeToSecret(currentRecoveryCode.value)
       await completeServerPasswordReset({
         token: operationToken.value,
         recoverySecret: currentRecoveryBytes,
@@ -281,7 +374,7 @@ async function handleSubmit() {
         newRecoverySecret: newRecoveryBytes.value
       })
       completed = true
-      setMode('login', '再設定が完了しました。新しいパスワードでログインしてください')
+      applyMode('login', '再設定が完了しました。新しいパスワードでログインしてください')
       return
     }
     await login(email.value, password.value)
@@ -289,6 +382,7 @@ async function handleSubmit() {
     completed = true
     window.location.href = '/'
   } catch (error) {
+    if (isAccountFlow.value) accountStep.value = 'credentials'
     errorMessage.value = error?.message || '操作に失敗しました'
   } finally {
     destroySecretBytes(currentRecoveryBytes)
@@ -307,6 +401,7 @@ async function handleSubmit() {
 }
 
 async function handlePasskeyLogin() {
+  if (loading.value) return
   loading.value = true
   errorMessage.value = ''
   infoMessage.value = ''
@@ -353,6 +448,30 @@ async function handlePasskeyLogin() {
 .recovery-code { width: 100%; box-sizing: border-box; resize: none; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .secondary-button { margin-top: 0.5rem; padding: 0.5rem 0.75rem; border: 1px solid #667eea; border-radius: 8px; color: #4d5fc7; background: #fff; cursor: pointer; }
 .confirmation-label { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.85rem; font-size: 0.9rem; color: #333; }
+.credentials-panel { min-width: 0; margin: 0; padding: 0; border: 0; }
+.form-actions { display: flex; align-items: stretch; gap: 0.75rem; }
+.form-actions .back-button { flex: 0 0 auto; margin-top: 0; padding-inline: 1rem; }
+
+/* Only invitation/reset pages opt out of the application's fixed-height
+   shell. The document is their single scroll owner, including with a keyboard. */
+:global(body:has(.login-root.account-flow)) { height: auto; min-height: 100vh; min-height: 100dvh; overflow: auto; }
+:global(#app:has(.login-root.account-flow)) { height: auto; min-height: 0; max-height: none; overflow: visible; }
+.login-root.account-flow { min-height: calc(100vh - 2rem); min-height: calc(100dvh - 2rem); align-items: flex-start; overflow: visible; }
+.account-flow .login-container { max-width: 960px; margin-block: auto; }
+.account-flow .account-form-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+.account-flow .credentials-panel > .form-group:last-child { margin-bottom: 0; }
+.account-flow .recovery-panel { min-width: 0; margin: 0; }
+.account-flow .recovery-code { min-height: 5rem; padding: 0.6rem; border: 1px solid rgba(102, 126, 234, 0.25); border-radius: 8px; line-height: 1.5; }
+.account-flow .form-actions { margin-top: 1.25rem; }
+.account-flow .auth-mode-tabs { grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr) minmax(0, 1.4fr); }
+.account-flow .auth-mode-tabs button { min-height: 44px; }
+
+@media (max-width: 56rem) {
+  .account-flow .login-container { max-width: 480px; padding: 0.5rem; }
+  .account-flow .login-card { padding: 1.25rem; }
+  .account-flow .account-form-layout { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .account-flow .login-header { margin-bottom: 1rem; }
+}
 .loading-spinner { display: inline-block; margin-right: 0.5rem; width: 14px; height: 14px; border: 2px solid rgba(255, 255, 255, 0.3); border-top: 2px solid #fff; border-radius: 50%; animation: spin 1s linear infinite; vertical-align: text-bottom; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @media (max-width: 480px) { .login-card { padding: 1.25rem; } .auth-mode-tabs { grid-template-columns: 1fr; } }
