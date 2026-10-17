@@ -264,9 +264,16 @@ async function verifyPersistedXSSRendering(page, addBtn) {
   await assertInert()
   await modal.locator('.cancel-btn').click()
   await expect(modal).toBeHidden()
+  // Cancelling an edit returns to the transaction details. Close that dialog
+  // through its real button before the next scenario uses the table controls.
+  await expect(details).toBeVisible()
+  await assertInert()
+  await details.getByRole('button', { name: '閉じる', exact: true }).click()
+  await expect(details).toBeHidden()
 }
 
 async function verifyTransactionTableLayout(page) {
+  await expect(page.locator('.modal-overlay')).toHaveCount(0)
   const table = page.locator('.transaction-table')
   const timedRow = table.locator('tbody tr[tabindex="0"]').filter({ hasText: ITEM_NAME })
   await expect(timedRow.locator('.transaction-time')).toHaveText('23:59:00')
