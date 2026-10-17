@@ -601,11 +601,58 @@ jobs:
       - name: Verify coordinated runtime versions
         run: node scripts/runtime-versions.mjs check
 
+  parser-fuzz:
+    name: Parser fuzz (${{ matrix.target }})
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        target: [fuzz-csv, fuzz-json, fuzz-image]
+    env:
+      GOMAXPROCS: "2"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+      - name: Fuzz bounded security parsers
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: node scripts/security-reports.mjs "$FUZZ_TARGET"
+      - name: Upload fuzz security report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-${{ matrix.target }}-${{ github.run_attempt }}
+          path: security-reports/*.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Upload failing fuzz corpus
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: parser-corpus-${{ matrix.target }}-${{ github.run_attempt }}
+          path: backend/**/testdata/fuzz/**
+          if-no-files-found: ignore
+          retention-days: 7
+
   # Keep the existing required check name, and include the auxiliary security
   # and update tests in its verdict before GitHub allows the PR to merge.
   go:
     name: Go tests
-    needs: [go-checks, safe-update, windows-security, security-automation]
+    needs: [go-checks, safe-update, windows-security, security-automation, parser-fuzz]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -617,15 +664,18 @@ jobs:
           SAFE_UPDATE_RESULT: ${{ needs.safe-update.result }}
           WINDOWS_RESULT: ${{ needs.windows-security.result }}
           SECURITY_AUTOMATION_RESULT: ${{ needs.security-automation.result }}
+          FUZZ_RESULT: ${{ needs.parser-fuzz.result }}
+          EXPECTED_FUZZ_RESULT: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'success' || 'skipped' }}
         run: |
           test "$GO_RESULT" = "$EXPECTED_GO_RESULT"
           test "$SAFE_UPDATE_RESULT" = success
           test "$WINDOWS_RESULT" = success
           test "$SECURITY_AUTOMATION_RESULT" = success
+          test "$FUZZ_RESULT" = "$EXPECTED_FUZZ_RESULT"
 
   security-issues:
     name: Report security findings
-    needs: [go-checks, frontend, docker, security-automation]
+    needs: [go-checks, frontend, docker, security-automation, parser-fuzz]
     if: >-
       ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
           && github.repository == 'ShiningWank0/Omni_Money' && needs.security-automation.result == 'success' }}

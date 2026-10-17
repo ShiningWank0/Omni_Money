@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { jsonStream, normalize, scans } from './security-reports.mjs';
+import { jsonStream, normalize, scans, fuzzReport, fuzzTargets } from './security-reports.mjs';
 import { collect, entries, render, publish, githubClient, main } from './security-issues.mjs';
 
 const runURL = 'https://github.com/ShiningWank0/Omni_Money/actions/runs/123/attempts/1';
@@ -231,7 +231,11 @@ test('PR/push/fork events cannot publish and untrusted run URLs are rejected', a
     { GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'someone/fork' },
     { GITHUB_EVENT_NAME: 'repository_dispatch', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money' },
   ]) await assert.rejects(main(env), /restricted/);
-  await assert.rejects(publish(() => assert.fail('unexpected request'), [], 'https://evil.test'), /invalid run URL/);
+  for (const url of [
+    'https://evil.test',
+    'https://github.com.evil.test/ShiningWank0/Omni_Money/actions/runs/123/attempts/1',
+    'https://evil.test/https://github.com/ShiningWank0/Omni_Money/actions/runs/123/attempts/1',
+  ]) await assert.rejects(publish(() => assert.fail('unexpected request'), [], url), /invalid run URL/);
 });
 
 test('scheduled and manual main runs publish findings through the same CLI path', t => {
@@ -357,5 +361,99 @@ test('CLI enforces failure on govulncheck JSON findings even when tool exits suc
   for (const mode of ['desktop', 'server']) {
     const r = JSON.parse(readFileSync(join(directory, `security-reports/govulncheck-${mode}.json`), 'utf8'));
     assert.equal(r.status, 'findings');
+  }
+});
+
+
+const fuzzOutput = scan => {
+  const [pkg, target] = fuzzTargets[scan];
+  const Package = `omni_money/${pkg.slice(2)}`;
+  return [
+    { Action: 'start', Package },
+    { Action: 'run', Package, Test: target },
+    { Action: 'output', Package, Test: target, Output: 'fuzz: elapsed: 3s, execs: 42 (14/sec), new interesting: 1 (total: 2)\n' },
+    { Action: 'pass', Package, Test: target },
+    { Action: 'pass', Package },
+  ].map(value => JSON.stringify(value)).join('\n');
+};
+
+test('fuzz reports fail closed without presenting parser failures as known vulnerabilities', () => {
+  for (const scan of Object.keys(fuzzTargets)) {
+    assert.deepEqual(fuzzReport(scan, 0, fuzzOutput(scan)), { schema: 1, scan, status: 'clean', findings: [] });
+    for (const code of [1, 2, null, undefined]) {
+      const report = fuzzReport(scan, code);
+      assert.equal(report.status, 'error');
+      assert.deepEqual(report.findings, []);
+      const view = render(entries([report])[0], runURL);
+      assert.match(view.title, /検査エラー/);
+      assert.deepEqual(view.body.split('\n').filter(line => line.startsWith('[検査ログ](')), [`[検査ログ](${runURL})`]);
+      assert.doesNotMatch(view.body, /CVE-/);
+    }
+  }
+  assert.throws(() => fuzzReport('../unknown', 0), /unknown fuzz target/);
+});
+
+test('missing fuzz reports create individual errors and failed downloads reject their clean results', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'omni-fuzz-reports-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  for (const scan of scans.filter(s => !Object.hasOwn(fuzzTargets, s))) {
+    writeFileSync(join(directory, `${scan}.json`), JSON.stringify({ schema: 1, scan, status: 'clean', findings: [] }));
+  }
+  assert.deepEqual(collect(directory).filter(r => r.status === 'error').map(r => r.scan).sort(), Object.keys(fuzzTargets).sort());
+  for (const scan of Object.keys(fuzzTargets)) writeFileSync(join(directory, `${scan}.json`), JSON.stringify(fuzzReport(scan, 0, fuzzOutput(scan))));
+  assert.ok(collect(directory).every(r => r.status === 'clean'));
+  assert.ok(collect(directory, false).every(r => r.status === 'error'));
+});
+
+test('required Go check rejects fuzz failure, cancellation and unexpected skips', t => {
+  const workflow = readFileSync(resolve('.github/workflows/ci.yml'), 'utf8');
+  const gate = workflow.split('      - name: Require expected Go result and successful auxiliary checks\n')[1]
+    ?.split('  security-issues:')[0];
+  const block = gate?.match(/        run: \|\n((?:          .*\n|\n)+)/)?.[1];
+  assert.ok(block, 'required-check script missing');
+  const program = block.replace(/^          /gm, '');
+  for (const expected of ['success', 'skipped']) {
+    for (const result of ['success', 'skipped', 'failure', 'cancelled', '']) {
+      const child = spawnSync('bash', ['-e', '-c', program], {
+        encoding: 'utf8', env: { ...process.env, GO_RESULT: 'success', EXPECTED_GO_RESULT: 'success',
+          SAFE_UPDATE_RESULT: 'success', WINDOWS_RESULT: 'success', SECURITY_AUTOMATION_RESULT: 'success',
+          FUZZ_RESULT: result, EXPECTED_FUZZ_RESULT: expected },
+      });
+      assert.equal(child.status === 0, result === expected, `${expected}/${result}`);
+    }
+  }
+  const fuzzJob = workflow.split('  parser-fuzz:\n')[1]?.split('  # Keep the existing required check name')[0];
+  assert.match(fuzzJob, /if: \$\{\{ github.event_name == 'schedule' \|\| github.event_name == 'workflow_dispatch' \}\}/);
+  assert.match(fuzzJob, /max-parallel: 2/);
+  assert.match(fuzzJob, /fail-fast: false/);
+  assert.match(fuzzJob, /target: \[fuzz-csv, fuzz-json, fuzz-image\]/);
+  assert.match(workflow, /needs: \[go-checks, safe-update, windows-security, security-automation, parser-fuzz\]/);
+  assert.match(workflow, /needs: \[go-checks, frontend, docker, security-automation, parser-fuzz\]/);
+  assert.match(workflow, /EXPECTED_FUZZ_RESULT: .*'schedule'.*'workflow_dispatch'.*'success' \|\| 'skipped'/);
+});
+
+
+test('zero exit without a completed matching fuzz engine never becomes a clean report', t => {
+  const scan = 'fuzz-json';
+  const valid = fuzzOutput(scan);
+  for (const output of ['', 'testing: warning: no fuzz tests to fuzz', '{}', valid.slice(0, -1),
+    valid.replaceAll('FuzzStrictServerJSONKeys', 'FuzzStaleName'),
+    valid.replaceAll('omni_money/backend/api', 'omni_money/backend/core'),
+    valid.replace('execs: 42 ', 'execs: 0 '),
+    valid.replace('"Action":"pass","Package":"omni_money/backend/api","Test"', '"Action":"skip","Package":"omni_money/backend/api","Test"')]) {
+    assert.equal(fuzzReport(scan, 0, output).status, 'error');
+  }
+  const directory = mkdtempSync(join(tmpdir(), 'omni-fuzz-cli-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  mkdirSync(join(directory, 'bin'));
+  for (const [output, expectedStatus] of [['testing: warning: no fuzz tests to fuzz', 'error'], [valid, 'clean']]) {
+    writeFileSync(join(directory, 'bin/go'), `#!${process.execPath}\nrequire('node:fs').writeFileSync('fuzz-args.json', JSON.stringify(process.argv.slice(2)));\nprocess.stdout.write(${JSON.stringify(output)});\n`, { mode: 0o755 });
+    const child = spawnSync(process.execPath, [resolve('scripts/security-reports.mjs'), scan], {
+      cwd: directory, env: { ...process.env, PATH: `${join(directory, 'bin')}:${process.env.PATH}` }, encoding: 'utf8',
+    });
+    assert.equal(child.status, expectedStatus === 'clean' ? 0 : 1);
+    assert.equal(JSON.parse(readFileSync(join(directory, `security-reports/${scan}.json`), 'utf8')).status, expectedStatus);
+    assert.deepEqual(JSON.parse(readFileSync(join(directory, 'fuzz-args.json'), 'utf8')),
+      ['test', '-json', '-run=^$', '-fuzz=^FuzzStrictServerJSONKeys$', '-fuzztime=120s', '-fuzzminimizetime=10s', '-parallel=1', '-timeout=4m', './backend/api']);
   }
 });
