@@ -1933,11 +1933,69 @@ body {
     width: 100%;
     overflow: auto;
     scrollbar-gutter: stable;
+    container-name: transaction-list;
+    container-type: inline-size;
 }
 
 .transaction-table {
-    min-width: 640px;
+    table-layout: auto;
+    min-width: 0;
     color: var(--omni-text);
+}
+
+/* Native table layout shares each intrinsic column width across every row.
+   Compact columns fit their unbroken content; the item absorbs spare space.
+   No per-row measurements or resize-driven JavaScript are needed. */
+.transaction-table .compact-column {
+    width: 1%;
+}
+
+.transaction-table .item-column {
+    width: 100%;
+}
+
+.transaction-table .item-cell {
+    min-width: 12ch;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.transaction-table .fund-item-cell {
+    white-space: nowrap;
+}
+
+.transaction-datetime {
+    white-space: nowrap;
+}
+
+.transaction-date,
+.transaction-time {
+    display: inline-block;
+    white-space: nowrap;
+}
+
+.transaction-time {
+    display: var(--transaction-time-display, inline-block);
+}
+
+.transaction-time:empty {
+    display: none;
+}
+
+@container transaction-list (max-width: 48rem) {
+    .transaction-table {
+        --transaction-time-display: block;
+    }
+}
+
+/* Older desktop WebViews without container queries still respond to a
+   narrow window; current browsers use the actual table viewport above. */
+@supports not (container-type: inline-size) {
+    @media (max-width: 48rem) {
+        .transaction-table {
+            --transaction-time-display: block;
+        }
+    }
 }
 
 .transaction-table thead th {
@@ -2181,10 +2239,6 @@ textarea:focus-visible,
         font-size: clamp(2rem, 10vw, 2.65rem);
     }
 
-    .transaction-table {
-        min-width: 620px;
-    }
-
     .transaction-table thead th,
     .transaction-table td {
         padding: 0.7rem 0.85rem;
@@ -2225,9 +2279,6 @@ textarea:focus-visible,
         padding-inline: 0.65rem;
     }
 
-    .transaction-table {
-        min-width: 580px;
-    }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -620,6 +620,36 @@ it('keeps signed amount styling tied to transaction type and excludes credit car
   expect(sortedRows[2].get('.income-cell').text()).toBe('+¥1,000')
 })
 
+it('preserves date/time precision and column alignment roles with four or five columns', async () => {
+  api.getAccounts.mockResolvedValueOnce(['cash', 'bank'])
+  const wrapper = await mountTransactionApp([
+    { ...existingTransaction, id: 10, date: '2026-12-31 23:59:59', type: 'income', amount: 1000000000, balance: 1000000000 },
+    { ...existingTransaction, id: 9, date: '2026-12-30 00:00:00' },
+    { ...existingTransaction, id: 8, date: '2026-12-29' }
+  ])
+  const rows = wrapper.findAll('.transaction-table tbody tr')
+  expect(rows[0].get('.transaction-date').text()).toBe('2026-12-31')
+  expect(rows[0].get('.transaction-time').text()).toBe('23:59:59')
+  expect(rows[0].attributes('aria-label')).toContain('2026-12-31 23:59:59')
+  expect(rows[0].get('.income-cell').text()).toBe('+¥1,000,000,000')
+  expect(rows[0].findAll('.numeric-cell').at(-1).text()).toBe('¥1,000,000,000')
+  expect(rows[1].get('.transaction-date').text()).toBe('2026-12-30')
+  expect(rows[1].get('.transaction-time').text()).toBe('')
+  expect(rows[1].attributes('aria-label')).not.toContain('00:00:00')
+  expect(rows[2].get('.transaction-date').text()).toBe('2026-12-29')
+  expect(rows[2].get('.transaction-time').text()).toBe('')
+  for (const [selection, columns] of [[['cash', 'bank'], 5], [['cash'], 4]]) {
+    useAppStore().selectedFundItems = selection
+    await flushPromises()
+    expect(wrapper.findAll('colgroup col')).toHaveLength(columns)
+    expect(wrapper.findAll('thead th')).toHaveLength(columns)
+    for (const row of wrapper.findAll('.transaction-table tbody tr')) {
+      expect(row.findAll('td')).toHaveLength(columns)
+    }
+  }
+  wrapper.unmount()
+})
+
 it('keeps all server menu actions in the scroll area and logout in a separate footer', async () => {
   api.getAuthStatus.mockResolvedValueOnce({
     authenticated: true, idle_timeout_seconds: 0,
