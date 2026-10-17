@@ -4,7 +4,7 @@ import { relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const scans = ['npm', 'gosec-desktop', 'gosec-server', 'govulncheck-desktop', 'govulncheck-server', 'trivy'];
+export const scans = ['npm', 'gosec-desktop', 'gosec-server', 'govulncheck-desktop', 'govulncheck-server', 'trivy', 'fuzz-csv', 'fuzz-json', 'fuzz-image'];
 export const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const requireValue = (condition, message) => { if (!condition) throw new Error(message); };
 const high = value => ['HIGH', 'CRITICAL'].includes(String(value).toUpperCase());
@@ -132,7 +132,44 @@ function save(report) {
   return report.status !== 'clean';
 }
 
+// Fixed target selection keeps workflow matrix data out of shell commands.
+export const fuzzTargets = {
+  'fuzz-csv': ['./backend/core', 'FuzzCSVFieldLimitReader'],
+  'fuzz-json': ['./backend/api', 'FuzzStrictServerJSONKeys'],
+  'fuzz-image': ['./backend/core', 'FuzzImageContainer'],
+};
+
+export function fuzzReport(scan, exitCode, output = '') {
+  requireValue(Object.hasOwn(fuzzTargets, scan), 'unknown fuzz target');
+  let completed = false;
+  try {
+    const [pkg, target] = fuzzTargets[scan];
+    const packageName = `omni_money/${pkg.slice(2)}`;
+    const events = output.trim().split('\n').map(line => JSON.parse(line));
+    const matches = event => event.Package === packageName && event.Test === target;
+    const run = events.findIndex(event => matches(event) && event.Action === 'run');
+    const pass = events.findIndex(event => matches(event) && event.Action === 'pass');
+    const packagePass = events.findIndex(event => event.Package === packageName && !event.Test && event.Action === 'pass');
+    completed = run >= 0 && pass > run && packagePass > pass &&
+      !events.some(event => event.Action === 'fail' || event.Action === 'skip') &&
+      events.some(event => matches(event) && event.Action === 'output' &&
+        /fuzz: elapsed: .*execs: [1-9][0-9]* /.test(event.Output));
+  } catch { /* Missing, malformed or truncated events must fail closed. */ }
+  const clean = exitCode === 0 && completed;
+  return { schema: 1, scan, status: clean ? 'clean' : 'error', findings: [],
+    ...(clean ? {} : { error: 'Fuzz試験が失敗、または完了しませんでした。再現corpusと実行ログを確認してください。' }) };
+}
+
 function run(tool) {
+  if (Object.hasOwn(fuzzTargets, tool)) {
+    const [pkg, target] = fuzzTargets[tool];
+    const result = spawnSync('go', ['test', '-json', '-run=^$', `-fuzz=^${target}$`, '-fuzztime=120s', '-fuzzminimizetime=10s', '-parallel=1', '-timeout=4m', pkg], {
+      encoding: 'utf8', timeout: 6 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, shell: false,
+    });
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+    return save(fuzzReport(tool, result.error ? null : result.status, result.stdout || ''));
+  }
   if (tool === 'trivy') {
     let raw = '';
     try { raw = readFileSync('trivy-report.json', 'utf8'); } catch { /* recorded as an error */ }
