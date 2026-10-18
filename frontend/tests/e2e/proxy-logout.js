@@ -37,7 +37,8 @@ export async function verifyLogoutBehindProxy(page) {
     await page.locator('#side-menu').getByRole('button', { name: 'ログアウト', exact: true }).click()
     const response = await responsePromise
     expect(response.status()).toBe(200)
-    expect(response.headers()['clear-site-data']).toBe('"cache", "storage"')
+    // headers() omits security-related headers; read the complete response.
+    expect(await response.headerValue('clear-site-data')).toBe('"cache", "storage"')
     await page.waitForURL(url => url.pathname === '/login')
     await expect(page.locator('#email')).toBeVisible()
     await expect(page.getByRole('button', { name: 'ログアウトを再試行' })).toHaveCount(0)
