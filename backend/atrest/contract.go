@@ -19,10 +19,6 @@ import (
 const (
 	ModeExternalEncryptedVolume = "external-encrypted-volume"
 	maxAttestationBytes         = 16 * 1024
-	verificationMaxAge          = 31 * 24 * time.Hour
-	recoveryTestMaxAge          = 185 * 24 * time.Hour
-	rotationPlanMaxHorizon      = 400 * 24 * time.Hour
-	clockSkewAllowance          = 5 * time.Minute
 )
 
 var (
@@ -31,14 +27,16 @@ var (
 )
 
 type attestationDocument struct {
-	Version          int       `json:"version"`
-	Protection       string    `json:"protection"`
-	Provider         string    `json:"provider"`
-	DataRoot         string    `json:"data_root"`
-	KeyID            string    `json:"key_id"`
-	VerifiedAt       time.Time `json:"verified_at"`
-	RecoveryTestedAt time.Time `json:"recovery_tested_at"`
-	NextRotationAt   time.Time `json:"next_rotation_at"`
+	Version    int    `json:"version"`
+	Protection string `json:"protection"`
+	Provider   string `json:"provider"`
+	DataRoot   string `json:"data_root"`
+	KeyID      string `json:"key_id"`
+	// Optional operational records are accepted for existing deployments, but
+	// do not establish storage protection or determine whether the server starts.
+	VerifiedAt       time.Time `json:"verified_at,omitzero"`
+	RecoveryTestedAt time.Time `json:"recovery_tested_at,omitzero"`
+	NextRotationAt   time.Time `json:"next_rotation_at,omitzero"`
 }
 
 // Status contains only non-secret metadata that is safe to log.
@@ -51,11 +49,12 @@ type Status struct {
 	NextRotationAt   time.Time
 }
 
-// RequireServerProtection fails closed unless a fresh, integrity-protected
+// RequireServerProtection fails closed unless an integrity-protected
 // attestation binds the configured database to an externally encrypted volume.
 // The attestation records an operator verification; it is not cryptographic
-// proof that the host storage is encrypted.
-func RequireServerProtection(dbPath, mode, attestationPath string, now time.Time) (Status, error) {
+// proof that the host storage is encrypted. Operational dates are not startup
+// requirements, including on the first deployment and after a restart.
+func RequireServerProtection(dbPath, mode, attestationPath string) (Status, error) {
 	if strings.TrimSpace(mode) != ModeExternalEncryptedVolume {
 		return Status{}, fmt.Errorf("DATA_AT_REST_MODE must be %q", ModeExternalEncryptedVolume)
 	}
@@ -138,22 +137,6 @@ func RequireServerProtection(dbPath, mode, attestationPath string, now time.Time
 	}
 	if pathContains(filepath.Clean(resolvedRoot), filepath.Clean(resolvedAttestation)) {
 		return Status{}, errors.New("attestation must be stored outside the financial data root")
-	}
-	if now.IsZero() {
-		return Status{}, errors.New("current time is required")
-	}
-	now = now.UTC()
-	if err := validatePastTimestamp("verified_at", document.VerifiedAt, now, verificationMaxAge); err != nil {
-		return Status{}, err
-	}
-	if err := validatePastTimestamp("recovery_tested_at", document.RecoveryTestedAt, now, recoveryTestMaxAge); err != nil {
-		return Status{}, err
-	}
-	if document.NextRotationAt.IsZero() || !document.NextRotationAt.After(now) {
-		return Status{}, errors.New("next_rotation_at must be in the future")
-	}
-	if document.NextRotationAt.After(now.Add(rotationPlanMaxHorizon)) {
-		return Status{}, errors.New("next_rotation_at is too far in the future")
 	}
 	return Status{
 		Provider:         document.Provider,
@@ -251,20 +234,6 @@ func validateDataPath(dataRoot, candidate string) error {
 		if info.Mode().Perm()&0o022 != 0 {
 			return fmt.Errorf("DB_PATH component must not be writable by group or other users: %04o", info.Mode().Perm())
 		}
-	}
-	return nil
-}
-
-func validatePastTimestamp(name string, value, now time.Time, maxAge time.Duration) error {
-	if value.IsZero() {
-		return fmt.Errorf("%s is required", name)
-	}
-	value = value.UTC()
-	if value.After(now.Add(clockSkewAllowance)) {
-		return fmt.Errorf("%s is in the future", name)
-	}
-	if value.Before(now.Add(-maxAge)) {
-		return fmt.Errorf("%s is stale", name)
 	}
 	return nil
 }

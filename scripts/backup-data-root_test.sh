@@ -79,6 +79,12 @@ assert_no_file() {
   fi
 }
 
+assert_mode() {
+  local path="$1" expected="$2" actual
+  actual="$(perl -e 'printf "%o", (stat shift)[2] & 0777' "$path")"
+  assert_eq "private permissions for $path" "$expected" "$actual"
+}
+
 new_fixture() {
   fixture_root="$test_root/$1"
   mock_bin="$fixture_root/mock-bin"
@@ -210,11 +216,13 @@ newest_generation() {
   ls -1 "$1" 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}Z$' | sort -r | head -n 1
 }
 
-invoke_backup() {
+invoke_backup() (
+  # Output permissions must be private even with a permissive caller umask.
+  umask 000
   timeout_wrap 120 env PATH="$mock_bin:$PATH" MOCK_SCENARIO="$MOCK_SCENARIO" \
     MOCK_DATA="$MOCK_DATA" MOCK_STATE_DIR="$MOCK_STATE_DIR" \
     bash "$BACKUP_SCRIPT" "$@"
-}
+)
 
 run_case() {
   local name="$1" expected="$2" status
@@ -244,6 +252,7 @@ run_case() {
 scenario_success() {
   new_fixture success
   build_mocks
+  printf 'issue-62-control-key-must-stay-outside-backups' > "$MOCK_CONTROL_KEY"
   mkdir -p "$MOCK_DATA/vaults/VaultLedger02"
   { printf '\005\006'; head -c 62 /dev/urandom; } > "$MOCK_DATA/vaults/VaultLedger02/ledger.db"
   chmod 600 "$MOCK_DATA/vaults/VaultLedger02/ledger.db"
@@ -261,6 +270,15 @@ post_success() {
   assert_file "$dir/data.tar"
   assert_file "$dir/data.tar.sha256"
   assert_file "$dir/manifest.json"
+  assert_mode "$fixture_root/omni-money-backups" 700
+  assert_mode "$dir" 700
+  for artifact in data.tar data.tar.sha256 manifest.json; do
+    assert_mode "$dir/$artifact" 600
+    if grep -aFq 'issue-62-control-key-must-stay-outside-backups' "$dir/$artifact"; then
+      echo "FAIL: backup artifact contains the separate control key" >&2
+      FAILURES=$((FAILURES + 1))
+    fi
+  done
   assert_eq "service restarted" "running" "$(cat "$mock_state/status")"
   assert_eq "health still healthy" "healthy" "$(cat "$mock_state/health")"
   ( cd "$dir" && sha256sum --check --strict data.tar.sha256 >/dev/null ) \
@@ -400,6 +418,8 @@ scenario_keep_prunes_oldest() {
   mkdir -p "$fixture_root/omni-money-backups/20240101T000000Z" \
            "$fixture_root/omni-money-backups/20240102T000000Z" \
            "$fixture_root/omni-money-backups/20240103T000000Z"
+  mkdir -p "$fixture_root/omni-money-backups/unrelated-data"
+  printf 'retain unrelated files' > "$fixture_root/omni-money-backups/unrelated-data/keep.txt"
   head -c 8 /dev/urandom > "$fixture_root/omni-money-backups/20240101T000000Z/data.tar"
   head -c 8 /dev/urandom > "$fixture_root/omni-money-backups/20240102T000000Z/data.tar"
   head -c 8 /dev/urandom > "$fixture_root/omni-money-backups/20240103T000000Z/data.tar"
@@ -407,6 +427,7 @@ scenario_keep_prunes_oldest() {
 
 post_keep_prunes_oldest() {
   local backups="$fixture_root/omni-money-backups"
+  assert_eq "retention preserves unrelated files" "retain unrelated files" "$(cat "$backups/unrelated-data/keep.txt")"
   [ -d "$backups/20240103T000000Z" ] \
     || { echo "FAIL: newest old generation should be retained" >&2; FAILURES=$((FAILURES + 1)); }
   [ -d "$backups/20240102T000000Z" ] \

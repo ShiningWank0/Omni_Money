@@ -69,29 +69,17 @@ admin_password_file="$tmp_dir/admin_password"
 mkdir -m 700 -p "$data_dir"
 
 # --- per-run credentials (never echoed, never passed as arguments) ----------
-# Cross-platform UTC date arithmetic: BSD date uses -v, GNU date uses -d.
-iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-iso_future() {
-  if date -u -v+1d +%F >/dev/null 2>&1; then
-    date -u -v+"$1"d +%Y-%m-%dT%H:%M:%SZ
-  else
-    date -u -d "+$1 days" +%Y-%m-%dT%H:%M:%SZ
-  fi
-}
 base64url_32_bytes() {
   head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n'
 }
 
-cat > "$attestation_file" <<EOF
+cat > "$attestation_file" <<'EOF'
 {
   "version": 1,
   "protection": "external-encrypted-volume",
   "provider": "e2e-ephemeral-volume",
   "data_root": "/app/data",
-  "key_id": "e2e-ephemeral-volume-2026",
-  "verified_at": "$(iso_now)",
-  "recovery_tested_at": "$(iso_now)",
-  "next_rotation_at": "$(iso_future 180)"
+  "key_id": "e2e-ephemeral-volume-2026"
 }
 EOF
 base64_32_bytes="$(head -c 32 /dev/urandom | base64)"

@@ -464,18 +464,12 @@ jobs:
           sudo chown 10001:10001 "$runtime_data"
           jq -n \
             --arg data_root "/app/data" \
-            --arg verified_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg recovery_tested_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg next_rotation_at "$(date -u -d '+180 days' +%Y-%m-%dT%H:%M:%SZ)" \
             '{
               version: 1,
               protection: "external-encrypted-volume",
               provider: "ci-ephemeral-volume",
               data_root: $data_root,
-              key_id: "ci-ephemeral-volume-2026",
-              verified_at: $verified_at,
-              recovery_tested_at: $recovery_tested_at,
-              next_rotation_at: $next_rotation_at
+              key_id: "ci-ephemeral-volume-2026"
             }' > "$attestation_file"
           head -c 32 /dev/urandom | base64 > "$control_key_file"
           head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n' > "$setup_token_file"

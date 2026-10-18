@@ -101,7 +101,6 @@ func newServerRuntime(
 		serverConfig.ControlDBPath,
 		serverConfig.DataAtRestMode,
 		serverConfig.DataAtRestAttestationFile,
-		time.Now(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("control DBの保存時保護contractが無効です: %w", err)
@@ -270,7 +269,6 @@ func validateVaultPlacement(root string, status atrest.Status, serverConfig conf
 		probe,
 		serverConfig.DataAtRestMode,
 		serverConfig.DataAtRestAttestationFile,
-		time.Now(),
 	)
 	if err != nil {
 		return fmt.Errorf("vault rootの保存時保護contractが無効です: %w", err)

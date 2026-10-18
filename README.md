@@ -143,7 +143,7 @@ cd ..
 
 デスクトップモードでは、SQLite データベースは OS 標準のアプリケーションデータディレクトリに保存されます。
 
-DesktopとserverのDB、WAL、snapshotはSQLCipher 4.18.0で暗号化し、所有者だけが読み書きできる権限で作成します。SQLCipherが不足・不正な場合は平文DBへfallbackせず、DBを開く前に起動を拒否します。DesktopのCSV exportは平文のため、暗号化済みvolumeへ保存してください。server modeはさらに外部暗号化volumeの期限付きattestationも検証します。鍵の作成と復旧は[SQLCipher鍵の運用](docs/sqlcipher-key-operations.md)、volumeの設定と復旧試験は[保存時暗号化volumeの運用contract](docs/at-rest-encryption.md)を参照してください。FileVault、BitLocker、LUKSもdefense in depthとして有効にしてください。
+DesktopとserverのDB、WAL、snapshotはSQLCipher 4.18.0で暗号化し、所有者だけが読み書きできる権限で作成します。SQLCipherが不足・不正な場合は平文DBへfallbackせず、DBを開く前に起動を拒否します。DesktopのCSV exportは平文のため、暗号化済みvolumeへ保存してください。server modeはさらに外部暗号化volumeのattestationと保存先・権限も検証します。鍵の作成と復旧は[SQLCipher鍵の運用](docs/sqlcipher-key-operations.md)、volumeの設定と復旧試験は[保存時暗号化volumeの運用contract](docs/at-rest-encryption.md)を参照してください。FileVault、BitLocker、LUKSもdefense in depthとして有効にしてください。
 
 - macOS: `~/Library/Application Support/OmniMoney/vaults/<vault-id>/omni_money.db`
 - Windows: `%APPDATA%/OmniMoney/vaults/<vault-id>/omni_money.db`
