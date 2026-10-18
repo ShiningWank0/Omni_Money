@@ -102,6 +102,8 @@
             <label>紐付け:</label>
             <div class="link-section">
               <div class="link-hint">{{ linkHint }}</div>
+              <p v-if="linkLoading" class="linked-empty" role="status">紐付けを読み込んでいます…</p>
+              <p v-if="legacyLinkConflict" class="link-conflict" role="status">紐付けの組み合わせを確認してください。</p>
               <div v-if="linkedTransactions.length > 0" class="linked-list">
                 <div v-for="lt in linkedTransactions" :key="lt.id" class="linked-item">
                   <div class="linked-info">
@@ -116,11 +118,11 @@
                 </div>
               </div>
               <div v-else class="linked-empty">紐付けされた取引はありません</div>
-              <div v-if="canSearchLinks" class="link-search-row">
+              <div v-if="canAddMoreLinks" class="link-search-row">
                 <input type="text" v-model="linkSearchQuery" placeholder="取引を検索して紐付け..."
                   class="link-search-input" @input="onLinkSearch" @focus="showLinkResults = true">
               </div>
-              <div v-if="canSearchLinks && showLinkResults && linkSearchResults.length > 0" class="link-search-results">
+              <div v-if="canAddMoreLinks && showLinkResults && linkSearchResults.length > 0" class="link-search-results">
                 <div v-for="sr in linkSearchResults" :key="sr.id" class="link-search-item" @click="linkTransaction(sr)">
                   <span class="linked-date">{{ sr.date }}</span>
                   <span class="linked-account">{{ sr.fundItem || sr.account }}</span>
@@ -130,6 +132,12 @@
                   </span>
                 </div>
               </div>
+              <p v-if="checkingLink" class="linked-empty" role="status">紐付け先を確認しています…</p>
+              <p v-if="linkError" class="link-conflict" role="alert">{{ linkError }}</p>
+              <CardReconciliationPanel v-for="group in reconciliationGroups" :key="group.bank.id"
+                :bank="group.bank" :cards="group.cards" :loading="group.loading" :error="group.error"
+                :credit-card-items="creditCardItems" :bank-account-items="bankAccountItems"
+                @retry="loadBankReconciliation(group.bank.id, true)" />
             </div>
           </div>
           </div>
@@ -203,9 +211,11 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { getTags, getTransactionLinks, getTransactions, getTransactionImages, isWailsMode } from '../utils/api'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { getTags, getTransactionLinks, getCardReconciliation, getTransactions, getTransactionImages, isWailsMode } from '../utils/api'
 import { formatExactInteger } from '../utils/exactAmount'
+import { ledgerAccountRole, transactionAccount } from '../utils/cardReconciliation.js'
+import CardReconciliationPanel from './CardReconciliationPanel.vue'
 
 const MAX_TRANSACTION_AMOUNT = 1_000_000_000
 
@@ -259,10 +269,16 @@ const isNewItem = computed(() => {
 })
 
 const currentFundItem = computed(() => form.value.fundItem || props.transaction?.account || props.transaction?.fundItem || '')
-const isCurrentCreditCard = computed(() => props.creditCardItems.includes(currentFundItem.value))
-const isCurrentBankAccount = computed(() => props.bankAccountItems.includes(currentFundItem.value))
+const currentLinkRole = computed(() => ledgerAccountRole(currentFundItem.value, props.creditCardItems, props.bankAccountItems))
+const isCurrentCreditCard = computed(() => currentLinkRole.value === 'card')
+const isCurrentBankAccount = computed(() => currentLinkRole.value === 'bank')
 const canSearchLinks = computed(() => isCurrentCreditCard.value || isCurrentBankAccount.value)
 const showLinkSection = computed(() => props.isEditMode && props.transaction?.id && (canSearchLinks.value || linkedTransactions.value.length > 0))
+const bankLinks = computed(() => linkedTransactions.value.filter(tx => roleOf(tx) === 'bank'))
+const canAddMoreLinks = computed(() => canSearchLinks.value && !linkLoading.value && !checkingLink.value &&
+  (!isCurrentCreditCard.value || bankLinks.value.length === 0))
+const legacyLinkConflict = computed(() => (isCurrentCreditCard.value && bankLinks.value.length > 1) ||
+  linkedTransactions.value.some(tx => !isLinkCounterpart(tx)))
 const linkHint = computed(() => {
   if (isCurrentCreditCard.value) return '銀行口座項目の引き落とし取引だけを紐付けできます'
   if (isCurrentBankAccount.value) return 'クレジットカード項目の支払い取引だけを紐付けできます'
@@ -373,13 +389,86 @@ const pendingLinkRemoveIDs = ref([])
 const linkSearchQuery = ref('')
 const linkSearchResults = ref([])
 const showLinkResults = ref(false)
+const linkLoading = ref(!!props.isEditMode)
+const checkingLink = ref(false)
+const linkError = ref('')
+const bankReconciliations = ref({})
 let linkSearchTimer = null
+let linkSearchRequest = 0
+let bankReconciliationRequest = 0
+
+function roleOf(transaction) {
+  return ledgerAccountRole(transactionAccount(transaction), props.creditCardItems, props.bankAccountItems)
+}
+
+const draftTransaction = computed(() => ({
+  ...props.transaction,
+  account: currentFundItem.value,
+  fundItem: currentFundItem.value,
+  item: form.value.item,
+  date: form.value.date,
+  type: form.value.type,
+  amount_exact: form.value.amount || '0'
+}))
+
+const reconciliationGroups = computed(() => {
+  if (!props.isEditMode) return []
+  if (isCurrentBankAccount.value && linkedTransactions.value.length > 0) {
+    const state = bankReconciliations.value[props.transaction.id]
+    const details = new Map((state?.data?.cards ?? []).map(card => [card.id, card]))
+    return [{
+      bank: draftTransaction.value,
+      cards: linkedTransactions.value.map(card => ({ ...card, linked_bank_ids: card.linked_bank_ids ?? details.get(card.id)?.linked_bank_ids })),
+      loading: !state || state.loading,
+      error: state?.error ?? false
+    }]
+  }
+  if (!isCurrentCreditCard.value) return []
+  return bankLinks.value.map(bank => {
+    const state = bankReconciliations.value[bank.id]
+    const cards = (state?.data?.cards ?? []).filter(card => card.id !== props.transaction.id)
+    cards.push({ ...draftTransaction.value, linked_bank_ids: bankLinks.value.map(link => link.id) })
+    return { bank: state?.data?.bank ?? bank, cards, loading: !state || state.loading, error: state?.error ?? false }
+  })
+})
+
+async function loadBankReconciliation(bankID, force = false) {
+  if (!force && bankReconciliations.value[bankID]) return
+  const request = ++bankReconciliationRequest
+  bankReconciliations.value[bankID] = { request, loading: true, error: false }
+  try {
+    const data = await getCardReconciliation(bankID)
+    if (!active || bankReconciliations.value[bankID]?.request !== request) return
+    bankReconciliations.value[bankID] = { request, data, loading: false, error: !data.applicable }
+  } catch {
+    if (active && bankReconciliations.value[bankID]?.request === request) {
+      bankReconciliations.value[bankID] = { request, loading: false, error: true }
+    }
+  }
+}
+
+function loadVisibleReconciliations() {
+  if (isCurrentBankAccount.value) loadBankReconciliation(props.transaction.id)
+  else if (isCurrentCreditCard.value) bankLinks.value.forEach(bank => loadBankReconciliation(bank.id))
+}
+
+watch(currentFundItem, () => {
+  clearTimeout(linkSearchTimer)
+  linkSearchRequest++
+  linkSearchResults.value = []
+  linkError.value = ''
+  if (!linkLoading.value && props.isEditMode) loadVisibleReconciliations()
+})
 
 async function loadLinkedTransactions() {
   if (!props.isEditMode || !props.transaction?.id) return
   try {
     const links = await getTransactionLinks(props.transaction.id)
-    if (active) linkedTransactions.value = links
+    if (active) {
+      linkedTransactions.value = links
+      linkLoading.value = false
+      loadVisibleReconciliations()
+    }
   } catch (e) {
     if (active) formError.value = '紐付け一覧の取得に失敗しました: ' + e.message
   }
@@ -387,6 +476,8 @@ async function loadLinkedTransactions() {
 
 function onLinkSearch() {
   clearTimeout(linkSearchTimer)
+  const request = ++linkSearchRequest
+  const query = linkSearchQuery.value.trim()
   if (!linkSearchQuery.value.trim()) {
     linkSearchResults.value = []
     showLinkResults.value = false
@@ -394,8 +485,8 @@ function onLinkSearch() {
   }
   linkSearchTimer = setTimeout(async () => {
     try {
-      const all = await getTransactions('', linkSearchQuery.value.trim())
-      if (!active) return
+      const all = await getTransactions('', query)
+      if (!active || request !== linkSearchRequest || !canAddMoreLinks.value) return
       const currentId = props.transaction?.id
       const linkedIds = new Set(linkedTransactions.value.map(lt => lt.id))
       linkSearchResults.value = (all || [])
@@ -404,7 +495,7 @@ function onLinkSearch() {
         .slice(0, 10)
       showLinkResults.value = true
     } catch (e) {
-      if (active) {
+      if (active && request === linkSearchRequest) {
         formError.value = '紐付け候補の検索に失敗しました: ' + e.message
         showLinkResults.value = false
       }
@@ -413,17 +504,38 @@ function onLinkSearch() {
 }
 
 function isLinkCounterpart(tx) {
-  const account = tx.account || tx.fundItem || ''
   if (isCurrentCreditCard.value) {
-    return props.bankAccountItems.includes(account)
+    return roleOf(tx) === 'bank'
   }
   if (isCurrentBankAccount.value) {
-    return props.creditCardItems.includes(account)
+    return roleOf(tx) === 'card'
   }
   return false
 }
 
-function linkTransaction(tx) {
+async function linkTransaction(tx) {
+  if (!canAddMoreLinks.value || !isLinkCounterpart(tx) || linkedTransactions.value.some(link => link.id === tx.id)) return
+  linkError.value = ''
+  if (isCurrentBankAccount.value) {
+    const account = currentFundItem.value
+    checkingLink.value = true
+    try {
+      const existing = await getTransactionLinks(tx.id)
+      if (!active || account !== currentFundItem.value) return
+      const banks = existing.filter(link => roleOf(link) === 'bank').map(link => link.id)
+      if (banks.some(id => id !== props.transaction.id)) {
+        linkError.value = 'このクレカ取引は別の銀行取引に紐付いています。先に紐付けを解除してください。'
+        return
+      }
+      tx = { ...tx, linked_bank_ids: [...new Set([...banks, props.transaction.id])] }
+    } catch {
+      if (active) linkError.value = 'クレカ取引の紐付け先を確認できませんでした。'
+      return
+    } finally {
+      if (active) checkingLink.value = false
+    }
+  }
+  if (!active) return
   if (pendingLinkRemoveIDs.value.includes(tx.id)) {
     pendingLinkRemoveIDs.value = pendingLinkRemoveIDs.value.filter(id => id !== tx.id)
   } else if (!pendingLinkAddIDs.value.includes(tx.id)) {
@@ -433,9 +545,14 @@ function linkTransaction(tx) {
   linkSearchQuery.value = ''
   linkSearchResults.value = []
   showLinkResults.value = false
+  linkSearchRequest++
+  loadVisibleReconciliations()
 }
 
 function unlinkTransaction(linkedId) {
+  linkSearchRequest++
+  linkSearchResults.value = []
+  linkError.value = ''
   linkedTransactions.value = linkedTransactions.value.filter(link => link.id !== linkedId)
   if (pendingLinkAddIDs.value.includes(linkedId)) {
     pendingLinkAddIDs.value = pendingLinkAddIDs.value.filter(id => id !== linkedId)
@@ -578,6 +695,10 @@ function removeImage(index) {
 
 function handleSubmit() {
   if (props.busy) return
+  if (checkingLink.value) {
+    formError.value = '紐付け先の確認が完了してから更新してください'
+    return
+  }
   if (props.isEditMode && (imagesLoading.value || imagesError.value)) {
     formError.value = '保存済み画像の読み込みが完了してから更新してください'
     return
@@ -667,6 +788,7 @@ onBeforeUnmount(() => {
   selectedTags.value = []
   linkedTransactions.value = []
   linkSearchResults.value = []
+  bankReconciliations.value = {}
   form.value = { date: '', time: '', fundItem: '', type: 'expense', item: '', amount: '', memo: '' }
 })
 </script>
@@ -918,6 +1040,7 @@ onBeforeUnmount(() => {
 }
 
 /* 取引紐付け (Agent.md §6.2) */
+.link-conflict { color: #845e17; font-size: .85rem; margin: .35rem 0; }
 .link-section {
   display: flex;
   flex-direction: column;

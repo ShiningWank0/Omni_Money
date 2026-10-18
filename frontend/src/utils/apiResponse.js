@@ -25,6 +25,10 @@ export const schema = {
   transactions: arrayOf(transaction),
   transaction,
   transactionResult: value => record(value) && transaction(value.transaction),
+  cardReconciliation: value => record(value) && typeof value.applicable === 'boolean' && transaction(value.bank) &&
+    arrayOf(card => transaction(card) && (card.linked_bank_ids == null || arrayOf(isID)(card.linked_bank_ids)))(value.cards) &&
+    typeof value.matched === 'boolean' && typeof value.has_conflicts === 'boolean' &&
+    (!value.applicable || ['card_total_exact', 'bank_amount_exact', 'difference_exact'].every(key => typeof value[key] === 'string' && /^-?\d+$/.test(value[key]))),
   tags: arrayOf(tag), tag,
   records: arrayOf(identified),
   auth: value => record(value) && typeof value.authenticated === 'boolean',
