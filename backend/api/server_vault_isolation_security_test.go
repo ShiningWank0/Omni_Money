@@ -135,6 +135,7 @@ func TestProductionServerSecurityFinancialIDsStayInsideSessionVault(t *testing.T
 		"/api/credit_card_settings", "/api/bank_account_settings",
 		fmt.Sprintf("/api/transaction_images/%d", txID), fmt.Sprintf("/api/transaction_images/%d?paged=1&limit=1", txID),
 		fmt.Sprintf("/api/transaction_tags/%d", txID), fmt.Sprintf("/api/transaction_links/%d", txID),
+		fmt.Sprintf("/api/transaction_links/%d/reconciliation", bankID),
 	}
 	for i, session := range logins {
 		for _, path := range readPaths {

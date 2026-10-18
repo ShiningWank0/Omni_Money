@@ -110,6 +110,10 @@ export function GetTransactionLinks(arg1) {
   return window['go']['main']['App']['GetTransactionLinks'](arg1);
 }
 
+export function GetCardReconciliation(arg1) {
+  return window['go']['main']['App']['GetCardReconciliation'](arg1);
+}
+
 export function GetTransactionTags(arg1) {
   return window['go']['main']['App']['GetTransactionTags'](arg1);
 }

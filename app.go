@@ -826,6 +826,15 @@ func (a *App) GetTagSummary(txType, startDate, endDate string) ([]models.TagSumm
 
 // --- Transaction links ---
 
+func (a *App) GetCardReconciliation(bankID int64) (*models.CardReconciliationResponse, error) {
+	service, release, err := a.borrowService()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return service.GetCardReconciliation(bankID)
+}
+
 func (a *App) GetTransactionLinks(transactionID int64) ([]models.LinkedTransactionResponse, error) {
 	service, release, err := a.borrowService()
 	if err != nil {

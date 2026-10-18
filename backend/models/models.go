@@ -47,14 +47,26 @@ type TransactionLink struct {
 
 // LinkedTransactionResponse は紐付け取引のレスポンス（簡易情報）
 type LinkedTransactionResponse struct {
-	ID          int64  `json:"id"`
-	FundItem    string `json:"fundItem"`
-	Date        string `json:"date"`
-	Item        string `json:"item"`
-	Type        string `json:"type"`
-	Amount      int64  `json:"amount"`
-	AmountExact string `json:"amount_exact"`
-	Memo        string `json:"memo"`
+	ID            int64   `json:"id"`
+	FundItem      string  `json:"fundItem"`
+	Date          string  `json:"date"`
+	Item          string  `json:"item"`
+	Type          string  `json:"type"`
+	Amount        int64   `json:"amount"`
+	AmountExact   string  `json:"amount_exact"`
+	Memo          string  `json:"memo"`
+	LinkedBankIDs []int64 `json:"linked_bank_ids,omitempty"`
+}
+
+type CardReconciliationResponse struct {
+	Applicable      bool                        `json:"applicable"`
+	Bank            LinkedTransactionResponse   `json:"bank"`
+	Cards           []LinkedTransactionResponse `json:"cards"`
+	CardTotalExact  string                      `json:"card_total_exact"`
+	BankAmountExact string                      `json:"bank_amount_exact"`
+	DifferenceExact string                      `json:"difference_exact"`
+	Matched         bool                        `json:"matched"`
+	HasConflicts    bool                        `json:"has_conflicts"`
 }
 
 // TransactionImage は取引画像の構造体（Agent.md §6.5）

@@ -401,6 +401,17 @@ func updatePreparedTransactionIn(tx *sql.Tx, id int64, req models.TransactionReq
 	if err != nil {
 		return nil, fmt.Errorf("取引が見つかりません: %w", err)
 	}
+	var previousAssignments cardBankAssignments
+	if oldAccount != req.Account {
+		previousSettings, err := loadLedgerSettingsIn(tx)
+		if err != nil {
+			return nil, err
+		}
+		previousAssignments, err = readCardBankAssignments(context.Background(), tx, previousSettings, 0)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// 更新
 	_, err = tx.Exec(
@@ -469,6 +480,11 @@ func updatePreparedTransactionIn(tx *sql.Tx, id int64, req models.TransactionReq
 	}
 	if err := pruneInvalidTransactionLinksIn(tx, settings); err != nil {
 		return nil, fmt.Errorf("紐付け整合性チェックエラー: %w", err)
+	}
+	if oldAccount != req.Account {
+		if err := validateCardBankAssignmentChanges(context.Background(), tx, settings, previousAssignments); err != nil {
+			return nil, err
+		}
 	}
 	t.Date = parseDate(dateStr)
 	resp := t.ToResponse()
@@ -717,6 +733,14 @@ func (s *Service) saveStringSliceSetting(key string, items []string) error {
 		return fmt.Errorf("設定transaction開始エラー: %w", err)
 	}
 	defer tx.Rollback()
+	previousSettings, err := loadLedgerSettingsIn(tx)
+	if err != nil {
+		return err
+	}
+	previousAssignments, err := readCardBankAssignments(context.Background(), tx, previousSettings, 0)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", key, data); err != nil {
 		return err
 	}
@@ -726,6 +750,9 @@ func (s *Service) saveStringSliceSetting(key string, items []string) error {
 	}
 	if err := pruneInvalidTransactionLinksIn(tx, settings); err != nil {
 		return fmt.Errorf("紐付け整合性チェックエラー: %w", err)
+	}
+	if err := validateCardBankAssignmentChanges(context.Background(), tx, settings, previousAssignments); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("設定transactionコミットエラー: %w", err)
@@ -3370,18 +3397,14 @@ func (s *Service) GetTransactionLinks(transactionID int64) ([]models.LinkedTrans
 
 	var results []models.LinkedTransactionResponse
 	for rows.Next() {
-		var r models.LinkedTransactionResponse
-		var dateTime time.Time
-		if err := rows.Scan(&r.ID, &r.FundItem, &dateTime, &r.Item, &r.Type, &r.Amount, &r.Memo); err != nil {
+		r, err := scanLinkedTransaction(rows)
+		if err != nil {
 			return nil, fmt.Errorf("紐付け取引スキャンエラー: %w", err)
 		}
-		r.AmountExact = models.ExactInt64(r.Amount)
-		if dateTime.Hour() == 0 && dateTime.Minute() == 0 && dateTime.Second() == 0 {
-			r.Date = dateTime.Format("2006-01-02")
-		} else {
-			r.Date = dateTime.Format("2006-01-02 15:04:05")
-		}
 		results = append(results, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("紐付け取引取得エラー: %w", err)
 	}
 	if results == nil {
 		results = []models.LinkedTransactionResponse{}
@@ -3398,52 +3421,30 @@ func (s *Service) AddTransactionLink(parentID, childID int64) error {
 	if err != nil {
 		return err
 	}
-	if err := s.validateCardWithdrawalLink(parentID, childID); err != nil {
+	tx, err := db.Begin()
+	if err != nil {
 		return err
 	}
-	// 正規化: 小さいIDをparent_id、大きいIDをchild_idにする（重複防止）
-	p, c := parentID, childID
-	if p > c {
-		p, c = c, p
+	defer tx.Rollback()
+	// Acquire SQLite's writer lock before reading the assignment. The no-op
+	// DELETE changes no rows, but concurrent additions cannot both validate
+	// the same unassigned card before either one commits.
+	if _, err := tx.Exec("DELETE FROM transaction_links WHERE 0"); err != nil {
+		return err
 	}
-	_, err = db.Exec("INSERT OR IGNORE INTO transaction_links (parent_id, child_id) VALUES (?, ?)", p, c)
+	settings, err := loadLedgerSettingsIn(tx)
 	if err != nil {
-		return fmt.Errorf("紐付け追加エラー: %w", err)
+		return err
+	}
+	if err := addCardBankLinkIn(context.Background(), tx, parentID, childID,
+		stringSetFromSetting(settings["credit_card_items"]), stringSetFromSetting(settings["bank_account_items"])); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 	s.autoSnapshot()
 	return nil
-}
-
-func (s *Service) validateCardWithdrawalLink(transactionID, linkedID int64) error {
-	db, err := s.database()
-	if err != nil {
-		return err
-	}
-	accounts := make(map[int64]string, 2)
-	rows, err := db.Query("SELECT id, account FROM transactions WHERE id IN (?, ?)", transactionID, linkedID)
-	if err != nil {
-		return fmt.Errorf("紐付け対象取得エラー: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var id int64
-		var account string
-		if err := rows.Scan(&id, &account); err != nil {
-			return fmt.Errorf("紐付け対象スキャンエラー: %w", err)
-		}
-		accounts[id] = account
-	}
-	if len(accounts) != 2 {
-		return fmt.Errorf("紐付け対象の取引が見つかりません")
-	}
-
-	accountA := strings.TrimSpace(accounts[transactionID])
-	accountB := strings.TrimSpace(accounts[linkedID])
-	if s.isCardWithdrawalLinkAccounts(accountA, accountB) {
-		return nil
-	}
-	return fmt.Errorf("紐付けはクレジットカード項目と銀行口座項目の取引間でのみ追加できます")
 }
 
 // loadLedgerSettingsIn reads only settings which participate in the
@@ -3569,20 +3570,6 @@ func pruneInvalidTransactionLinksContext(ctx context.Context, q sqlContextExecut
 	return nil
 }
 
-func (s *Service) isCardWithdrawalLinkAccounts(accountA, accountB string) bool {
-	db, err := s.database()
-	if err != nil {
-		return false
-	}
-	settings, err := loadLedgerSettingsIn(db)
-	if err != nil {
-		return false
-	}
-	return isCardWithdrawalLinkAccountsWithSettings(accountA, accountB,
-		stringSetFromSetting(settings["credit_card_items"]),
-		stringSetFromSetting(settings["bank_account_items"]))
-}
-
 func isCardWithdrawalLinkAccountsWithSettings(accountA, accountB string, creditCards, bankAccounts map[string]bool) bool {
 	// Settings written by older clients may contain surrounding whitespace.
 	// Keep the stored archive value byte-for-byte, but use the historical
@@ -3615,29 +3602,9 @@ func applyTransactionLinkChangesIn(tx *sql.Tx, transactionID int64, addIDs, remo
 	}
 	creditCards := stringSetFromSetting(settings["credit_card_items"])
 	bankAccounts := stringSetFromSetting(settings["bank_account_items"])
-	var account string
-	if len(addIDs) > 0 {
-		if err := tx.QueryRow("SELECT account FROM transactions WHERE id = ?", transactionID).Scan(&account); err != nil {
-			return fmt.Errorf("紐付け対象の取引が見つかりません")
-		}
-	}
 	for _, linkedID := range addIDs {
-		if linkedID <= 0 || linkedID == transactionID {
-			return fmt.Errorf("同一または無効な取引とは紐付けできません")
-		}
-		var linkedAccount string
-		if err := tx.QueryRow("SELECT account FROM transactions WHERE id = ?", linkedID).Scan(&linkedAccount); err != nil {
-			return fmt.Errorf("紐付け対象の取引が見つかりません")
-		}
-		if !isCardWithdrawalLinkAccountsWithSettings(account, linkedAccount, creditCards, bankAccounts) {
-			return fmt.Errorf("紐付けはクレジットカード項目と銀行口座項目の取引間でのみ追加できます")
-		}
-		parentID, childID := transactionID, linkedID
-		if parentID > childID {
-			parentID, childID = childID, parentID
-		}
-		if _, err := tx.Exec("INSERT OR IGNORE INTO transaction_links (parent_id, child_id) VALUES (?, ?)", parentID, childID); err != nil {
-			return fmt.Errorf("紐付け追加エラー: %w", err)
+		if err := addCardBankLinkIn(context.Background(), tx, transactionID, linkedID, creditCards, bankAccounts); err != nil {
+			return err
 		}
 	}
 	return nil

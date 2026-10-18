@@ -58,6 +58,8 @@ export function GetTransactionImagesPage(arg1:number,arg2:string,arg3:number):Pr
 
 export function GetTransactionLinks(arg1:number):Promise<Array<models.LinkedTransactionResponse>>;
 
+export function GetCardReconciliation(arg1:number):Promise<models.CardReconciliationResponse>;
+
 export function GetTransactionTags(arg1:number):Promise<Array<models.Tag>>;
 
 export function GetTransactions(arg1:string,arg2:string):Promise<Array<models.TransactionResponse>>;

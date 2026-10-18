@@ -6,6 +6,7 @@ const api = vi.hoisted(() => ({
   createTag: vi.fn(),
   createTagByPath: vi.fn(),
   getTransactionLinks: vi.fn(),
+  getCardReconciliation: vi.fn(),
   addTransactionLink: vi.fn(),
   removeTransactionLink: vi.fn(),
   getTransactions: vi.fn(),
@@ -38,6 +39,13 @@ beforeEach(() => {
   api.getTransactionLinks.mockResolvedValue([])
   api.getTransactions.mockResolvedValue([])
   api.getTransactionImages.mockResolvedValue([])
+  api.getCardReconciliation.mockImplementation(async id => ({
+    applicable: true,
+    bank: { ...linkedTransaction, id },
+    cards: [],
+    card_total_exact: '0', bank_amount_exact: '100', difference_exact: '-100',
+    matched: false, has_conflicts: false
+  }))
 })
 
 async function mountModal(props = {}) {
@@ -55,6 +63,116 @@ function fillRequiredFields(wrapper) {
 }
 
 describe('TransactionModal', () => {
+  async function searchLink(wrapper, query) {
+    vi.useFakeTimers()
+    await wrapper.get('.link-search-input').setValue(query)
+    await vi.advanceTimersByTimeAsync(300)
+    await flushPromises()
+  }
+
+  it('shows a bank total net of refunds, updates on edits, and saves a mismatch', async () => {
+    const cards = [
+      { id: 2, fundItem: 'card', date: '2026-01-01', item: 'first', type: 'expense', amount: 300 },
+      { id: 3, fundItem: 'card', date: '2026-01-01', item: 'second', type: 'expense', amount: 200 },
+      { id: 4, fundItem: 'card', date: '2026-01-01', item: 'refund', type: 'income', amount: 50 }
+    ]
+    api.getTransactionLinks.mockResolvedValue(cards)
+    const wrapper = await mountModal({
+      isEditMode: true,
+      transaction: { id: 1, account: 'bank', date: '2026-01-02', item: 'withdrawal', type: 'expense', amount: 450 }
+    })
+    expect(wrapper.get('.card-reconciliation .matched').text()).toBe('一致')
+    expect(wrapper.get('.card-reconciliation').text()).toContain('クレカ合計¥450')
+    await wrapper.get('input[inputmode="numeric"]').setValue('500')
+    expect(wrapper.get('.card-reconciliation .unmatched').text()).toBe('差額あり')
+    expect(wrapper.get('.card-reconciliation').text()).toContain('差額¥-50')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('save')[0][0].amount).toBe(500)
+    expect(wrapper.find('.form-error').exists()).toBe(false)
+    await wrapper.findAll('.link-remove')[2].trigger('click')
+    expect(wrapper.get('.card-reconciliation .matched').text()).toBe('一致')
+  })
+
+  it('includes the other card purchases when previewing an edited card transaction', async () => {
+    api.getTransactionLinks.mockResolvedValue([linkedTransaction])
+    api.getCardReconciliation.mockResolvedValue({
+      applicable: true, bank: { ...linkedTransaction, amount: 300 },
+      cards: [
+        { id: 1, fundItem: 'card', type: 'expense', amount: 100, linked_bank_ids: [2] },
+        { id: 3, fundItem: 'card', type: 'expense', amount: 200, linked_bank_ids: [2] }
+      ]
+    })
+    const wrapper = await mountModal({
+      isEditMode: true,
+      transaction: { id: 1, date: '2026-01-01', account: 'card', item: 'purchase', type: 'expense', amount: 100 }
+    })
+    expect(wrapper.get('.card-reconciliation .matched').text()).toBe('一致')
+    await wrapper.get('input[inputmode="numeric"]').setValue('150')
+    expect(wrapper.get('.card-reconciliation').text()).toContain('クレカ合計¥350')
+    expect(wrapper.get('.card-reconciliation').text()).toContain('差額¥50')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('save')[0][0].amount).toBe(150)
+  })
+
+  it('allows several unassigned cards on a bank and rejects a card owned by another bank', async () => {
+    api.getTransactionLinks.mockImplementation(async id => id === 5 ? [linkedTransaction] : [])
+    api.getTransactions.mockResolvedValue([
+      { id: 3, account: 'card', date: '2026-01-01', item: 'first card', type: 'expense', amount: 200 },
+      { id: 4, account: 'card', date: '2026-01-01', item: 'second card', type: 'expense', amount: 300 },
+      { id: 5, account: 'card', date: '2026-01-01', item: 'already linked', type: 'expense', amount: 100 }
+    ])
+    const wrapper = await mountModal({
+      isEditMode: true,
+      transaction: { id: 1, date: '2026-01-02', account: 'bank', item: 'withdrawal', type: 'expense', amount: 500 }
+    })
+    await searchLink(wrapper, 'card')
+    await wrapper.findAll('.link-search-item')[0].trigger('click')
+    await flushPromises()
+    await searchLink(wrapper, 'card')
+    await wrapper.findAll('.link-search-item')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.linked-item')).toHaveLength(2)
+    expect(wrapper.get('.card-reconciliation .matched').text()).toBe('一致')
+    await searchLink(wrapper, 'linked')
+    await wrapper.get('.link-search-item').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.linked-item')).toHaveLength(2)
+    expect(wrapper.get('.link-conflict').text()).toContain('別の銀行取引に紐付いています')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('save')[0][0].link_add_ids).toEqual([3, 4])
+  })
+
+  it('preserves legacy multi-bank links until the user explicitly removes one', async () => {
+    api.getTransactionLinks.mockResolvedValue([linkedTransaction, { ...linkedTransaction, id: 3 }])
+    const wrapper = await mountModal({
+      isEditMode: true,
+      transaction: { id: 1, date: '2026-01-01', account: 'card', item: 'purchase', type: 'expense', amount: 100 }
+    })
+    expect(wrapper.findAll('.linked-item')).toHaveLength(2)
+    expect(wrapper.find('.link-conflict').exists()).toBe(true)
+    expect(wrapper.find('.link-search-input').exists()).toBe(false)
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('save')[0][0].link_remove_ids).toBeUndefined()
+    await wrapper.findAll('.link-remove')[1].trigger('click')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('save')[1][0].link_remove_ids).toEqual([3])
+  })
+
+  it('does not block saving a transaction when the informational reconciliation request fails', async () => {
+    api.getTransactionLinks.mockResolvedValue([linkedTransaction])
+    api.getCardReconciliation.mockRejectedValueOnce(new Error('offline'))
+    const wrapper = await mountModal({
+      isEditMode: true,
+      transaction: { id: 1, date: '2026-01-01', account: 'card', item: 'purchase', type: 'expense', amount: 100 }
+    })
+    expect(wrapper.get('.reconciliation-unavailable').text()).toContain('照合情報を取得できませんでした')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('save')).toHaveLength(1)
+    await wrapper.get('.reconciliation-unavailable button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.reconciliation-unavailable').exists()).toBe(false)
+  })
+
   for (const isEditMode of [false, true]) {
     describe(isEditMode ? 'amount validation when editing' : 'amount validation when creating', () => {
       async function prepareModal() {
@@ -185,22 +303,23 @@ describe('TransactionModal', () => {
     })
 
     vi.useFakeTimers()
+    expect(wrapper.find('.link-search-input').exists()).toBe(false)
+    await wrapper.get('.link-remove').trigger('click')
     const search = wrapper.get('.link-search-input')
     await search.setValue('payment')
     await vi.advanceTimersByTimeAsync(300)
     await flushPromises()
 
     const candidates = wrapper.findAll('.link-search-item')
-    expect(candidates).toHaveLength(1)
-    expect(candidates[0].text()).toContain('new payment')
+    expect(candidates).toHaveLength(2)
+    const newPayment = candidates.find(candidate => candidate.text().includes('new payment'))
 
-    await candidates[0].trigger('click')
+    await newPayment.trigger('click')
     await flushPromises()
-    expect(wrapper.findAll('.linked-item')).toHaveLength(2)
+    expect(wrapper.findAll('.linked-item')).toHaveLength(1)
+    expect(wrapper.find('.link-search-input').exists()).toBe(false)
     expect(api.addTransactionLink).not.toHaveBeenCalled()
 
-    await wrapper.findAll('.link-remove')[1].trigger('click')
-    expect(wrapper.findAll('.linked-item')).toHaveLength(1)
     await wrapper.get('.link-remove').trigger('click')
     expect(api.removeTransactionLink).not.toHaveBeenCalled()
     await wrapper.get('form').trigger('submit')

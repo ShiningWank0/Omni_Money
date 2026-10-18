@@ -87,6 +87,7 @@ export namespace models {
 	    amount: number;
 	    amount_exact: string;
 	    memo: string;
+	    linked_bank_ids?: number[];
 
 	    static createFrom(source: any = {}) {
 	        return new LinkedTransactionResponse(source);
@@ -102,6 +103,30 @@ export namespace models {
 	        this.amount = source["amount"];
 	        this.amount_exact = source["amount_exact"];
 	        this.memo = source["memo"];
+	        this.linked_bank_ids = source["linked_bank_ids"];
+	    }
+	}
+	export class CardReconciliationResponse {
+	    applicable: boolean;
+	    bank: LinkedTransactionResponse;
+	    cards: LinkedTransactionResponse[];
+	    card_total_exact: string;
+	    bank_amount_exact: string;
+	    difference_exact: string;
+	    matched: boolean;
+	    has_conflicts: boolean;
+
+	    static createFrom(source: any = {}) { return new CardReconciliationResponse(source); }
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.applicable = source["applicable"];
+	        this.bank = new LinkedTransactionResponse(source["bank"]);
+	        this.cards = (source["cards"] || []).map((card: any) => new LinkedTransactionResponse(card));
+	        this.card_total_exact = source["card_total_exact"];
+	        this.bank_amount_exact = source["bank_amount_exact"];
+	        this.difference_exact = source["difference_exact"];
+	        this.matched = source["matched"];
+	        this.has_conflicts = source["has_conflicts"];
 	    }
 	}
 	export class Tag {

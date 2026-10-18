@@ -1291,6 +1291,19 @@ func handleTransactionLinksAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "reconciliation" {
+		if r.Method != http.MethodGet {
+			jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		result, err := service.GetCardReconciliation(txID)
+		if err != nil {
+			writeFinancialError(w, err, http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, result, http.StatusOK)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		links, err := service.GetTransactionLinks(txID)
