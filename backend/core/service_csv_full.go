@@ -2975,6 +2975,17 @@ func (s *Service) importCSVV3Parsed(ctx context.Context, parsed *csvV3Import, mo
 	if err := verifyCSVPins(ctx, tx, pins, digests); err != nil {
 		return 0, err
 	}
+	previousAssignments := make(cardBankAssignments)
+	if mode != "replace" {
+		previousSettings, err := loadLedgerSettingsContext(ctx, tx)
+		if err != nil {
+			return 0, err
+		}
+		previousAssignments, err = readCardBankAssignments(ctx, tx, previousSettings, 0)
+		if err != nil {
+			return 0, err
+		}
+	}
 	if mode == "replace" {
 		// Keep this list explicit. In particular, settings outside the two
 		// ledger keys are owned by other features and must survive replace.
@@ -3183,8 +3194,8 @@ func (s *Service) importCSVV3Parsed(ctx context.Context, parsed *csvV3Import, mo
 		if err := tx.QueryRowContext(ctx, "SELECT account FROM transactions WHERE id = ?", child).Scan(&accountB); err != nil {
 			return 0, err
 		}
-		if !isCardWithdrawalLinkAccountsWithSettings(accountA, accountB, creditCards, bankAccounts) {
-			return 0, fmt.Errorf("CSV v3リンクはクレジットカード項目と銀行口座項目の取引間でのみ追加できます")
+		if _, _, err := cardBankPair(parent, accountA, child, accountB, creditCards, bankAccounts); err != nil {
+			return 0, fmt.Errorf("CSV v3リンクが無効です: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, "INSERT INTO transaction_links (parent_id, child_id) VALUES (?, ?)", parent, child); err != nil {
 			return 0, fmt.Errorf("CSV v3リンク登録エラー: %w", err)
@@ -3198,6 +3209,9 @@ func (s *Service) importCSVV3Parsed(ctx context.Context, parsed *csvV3Import, mo
 		if err := pruneInvalidTransactionLinksContext(ctx, tx, settings); err != nil {
 			return 0, fmt.Errorf("CSV v3リンク整合性チェックエラー: %w", err)
 		}
+	}
+	if err := validateCardBankAssignmentChanges(ctx, tx, settings, previousAssignments); err != nil {
+		return 0, fmt.Errorf("CSV v3リンクの組み合わせが無効です: %w", err)
 	}
 	for account := range accounts {
 		if err := recalculateBalanceInContext(ctx, tx, account); err != nil {

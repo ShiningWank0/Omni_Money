@@ -28,6 +28,7 @@ const cases = [
   ['getTransactionTags', [1], [tag]], ['addTransactionTags', [1, [1]], { message: 'added' }], ['removeTransactionTag', [1, 1], { message: 'deleted' }],
   ['getTagSummary', [], [{ tag_id: 1, tag_name: 'food', amount: 100, count: 1 }]],
   ['getTransactionLinks', [1], [tx]], ['addTransactionLink', [1, 2], { message: 'added' }], ['removeTransactionLink', [1, 2], { message: 'deleted' }],
+  ['getCardReconciliation', [1], { applicable: true, bank: tx, cards: [tx], card_total_exact: '100', bank_amount_exact: '100', difference_exact: '0', matched: true, has_conflicts: false }],
   ['getAuthStatus', [], { authenticated: true }], ['login', ['a@test', 'password'], { authenticated: true }],
   ['listServerUsers', [], { users: [entity] }], ['listServerInvitations', [], { invitations: [entity] }], ['listServerPasswordResets', [], { password_resets: [entity] }],
   ['enableServerUser', ['user'], { success: true }], ['setServerUserRole', ['user', 'user'], { success: true }], ['disableServerUser', ['user'], { success: true }],

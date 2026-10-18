@@ -1645,6 +1645,15 @@ export async function getTagSummary(type = '', startDate = '', endDate = '') {
 
 // --- 取引紐付け (Agent.md §6.2) ---
 
+export async function getCardReconciliation(bankId) {
+  if (isWails) {
+    const result = await desktopFinancialCall(() => window.go.main.App.GetCardReconciliation(bankId))
+    return validateData(result, schema.cardReconciliation, { status: 200 })
+  }
+  const res = await apiFetch(`/api/transaction_links/${bankId}/reconciliation`)
+  return await expectJSON(res, schema.cardReconciliation)
+}
+
 /**
  * 取引に紐付いた取引の一覧を取得
  * @param {number} transactionId

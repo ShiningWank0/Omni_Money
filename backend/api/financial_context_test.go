@@ -62,6 +62,7 @@ func TestFinancialRoutesNeverFallBackToInitializedGlobalDatabase(t *testing.T) {
 		{http.MethodPost, "/api/transaction_tags/1", `{}`},
 		{http.MethodDelete, "/api/transaction_tags/1/1", ""},
 		{http.MethodGet, "/api/transaction_links/1", ""},
+		{http.MethodGet, "/api/transaction_links/1/reconciliation", ""},
 		{http.MethodPost, "/api/transaction_links/1", `{}`},
 		{http.MethodDelete, "/api/transaction_links/1/2", ""},
 	}
