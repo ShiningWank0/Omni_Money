@@ -63,7 +63,7 @@ Mac + Colimaで公開済みDockerイメージを検証する場合は、[Mac + C
 - Docker EngineとDocker Compose
 - SQLCipherに加えて、host側data directoryを保護するLUKS2、ZFS native encryption等
 - ownerだけが読めるcontrol keyとinitial Admin setup token
-- [保存時暗号化volumeの運用contract](at-rest-encryption.md)に従った期限内のattestation
+- [保存時暗号化volumeの運用contract](at-rest-encryption.md)に従ったattestation（運用日付の入力は不要）
 
 準備例です。attestation JSONは実際の暗号化volumeを検証して作成し、例だけをcopyしないでください。
 

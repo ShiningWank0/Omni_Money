@@ -55,7 +55,7 @@ context 名が違う場合は置き換えます。`docker context inspect "$CONT
 )
 ```
 
-`$TEST_DIR/secrets/omni_data_at_rest.json` は [保存時暗号化 volume の運用 contract](at-rest-encryption.md) に従い、実際に確認した事実で作成します。`provider` は FileVault を確認した場合の例です。`verified_at` と `recovery_tested_at` は**実施した日時だけ**を UTC で記録します。復旧試験をしていなければ値を作らず、起動前に復旧手段と試験を確認してください。attestation は暗号化の自動検証ではありません。
+`$TEST_DIR/secrets/omni_data_at_rest.json` は [保存時暗号化 volume の運用 contract](at-rest-encryption.md) に従い、実際に確認した事実で作成します。`provider` は FileVault を確認した場合の例です。確認日・復旧試験日・鍵更新予定日は起動条件ではなく、未実施の日時を作成する必要はありません。attestation は暗号化の自動検証ではありません。
 
 ```json
 {
@@ -63,14 +63,11 @@ context 名が違う場合は置き換えます。`docker context inspect "$CONT
   "protection": "external-encrypted-volume",
   "provider": "filevault",
   "data_root": "/app/data",
-  "key_id": "mac-colima-test-volume-2026",
-  "verified_at": "<実際に確認した UTC 日時>",
-  "recovery_tested_at": "<実際に復旧試験した UTC 日時>",
-  "next_rotation_at": "<実際の更新予定の UTC 日時>"
+  "key_id": "mac-colima-test-volume-2026"
 }
 ```
 
-この JSON は例をそのままコピーして使わず、保存後に `chmod 600 "$TEST_DIR/secrets/omni_data_at_rest.json"` とします。アプリは日時の有効期限やファイルの配置・権限を検証し、満たさなければ起動を拒否します。
+この JSON は例をそのままコピーして使わず、保存後に `chmod 600 "$TEST_DIR/secrets/omni_data_at_rest.json"` とします。アプリは保存先との一致、ファイルの配置・権限を検証し、満たさなければ起動を拒否します。
 
 ## 3. Mac 専用 Compose 設定
 
