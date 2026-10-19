@@ -147,8 +147,7 @@ func handleAuthLogout(authManager *middleware.AuthSessionManager) http.HandlerFu
 		if session, ok := middleware.SessionFromContext(r.Context()); ok {
 			authManager.SessionManager().DeleteSession(session.ID)
 		}
-		authManager.SessionManager().ClearSessionCookie(w, r)
-		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		clearSessionBrowserData(w, r, authManager.SessionManager())
 		auditAuth("logout", middleware.ClientIPFromRequest(r), "")
 		jsonResponse(w, map[string]interface{}{
 			"success": true,
@@ -169,8 +168,7 @@ func handleAuthLogoutAll(authManager *middleware.AuthSessionManager) http.Handle
 			return
 		}
 		deleted := authManager.SessionManager().DeleteAllSessions(session.Username)
-		authManager.SessionManager().ClearSessionCookie(w, r)
-		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		clearSessionBrowserData(w, r, authManager.SessionManager())
 		auditAuth("logout_all", middleware.ClientIPFromRequest(r), "")
 		jsonResponse(w, map[string]interface{}{
 			"success":          true,

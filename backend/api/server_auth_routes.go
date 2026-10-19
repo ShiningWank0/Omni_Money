@@ -240,8 +240,7 @@ func handleServerPasswordChange(dependencies ServerDependencies, lifecycle Serve
 			writeServerAccountError(w, err, serverOperationCredential)
 			return
 		}
-		dependencies.Sessions.ClearSessionCookie(w, r)
-		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		clearSessionBrowserData(w, r, dependencies.Sessions)
 		auditCredentialMutation("server_password_changed", middleware.ClientIPFromRequest(r), session.UserID, session.UserID)
 		jsonResponse(w, map[string]interface{}{"success": true, "revoked_passkeys": revoked, "reauthentication_required": true}, http.StatusOK)
 	}
@@ -271,8 +270,7 @@ func handleServerRecoveryRotation(dependencies ServerDependencies, lifecycle Ser
 			writeServerAccountError(w, err, serverOperationCredential)
 			return
 		}
-		dependencies.Sessions.ClearSessionCookie(w, r)
-		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		clearSessionBrowserData(w, r, dependencies.Sessions)
 		auditCredentialMutation("server_recovery_code_rotated", middleware.ClientIPFromRequest(r), session.UserID, session.UserID)
 		jsonResponse(w, map[string]interface{}{"success": true, "reauthentication_required": true}, http.StatusOK)
 	}
@@ -311,8 +309,7 @@ func handleServerLogout(dependencies ServerDependencies) http.HandlerFunc {
 		if session, ok := middleware.SessionFromContext(r.Context()); ok {
 			dependencies.Sessions.RevokeSession(session)
 		}
-		dependencies.Sessions.ClearSessionCookie(w, r)
-		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		clearSessionBrowserData(w, r, dependencies.Sessions)
 		auditAuth("server_logout", middleware.ClientIPFromRequest(r), "")
 		jsonResponse(w, map[string]bool{"success": true}, http.StatusOK)
 	}
@@ -330,8 +327,7 @@ func handleServerLogoutAll(dependencies ServerDependencies) http.HandlerFunc {
 			return
 		}
 		deleted := dependencies.Sessions.DeleteAllSessionsForUser(session.UserID)
-		dependencies.Sessions.ClearSessionCookie(w, r)
-		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		clearSessionBrowserData(w, r, dependencies.Sessions)
 		auditAuth("server_logout_all", middleware.ClientIPFromRequest(r), "")
 		jsonResponse(w, map[string]interface{}{"success": true, "deleted_sessions": deleted}, http.StatusOK)
 	}

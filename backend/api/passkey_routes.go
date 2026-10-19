@@ -350,8 +350,7 @@ func handlePasskeyDelete(dependencies ServerDependencies, passkeys ServerPasskey
 			return
 		}
 		auditCredentialMutation("server_passkey_revoked", middleware.ClientIPFromRequest(r), session.UserID, session.UserID)
-		dependencies.Sessions.ClearSessionCookie(w, r)
-		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		clearSessionBrowserData(w, r, dependencies.Sessions)
 		// Revocation invalidates every session and drains the open vault. The
 		// client must authenticate again so no session derived from the revoked
 		// credential remains usable.
@@ -380,8 +379,7 @@ func handleAllPasskeysDelete(dependencies ServerDependencies, passkeys ServerPas
 			return
 		}
 		auditCredentialMutation("server_passkeys_revoked", middleware.ClientIPFromRequest(r), session.UserID, session.UserID)
-		dependencies.Sessions.ClearSessionCookie(w, r)
-		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		clearSessionBrowserData(w, r, dependencies.Sessions)
 		jsonResponse(w, map[string]interface{}{"success": true, "revoked_passkeys": removed, "reauthentication_required": true}, http.StatusOK)
 	}
 }
