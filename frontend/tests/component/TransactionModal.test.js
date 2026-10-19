@@ -63,6 +63,62 @@ function fillRequiredFields(wrapper) {
 }
 
 describe('TransactionModal', () => {
+  for (const [now, expectedDate, expectedTime] of [
+    [new Date(2026, 0, 2, 0, 5, 59), '2026-01-02', '00:05'],
+    [new Date(2026, 11, 31, 23, 59, 59), '2026-12-31', '23:59'],
+  ]) {
+    it('prefills and saves local date and time when opened at ' + expectedTime, async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(now)
+      const wrapper = await mountModal()
+      expect(wrapper.get('input[type="date"]').element.value).toBe(expectedDate)
+      expect(wrapper.get('input[type="time"]').element.value).toBe(expectedTime)
+      await fillRequiredFields(wrapper)
+      await wrapper.get('form').trigger('submit')
+      expect(wrapper.emitted('save')[0][0]).toMatchObject({ date: expectedDate, time: expectedTime })
+    })
+  }
+
+  it('keeps user changes while open and captures a fresh time on the next opening', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 9, 18, 13, 51))
+    const wrapper = await mountModal()
+    expect(wrapper.get('input[type="time"]').element.value).toBe('13:51')
+    await wrapper.get('input[type="date"]').setValue('2026-10-01')
+    await wrapper.get('input[type="time"]').setValue('08:30')
+    vi.setSystemTime(new Date(2026, 9, 19, 0, 5))
+    await flushPromises()
+    expect(wrapper.get('input[type="date"]').element.value).toBe('2026-10-01')
+    expect(wrapper.get('input[type="time"]').element.value).toBe('08:30')
+    wrapper.unmount()
+    const reopened = await mountModal()
+    expect(reopened.get('input[type="date"]').element.value).toBe('2026-10-19')
+    expect(reopened.get('input[type="time"]').element.value).toBe('00:05')
+  })
+
+  it('allows the automatically filled optional time to be cleared before saving', async () => {
+    const wrapper = await mountModal()
+    await fillRequiredFields(wrapper)
+    await wrapper.get('input[type="time"]').setValue('')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('save')[0][0].time).toBe('')
+  })
+
+  for (const [date, time] of [['2026-01-02 09:04:59', '09:04'], ['2026-01-02', '']]) {
+    it('preserves the stored date and time when editing ' + date, async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date(2026, 9, 18, 13, 51))
+      const wrapper = await mountModal({
+        isEditMode: true,
+        transaction: { id: 1, date, account: 'cash', item: 'purchase', type: 'expense', amount: 100 }
+      })
+      expect(wrapper.get('input[type="date"]').element.value).toBe('2026-01-02')
+      expect(wrapper.get('input[type="time"]').element.value).toBe(time)
+      await wrapper.get('form').trigger('submit')
+      expect(wrapper.emitted('save')[0][0]).toMatchObject({ date: '2026-01-02', time })
+    })
+  }
+
   async function searchLink(wrapper, query) {
     vi.useFakeTimers()
     await wrapper.get('.link-search-input').setValue(query)
