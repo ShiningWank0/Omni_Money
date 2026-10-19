@@ -1985,6 +1985,8 @@ body {
 @container transaction-list (max-width: 48rem) {
     .transaction-table {
         --transaction-time-display: block;
+        --transaction-heading-font-size: clamp(0.6875rem, 3cqi, 0.78rem);
+        --transaction-heading-padding: clamp(0.35rem, 1.5cqi, 0.85rem);
     }
 }
 
@@ -1994,19 +1996,23 @@ body {
     @media (max-width: 48rem) {
         .transaction-table {
             --transaction-time-display: block;
+            --transaction-heading-font-size: clamp(0.6875rem, 3vw, 0.78rem);
+            --transaction-heading-padding: clamp(0.35rem, 1.5vw, 0.85rem);
         }
     }
 }
 
 .transaction-table thead th {
-    padding: 0.8rem 1.25rem;
+    padding: 0.8rem var(--transaction-heading-padding, 1.25rem);
     color: var(--omni-text-muted);
     background: #f5faf7;
     border-bottom: 1px solid var(--omni-border-strong);
-    font-size: 0.78rem;
+    font-size: var(--transaction-heading-font-size, 0.78rem);
     font-weight: 700;
     letter-spacing: 0.035em;
     text-transform: none;
+    /* Headers must provide their own unbroken minimum width, even with no rows. */
+    white-space: nowrap;
 }
 
 .transaction-table td {
@@ -2044,6 +2050,7 @@ body {
 .sort-button {
     display: inline-flex;
     align-items: center;
+    white-space: nowrap;
     gap: 0.35rem;
     padding: 0;
     color: inherit;
@@ -2239,7 +2246,10 @@ textarea:focus-visible,
         font-size: clamp(2rem, 10vw, 2.65rem);
     }
 
-    .transaction-table thead th,
+    .transaction-table thead th {
+        padding: 0.7rem var(--transaction-heading-padding, 0.85rem);
+    }
+
     .transaction-table td {
         padding: 0.7rem 0.85rem;
         font-size: 0.82rem;
