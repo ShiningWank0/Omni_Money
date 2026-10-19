@@ -91,8 +91,7 @@ func handleServerSnapshotRestore(dependencies ServerDependencies) http.HandlerFu
 			if operation != nil {
 				operation.Release()
 			}
-			dependencies.Sessions.ClearSessionCookie(w, r)
-			w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+			clearSessionBrowserData(w, r, dependencies.Sessions)
 			log.Printf("security_event=snapshot_restore result=identity_error")
 			jsonSafeError(w, "アカウントサービスを利用できません", http.StatusServiceUnavailable)
 			return
@@ -104,8 +103,7 @@ func handleServerSnapshotRestore(dependencies ServerDependencies) http.HandlerFu
 		// Restore invalidates the current root as well as every sibling session.
 		// Clear the browser credential before doing the potentially slow disk
 		// operation; both success and failure require a fresh login.
-		dependencies.Sessions.ClearSessionCookie(w, r)
-		w.Header().Set("Clear-Site-Data", `"cache", "cookies", "storage"`)
+		clearSessionBrowserData(w, r, dependencies.Sessions)
 		err = operation.RestoreSnapshot(r.Context(), request.Name)
 		if err != nil {
 			log.Printf("security_event=snapshot_restore result=error")

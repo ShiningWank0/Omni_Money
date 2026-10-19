@@ -250,9 +250,21 @@ const selectedLevel3 = ref('')
 const newTagName = ref('')
 let nextPendingTagID = -1
 
+// Capture one local instant per opening so date and time agree across midnight.
+const openedAt = new Date()
+const localDate = [
+  openedAt.getFullYear(),
+  String(openedAt.getMonth() + 1).padStart(2, '0'),
+  String(openedAt.getDate()).padStart(2, '0')
+].join('-')
+const localTime = [
+  String(openedAt.getHours()).padStart(2, '0'),
+  String(openedAt.getMinutes()).padStart(2, '0')
+].join(':')
+
 const form = ref({
-  date: new Date().toISOString().slice(0, 10),
-  time: '',
+  date: localDate,
+  time: props.isEditMode ? '' : localTime,
   fundItem: '',
   type: 'expense',
   item: '',
