@@ -17,6 +17,7 @@ import LoginView from '../../src/views/LoginView.vue'
 import { recoveryCodeToSecret, recoverySecretToCode } from '../../src/utils/recovery'
 
 const password = 'test-password-for-account-flow'
+const setupToken = 'bootstrap-test-token-with-at-least-32-characters'
 const oldRecovery = new Uint8Array(32).fill(7)
 const oldCode = recoverySecretToCode(oldRecovery)
 let media
@@ -57,6 +58,19 @@ async function fillCredentials(wrapper, mode = 'invite') {
   await wrapper.get('#operation-token').setValue('test-operation-token')
   if (mode === 'invite') await wrapper.get('#display-name').setValue('テスト')
   else await wrapper.get('#current-recovery').setValue(oldCode)
+  await wrapper.get('#password').setValue(password)
+  await wrapper.get('#password-confirmation').setValue(password)
+}
+
+async function openSetup(compact = true) {
+  api.getAuthStatus.mockResolvedValueOnce({ setup_required: true, authenticated: false })
+  return open('login', compact)
+}
+
+async function fillSetupCredentials(wrapper) {
+  await wrapper.get('#setup-token').setValue(setupToken)
+  await wrapper.get('#email').setValue('test@example.invalid')
+  await wrapper.get('#display-name').setValue('管理者')
   await wrapper.get('#password').setValue(password)
   await wrapper.get('#password-confirmation').setValue(password)
 }
@@ -252,22 +266,173 @@ it('keeps password/passkey login as direct actions and renames only the reset en
   expect(api.loginWithPasskey).toHaveBeenCalledTimes(1)
 })
 
-it('keeps first-admin setup in a single form and handles a subsequent login failure', async () => {
-  api.getAuthStatus.mockResolvedValueOnce({ setup_required: true, authenticated: false })
-  api.setupInitialAdmin.mockResolvedValueOnce()
-  const wrapper = await open('login')
-  expect(wrapper.classes()).not.toContain('account-flow')
-  expect(wrapper.get('.login-button').text()).toBe('管理者を作成してログイン')
-  await wrapper.get('#setup-token').setValue('bootstrap-test-token')
-  await wrapper.get('#email').setValue('test@example.invalid')
-  await wrapper.get('#display-name').setValue('管理者')
-  await wrapper.get('#password').setValue(password)
-  await wrapper.get('#password-confirmation').setValue(password)
-  await wrapper.get('.confirmation-label input').setValue(true)
+for (const compact of [true, false]) {
+  it('commits the same first-admin payload once in ' + (compact ? 'compact' : 'wide') + ' layout and handles a subsequent login failure', async () => {
+    let captured
+    let recoveryBytes
+    api.setupInitialAdmin.mockImplementationOnce(async input => {
+      recoveryBytes = input.recoverySecret
+      captured = { ...input, recoverySecret: input.recoverySecret.slice() }
+    })
+    const wrapper = await openSetup(compact)
+    expect(wrapper.classes()).toContain('account-flow')
+    expect(wrapper.get('form').attributes('novalidate')).toBeDefined()
+    expect(wrapper.find('.auth-mode-tabs').exists()).toBe(false)
+    expect(wrapper.find('.passkey-login-entry').exists()).toBe(false)
+    expect(wrapper.get('#password').attributes('autocomplete')).toBe('new-password')
+    expect(wrapper.get('.credentials-panel').isVisible()).toBe(true)
+    expect(wrapper.get('.recovery-panel').isVisible()).toBe(!compact)
+    await fillSetupCredentials(wrapper)
+    const recoverySecret = recoveryCodeToSecret(wrapper.get('.recovery-code').element.value)
+    if (compact) {
+      expect(wrapper.get('.login-button').text()).toBe('次へ')
+      await wrapper.get('form').trigger('submit')
+      await flushPromises()
+      expect(api.setupInitialAdmin).not.toHaveBeenCalled()
+      expect(api.login).not.toHaveBeenCalled()
+      expect(wrapper.get('.credentials-panel').isVisible()).toBe(false)
+      expect(wrapper.get('.recovery-panel').isVisible()).toBe(true)
+    }
+    expect(wrapper.get('.login-button').text()).toBe('管理者を作成してログイン')
+    expect(wrapper.get('.login-button').attributes('disabled')).toBeDefined()
+    await wrapper.get('.confirmation-label input').setValue(true)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(api.setupInitialAdmin).toHaveBeenCalledTimes(1)
+    expect(captured).toEqual({ setupToken, email: 'test@example.invalid', displayName: '管理者', password, recoverySecret })
+    expect(recoveryBytes.every(byte => byte === 0)).toBe(true)
+    expect(api.login).toHaveBeenCalledExactlyOnceWith('test@example.invalid', password)
+    expect(wrapper.classes()).not.toContain('account-flow')
+    expect(wrapper.find('#setup-token').exists()).toBe(false)
+    expect(wrapper.find('.recovery-panel').exists()).toBe(false)
+    expect(wrapper.get('.info-message').text()).toContain('管理者アカウントは作成済み')
+    expect(wrapper.get('#password').element.value).toBe('')
+    expect(wrapper.get('#password').attributes('autocomplete')).toBe('current-password')
+    // An automatic login failure must not expose the already committed setup again.
+    await wrapper.get('#password').setValue(password)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(api.setupInitialAdmin).toHaveBeenCalledTimes(1)
+    expect(api.login).toHaveBeenCalledTimes(2)
+  })
+}
+
+it('preserves first-admin inputs and the saved recovery code across Back and viewport changes', async () => {
+  const wrapper = await openSetup()
+  await fillSetupCredentials(wrapper)
+  const code = wrapper.get('.recovery-code').element.value
   await wrapper.get('form').trigger('submit')
   await flushPromises()
+  await wrapper.get('.confirmation-label input').setValue(true)
+  await wrapper.get('.back-button').trigger('click')
+  expect(wrapper.get('#setup-token').element.value).toBe(setupToken)
+  expect(wrapper.get('#email').element.value).toBe('test@example.invalid')
+  expect(wrapper.get('#display-name').element.value).toBe('管理者')
+  expect(wrapper.get('#password').element.value).toBe(password)
+  await resize(false)
+  expect(wrapper.get('.credentials-panel').isVisible()).toBe(true)
+  expect(wrapper.get('.recovery-panel').isVisible()).toBe(true)
+  await resize(true)
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+  expect(wrapper.get('.recovery-code').element.value).toBe(code)
+  expect(wrapper.get('.confirmation-label input').element.checked).toBe(true)
+  expect(api.setupInitialAdmin).not.toHaveBeenCalled()
+  expect(api.login).not.toHaveBeenCalled()
+})
+
+for (const [selector, value, message] of [
+  ['#setup-token', '', '初期設定トークン'],
+  ['#setup-token', 'x'.repeat(513), '初期設定トークン'],
+  ['#email', '', 'メールアドレス'],
+  ['#email', 'invalid-email', 'メールアドレス'],
+  ['#email', 'x'.repeat(250) + '@example.invalid', 'メールアドレス'],
+  ['#display-name', '   ', '表示名'],
+  ['#display-name', 'x'.repeat(121), '表示名'],
+  ['#password', 'short', '12〜1024'],
+  ['#password-confirmation', 'different-password', '一致しません'],
+]) {
+  it('revalidates first-admin ' + selector + ' on Next and final submission (' + message + ', length ' + value.length + ')', async () => {
+    const wrapper = await openSetup()
+    await fillSetupCredentials(wrapper)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    await wrapper.get('.confirmation-label input').setValue(true)
+    await wrapper.get(selector).setValue(value)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.get('.credentials-panel').isVisible()).toBe(true)
+    expect(wrapper.get('[role="alert"]').text()).toContain(message)
+    expect(api.setupInitialAdmin).not.toHaveBeenCalled()
+    expect(api.login).not.toHaveBeenCalled()
+    await fillSetupCredentials(wrapper)
+    await wrapper.get(selector).setValue(value)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.get('.credentials-panel').isVisible()).toBe(true)
+    expect(wrapper.get('[role="alert"]').text()).toContain(message)
+    expect(api.setupInitialAdmin).not.toHaveBeenCalled()
+  })
+}
+
+for (const compact of [true, false]) {
+  it('blocks a direct first-admin final submit without saved recovery in ' + (compact ? 'compact' : 'wide') + ' layout', async () => {
+    const wrapper = await openSetup(compact)
+    await fillSetupCredentials(wrapper)
+    if (compact) {
+      await wrapper.get('form').trigger('submit')
+      await flushPromises()
+    }
+    // Trigger the form directly to verify the guard behind the disabled button.
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(api.setupInitialAdmin).not.toHaveBeenCalled()
+    expect(api.login).not.toHaveBeenCalled()
+    expect(wrapper.get('[role="alert"]').text()).toContain('回復コードを安全な場所へ保存')
+    expect(wrapper.get('.credentials-panel').isVisible()).toBe(true)
+  })
+}
+
+it('blocks duplicate bootstrap requests and returns to credentials after a server rejection', async () => {
+  const pending = deferred()
+  api.setupInitialAdmin.mockReturnValueOnce(pending.promise)
+  const wrapper = await openSetup()
+  await fillSetupCredentials(wrapper)
+  const code = wrapper.get('.recovery-code').element.value
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+  await wrapper.get('.confirmation-label input').setValue(true)
+  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form').trigger('submit')
   expect(api.setupInitialAdmin).toHaveBeenCalledTimes(1)
-  expect(api.login).toHaveBeenCalledTimes(1)
-  expect(wrapper.find('#setup-token').exists()).toBe(false)
-  expect(wrapper.get('.info-message').text()).toContain('管理者アカウントは作成済み')
+  expect(wrapper.get('.back-button').attributes('disabled')).toBeDefined()
+  expect(wrapper.get('.credentials-panel').attributes('disabled')).toBeDefined()
+  pending.reject(new Error('初期設定トークンが無効です'))
+  await flushPromises()
+  expect(wrapper.get('.credentials-panel').isVisible()).toBe(true)
+  expect(wrapper.get('.recovery-code').element.value).toBe(code)
+  expect(wrapper.get('#setup-token').element.value).toBe('')
+  expect(wrapper.get('#password').element.value).toBe('')
+  expect(wrapper.get('[role="alert"]').text()).toContain('初期設定トークンが無効')
+  expect(api.login).not.toHaveBeenCalled()
+})
+
+it('returns a late initial-setup status to credentials without regenerating an existing recovery code', async () => {
+  const pending = deferred()
+  api.getAuthStatus.mockReturnValueOnce(pending.promise)
+  const wrapper = mount(LoginView, { attachTo: document.body })
+  await wrapper.findAll('.auth-mode-tabs button')[1].trigger('click')
+  await fillCredentials(wrapper)
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+  const code = wrapper.get('.recovery-code').element.value
+  await wrapper.get('.confirmation-label input').setValue(true)
+  pending.resolve({ authenticated: false, setup_required: true })
+  await flushPromises()
+  expect(wrapper.get('.credentials-panel').isVisible()).toBe(true)
+  expect(wrapper.get('#setup-token').exists()).toBe(true)
+  expect(wrapper.get('.login-button').text()).toBe('次へ')
+  expect(wrapper.get('.recovery-code').element.value).toBe(code)
+  expect(wrapper.get('.confirmation-label input').element.checked).toBe(true)
+  expect(api.setupInitialAdmin).not.toHaveBeenCalled()
 })

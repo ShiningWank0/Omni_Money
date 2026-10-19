@@ -92,6 +92,7 @@ test('server round trip: bootstrap admin, persist a transaction, CSV v3 export a
   // is visible (.header-add-btn is display:none above 768px).
   const addBtn = page.locator('.add-btn.add-btn-desktop')
   await expect(addBtn).toBeVisible()
+  await verifyEmptyTransactionHeaders(page)
 
   // 3. Add one transaction through the modal.
   await addBtn.click()
@@ -274,6 +275,59 @@ async function verifyPersistedXSSRendering(page, addBtn) {
   await expect(details).toBeHidden()
 }
 
+async function expectSingleLineTransactionHeaders(table) {
+  const headers = await table.locator('thead th').evaluateAll(cells => cells.map(cell => {
+    const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT)
+    const rects = []
+    while (walker.nextNode()) {
+      const node = walker.currentNode
+      const start = node.textContent.search(/\S/)
+      if (start < 0) continue
+      const range = document.createRange()
+      range.setStart(node, start)
+      range.setEnd(node, node.textContent.trimEnd().length)
+      rects.push(...[...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0))
+    }
+    const lineHeight = Math.max(...rects.map(rect => rect.height))
+    const textHeight = Math.max(...rects.map(rect => rect.bottom)) - Math.min(...rects.map(rect => rect.top))
+    return {
+      text: cell.textContent.trim(),
+      singleLine: rects.length > 0 && textHeight <= lineHeight + 1,
+      fits: cell.scrollWidth <= cell.clientWidth,
+      fontSize: Number.parseFloat(getComputedStyle(cell).fontSize),
+    }
+  }))
+  for (const header of headers) {
+    expect(header.singleLine, header.text).toBe(true)
+    expect(header.fits, header.text).toBe(true)
+  }
+  return headers
+}
+
+async function verifyEmptyTransactionHeaders(page) {
+  const table = page.locator('.transaction-table')
+  await expect(table.locator('tbody .table-status-row')).toHaveText('取引はまだありません')
+  await expect(table.locator('thead th')).toHaveCount(5)
+  let wideFontSize
+  for (const width of [1440, 900, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 })
+    const headers = await expectSingleLineTransactionHeaders(table)
+    if (width === 1440) wideFontSize = headers[0].fontSize
+    if (width <= 390) {
+      expect(headers[0].fontSize).toBeLessThan(wideFontSize)
+      expect(headers[0].fontSize).toBeGreaterThanOrEqual(11)
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  }
+  // Also shrink the table without shrinking the window, so font sizing must
+  // follow the actual table container rather than only a viewport breakpoint.
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.locator('.transaction-section').evaluate(element => { element.style.width = '320px' })
+  const narrowHeaders = await expectSingleLineTransactionHeaders(table)
+  expect(narrowHeaders[0].fontSize).toBeLessThan(wideFontSize)
+  await page.locator('.transaction-section').evaluate(element => { element.style.removeProperty('width') })
+}
+
 async function verifyTransactionTableLayout(page) {
   await expect(page.locator('.modal-overlay')).toHaveCount(0)
   const table = page.locator('.transaction-table')
@@ -294,6 +348,7 @@ async function verifyTransactionTableLayout(page) {
 
     for (const width of [1440, 900, 390]) {
       await page.setViewportSize({ width, height: 900 })
+      await expectSingleLineTransactionHeaders(table)
       await expect.poll(async () => timedRow.locator('.transaction-time').evaluate(element => getComputedStyle(element).display))
         .toBe(width === 390 ? 'block' : 'inline-block')
       const geometry = await table.evaluate(element => {
