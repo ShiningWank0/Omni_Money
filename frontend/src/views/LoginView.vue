@@ -70,7 +70,7 @@
                   v-model="password"
                   type="password"
                   class="form-input"
-                  :autocomplete="mode === 'login' ? 'current-password' : 'new-password'"
+                  :autocomplete="setupRequired || mode !== 'login' ? 'new-password' : 'current-password'"
                   maxlength="1024"
                   required
                 >
@@ -162,7 +162,7 @@ const credentialsPanel = ref(null)
 const recoveryPanel = ref(null)
 let layoutQuery = null
 
-const isAccountFlow = computed(() => !setupRequired.value && mode.value !== 'login')
+const isAccountFlow = computed(() => setupRequired.value || mode.value !== 'login')
 const isFinalAccountAction = computed(() => isAccountFlow.value && (!compactLayout.value || accountStep.value === 'recovery'))
 const needsNewRecovery = computed(() => setupRequired.value || mode.value === 'invite' || mode.value === 'reset')
 const pageTitle = computed(() => {
@@ -238,6 +238,7 @@ onMounted(async () => {
     setupRequired.value = Boolean(status?.setup_required)
     if (setupRequired.value) {
       mode.value = 'login'
+      accountStep.value = 'credentials'
       window.history.replaceState({}, '', '/login')
       prepareRecoveryCode()
     } else if (status?.authenticated && mode.value === 'login' && !forceLoginRequired) {
@@ -270,8 +271,15 @@ async function copyRecoveryCode() {
 // Hidden required inputs cannot rely on native form validation. Validate the
 // complete model on both Next and final submit; the server remains authoritative.
 function validateAccountInputs() {
-  if (!operationToken.value || operationToken.value.length > 4096) throw new Error('管理者から受け取ったトークンを入力してください')
-  if (mode.value === 'invite' && (!displayName.value || displayName.value.length > 120)) throw new Error('表示名を入力してください')
+  if (setupRequired.value) {
+    if (!setupToken.value || setupToken.value.length > 512) throw new Error('初期設定トークンを確認してください')
+    // Keep the browser's email rule when the real field is hidden or disabled.
+    const emailInput = document.createElement('input')
+    emailInput.type = 'email'
+    emailInput.value = email.value
+    if (!email.value || email.value.length > 254 || !emailInput.checkValidity()) throw new Error('メールアドレスを確認してください')
+  } else if (!operationToken.value || operationToken.value.length > 4096) throw new Error('管理者から受け取ったトークンを入力してください')
+  if ((setupRequired.value || mode.value === 'invite') && (!displayName.value || displayName.value.length > 120)) throw new Error('表示名を入力してください')
   validateNewPassword(password.value, passwordConfirmation.value)
   return mode.value === 'reset' ? recoveryCodeToSecret(currentRecoveryCode.value) : null
 }
@@ -322,9 +330,6 @@ async function handleSubmit() {
 	try {
     if (isAccountFlow.value) {
       currentRecoveryBytes = validateAccountInputs()
-      requireSavedRecovery()
-    } else if (setupRequired.value) {
-      validateNewPassword(password.value, passwordConfirmation.value)
       requireSavedRecovery()
     } else validatePasswordBytes(password.value)
 	  if (setupRequired.value) {
@@ -452,7 +457,7 @@ async function handlePasskeyLogin() {
 .form-actions { display: flex; align-items: stretch; gap: 0.75rem; }
 .form-actions .back-button { flex: 0 0 auto; margin-top: 0; padding-inline: 1rem; }
 
-/* Only invitation/reset pages opt out of the application's fixed-height
+/* Initial setup, invitation, and reset opt out of the application's fixed-height
    shell. The document is their single scroll owner, including with a keyboard. */
 :global(body:has(.login-root.account-flow)) { height: auto; min-height: 100vh; min-height: 100dvh; overflow: auto; }
 :global(#app:has(.login-root.account-flow)) { height: auto; min-height: 0; max-height: none; overflow: visible; }
