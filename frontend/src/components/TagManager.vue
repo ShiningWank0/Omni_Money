@@ -1,26 +1,28 @@
 <template>
   <div class="modal-overlay" @click="$emit('close')">
-    <div class="modal-content tag-manager" @click.stop>
-      <div class="tag-manager-header">
-        <h3>タグ管理</h3>
-        <PanelCloseButton class="modal-close" @click="$emit('close')" />
-      </div>
-      <div v-if="errorMessage" class="form-error" role="alert">{{ errorMessage }}</div>
-      <div v-if="rows.length === 0" class="tag-empty">タグはまだありません。</div>
-      <div v-for="row in rows" :key="row.id" class="tag-manager-row" :style="{ paddingLeft: `${row.depth * 20 + 8}px` }">
-        <input
-          v-model="drafts[row.id]"
-          class="tag-name-input"
-          :aria-label="`${row.name}の名前`"
-          maxlength="255"
-          @keyup.enter="save(row)"
-        >
-        <span class="tag-level">L{{ row.level }}</span>
-        <button type="button" class="tag-save-btn" :disabled="busy" @click="save(row)">保存</button>
-        <button type="button" class="tag-delete-btn" :disabled="busy" @click="remove(row)">削除</button>
-      </div>
-      <div class="tag-manager-actions">
-        <button type="button" class="cancel-btn" @click="$emit('close')">閉じる</button>
+    <div class="floating-close-panel modal-content tag-manager" @click.stop>
+      <PanelCloseButton class="panel-floating-close modal-close" @click="$emit('close')" />
+      <div class="panel-scroll-content">
+        <div class="tag-manager-header">
+          <h3>タグ管理</h3>
+        </div>
+        <div v-if="errorMessage" class="form-error" role="alert">{{ errorMessage }}</div>
+        <div v-if="rows.length === 0" class="tag-empty">タグはまだありません。</div>
+        <div v-for="row in rows" :key="row.id" class="tag-manager-row" :style="{ paddingLeft: `${row.depth * 20 + 8}px` }">
+          <input
+            v-model="drafts[row.id]"
+            class="tag-name-input"
+            :aria-label="`${row.name}の名前`"
+            maxlength="255"
+            @keyup.enter="save(row)"
+          >
+          <span class="tag-level">L{{ row.level }}</span>
+          <button type="button" class="tag-save-btn" :disabled="busy" @click="save(row)">保存</button>
+          <button type="button" class="tag-delete-btn" :disabled="busy" @click="remove(row)">削除</button>
+        </div>
+        <div class="tag-manager-actions">
+          <button type="button" class="cancel-btn" @click="$emit('close')">閉じる</button>
+        </div>
       </div>
     </div>
   </div>
@@ -105,4 +107,9 @@ async function remove(row) {
 .tag-save-btn:disabled, .tag-delete-btn:disabled { opacity: .55; cursor: wait; }
 .tag-empty { padding: 28px 0; text-align: center; color: #687386; }
 .tag-manager-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
+@media (max-width: 560px) {
+  .tag-manager-row { flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; }
+  .tag-name-input { flex-basis: calc(100% - 44px); }
+  .tag-save-btn, .tag-delete-btn { flex: 1 1 calc(50% - 4px); }
+}
 </style>

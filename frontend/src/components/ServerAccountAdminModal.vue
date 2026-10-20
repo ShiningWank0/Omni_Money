@@ -1,104 +1,106 @@
 <template>
   <div class="admin-overlay" @click.self="close">
-    <section class="admin-card" role="dialog" aria-modal="true" aria-labelledby="server-admin-title">
-      <header class="admin-header">
-        <div>
-          <h2 id="server-admin-title">サーバーユーザー管理</h2>
-          <p>アカウント状態だけを管理します。ほかのユーザーの家計データへアクセスする機能はありません。</p>
-        </div>
-        <PanelCloseButton class="icon-close" :disabled="busy" @click="close" />
-      </header>
+    <section class="floating-close-panel admin-card" role="dialog" aria-modal="true" aria-labelledby="server-admin-title">
+      <PanelCloseButton class="panel-floating-close icon-close" :disabled="busy" @click="close" />
+      <div class="panel-scroll-content">
+        <header class="admin-header">
+          <div>
+            <h2 id="server-admin-title">サーバーユーザー管理</h2>
+            <p>アカウント状態だけを管理します。ほかのユーザーの家計データへアクセスする機能はありません。</p>
+          </div>
+        </header>
 
-      <div v-if="errorMessage" class="message error" role="alert">{{ errorMessage }}</div>
-      <div v-if="infoMessage" class="message info" role="status">{{ infoMessage }}</div>
+        <div v-if="errorMessage" class="message error" role="alert">{{ errorMessage }}</div>
+        <div v-if="infoMessage" class="message info" role="status">{{ infoMessage }}</div>
 
-      <section class="admin-section" aria-labelledby="invite-title">
-        <h3 id="invite-title">ユーザーを招待</h3>
-        <form class="invite-form" @submit.prevent="createInvitation">
-          <label>
-            メールアドレス
-            <input v-model.trim="inviteEmail" type="email" autocomplete="off" maxlength="254" :disabled="busy || Boolean(issuedToken)" required>
-          </label>
-          <label>
-            権限
-            <select v-model="inviteRole" :disabled="busy || Boolean(issuedToken)">
-              <option value="user">一般ユーザー</option>
-              <option value="admin">管理者</option>
-            </select>
-          </label>
-          <button type="submit" :disabled="busy || Boolean(issuedToken)">招待を作成</button>
-        </form>
-      </section>
+        <section class="admin-section" aria-labelledby="invite-title">
+          <h3 id="invite-title">ユーザーを招待</h3>
+          <form class="invite-form" @submit.prevent="createInvitation">
+            <label>
+              メールアドレス
+              <input v-model.trim="inviteEmail" type="email" autocomplete="off" maxlength="254" :disabled="busy || Boolean(issuedToken)" required>
+            </label>
+            <label>
+              権限
+              <select v-model="inviteRole" :disabled="busy || Boolean(issuedToken)">
+                <option value="user">一般ユーザー</option>
+                <option value="admin">管理者</option>
+              </select>
+            </label>
+            <button type="submit" :disabled="busy || Boolean(issuedToken)">招待を作成</button>
+          </form>
+        </section>
 
-      <section v-if="issuedToken" class="token-panel" aria-live="polite">
-        <h3>{{ issuedTokenKind === 'invite' ? '招待token' : 'パスワード再設定token' }}</h3>
-        <p>
-          このtokenは今だけ表示され、閉じると再取得できません。安全な経路で本人へ渡し、URLには含めないでください。
-          Omni Moneyがクリップボードへ自動で書き込むことはありません。
-        </p>
-        <textarea :value="issuedToken" readonly rows="3" aria-label="一度だけ表示されるtoken" @focus="$event.target.select()"></textarea>
-        <div class="token-actions">
-          <button type="button" @click="copyIssuedToken">tokenをコピー</button>
-          <button type="button" class="secondary" @click="confirmForgetIssuedToken">表示を消す</button>
-        </div>
-        <p class="completion-path">
-          本人は <code>{{ issuedTokenKind === 'invite' ? '/login?mode=invite' : '/login?mode=reset' }}</code>
-          を開き、tokenをフォームへ貼り付けます。
-        </p>
-      </section>
+        <section v-if="issuedToken" class="token-panel" aria-live="polite">
+          <h3>{{ issuedTokenKind === 'invite' ? '招待token' : 'パスワード再設定token' }}</h3>
+          <p>
+            このtokenは今だけ表示され、閉じると再取得できません。安全な経路で本人へ渡し、URLには含めないでください。
+            Omni Moneyがクリップボードへ自動で書き込むことはありません。
+          </p>
+          <textarea :value="issuedToken" readonly rows="3" aria-label="一度だけ表示されるtoken" @focus="$event.target.select()"></textarea>
+          <div class="token-actions">
+            <button type="button" @click="copyIssuedToken">tokenをコピー</button>
+            <button type="button" class="secondary" @click="confirmForgetIssuedToken">表示を消す</button>
+          </div>
+          <p class="completion-path">
+            本人は <code>{{ issuedTokenKind === 'invite' ? '/login?mode=invite' : '/login?mode=reset' }}</code>
+            を開き、tokenをフォームへ貼り付けます。
+          </p>
+        </section>
 
-      <section class="admin-section" aria-labelledby="capabilities-title">
-        <div class="section-title-row"><h3 id="capabilities-title">発行済みtoken</h3><button type="button" class="secondary" :disabled="busy" @click="loadCapabilities">更新</button></div>
-        <h4>招待</h4>
-        <ul class="capability-list">
-          <li v-for="item in invitations" :key="item.id"><span>{{ item.email }} / {{ stateLabel(item.state) }} / 期限 {{ formatDate(item.expires_at) }}</span><button v-if="item.state === 'pending'" type="button" class="danger" :disabled="busy || Boolean(issuedToken)" @click="revokeInvitation(item)">取消</button></li>
-          <li v-if="!invitations.length">発行済みの招待はありません</li>
-        </ul>
-        <h4>パスワード再設定</h4>
-        <ul class="capability-list">
-          <li v-for="item in passwordResets" :key="item.id"><span>{{ userName(item.user_id) }} / {{ stateLabel(item.state) }} / 期限 {{ formatDate(item.expires_at) }}</span><button v-if="item.state === 'pending'" type="button" class="danger" :disabled="busy || Boolean(issuedToken)" @click="revokePasswordReset(item)">取消</button></li>
-          <li v-if="!passwordResets.length">発行済みの再設定tokenはありません</li>
-        </ul>
-      </section>
+        <section class="admin-section" aria-labelledby="capabilities-title">
+          <div class="section-title-row"><h3 id="capabilities-title">発行済みtoken</h3><button type="button" class="secondary" :disabled="busy" @click="loadCapabilities">更新</button></div>
+          <h4>招待</h4>
+          <ul class="capability-list">
+            <li v-for="item in invitations" :key="item.id"><span>{{ item.email }} / {{ stateLabel(item.state) }} / 期限 {{ formatDate(item.expires_at) }}</span><button v-if="item.state === 'pending'" type="button" class="danger" :disabled="busy || Boolean(issuedToken)" @click="revokeInvitation(item)">取消</button></li>
+            <li v-if="!invitations.length">発行済みの招待はありません</li>
+          </ul>
+          <h4>パスワード再設定</h4>
+          <ul class="capability-list">
+            <li v-for="item in passwordResets" :key="item.id"><span>{{ userName(item.user_id) }} / {{ stateLabel(item.state) }} / 期限 {{ formatDate(item.expires_at) }}</span><button v-if="item.state === 'pending'" type="button" class="danger" :disabled="busy || Boolean(issuedToken)" @click="revokePasswordReset(item)">取消</button></li>
+            <li v-if="!passwordResets.length">発行済みの再設定tokenはありません</li>
+          </ul>
+        </section>
 
-      <section class="admin-section users-section" aria-labelledby="users-title">
-        <div class="section-title-row">
-          <h3 id="users-title">ユーザー一覧</h3>
-          <button type="button" class="secondary" :disabled="busy" @click="loadUsers">更新</button>
-        </div>
-        <div v-if="loadingUsers" class="loading" role="status">読み込み中...</div>
-        <div v-else class="table-scroll">
-          <table>
-            <caption class="sr-only">サーバーユーザーのアカウント状態</caption>
-            <thead>
-              <tr><th scope="col">ユーザー</th><th scope="col">権限</th><th scope="col">状態</th><th scope="col">最終ログイン</th><th scope="col">操作</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="user in users" :key="user.id">
-                <td><strong>{{ user.display_name }}</strong><span>{{ user.email }}</span></td>
-                <td><select :value="user.role" :disabled="busy || Boolean(issuedToken) || user.state !== 'active'" @change="changeRole(user, $event.target.value)"><option value="user">一般</option><option value="admin">管理者</option></select></td>
-                <td>{{ user.state === 'active' ? '有効' : '無効' }}</td>
-                <td>{{ formatDate(user.last_login_at) }}</td>
-                <td class="user-actions">
-                  <button type="button" :disabled="busy || user.state !== 'active' || Boolean(issuedToken)" @click="startPasswordReset(user)">再設定token</button>
-                  <button
-                    type="button"
-                    class="danger"
-                    :disabled="busy || Boolean(issuedToken) || user.state !== 'active' || user.id === currentUserId"
-                    @click="disableUser(user)"
-                  >無効化</button>
-				  <button v-if="user.state === 'disabled'" type="button" :disabled="busy || Boolean(issuedToken)" @click="enableUser(user)">再有効化</button>
-                </td>
-              </tr>
-              <tr v-if="users.length === 0"><td colspan="5">ユーザーはいません</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-      <section class="admin-section app-info" aria-labelledby="app-info-title">
-        <h3 id="app-info-title">情報</h3>
-        <p>バージョン: {{ buildInfoLabel }}</p>
-      </section>
+        <section class="admin-section users-section" aria-labelledby="users-title">
+          <div class="section-title-row">
+            <h3 id="users-title">ユーザー一覧</h3>
+            <button type="button" class="secondary" :disabled="busy" @click="loadUsers">更新</button>
+          </div>
+          <div v-if="loadingUsers" class="loading" role="status">読み込み中...</div>
+          <div v-else class="table-scroll">
+            <table>
+              <caption class="sr-only">サーバーユーザーのアカウント状態</caption>
+              <thead>
+                <tr><th scope="col">ユーザー</th><th scope="col">権限</th><th scope="col">状態</th><th scope="col">最終ログイン</th><th scope="col">操作</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="user in users" :key="user.id">
+                  <td><strong>{{ user.display_name }}</strong><span>{{ user.email }}</span></td>
+                  <td><select :value="user.role" :disabled="busy || Boolean(issuedToken) || user.state !== 'active'" @change="changeRole(user, $event.target.value)"><option value="user">一般</option><option value="admin">管理者</option></select></td>
+                  <td>{{ user.state === 'active' ? '有効' : '無効' }}</td>
+                  <td>{{ formatDate(user.last_login_at) }}</td>
+                  <td class="user-actions">
+                    <button type="button" :disabled="busy || user.state !== 'active' || Boolean(issuedToken)" @click="startPasswordReset(user)">再設定token</button>
+                    <button
+                      type="button"
+                      class="danger"
+                      :disabled="busy || Boolean(issuedToken) || user.state !== 'active' || user.id === currentUserId"
+                      @click="disableUser(user)"
+                    >無効化</button>
+            <button v-if="user.state === 'disabled'" type="button" :disabled="busy || Boolean(issuedToken)" @click="enableUser(user)">再有効化</button>
+                  </td>
+                </tr>
+                <tr v-if="users.length === 0"><td colspan="5">ユーザーはいません</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section class="admin-section app-info" aria-labelledby="app-info-title">
+          <h3 id="app-info-title">情報</h3>
+          <p>バージョン: {{ buildInfoLabel }}</p>
+        </section>
+      </div>
     </section>
   </div>
 </template>
@@ -292,7 +294,7 @@ function formatDate(value) {
 
 <style scoped>
 .admin-overlay { position: fixed; inset: 0; z-index: 1200; display: flex; justify-content: center; align-items: center; padding: 1rem; background: rgba(0, 0, 0, 0.55); box-sizing: border-box; }
-.admin-card { width: min(1040px, 100%); max-height: calc(100vh - 2rem); overflow: auto; padding: 1.5rem; border-radius: 18px; background: #fff; box-sizing: border-box; }
+.admin-card { width: min(1040px, 100%); max-height: calc(100vh - 2rem); overflow: auto; padding: var(--floating-panel-padding, 1.5rem); border-radius: 18px; background: #fff; box-sizing: border-box; }
 .admin-header, .section-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
 .admin-header h2, .admin-section h3, .token-panel h3 { margin: 0; }
 .admin-header p { margin: 0.4rem 0 0; color: #555; line-height: 1.45; }
@@ -320,5 +322,5 @@ td span { display: block; color: #666; overflow-wrap: anywhere; }
 .app-info p { margin: 0.75rem 0 0; color: #555; }
 .capability-list { display:grid; gap:.5rem; padding:0; list-style:none; }.capability-list li { display:flex; align-items:center; justify-content:space-between; gap:.75rem; padding:.5rem; border-bottom:1px solid #e5e7f2; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-@media (max-width: 760px) { .invite-form { grid-template-columns: 1fr; } .admin-card { padding: 1rem; } }
+@media (max-width: 760px) { .invite-form { grid-template-columns: 1fr; } .admin-card { padding: var(--floating-panel-padding, 1rem); } }
 </style>

@@ -2393,7 +2393,8 @@ textarea:focus-visible,
 .panel-header > :first-child,
 .admin-header > div,
 .passkey-header > div,
-.credential-card > header > div {
+.credential-card > header > div,
+.panel-scroll-content > header > div {
     min-width: 0;
     overflow-wrap: anywhere;
 }
@@ -2405,3 +2406,58 @@ textarea:focus-visible,
     justify-content: space-between;
     gap: 0.5rem;
 }
+
+/* A separate close-button column keeps scrolling content unobstructed. */
+.floating-close-panel.floating-close-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  grid-template-rows: minmax(0, 1fr);
+  column-gap: 12px;
+  overflow: hidden;
+  box-sizing: border-box;
+  max-height: calc(100dvh - 2rem);
+}
+
+.floating-close-panel > .panel-floating-close {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: start;
+  z-index: 1;
+}
+
+.floating-close-panel > .panel-scroll-content {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+
+.floating-close-panel .modal-buttons {
+  flex-wrap: wrap;
+}
+
+.floating-close-panel .modal-buttons > button {
+  flex: 1 1 9rem;
+  min-width: 0;
+}
+
+@media (max-width: 560px) {
+  .floating-close-panel.floating-close-panel {
+    --floating-panel-padding: 12px;
+    padding: var(--floating-panel-padding);
+    column-gap: 8px;
+  }
+}
+
+/* The fund selector scrolls only its list, keeping its controls visible. */
+.account-dropdown {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.fund-item-header { flex-shrink: 0; }
+.fund-item-list { min-height: 0; }

@@ -1,57 +1,59 @@
 <template>
   <div class="passkey-overlay" @click.self="close">
-    <section class="passkey-card" role="dialog" aria-modal="true" aria-labelledby="passkey-settings-title">
-      <header class="passkey-header">
-        <div>
-          <h2 id="passkey-settings-title">パスキー設定</h2>
-          <p>パスキーを使うと、パスワードを入力せずにログインできます。</p>
-        </div>
-        <PanelCloseButton class="icon-close" :disabled="busy" @click="close" />
-      </header>
+    <section class="floating-close-panel passkey-card" role="dialog" aria-modal="true" aria-labelledby="passkey-settings-title">
+      <PanelCloseButton class="panel-floating-close icon-close" :disabled="busy" @click="close" />
+      <div class="panel-scroll-content">
+        <header class="passkey-header">
+          <div>
+            <h2 id="passkey-settings-title">パスキー設定</h2>
+            <p>パスキーを使うと、パスワードを入力せずにログインできます。</p>
+          </div>
+        </header>
 
-      <div v-if="errorMessage" class="message error" role="alert">{{ errorMessage }}</div>
-      <div v-if="infoMessage" class="message info" role="status">{{ infoMessage }}</div>
-      <div v-if="!supported" class="message warning" role="status">
-        パスキーの登録には、HTTPS接続と対応ブラウザが必要です。
+        <div v-if="errorMessage" class="message error" role="alert">{{ errorMessage }}</div>
+        <div v-if="infoMessage" class="message info" role="status">{{ infoMessage }}</div>
+        <div v-if="!supported" class="message warning" role="status">
+          パスキーの登録には、HTTPS接続と対応ブラウザが必要です。
+        </div>
+
+        <section class="passkey-section" aria-labelledby="register-passkey-title">
+          <h3 id="register-passkey-title">新しいパスキーを登録</h3>
+          <p class="section-description">
+            このアカウントにパスキーを登録します。保存先の確認画面に従ってください。
+          </p>
+          <form class="registration-form" @submit.prevent="register">
+            <label>
+              パスキー名
+              <input v-model.trim="name" type="text" autocomplete="off" maxlength="120" placeholder="例: MacBook Touch ID" :disabled="busy || !supported" required>
+            </label>
+            <button type="submit" :disabled="busy || !supported">{{ registering ? '登録中...' : 'パスキーを登録' }}</button>
+          </form>
+        </section>
+
+        <section class="passkey-section" aria-labelledby="registered-passkeys-title">
+          <div class="section-title-row">
+            <h3 id="registered-passkeys-title">登録済みパスキー</h3>
+            <button type="button" class="secondary" :disabled="busy" @click="load">更新</button>
+          </div>
+          <div v-if="loading" class="loading" role="status">読み込み中...</div>
+          <ul v-else-if="passkeys.length" class="passkey-list">
+            <li v-for="passkey in passkeys" :key="passkey.id">
+              <div>
+                <strong>{{ passkey.name }}</strong>
+                <span>パスキーでログインできます</span>
+                <span>登録: {{ formatDate(passkey.created_at) }}</span>
+                <span>最終利用: {{ passkey.last_used_at ? formatDate(passkey.last_used_at) : '未使用' }}</span>
+              </div>
+              <button type="button" class="danger" :disabled="busy" @click="remove(passkey)">削除</button>
+            </li>
+          </ul>
+          <p v-else class="empty-state">登録済みのパスキーはありません。パスワードでのログインは引き続き利用できます。</p>
+      <div v-if="passkeys.length" class="bulk-revoke">
+        <p>一括失効すると、この端末を含む全端末からログアウトします。パスワードでのログインは残ります。</p>
+        <button type="button" class="danger" :disabled="busy" @click="removeAll">すべてのパスキーを失効</button>
       </div>
-
-      <section class="passkey-section" aria-labelledby="register-passkey-title">
-        <h3 id="register-passkey-title">新しいパスキーを登録</h3>
-        <p class="section-description">
-          このアカウントにパスキーを登録します。保存先の確認画面に従ってください。
-        </p>
-        <form class="registration-form" @submit.prevent="register">
-          <label>
-            パスキー名
-            <input v-model.trim="name" type="text" autocomplete="off" maxlength="120" placeholder="例: MacBook Touch ID" :disabled="busy || !supported" required>
-          </label>
-          <button type="submit" :disabled="busy || !supported">{{ registering ? '登録中...' : 'パスキーを登録' }}</button>
-        </form>
-      </section>
-
-      <section class="passkey-section" aria-labelledby="registered-passkeys-title">
-        <div class="section-title-row">
-          <h3 id="registered-passkeys-title">登録済みパスキー</h3>
-          <button type="button" class="secondary" :disabled="busy" @click="load">更新</button>
-        </div>
-        <div v-if="loading" class="loading" role="status">読み込み中...</div>
-        <ul v-else-if="passkeys.length" class="passkey-list">
-          <li v-for="passkey in passkeys" :key="passkey.id">
-            <div>
-              <strong>{{ passkey.name }}</strong>
-              <span>パスキーでログインできます</span>
-              <span>登録: {{ formatDate(passkey.created_at) }}</span>
-              <span>最終利用: {{ passkey.last_used_at ? formatDate(passkey.last_used_at) : '未使用' }}</span>
-            </div>
-            <button type="button" class="danger" :disabled="busy" @click="remove(passkey)">削除</button>
-          </li>
-        </ul>
-        <p v-else class="empty-state">登録済みのパスキーはありません。パスワードでのログインは引き続き利用できます。</p>
-		<div v-if="passkeys.length" class="bulk-revoke">
-		  <p>一括失効すると、この端末を含む全端末からログアウトします。パスワードでのログインは残ります。</p>
-		  <button type="button" class="danger" :disabled="busy" @click="removeAll">すべてのパスキーを失効</button>
-		</div>
-      </section>
+        </section>
+      </div>
     </section>
   </div>
 </template>
@@ -150,7 +152,7 @@ function formatDate(value) {
 
 <style scoped>
 .passkey-overlay { position: fixed; inset: 0; z-index: 1200; display: flex; justify-content: center; align-items: center; padding: 1rem; background: rgba(0, 0, 0, 0.55); box-sizing: border-box; }
-.passkey-card { width: min(720px, 100%); max-height: calc(100vh - 2rem); overflow: auto; padding: 1.5rem; border-radius: 18px; background: #fff; box-sizing: border-box; }
+.passkey-card { width: min(720px, 100%); max-height: calc(100vh - 2rem); overflow: auto; padding: var(--floating-panel-padding, 1.5rem); border-radius: 18px; background: #fff; box-sizing: border-box; }
 .passkey-header, .section-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
 .passkey-header h2, .passkey-section h3 { margin: 0; }
 .passkey-header p, .section-description { margin: 0.4rem 0 0; color: #555; line-height: 1.45; }
@@ -172,5 +174,5 @@ button.danger { border-color: #c63232; background: #c63232; }
 .message.warning { color: #694d00; background: #fff8e8; }
 .loading, .empty-state { margin: 0.9rem 0 0; color: #555; }
 .bulk-revoke { margin-top:1rem; padding-top:1rem; border-top:1px solid #e5e7f2; }.bulk-revoke p { color:#555; line-height:1.45; }
-@media (max-width: 560px) { .passkey-card { padding: 1rem; } .passkey-list li { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 560px) { .passkey-card { padding: var(--floating-panel-padding, 1rem); } .passkey-list li { align-items: flex-start; flex-direction: column; } }
 </style>

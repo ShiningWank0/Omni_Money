@@ -1,70 +1,72 @@
 <template>
   <div class="modal-overlay" @click="$emit('close')">
-    <div class="modal-content tag-chart-modal" @click.stop>
-      <div class="panel-header">
-        <h3>タグ別分析</h3>
-        <PanelCloseButton @click="$emit('close')" />
-      </div>
-
-      <!-- 期間フィルタ -->
-      <div class="filter-section">
-        <div class="period-filter">
-          <button v-for="p in periods" :key="p.value"
-            :class="['period-btn', { active: periodMode === p.value }]"
-            @click="setPeriodMode(p.value)">
-            {{ p.label }}
-          </button>
+    <div class="floating-close-panel modal-content tag-chart-modal" @click.stop>
+      <PanelCloseButton class="panel-floating-close" @click="$emit('close')" />
+      <div class="panel-scroll-content">
+        <div class="panel-header">
+          <h3>タグ別分析</h3>
         </div>
 
-        <div v-if="periodMode !== 'all'" class="date-navigator">
-          <button class="nav-btn" @click="navigatePeriod(-1)">◀</button>
-          <span class="period-label">{{ currentPeriodLabel }}</span>
-          <button class="nav-btn" @click="navigatePeriod(1)">▶</button>
-        </div>
-
-        <!-- 収入/支出タブ -->
-        <div class="type-tabs">
-          <button :class="['tab-btn', { active: chartType === 'expense' }]" @click="chartType = 'expense'">支出</button>
-          <button :class="['tab-btn', { active: chartType === 'income' }]" @click="chartType = 'income'">収入</button>
-        </div>
-      </div>
-
-      <!-- パンくずリスト（ドリルダウン用） -->
-      <div v-if="breadcrumbs.length > 0" class="breadcrumbs">
-        <span class="breadcrumb-item" @click="drillUp(-1)">全体</span>
-        <span v-for="(bc, i) in breadcrumbs" :key="i">
-          <span class="breadcrumb-sep"> › </span>
-          <span class="breadcrumb-item" @click="drillUp(i)">{{ bc.name }}</span>
-        </span>
-      </div>
-
-      <!-- 円グラフ + 凡例 -->
-      <div class="chart-body">
-        <div v-if="loading" class="no-data" role="status">集計を読み込んでいます…</div>
-        <div v-else-if="loadError" class="no-data" role="alert">
-          {{ loadError }} <button type="button" @click="loadData">再読み込み</button>
-        </div>
-        <div v-else-if="currentData.length === 0" class="no-data">データがありません</div>
-        <template v-else>
-          <div class="chart-container">
-            <canvas ref="chartCanvas"></canvas>
+        <!-- 期間フィルタ -->
+        <div class="filter-section">
+          <div class="period-filter">
+            <button v-for="p in periods" :key="p.value"
+              :class="['period-btn', { active: periodMode === p.value }]"
+              @click="setPeriodMode(p.value)">
+              {{ p.label }}
+            </button>
           </div>
-          <div class="chart-legend">
-            <div class="legend-total">
-              合計: ¥{{ totalAmount.toLocaleString() }}
-            </div>
-            <div v-for="(item, i) in currentData" :key="i"
-              class="legend-item"
-              @click="drillDown(item)"
-              :class="{ clickable: item.children && item.children.length > 0 }">
-              <span class="legend-color" :style="{ background: chartColors[i % chartColors.length] }"></span>
-              <span class="legend-name">{{ item.tag_name }}</span>
-              <span class="legend-amount">¥{{ formatExactInteger(item.amount, item.amount_exact) }}</span>
-              <span class="legend-ratio">{{ (item.ratio * 100).toFixed(1) }}%</span>
-              <span v-if="item.children && item.children.length > 0" class="legend-drill">▶</span>
-            </div>
+
+          <div v-if="periodMode !== 'all'" class="date-navigator">
+            <button class="nav-btn" @click="navigatePeriod(-1)">◀</button>
+            <span class="period-label">{{ currentPeriodLabel }}</span>
+            <button class="nav-btn" @click="navigatePeriod(1)">▶</button>
           </div>
-        </template>
+
+          <!-- 収入/支出タブ -->
+          <div class="type-tabs">
+            <button :class="['tab-btn', { active: chartType === 'expense' }]" @click="chartType = 'expense'">支出</button>
+            <button :class="['tab-btn', { active: chartType === 'income' }]" @click="chartType = 'income'">収入</button>
+          </div>
+        </div>
+
+        <!-- パンくずリスト（ドリルダウン用） -->
+        <div v-if="breadcrumbs.length > 0" class="breadcrumbs">
+          <span class="breadcrumb-item" @click="drillUp(-1)">全体</span>
+          <span v-for="(bc, i) in breadcrumbs" :key="i">
+            <span class="breadcrumb-sep"> › </span>
+            <span class="breadcrumb-item" @click="drillUp(i)">{{ bc.name }}</span>
+          </span>
+        </div>
+
+        <!-- 円グラフ + 凡例 -->
+        <div class="chart-body">
+          <div v-if="loading" class="no-data" role="status">集計を読み込んでいます…</div>
+          <div v-else-if="loadError" class="no-data" role="alert">
+            {{ loadError }} <button type="button" @click="loadData">再読み込み</button>
+          </div>
+          <div v-else-if="currentData.length === 0" class="no-data">データがありません</div>
+          <template v-else>
+            <div class="chart-container">
+              <canvas ref="chartCanvas"></canvas>
+            </div>
+            <div class="chart-legend">
+              <div class="legend-total">
+                合計: ¥{{ totalAmount.toLocaleString() }}
+              </div>
+              <div v-for="(item, i) in currentData" :key="i"
+                class="legend-item"
+                @click="drillDown(item)"
+                :class="{ clickable: item.children && item.children.length > 0 }">
+                <span class="legend-color" :style="{ background: chartColors[i % chartColors.length] }"></span>
+                <span class="legend-name">{{ item.tag_name }}</span>
+                <span class="legend-amount">¥{{ formatExactInteger(item.amount, item.amount_exact) }}</span>
+                <span class="legend-ratio">{{ (item.ratio * 100).toFixed(1) }}%</span>
+                <span v-if="item.children && item.children.length > 0" class="legend-drill">▶</span>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
     </div>
   </div>

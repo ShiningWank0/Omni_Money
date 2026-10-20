@@ -1,42 +1,44 @@
 <template>
   <div class="modal-overlay" @click.self="$emit('close')">
-    <div class="modal-content ai-console-modal" @click.stop>
-      <div class="ai-console-header">
-        <h3>AI API操作</h3>
-        <PanelCloseButton class="close-btn" @click="$emit('close')" />
-      </div>
+    <div class="floating-close-panel modal-content ai-console-modal" @click.stop>
+      <PanelCloseButton class="panel-floating-close close-btn" @click="$emit('close')" />
+      <div class="panel-scroll-content">
+        <div class="ai-console-header">
+          <h3>AI API操作</h3>
+        </div>
 
-      <div class="form-row">
-        <label for="ai-operation">操作:</label>
-        <select id="ai-operation" v-model="operation" :disabled="sending">
-          <option value="transactions">取引追加（POST /transactions）</option>
-          <option value="analysis">分析（POST /analysis）</option>
-        </select>
-      </div>
+        <div class="form-row">
+          <label for="ai-operation">操作:</label>
+          <select id="ai-operation" v-model="operation" :disabled="sending">
+            <option value="transactions">取引追加（POST /transactions）</option>
+            <option value="analysis">分析（POST /analysis）</option>
+          </select>
+        </div>
 
-      <div class="form-row">
-        <label for="ai-request-body">JSONリクエスト:</label>
-        <textarea
-          id="ai-request-body"
-          v-model="requestBody"
-          rows="16"
-          spellcheck="false"
-          autocomplete="off"
-          :disabled="sending"
-        ></textarea>
-        <p class="api-key-warning">APIキーは入力しないでください。</p>
-      </div>
+        <div class="form-row">
+          <label for="ai-request-body">JSONリクエスト:</label>
+          <textarea
+            id="ai-request-body"
+            v-model="requestBody"
+            rows="16"
+            spellcheck="false"
+            autocomplete="off"
+            :disabled="sending"
+          ></textarea>
+          <p class="api-key-warning">APIキーは入力しないでください。</p>
+        </div>
 
-      <div class="button-row">
-        <button type="button" class="cancel-btn" :disabled="sending" @click="$emit('close')">閉じる</button>
-        <button type="button" class="send-btn" :disabled="sending" @click="sendRequest">
-          {{ sending ? '送信中...' : 'AI専用入口へ送信' }}
-        </button>
-      </div>
+        <div class="button-row">
+          <button type="button" class="cancel-btn" :disabled="sending" @click="$emit('close')">閉じる</button>
+          <button type="button" class="send-btn" :disabled="sending" @click="sendRequest">
+            {{ sending ? '送信中...' : 'AI専用入口へ送信' }}
+          </button>
+        </div>
 
-      <div v-if="result" class="result-panel" :class="result.ok ? 'success' : 'error'">
-        <div class="result-title">HTTP {{ result.status }}</div>
-        <pre>{{ result.body }}</pre>
+        <div v-if="result" class="result-panel" :class="result.ok ? 'success' : 'error'">
+          <div class="result-title">HTTP {{ result.status }}</div>
+          <pre>{{ result.body }}</pre>
+        </div>
       </div>
     </div>
   </div>

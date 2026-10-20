@@ -1,119 +1,121 @@
 <template>
   <div class="modal-overlay" @click="$emit('close')">
-    <div class="modal-content csv-import-modal" @click.stop>
-      <div class="panel-header">
-        <h3>CSVインポート</h3>
-        <PanelCloseButton :disabled="csvImporting" @click="$emit('close')" />
-      </div>
+    <div class="floating-close-panel modal-content csv-import-modal" @click.stop>
+      <PanelCloseButton class="panel-floating-close" :disabled="csvImporting" @click="$emit('close')" />
+      <div class="panel-scroll-content">
+        <div class="panel-header">
+          <h3>CSVインポート</h3>
+        </div>
 
-      <!-- ファイル選択セクション -->
-      <div class="form-row">
-        <label>CSVファイル：</label>
-        <div>
-          <input v-if="!isWailsMode" type="file" accept=".csv" ref="csvFileInput" :disabled="csvImporting" @change="onCSVFileSelected">
-          <div v-if="isWailsMode" class="file-info">
-            Desktopでは実行時にOSのファイル選択ダイアログを開きます。
-          </div>
-          <div v-else-if="csvFile" class="file-info">
-            選択ファイル: {{ csvFile.name }}
+        <!-- ファイル選択セクション -->
+        <div class="form-row">
+          <label>CSVファイル：</label>
+          <div>
+            <input v-if="!isWailsMode" type="file" accept=".csv" ref="csvFileInput" :disabled="csvImporting" @change="onCSVFileSelected">
+            <div v-if="isWailsMode" class="file-info">
+              Desktopでは実行時にOSのファイル選択ダイアログを開きます。
+            </div>
+            <div v-else-if="csvFile" class="file-info">
+              選択ファイル: {{ csvFile.name }}
+            </div>
           </div>
         </div>
-      </div>
 
-      <!-- インポートモード選択 -->
-      <div class="form-row">
-        <label>インポートモード：</label>
-        <div class="radio-group">
-          <label class="radio-label">
-            <input type="radio" v-model="csvImportMode" value="append" :disabled="csvImporting" @change="onImportModeChanged">
-            <span>追加 (既存データを保持)</span>
+        <!-- インポートモード選択 -->
+        <div class="form-row">
+          <label>インポートモード：</label>
+          <div class="radio-group">
+            <label class="radio-label">
+              <input type="radio" v-model="csvImportMode" value="append" :disabled="csvImporting" @change="onImportModeChanged">
+              <span>追加 (既存データを保持)</span>
+            </label>
+            <label class="radio-label">
+              <input type="radio" v-model="csvImportMode" value="replace" :disabled="csvImporting" @change="onImportModeChanged">
+              <span>置換 (CSV v3のみ)</span>
+            </label>
+          </div>
+        </div>
+
+        <div v-if="csvImportMode === 'replace'" class="replace-warning" role="alert">
+          <strong>破壊的操作です。</strong>
+          置換はCSV v3でのみ利用できます。v1/v2（旧形式）のreplaceは安全のため拒否されます。
+          旧形式はappendで追加するか、完全バックアップからCSV v3を使用してください。
+          CSV v3の置換を実行すると、現在の取引・画像・タグ・取引タグ・取引リンクと、allowlist対象のledger設定
+          （credit_card_items / bank_account_items）を必ず削除します。CSVに設定行があればその値で置き換え、
+          なければ未設定のままになります。AI連携の重複排除・日次利用量記録もリセットされます。
+          その他の設定は保持され、CSVにない取引関連データは復元されません。
+          <label class="replace-confirmation">
+            <input v-model="replaceConfirmed" type="checkbox" :disabled="csvImporting || csvPreviewing">
+            <span>現在の取引データが削除されることを理解し、置換を実行します</span>
           </label>
-          <label class="radio-label">
-            <input type="radio" v-model="csvImportMode" value="replace" :disabled="csvImporting" @change="onImportModeChanged">
-            <span>置換 (CSV v3のみ)</span>
-          </label>
         </div>
-      </div>
 
-      <div v-if="csvImportMode === 'replace'" class="replace-warning" role="alert">
-        <strong>破壊的操作です。</strong>
-        置換はCSV v3でのみ利用できます。v1/v2（旧形式）のreplaceは安全のため拒否されます。
-        旧形式はappendで追加するか、完全バックアップからCSV v3を使用してください。
-        CSV v3の置換を実行すると、現在の取引・画像・タグ・取引タグ・取引リンクと、allowlist対象のledger設定
-        （credit_card_items / bank_account_items）を必ず削除します。CSVに設定行があればその値で置き換え、
-        なければ未設定のままになります。AI連携の重複排除・日次利用量記録もリセットされます。
-        その他の設定は保持され、CSVにない取引関連データは復元されません。
-        <label class="replace-confirmation">
-          <input v-model="replaceConfirmed" type="checkbox" :disabled="csvImporting || csvPreviewing">
-          <span>現在の取引データが削除されることを理解し、置換を実行します</span>
-        </label>
-      </div>
-
-      <!-- CSV形式の説明 -->
-      <div class="format-info">
-        <div style="font-weight: bold; margin-bottom: 8px; font-size: 0.95em; color: #333;">CSVファイル形式</div>
-        <div>
-          <div style="margin-bottom: 4px;"><strong>旧形式:</strong> account, date, item, type, amount（v1/v2はappendのみ。replaceはCSV v3のみ）</div>
-          <div style="margin-bottom: 4px;"><strong>完全バックアップ:</strong> v3（取引・画像・タグ・タグ紐付け・取引リンク・ledger設定）</div>
-          <div style="margin-left: 12px;">
-            <div>• <strong>account:</strong> 資金項目名</div>
-            <div>• <strong>date:</strong> 取引日 (YYYY-MM-DD または YYYY-MM-DD HH:MM:SS)</div>
-            <div>• <strong>item:</strong> 取引項目名</div>
-            <div>• <strong>type:</strong> income (収入) または expense (支出)</div>
-            <div>• <strong>amount:</strong> 金額 (正の数値)</div>
-            <div>• <strong>balance:</strong> 残高 (オプション、自動計算されます)</div>
-            <div>• v3の画像はファイル名・MIMEタイプ・Base64バイナリを含みます</div>
-            <div>• v3の関連付けはインポート時に安全な新しいIDへ再採番されます</div>
-            <div>• appendは既存の取引・画像・タグ・リンク・ledger設定を保持します。CSVのledger設定が既存値と異なる場合は全体を中止します</div>
+        <!-- CSV形式の説明 -->
+        <div class="format-info">
+          <div style="font-weight: bold; margin-bottom: 8px; font-size: 0.95em; color: #333;">CSVファイル形式</div>
+          <div>
+            <div style="margin-bottom: 4px;"><strong>旧形式:</strong> account, date, item, type, amount（v1/v2はappendのみ。replaceはCSV v3のみ）</div>
+            <div style="margin-bottom: 4px;"><strong>完全バックアップ:</strong> v3（取引・画像・タグ・タグ紐付け・取引リンク・ledger設定）</div>
+            <div style="margin-left: 12px;">
+              <div>• <strong>account:</strong> 資金項目名</div>
+              <div>• <strong>date:</strong> 取引日 (YYYY-MM-DD または YYYY-MM-DD HH:MM:SS)</div>
+              <div>• <strong>item:</strong> 取引項目名</div>
+              <div>• <strong>type:</strong> income (収入) または expense (支出)</div>
+              <div>• <strong>amount:</strong> 金額 (正の数値)</div>
+              <div>• <strong>balance:</strong> 残高 (オプション、自動計算されます)</div>
+              <div>• v3の画像はファイル名・MIMEタイプ・Base64バイナリを含みます</div>
+              <div>• v3の関連付けはインポート時に安全な新しいIDへ再採番されます</div>
+              <div>• appendは既存の取引・画像・タグ・リンク・ledger設定を保持します。CSVのledger設定が既存値と異なる場合は全体を中止します</div>
+            </div>
+            <div class="csv-plaintext-note" role="note">CSVは暗号化されない平文です。出力・保存前に、FileVault・BitLocker・LUKS等で保護された保存先であることを確認してください。</div>
           </div>
-          <div class="csv-plaintext-note" role="note">CSVは暗号化されない平文です。出力・保存前に、FileVault・BitLocker・LUKS等で保護された保存先であることを確認してください。</div>
         </div>
-      </div>
 
-      <!-- プレビュー結果 -->
-      <div v-if="csvPreview" class="import-preview" role="status">
-        <div class="preview-counts">
-          新規 <strong>{{ csvPreview.new_count }}</strong>件 /
-          重複候補 <strong>{{ csvPreview.duplicate_count }}</strong>件 /
-          競合候補 <strong>{{ csvPreview.conflict_count }}</strong>件
+        <!-- プレビュー結果 -->
+        <div v-if="csvPreview" class="import-preview" role="status">
+          <div class="preview-counts">
+            新規 <strong>{{ csvPreview.new_count }}</strong>件 /
+            重複候補 <strong>{{ csvPreview.duplicate_count }}</strong>件 /
+            競合候補 <strong>{{ csvPreview.conflict_count }}</strong>件
+          </div>
+          <div>候補は既存取引との比較です。自動スキップは行わず、追加では候補を含む全行を取り込みます。</div>
+          <div v-if="csvImportMode === 'replace' && csvPreview.replace_impact" class="preview-impact">
+            置換により削除されます: 取引 {{ csvPreview.replace_impact.transactions }}件 /
+            画像 {{ csvPreview.replace_impact.images }}件 /
+            タグ {{ csvPreview.replace_impact.tags }}件 /
+            タグ付け {{ csvPreview.replace_impact.transaction_tags }}件 /
+            取引リンク {{ csvPreview.replace_impact.transaction_links }}件 /
+            ledger設定 {{ csvPreview.replace_impact.ledger_settings }}件
+          </div>
         </div>
-        <div>候補は既存取引との比較です。自動スキップは行わず、追加では候補を含む全行を取り込みます。</div>
-        <div v-if="csvImportMode === 'replace' && csvPreview.replace_impact" class="preview-impact">
-          置換により削除されます: 取引 {{ csvPreview.replace_impact.transactions }}件 /
-          画像 {{ csvPreview.replace_impact.images }}件 /
-          タグ {{ csvPreview.replace_impact.tags }}件 /
-          タグ付け {{ csvPreview.replace_impact.transaction_tags }}件 /
-          取引リンク {{ csvPreview.replace_impact.transaction_links }}件 /
-          ledger設定 {{ csvPreview.replace_impact.ledger_settings }}件
+        <div v-if="csvPreviewing" class="progress-section">
+          <div class="progress-text">プレビューを確認中...</div>
         </div>
-      </div>
-      <div v-if="csvPreviewing" class="progress-section">
-        <div class="progress-text">プレビューを確認中...</div>
-      </div>
 
-      <!-- プログレスバー -->
-      <div v-if="csvImporting" class="progress-section">
-        <div class="progress-bar">
-          <div class="progress-fill"></div>
+        <!-- プログレスバー -->
+        <div v-if="csvImporting" class="progress-section">
+          <div class="progress-bar">
+            <div class="progress-fill"></div>
+          </div>
+          <div class="progress-text">CSVファイルをインポート中...</div>
         </div>
-        <div class="progress-text">CSVファイルをインポート中...</div>
-      </div>
 
-      <!-- ステータスメッセージ -->
-      <div v-if="csvImportError" class="status-message status-error">{{ csvImportError }}</div>
-      <div v-if="csvImportSuccess" class="status-message status-success">{{ csvImportSuccess }}</div>
+        <!-- ステータスメッセージ -->
+        <div v-if="csvImportError" class="status-message status-error">{{ csvImportError }}</div>
+        <div v-if="csvImportSuccess" class="status-message status-success">{{ csvImportSuccess }}</div>
 
-      <!-- ボタン -->
-      <div class="modal-buttons">
-        <button class="cancel-btn" @click="$emit('close')" :disabled="csvImporting">キャンセル</button>
-        <button v-if="!isWailsMode" class="preview-btn" @click="runCSVPreview" :disabled="previewDisabled"
-          :style="{ opacity: previewDisabled ? 0.5 : 1 }">
-          {{ csvPreviewing ? 'プレビュー中...' : (csvPreview ? '再プレビュー' : 'プレビュー') }}
-        </button>
-        <button class="ok-btn" @click="importCSVFile" :disabled="importDisabled"
-          :style="{ opacity: importDisabled ? 0.5 : 1 }">
-          {{ csvImporting ? 'インポート中...' : 'インポート実行' }}
-        </button>
+        <!-- ボタン -->
+        <div class="modal-buttons">
+          <button class="cancel-btn" @click="$emit('close')" :disabled="csvImporting">キャンセル</button>
+          <button v-if="!isWailsMode" class="preview-btn" @click="runCSVPreview" :disabled="previewDisabled"
+            :style="{ opacity: previewDisabled ? 0.5 : 1 }">
+            {{ csvPreviewing ? 'プレビュー中...' : (csvPreview ? '再プレビュー' : 'プレビュー') }}
+          </button>
+          <button class="ok-btn" @click="importCSVFile" :disabled="importDisabled"
+            :style="{ opacity: importDisabled ? 0.5 : 1 }">
+            {{ csvImporting ? 'インポート中...' : 'インポート実行' }}
+          </button>
+        </div>
       </div>
     </div>
   </div>
