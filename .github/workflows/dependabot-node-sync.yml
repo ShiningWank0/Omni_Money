@@ -1,0 +1,76 @@
+name: Sync Dependabot Node version
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [requested]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: dependabot-node-sync-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: >-
+      github.repository == 'ShiningWank0/Omni_Money' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/docker/node-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Execute only the workflow's trusted default-branch revision. PR content
+      # is API data; no PR checkout, artifacts, dependencies or scripts execute.
+      - name: Checkout trusted synchronization code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Setup trusted Node version
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Inspect Dependabot Node update with read-only access
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/dependabot-node-sync.mjs inspect
+
+      - name: Check GitHub App configuration
+        id: config
+        if: steps.plan.outputs.eligible == 'true'
+        env:
+          NODE_SYNC_CLIENT_ID: ${{ vars.NODE_SYNC_APP_CLIENT_ID }}
+          NODE_SYNC_PRIVATE_KEY: ${{ secrets.NODE_SYNC_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$NODE_SYNC_CLIENT_ID" ] && [ -n "$NODE_SYNC_PRIVATE_KEY" ]; then
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          else
+            echo '::warning::Node sync GitHub App is not configured; follow docs/dependency-updates.md'
+            echo '自動同期にはGitHub Appの初回設定が必要です。docs/dependency-updates.mdを参照してください。既存CIの整合性検査は引き続き有効です。' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Create repository-scoped short-lived write token
+        id: app
+        if: steps.config.outputs.configured == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.NODE_SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.NODE_SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: read
+
+      - name: Revalidate and synchronize only .node-version
+        if: steps.config.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: node scripts/dependabot-node-sync.mjs apply
