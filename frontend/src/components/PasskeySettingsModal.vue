@@ -6,7 +6,7 @@
           <h2 id="passkey-settings-title">パスキー設定</h2>
           <p>パスキーを使うと、パスワードを入力せずにログインできます。</p>
         </div>
-        <button type="button" class="icon-close" aria-label="閉じる" :disabled="busy" @click="close">×</button>
+        <PanelCloseButton class="icon-close" :disabled="busy" @click="close" />
       </header>
 
       <div v-if="errorMessage" class="message error" role="alert">{{ errorMessage }}</div>
@@ -57,6 +57,7 @@
 </template>
 
 <script setup>
+import PanelCloseButton from './PanelCloseButton.vue'
 import { onMounted, ref } from 'vue'
 import { deleteAllPasskeys, deletePasskey, listPasskeys, registerPasskey } from '../utils/api'
 import { replaceLocation } from '../utils/navigation'
@@ -153,7 +154,6 @@ function formatDate(value) {
 .passkey-header, .section-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
 .passkey-header h2, .passkey-section h3 { margin: 0; }
 .passkey-header p, .section-description { margin: 0.4rem 0 0; color: #555; line-height: 1.45; }
-.icon-close { border: none; color: #333; background: transparent; font-size: 1.8rem; cursor: pointer; }
 .passkey-section { margin-top: 1.25rem; padding: 1rem; border: 1px solid #dde1f6; border-radius: 12px; }
 .registration-form { display: grid; gap: 0.8rem; margin-top: 0.9rem; }
 label { display: grid; gap: 0.3rem; color: #333; font-size: 0.88rem; font-weight: 600; }

@@ -53,6 +53,7 @@
             </button>
             <div v-if="showAccountDropdown" id="account-dropdown" class="account-dropdown" @click.stop>
               <div class="fund-item-header">
+                <PanelCloseButton label="資金項目の選択を閉じる" @click="showAccountDropdown = false" />
                 <button type="button" @click="store.toggleAllFundItems(); refreshData()" class="toggle-all-btn">
                   {{ store.selectedFundItems.length === store.actualFundItems.length ? '全解除' : '全選択' }}
                 </button>
@@ -88,6 +89,10 @@
     <!-- メニューのドロワー -->
     <div v-if="showMenu" class="side-menu-overlay" @click.self="toggleMenu">
       <nav id="side-menu" class="side-menu" aria-label="アプリケーションメニュー">
+        <div class="side-menu-header">
+          <h2>メニュー</h2>
+          <PanelCloseButton label="メニューを閉じる" @click="showMenu = false" />
+        </div>
         <div class="side-menu-items">
           <button class="menu-btn" @click="backupToCSV">CSVバックアップ</button>
           <button class="menu-btn" @click="showImportCSVModalMethod">CSVインポート</button>
@@ -278,7 +283,10 @@
 
     <div v-if="showDesktopIdleSettings" class="reauth-overlay" @click.self="closeDesktopIdleSettings">
       <form class="reauth-card" role="dialog" aria-modal="true" aria-labelledby="desktop-idle-title" @submit.prevent="saveDesktopIdleSettings">
-        <h3 id="desktop-idle-title">Desktop 自動ロック</h3>
+        <div class="panel-header">
+          <h3 id="desktop-idle-title">Desktop 自動ロック</h3>
+          <PanelCloseButton @click="closeDesktopIdleSettings" />
+        </div>
         <label class="reauth-label" for="desktop-idle-minutes">無操作時間（5〜120分）</label>
         <input
           id="desktop-idle-minutes"
@@ -308,7 +316,10 @@
     <!-- 最近の認証が必要な操作用の再認証ダイアログ -->
     <div v-if="showReauthModal" class="reauth-overlay" @click.self="cancelReauthentication">
       <div class="reauth-card" role="dialog" aria-modal="true" aria-labelledby="reauth-title">
-        <h3 id="reauth-title">重要な操作の確認</h3>
+        <div class="panel-header">
+          <h3 id="reauth-title">重要な操作の確認</h3>
+          <PanelCloseButton :disabled="reauthLoading" @click="cancelReauthentication" />
+        </div>
         <form @submit.prevent="submitReauthentication">
           <label class="reauth-label" for="reauth-password">パスワード</label>
           <input
@@ -358,6 +369,7 @@
 import { ref, computed, defineAsyncComponent, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useAppStore } from './store/index'
 import TransactionModal from './components/TransactionModal.vue'
+import PanelCloseButton from './components/PanelCloseButton.vue'
 import DesktopVaultGate from './components/DesktopVaultGate.vue'
 import { csvExportWarning } from './utils/csvSafety'
 import { isDesktopVaultUnlocked } from './utils/desktopVaultSafety'

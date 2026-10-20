@@ -1,7 +1,10 @@
 <template>
   <div class="modal-overlay" @click="$emit('close')">
     <div class="modal-content csv-import-modal" @click.stop>
-      <h3>CSVインポート</h3>
+      <div class="panel-header">
+        <h3>CSVインポート</h3>
+        <PanelCloseButton :disabled="csvImporting" @click="$emit('close')" />
+      </div>
 
       <!-- ファイル選択セクション -->
       <div class="form-row">
@@ -117,6 +120,7 @@
 </template>
 
 <script setup>
+import PanelCloseButton from './PanelCloseButton.vue'
 import { computed, ref } from 'vue'
 import { importCSV, previewCSVImport, isWailsMode } from '../utils/api'
 import { canStartCSVImport } from '../utils/csvSafety'

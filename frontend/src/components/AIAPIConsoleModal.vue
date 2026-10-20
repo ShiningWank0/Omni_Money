@@ -3,7 +3,7 @@
     <div class="modal-content ai-console-modal" @click.stop>
       <div class="ai-console-header">
         <h3>AI API操作</h3>
-        <button class="close-btn" type="button" @click="$emit('close')">&times;</button>
+        <PanelCloseButton class="close-btn" @click="$emit('close')" />
       </div>
 
       <div class="form-row">
@@ -43,6 +43,7 @@
 </template>
 
 <script setup>
+import PanelCloseButton from './PanelCloseButton.vue'
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { apiFetch } from '../utils/api'
 
@@ -175,13 +176,6 @@ onBeforeUnmount(() => {
   margin: 0;
 }
 
-.close-btn {
-  border: 0;
-  background: transparent;
-  color: #555;
-  cursor: pointer;
-  font-size: 1.8rem;
-}
 
 .api-key-warning { margin: 0.4rem 0 0; color: #8a2525; font-size: 0.85rem; }
 

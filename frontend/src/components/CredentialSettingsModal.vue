@@ -6,7 +6,7 @@
           <h2 id="credential-title">認証情報の管理</h2>
           <p>Vaultの暗号鍵は変更せず、鍵を開くための認証情報だけを安全に更新します。</p>
         </div>
-        <button type="button" class="icon-close" aria-label="閉じる" :disabled="busy" @click="close">×</button>
+        <PanelCloseButton class="icon-close" :disabled="busy" @click="close" />
       </header>
 
       <div v-if="errorMessage" class="message error" role="alert">{{ errorMessage }}</div>
@@ -65,6 +65,7 @@
 </template>
 
 <script setup>
+import PanelCloseButton from './PanelCloseButton.vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
 	  changeDesktopVaultPassword, changeServerPassword, isWailsMode, listServerCredentials, logoutAll,
@@ -227,7 +228,6 @@ function formatDate(value) {
 .credential-overlay { position: fixed; inset: 0; z-index: 1200; display: flex; justify-content: center; align-items: center; padding: 1rem; background: rgba(0,0,0,.55); box-sizing: border-box; }
 .credential-card { width: min(760px,100%); max-height: calc(100vh - 2rem); overflow: auto; padding: 1.5rem; border-radius: 18px; background: #fff; box-sizing: border-box; }
 header { display: flex; justify-content: space-between; gap: 1rem; } h2,h3 { margin: 0; } header p,.credential-section p { color: #555; line-height: 1.45; }
-.icon-close { border: 0; color: #333; background: transparent; font-size: 1.8rem; }
 .credential-section,.recovery-panel { margin-top: 1rem; padding: 1rem; border: 1px solid #dde1f6; border-radius: 12px; }
 .recovery-panel { border-color: #e0ad3f; background: #fffaf0; }
 form { display: grid; gap: .75rem; } label { display: grid; gap: .3rem; font-size: .88rem; font-weight: 600; }

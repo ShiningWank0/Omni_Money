@@ -1,7 +1,10 @@
 <template>
   <div class="modal-overlay" @click="!saving && $emit('close')">
     <div class="modal-content cc-settings-modal" @click.stop>
-      <h3>{{ title }}</h3>
+      <div class="panel-header">
+        <h3>{{ title }}</h3>
+        <PanelCloseButton :disabled="saving" @click="$emit('close')" />
+      </div>
 
       <div class="info-box">
         <p>
@@ -45,6 +48,7 @@
 </template>
 
 <script setup>
+import PanelCloseButton from './PanelCloseButton.vue'
 import { ref, computed, onMounted } from 'vue'
 
 const props = defineProps({

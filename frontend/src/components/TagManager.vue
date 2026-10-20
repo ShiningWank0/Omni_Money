@@ -3,7 +3,7 @@
     <div class="modal-content tag-manager" @click.stop>
       <div class="tag-manager-header">
         <h3>タグ管理</h3>
-        <button type="button" class="modal-close" aria-label="閉じる" @click="$emit('close')">×</button>
+        <PanelCloseButton class="modal-close" @click="$emit('close')" />
       </div>
       <div v-if="errorMessage" class="form-error" role="alert">{{ errorMessage }}</div>
       <div v-if="rows.length === 0" class="tag-empty">タグはまだありません。</div>
@@ -27,6 +27,7 @@
 </template>
 
 <script setup>
+import PanelCloseButton from './PanelCloseButton.vue'
 import { computed, ref } from 'vue'
 import { deleteTag, getTagDeleteImpact, getTags, updateTag } from '../utils/api'
 import { formatTagDeleteImpact, syncTagDrafts } from '../utils/tagManagerSafety.js'
@@ -95,7 +96,6 @@ async function remove(row) {
 .tag-manager { max-width: 760px; width: min(94vw, 760px); }
 .tag-manager-header { display: flex; align-items: center; justify-content: space-between; }
 .tag-manager-header h3 { margin: 0; }
-.modal-close { border: 0; background: transparent; font-size: 1.5rem; cursor: pointer; }
 .tag-manager-row { display: flex; align-items: center; gap: 8px; min-height: 44px; border-bottom: 1px solid #e6e9ef; }
 .tag-name-input { flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid #cfd5dd; border-radius: 5px; }
 .tag-level { color: #687386; font-size: 0.8rem; width: 28px; }

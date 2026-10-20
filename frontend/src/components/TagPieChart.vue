@@ -1,7 +1,10 @@
 <template>
   <div class="modal-overlay" @click="$emit('close')">
     <div class="modal-content tag-chart-modal" @click.stop>
-      <h3>タグ別分析</h3>
+      <div class="panel-header">
+        <h3>タグ別分析</h3>
+        <PanelCloseButton @click="$emit('close')" />
+      </div>
 
       <!-- 期間フィルタ -->
       <div class="filter-section">
@@ -68,6 +71,7 @@
 </template>
 
 <script setup>
+import PanelCloseButton from './PanelCloseButton.vue'
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { getTagSummary } from '../utils/api'
 import Chart from 'chart.js/auto'

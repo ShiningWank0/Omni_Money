@@ -2221,6 +2221,7 @@ textarea:focus-visible,
     }
 
     .header-left {
+        position: relative;
         flex: 1;
         min-width: 0;
         gap: 0.45rem;
@@ -2228,6 +2229,12 @@ textarea:focus-visible,
 
     .project-selector {
         flex: 1;
+        position: static;
+    }
+
+    .account-dropdown {
+        right: 0;
+        min-width: 0;
     }
 
     .project-selector-button {
@@ -2372,4 +2379,41 @@ textarea:focus-visible,
         animation-iteration-count: 1 !important;
         transition-duration: 0.01ms !important;
     }
+}
+
+/* 閉じる操作は余白のタップに依存せず、見出し横に常設する。 */
+.panel-header,
+.side-menu-header {
+    display: flex;
+    flex-shrink: 0;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.panel-header > :first-child,
+.admin-header > div,
+.passkey-header > div,
+.credential-card > header > div {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.side-menu-header {
+    align-items: center;
+    padding: 0 0.25rem;
+}
+
+.side-menu-header h2 {
+    margin: 0;
+    color: var(--omni-text);
+    font-size: 1.1rem;
+}
+
+.fund-item-header {
+    display: flex;
+    flex-direction: row-reverse;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
 }
