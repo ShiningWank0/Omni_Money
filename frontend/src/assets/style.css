@@ -2382,8 +2382,7 @@ textarea:focus-visible,
 }
 
 /* 閉じる操作は余白のタップに依存せず、見出し横に常設する。 */
-.panel-header,
-.side-menu-header {
+.panel-header {
     display: flex;
     flex-shrink: 0;
     align-items: flex-start;
@@ -2397,17 +2396,6 @@ textarea:focus-visible,
 .credential-card > header > div {
     min-width: 0;
     overflow-wrap: anywhere;
-}
-
-.side-menu-header {
-    align-items: center;
-    padding: 0 0.25rem;
-}
-
-.side-menu-header h2 {
-    margin: 0;
-    color: var(--omni-text);
-    font-size: 1.1rem;
 }
 
 .fund-item-header {

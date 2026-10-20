@@ -61,16 +61,14 @@ async function expectUsableClose(button) {
 }
 
 for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 430 }, { width: 1280, height: 900 }]) {
-  test(`menus and panels close through visible touch targets at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+  test(`opened panels close through visible touch targets at ${viewport.width}x${viewport.height}`, async ({ page }) => {
     const unexpected = await mockPanelAPIs(page)
     await page.setViewportSize(viewport)
     await page.goto('/')
     await page.getByRole('button', { name: 'メニューを開く', exact: true }).click()
     const menu = page.locator('#side-menu')
-    await menu.locator('.side-menu-items').evaluate(el => { el.scrollTop = el.scrollHeight })
-    const menuClose = menu.getByRole('button', { name: 'メニューを閉じる', exact: true })
-    await expectUsableClose(menuClose)
-    await menuClose.click()
+    await expect(menu.getByRole('button', { name: /閉じる/ })).toHaveCount(0)
+    await page.locator('.side-menu-overlay').click({ position: { x: viewport.width - 1, y: 1 } })
     await expect(menu).toHaveCount(0)
     await expect(page.locator('.hamburger-menu')).toHaveAttribute('aria-expanded', 'false')
 

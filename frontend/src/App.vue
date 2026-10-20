@@ -89,10 +89,6 @@
     <!-- メニューのドロワー -->
     <div v-if="showMenu" class="side-menu-overlay" @click.self="toggleMenu">
       <nav id="side-menu" class="side-menu" aria-label="アプリケーションメニュー">
-        <div class="side-menu-header">
-          <h2>メニュー</h2>
-          <PanelCloseButton label="メニューを閉じる" @click="showMenu = false" />
-        </div>
         <div class="side-menu-items">
           <button class="menu-btn" @click="backupToCSV">CSVバックアップ</button>
           <button class="menu-btn" @click="showImportCSVModalMethod">CSVインポート</button>
