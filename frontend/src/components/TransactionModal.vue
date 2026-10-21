@@ -1,7 +1,10 @@
 <template>
   <div class="modal-overlay" @click="!busy && $emit('close')">
     <div class="modal-content transaction-modal" @click.stop>
-      <h3>{{ isEditMode ? '取引を編集' : '新しい取引を追加' }}</h3>
+      <div class="panel-header">
+        <h3>{{ isEditMode ? '取引を編集' : '新しい取引を追加' }}</h3>
+        <PanelCloseButton :disabled="busy" @click="$emit('close')" />
+      </div>
       <form @submit.prevent="handleSubmit" :aria-busy="busy">
         <fieldset :disabled="busy" :inert="busy" class="transaction-fields">
         <div class="form-container">
@@ -211,6 +214,7 @@
 </template>
 
 <script setup>
+import PanelCloseButton from './PanelCloseButton.vue'
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { getTags, getTransactionLinks, getCardReconciliation, getTransactions, getTransactionImages, isWailsMode } from '../utils/api'
 import { formatExactInteger } from '../utils/exactAmount'

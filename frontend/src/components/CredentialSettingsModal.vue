@@ -1,70 +1,73 @@
 <template>
   <div class="credential-overlay" @click.self="close">
-    <section class="credential-card" role="dialog" aria-modal="true" aria-labelledby="credential-title">
-      <header>
-        <div>
-          <h2 id="credential-title">認証情報の管理</h2>
-          <p>Vaultの暗号鍵は変更せず、鍵を開くための認証情報だけを安全に更新します。</p>
-        </div>
-        <button type="button" class="icon-close" aria-label="閉じる" :disabled="busy" @click="close">×</button>
-      </header>
+    <section class="floating-close-panel credential-card" role="dialog" aria-modal="true" aria-labelledby="credential-title">
+      <PanelCloseButton class="panel-floating-close icon-close" :disabled="busy" @click="close" />
+      <div class="panel-scroll-content">
+        <header>
+          <div>
+            <h2 id="credential-title">認証情報の管理</h2>
+            <p>Vaultの暗号鍵は変更せず、鍵を開くための認証情報だけを安全に更新します。</p>
+          </div>
+        </header>
 
-      <div v-if="errorMessage" class="message error" role="alert">{{ errorMessage }}</div>
-      <div v-if="infoMessage" class="message info" role="status">{{ infoMessage }}</div>
-	  <section v-if="!isWailsMode && inventory" class="credential-section">
-	    <h3>現在の認証情報</h3>
-	    <ul class="inventory-list">
-	      <li>パスワード: 更新 {{ formatDate(inventory.password?.updated_at) }}</li>
-	      <li>回復コード: 更新 {{ formatDate(inventory.recovery?.created_at) }}</li>
-	      <li>パスキー: {{ Array.isArray(inventory.passkeys) ? inventory.passkeys.length : 0 }}件（個別の詳細と失効は「パスキー設定」）</li>
-	    </ul>
-	  </section>
-
-      <section class="credential-section">
-        <h3>パスワードを変更</h3>
-        <p v-if="!isWailsMode">変更後は全端末からログアウトします。登録済みパスキーは、下の選択に従って残すか一括失効します。</p>
-		<form @submit.prevent="changePassword">
-		  <label>現在のパスワード<input v-model="currentPassword" type="password" autocomplete="current-password" maxlength="1024" required></label>
-		  <label>新しいパスワード<input v-model="newPassword" type="password" autocomplete="new-password" maxlength="1024" required></label>
-		  <label>新しいパスワード（確認）<input v-model="newPasswordConfirmation" type="password" autocomplete="new-password" maxlength="1024" required></label>
-          <label v-if="!isWailsMode" class="check-row">
-            <input v-model="revokePasskeys" type="checkbox">
-            登録済みパスキーもすべて失効する
-          </label>
-          <p v-if="!isWailsMode" class="policy-note">
-            {{ revokePasskeys ? 'パスワードと全パスキーを更新対象にします。次回は新しいパスワードでログインしてください。' : 'パスキーは残るため、変更後も登録済みパスキーでログインできます。' }}
-          </p>
-          <button type="submit" :disabled="busy">パスワードを変更</button>
-        </form>
+        <div v-if="errorMessage" class="message error" role="alert">{{ errorMessage }}</div>
+        <div v-if="infoMessage" class="message info" role="status">{{ infoMessage }}</div>
+      <section v-if="!isWailsMode && inventory" class="credential-section">
+        <h3>現在の認証情報</h3>
+        <ul class="inventory-list">
+          <li>パスワード: 更新 {{ formatDate(inventory.password?.updated_at) }}</li>
+          <li>回復コード: 更新 {{ formatDate(inventory.recovery?.created_at) }}</li>
+          <li>パスキー: {{ Array.isArray(inventory.passkeys) ? inventory.passkeys.length : 0 }}件（個別の詳細と失効は「パスキー設定」）</li>
+        </ul>
       </section>
 
-      <section class="credential-section">
-        <h3>回復コードを更新</h3>
-        <p>候補をこの端末で作成し、安全な場所へ保存したことを確認してから更新します。確認前は現在のコードが有効なままです。サーバーでは更新後に全端末からログアウトします。</p>
-        <form @submit.prevent="rotateRecovery">
-          <label>現在のパスワード<input v-model="recoveryPassword" type="password" autocomplete="current-password" maxlength="1024" required></label>
-          <button type="submit" :disabled="busy || Boolean(recoveryCode)">新しい回復コードの候補を作成</button>
-        </form>
-      </section>
+        <section class="credential-section">
+          <h3>パスワードを変更</h3>
+          <p v-if="!isWailsMode">変更後は全端末からログアウトします。登録済みパスキーは、下の選択に従って残すか一括失効します。</p>
+      <form @submit.prevent="changePassword">
+        <label>現在のパスワード<input v-model="currentPassword" type="password" autocomplete="current-password" maxlength="1024" required></label>
+        <label>新しいパスワード<input v-model="newPassword" type="password" autocomplete="new-password" maxlength="1024" required></label>
+        <label>新しいパスワード（確認）<input v-model="newPasswordConfirmation" type="password" autocomplete="new-password" maxlength="1024" required></label>
+            <label v-if="!isWailsMode" class="check-row">
+              <input v-model="revokePasskeys" type="checkbox">
+              登録済みパスキーもすべて失効する
+            </label>
+            <p v-if="!isWailsMode" class="policy-note">
+              {{ revokePasskeys ? 'パスワードと全パスキーを更新対象にします。次回は新しいパスワードでログインしてください。' : 'パスキーは残るため、変更後も登録済みパスキーでログインできます。' }}
+            </p>
+            <button type="submit" :disabled="busy">パスワードを変更</button>
+          </form>
+        </section>
 
-      <section v-if="recoveryCode" class="recovery-panel" aria-live="polite">
-        <h3>新しい回復コード</h3>
-        <p>まだアカウントには反映されていません。この画面を閉じると再表示できないため、先に安全な場所へ保存してください。</p>
-        <textarea :value="recoveryCode" readonly rows="3" @focus="$event.target.select()"></textarea>
-        <label class="check-row"><input v-model="recoverySaved" type="checkbox">安全な場所へ保存しました</label>
-        <button type="button" :disabled="!canCommitRecovery" @click="finishRecovery">保存済みのコードへ更新</button>
-      </section>
+        <section class="credential-section">
+          <h3>回復コードを更新</h3>
+          <p>候補をこの端末で作成し、安全な場所へ保存したことを確認してから更新します。確認前は現在のコードが有効なままです。サーバーでは更新後に全端末からログアウトします。</p>
+          <form @submit.prevent="rotateRecovery">
+            <label>現在のパスワード<input v-model="recoveryPassword" type="password" autocomplete="current-password" maxlength="1024" required></label>
+            <button type="submit" :disabled="busy || Boolean(recoveryCode)">新しい回復コードの候補を作成</button>
+          </form>
+        </section>
 
-      <section v-if="!isWailsMode" class="credential-section">
-        <h3>すべてのセッションを終了</h3>
-        <p>この端末を含む全端末からログアウトします。パスワードとパスキー自体は変更しません。</p>
-        <button type="button" class="danger" :disabled="busy" @click="endAllSessions">全端末からログアウト</button>
-      </section>
+        <section v-if="recoveryCode" class="recovery-panel" aria-live="polite">
+          <h3>新しい回復コード</h3>
+          <p>まだアカウントには反映されていません。この画面を閉じると再表示できないため、先に安全な場所へ保存してください。</p>
+          <textarea :value="recoveryCode" readonly rows="3" @focus="$event.target.select()"></textarea>
+          <label class="check-row"><input v-model="recoverySaved" type="checkbox">安全な場所へ保存しました</label>
+          <button type="button" :disabled="!canCommitRecovery" @click="finishRecovery">保存済みのコードへ更新</button>
+        </section>
+
+        <section v-if="!isWailsMode" class="credential-section">
+          <h3>すべてのセッションを終了</h3>
+          <p>この端末を含む全端末からログアウトします。パスワードとパスキー自体は変更しません。</p>
+          <button type="button" class="danger" :disabled="busy" @click="endAllSessions">全端末からログアウト</button>
+        </section>
+      </div>
     </section>
   </div>
 </template>
 
 <script setup>
+import PanelCloseButton from './PanelCloseButton.vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
 	  changeDesktopVaultPassword, changeServerPassword, isWailsMode, listServerCredentials, logoutAll,
@@ -225,9 +228,8 @@ function formatDate(value) {
 
 <style scoped>
 .credential-overlay { position: fixed; inset: 0; z-index: 1200; display: flex; justify-content: center; align-items: center; padding: 1rem; background: rgba(0,0,0,.55); box-sizing: border-box; }
-.credential-card { width: min(760px,100%); max-height: calc(100vh - 2rem); overflow: auto; padding: 1.5rem; border-radius: 18px; background: #fff; box-sizing: border-box; }
+.credential-card { width: min(760px,100%); max-height: calc(100vh - 2rem); overflow: auto; padding: var(--floating-panel-padding, 1.5rem); border-radius: 18px; background: #fff; box-sizing: border-box; }
 header { display: flex; justify-content: space-between; gap: 1rem; } h2,h3 { margin: 0; } header p,.credential-section p { color: #555; line-height: 1.45; }
-.icon-close { border: 0; color: #333; background: transparent; font-size: 1.8rem; }
 .credential-section,.recovery-panel { margin-top: 1rem; padding: 1rem; border: 1px solid #dde1f6; border-radius: 12px; }
 .recovery-panel { border-color: #e0ad3f; background: #fffaf0; }
 form { display: grid; gap: .75rem; } label { display: grid; gap: .3rem; font-size: .88rem; font-weight: 600; }

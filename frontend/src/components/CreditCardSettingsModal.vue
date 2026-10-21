@@ -1,50 +1,56 @@
 <template>
   <div class="modal-overlay" @click="!saving && $emit('close')">
-    <div class="modal-content cc-settings-modal" @click.stop>
-      <h3>{{ title }}</h3>
+    <div class="floating-close-panel modal-content cc-settings-modal" @click.stop>
+      <PanelCloseButton class="panel-floating-close" :disabled="saving" @click="$emit('close')" />
+      <div class="panel-scroll-content">
+        <div class="panel-header">
+          <h3>{{ title }}</h3>
+        </div>
 
-      <div class="info-box">
-        <p>
-          <strong>設定の効果：</strong><br>
-          <span v-for="line in infoLines" :key="line">• {{ line }}<br></span>
-        </p>
-      </div>
+        <div class="info-box">
+          <p>
+            <strong>設定の効果：</strong><br>
+            <span v-for="line in infoLines" :key="line">• {{ line }}<br></span>
+          </p>
+        </div>
 
-      <div class="form-row">
-        <label>{{ itemLabel }}：</label>
-        <div class="select-wrapper">
-          <button :disabled="saving" @click="showDropdown = !showDropdown" class="select-button">
-            {{ displayText }} ▼
-          </button>
-          <div v-if="showDropdown" class="select-dropdown">
-            <div v-if="dropdownHint" class="dropdown-hint">{{ dropdownHint }}</div>
-            <label v-for="item in fundItems" :key="item" class="dropdown-item"
-              :class="{ selected: localSelected.includes(item) }">
-              <input :disabled="saving" type="checkbox" :checked="localSelected.includes(item)" @change="toggleItem(item)">
-              <span>{{ item }}</span>
-            </label>
+        <div class="form-row">
+          <label>{{ itemLabel }}：</label>
+          <div class="select-wrapper">
+            <button :disabled="saving" @click="showDropdown = !showDropdown" class="select-button">
+              {{ displayText }} ▼
+            </button>
+            <div v-if="showDropdown" class="select-dropdown">
+              <div v-if="dropdownHint" class="dropdown-hint">{{ dropdownHint }}</div>
+              <label v-for="item in fundItems" :key="item" class="dropdown-item"
+                :class="{ selected: localSelected.includes(item) }">
+                <input :disabled="saving" type="checkbox" :checked="localSelected.includes(item)" @change="toggleItem(item)">
+                <span>{{ item }}</span>
+              </label>
+            </div>
           </div>
         </div>
-      </div>
 
-      <div class="action-buttons">
-        <button :disabled="saving" @click="handleSave" class="ok-btn">設定を保存</button>
-        <button :disabled="saving" @click="handleReset" class="delete-btn">設定をクリア</button>
-      </div>
+        <div class="action-buttons">
+          <button :disabled="saving" @click="handleSave" class="ok-btn">設定を保存</button>
+          <button :disabled="saving" @click="handleReset" class="delete-btn">設定をクリア</button>
+        </div>
 
-      <div v-if="message" :role="failed ? 'alert' : 'status'" class="status-message"
-        :class="failed ? 'status-error' : 'status-success'">
-        {{ message }}
-      </div>
+        <div v-if="message" :role="failed ? 'alert' : 'status'" class="status-message"
+          :class="failed ? 'status-error' : 'status-success'">
+          {{ message }}
+        </div>
 
-      <div class="close-section">
-        <button :disabled="saving" class="cancel-btn" @click="!saving && $emit('close')">閉じる</button>
+        <div class="close-section">
+          <button :disabled="saving" class="cancel-btn" @click="!saving && $emit('close')">閉じる</button>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
+import PanelCloseButton from './PanelCloseButton.vue'
 import { ref, computed, onMounted } from 'vue'
 
 const props = defineProps({
@@ -183,10 +189,8 @@ onMounted(() => {
 }
 
 .select-dropdown {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
+  position: static;
+  box-sizing: border-box;
   background: white;
   border: 1px solid #ddd;
   border-radius: 8px;
