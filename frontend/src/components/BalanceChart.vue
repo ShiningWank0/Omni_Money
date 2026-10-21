@@ -3,7 +3,7 @@
     <div class="modal-content graph-modal" @click.stop>
       <div class="graph-modal-header">
         <h3>残高推移グラフ</h3>
-        <button class="close-btn" @click="$emit('close')">&times;</button>
+        <PanelCloseButton class="close-btn" @click="$emit('close')" />
       </div>
       <div class="graph-controls">
         <div class="graph-period-control">
@@ -30,6 +30,7 @@
 </template>
 
 <script setup>
+import PanelCloseButton from './PanelCloseButton.vue'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { Line } from 'vue-chartjs'
 import { exactInteger, formatExactInteger } from '../utils/exactAmount'
@@ -529,20 +530,6 @@ onUnmounted(() => {
 .graph-modal-header h3 {
   margin: 0;
   font-size: 1.1em;
-  color: #333;
-}
-
-.close-btn {
-  background: none;
-  border: none;
-  color: #999;
-  font-size: 1.5em;
-  cursor: pointer;
-  padding: 0 4px;
-  line-height: 1;
-}
-
-.close-btn:hover {
   color: #333;
 }
 
