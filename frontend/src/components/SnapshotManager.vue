@@ -3,7 +3,7 @@
     <div class="modal-content snapshot-modal" @click.stop>
       <div class="snapshot-header">
         <h3>スナップショット管理</h3>
-        <button class="close-btn" @click="closeSnapshotManager" :disabled="isRestoring">&times;</button>
+        <PanelCloseButton class="close-btn" @click="closeSnapshotManager" :disabled="isRestoring" />
       </div>
 
       <div class="snapshot-info-text">
@@ -46,6 +46,7 @@
 </template>
 
 <script setup>
+import PanelCloseButton from './PanelCloseButton.vue'
 import { ref, onMounted } from 'vue'
 import {
   listSnapshots as apiListSnapshots,
@@ -144,20 +145,6 @@ onMounted(fetchSnapshots)
   font-size: 0.85em;
   color: #888;
   margin-bottom: 12px;
-}
-
-.close-btn {
-  background: none;
-  border: none;
-  color: #999;
-  font-size: 1.5em;
-  cursor: pointer;
-  padding: 0 4px;
-  line-height: 1;
-}
-
-.close-btn:hover {
-  color: #333;
 }
 
 .snapshot-message {
