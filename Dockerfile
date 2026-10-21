@@ -2,7 +2,7 @@
 ARG VERSION=dev
 
 # ===== Stage 1: フロントエンドのビルド =====
-FROM node:26.11.1-alpine@sha256:143494b1da2945f061539253adc65e4f1569ddf07da2d384c022c791a9d90a4a AS frontend-builder
+FROM node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5 AS frontend-builder
 
 ARG VERSION
 
@@ -13,7 +13,7 @@ COPY frontend/ ./
 RUN VITE_APP_VERSION="$VERSION" npm run build
 
 # ===== Stage 2: バックエンドのビルド =====
-FROM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS backend-builder
+FROM golang:1.27.3-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS backend-builder
 
 ARG VERSION
 
