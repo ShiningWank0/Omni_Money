@@ -29,6 +29,21 @@ Go最低対応版、Node対応範囲、API利用コード、ドキュメント�
 最低対応版より古いGoイメージ、digest未固定や曖昧なビルドstageは拒否する。
 CIの整合性チェックとGoテストは、Dockerだけの更新による固定版の不一致を拒否する。
 
+### Go本体と標準ライブラリのセキュリティ更新
+
+DependabotのGo modules更新だけでは、Go本体の`toolchain`を新しいリリースへ更新するPRを期待できない。
+DockerのGoイメージ更新は、このリポジトリでは週次の確認であり、緊急修正の公開直後にPRが作成されるとは限らない。
+`groups.exclude-patterns`の`golang`はグループ化から外して個別PRにする指定であり、更新を無視する指定ではない。
+
+Go標準ライブラリの検出はCIの`govulncheck`も確認する。標準ライブラリの修正が必要な場合は、Go modulesの更新を待たずに、
+DockerのGoイメージとdigest、`go.mod`の`toolchain`、必要なら最低対応版の`go`を同じPRで更新する。
+`runtime-versions.mjs sync`は最低対応版を変更しないため、対応するGo系列の修正版を個別に確認する。
+例えば`GO-2026-6809`はGo 1.26.10 / 1.27.3で修正されており、最低対応版を1.26.10、配布用固定版を1.27.3に設定する。
+既存の配布済みバイナリやコンテナへ修正を適用するには、更新したGoで再ビルドした配布物への更新も必要になる。
+
+参考：[Goのリリース履歴](https://go.dev/doc/devel/release)、
+[Dependabotのtoolchain更新要望](https://github.com/dependabot/dependabot-core/issues/13520)。
+
 ## マージ前の確認
 
 通常のCIに加え、Wails更新は4構成のdesktop buildとSQLCipher検証、WebAuthn更新はPRFなしの登録・discoverable login・再認証、server-custody envelope、旧形式移行、ユーザー列挙防止のテストを確認する。PRFを標準パスキーの必須条件へ戻さない。
