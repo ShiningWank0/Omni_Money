@@ -1,0 +1,59 @@
+name: Check Node sync App configuration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: >-
+      github.repository == 'ShiningWank0/Omni_Money' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted configuration check
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Setup trusted Node version
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Validate configured Client ID and RSA private key
+        env:
+          NODE_SYNC_CLIENT_ID: ${{ vars.NODE_SYNC_APP_CLIENT_ID }}
+          NODE_SYNC_PRIVATE_KEY: ${{ secrets.NODE_SYNC_APP_PRIVATE_KEY }}
+        run: node scripts/check-node-sync-app.mjs credentials
+
+      # Request the same repository and permissions as the automatic sync.
+      # GitHub rejects token creation if the installation lacks a permission.
+      - name: Create repository-scoped short-lived App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.NODE_SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.NODE_SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: read
+
+      - name: Verify token scope and repository access without repository writes
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          NODE_SYNC_CHECK_SHA: ${{ github.workflow_sha }}
+        run: node scripts/check-node-sync-app.mjs access
+
+      - name: Explain failed configuration check
+        if: failure()
+        run: |
+          echo '### Node同期Appの設定確認に失敗しました' >> "$GITHUB_STEP_SUMMARY"
+          echo '失敗したstepを確認してください。トークン発行で失敗した場合は、Client ID・PEM秘密鍵・Appのインストール先・Contents/Pull requests権限を確認してください。秘密鍵やトークンをログへ出力する必要はありません。' >> "$GITHUB_STEP_SUMMARY"
