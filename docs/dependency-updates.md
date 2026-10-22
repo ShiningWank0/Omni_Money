@@ -106,6 +106,27 @@ Appを無効化する場合はインストールまたは秘密鍵を削除し�
 自動同期のテストは`node --test scripts/dependabot-node-sync.test.mjs`で実行し、通常CIの`Security issue reporting tests`にも含める。
 このテストはGitHub APIを模擬し、対象条件、変更範囲、major更新の拒否、同期済みの無変更、競合時の強制更新拒否を確認する。
 
+### Actionsから手動でApp設定を確認する
+
+対象のDependabot PRがなくても、`Check Node sync App configuration`で登録済みの設定を確認できる。
+このworkflowの起動イベントは`workflow_dispatch`だけであり、push・PR・スケジュールでは起動しない。
+main以外のブランチを選ぶとジョブをスキップする。既存の自動同期workflowは引き続き対象Dependabot PRだけを処理する。
+
+1. workflowを含むPRをmainへマージする。
+2. リポジトリのActionsで`Check Node sync App configuration`を選ぶ。
+3. `Run workflow`を開き、Branchに`main`を選んで実行する。追加入力は不要。
+4. 実行結果のSummaryを確認する。失敗時は失敗したstepも確認する。
+
+チェックはClient IDとRSA秘密鍵の読み込み、自動同期と同じ`Contents: write`・`Pull requests: read`を指定したAppトークンの発行、
+発行トークンがOmni_Moneyだけに限定されていること、固定コミットの`.node-version`とPR一覧の読み取りを確認する。
+秘密鍵・トークンの内容はログやartifactへ出力せず、ジョブ終了時にはトークンを失効させる。
+
+トークン発行の成功は指定権限の取得を確認するが、実際のコミット作成やブランチ保護ルールへの適合を検証するものではない。
+同期コミットの追加とCIの再起動は、次の対象Dependabot PRで確認する。手動テストはコミット・PRを変更しない。
+
+秘密鍵をクリップボードから検証ファイルへ戻す場合、復元コマンドを先にターミナルへ貼り付け、まだ実行しない状態にする。
+その後で保管先から鍵をコピーし、ターミナルへ戻って実行する。鍵のコピー後にコマンドをコピーすると、クリップボードがコマンドへ置き換わる。
+
 ## マージ前の確認
 
 通常のCIに加え、Wails更新は4構成のdesktop buildとSQLCipher検証、WebAuthn更新はPRFなしの登録・discoverable login・再認証、server-custody envelope、旧形式移行、ユーザー列挙防止のテストを確認する。PRFを標準パスキーの必須条件へ戻さない。
