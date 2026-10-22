@@ -66,10 +66,37 @@ PR内のスクリプト、依存関係、artifactは実行しない。
 通常の`GITHUB_TOKEN`で追加したコミットではPR workflowの実行に承認が必要になるため、無人で再検査するには専用GitHub Appを使う。
 GitHubの仕様は[workflowの起動](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)を参照。
 
-1. 専用GitHub Appを作成し、Repository permissionsを`Contents: Read and write`、`Pull requests: Read-only`にする。Webhookは不要。
-2. Appを`ShiningWank0/Omni_Money`だけにインストールする。main保護のbypass権限は付与しない。
-3. リポジトリのSettings → Secrets and variables → Actionsで、Variable `NODE_SYNC_APP_CLIENT_ID`にClient IDを、Secret `NODE_SYNC_APP_PRIVATE_KEY`に発行した秘密鍵を登録する。鍵はファイルやPR本文に記載しない。
-4. workflowをmainへ反映後、次の対象Node更新PRで同期コミットと最新コミットのCI・Docker・desktopチェックが起動することを確認する。既存PRを使う場合はDependabot側で新しい更新イベントを発生させる。同期workflow自身の再実行も、保存されたheadがまだ最新なら利用できる。
+1. [個人設定のGitHub Apps](https://github.com/settings/apps)で`New GitHub App`を選ぶ。既存の専用Appがあれば再利用する。
+   - App名はGitHub全体で未使用の名前にする。Homepage URLはこのリポジトリのURLでよい。
+   - ユーザーとしてのOAuth認証は使わないため、Callback URLは不要。Webhookの`Active`を外す。
+   - Repository permissionsを`Contents: Read and write`、`Pull requests: Read-only`にする。`Metadata: Read-only`は自動で付く。
+   - インストール先は自分のアカウントだけに限定して作成する。
+2. Appの設定画面で`Client ID`を控える。このworkflowが使うのは数字のApp IDではなくClient IDである。
+   `Private keys`の`Generate a private key`からPEMファイルを取得する。Client secretの発行は不要。
+3. Appの`Install App`から自分のアカウントへインストールし、`Only select repositories`で`Omni_Money`だけを選ぶ。
+   main保護のbypass権限は付与しない。すでにインストール済みなら、対象リポジトリと権限を確認する。
+4. [リポジトリのActions設定値](https://github.com/ShiningWank0/Omni_Money/settings/secrets/actions)で、次の2つを登録する。
+
+   | タブ・操作 | 名前 | 値 |
+   | --- | --- | --- |
+   | Variables → New repository variable | `NODE_SYNC_APP_CLIENT_ID` | AppのClient ID |
+   | Secrets → New repository secret | `NODE_SYNC_APP_PRIVATE_KEY` | PEMファイルの内容全体。BEGIN/END行と改行を含む |
+
+   ファイル名やパス、Client secret、base64へ変換した文字列は秘密鍵の代わりにならない。秘密鍵をチャット・リポジトリ・PR本文へ記載しない。
+   通常のActions設定値を使い、Dependabot secretsやEnvironment secretsへ登録するものではない。
+5. このPRをmainへマージして同期workflowを有効にする。App設定だけでも、PRのマージだけでも自動同期は完成しない。
+   リポジトリ全体の`GITHUB_TOKEN`を書き込み可能へ変更したり、ActionsによるPR作成・承認を許可したりする必要はない。
+6. 次の対象Node Docker更新PRで、Actionsの`Sync Dependabot Node version`と、同じPRへの`.node-version`同期コミットを確認する。
+   その最新コミットで通常CI・Docker・desktopチェックが起動し、固定版の整合性検査が通ることを確認する。
+
+既存の対象PRで試す場合、通常CIの`Re-run jobs`だけでは`workflow_run: requested`は発生しない。
+Dependabot側で新しいコミットを生成する更新・rebaseなどが必要になる。
+すでに`Sync Dependabot Node version`の実行履歴がある場合は、記録されたPRのheadがまだ最新であれば、その同期workflow自体の再実行も利用できる。
+対象PRがないときは次の更新を待つ。動作確認のために古いNodeへ戻す必要はない。
+
+同期されないときは、同期workflowのSummaryを確認する。App未設定の警告なら上記の2設定値を、
+トークン発行時の失敗ならAppのインストール先・権限・秘密鍵を確認する。
+メジャー更新や追加コードを含むPRは対象外であり、設定を緩めず手動レビューする。
 
 App設定前は警告とジョブのsummaryに設定手順を表示し、同期コミットは追加しない。既存CIの不一致検査は維持する。
 トークンは対象リポジトリ・上記2権限だけに絞って発行し、ジョブ終了時にActionが失効させる。

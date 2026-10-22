@@ -53,6 +53,7 @@
             </button>
             <div v-if="showAccountDropdown" id="account-dropdown" class="account-dropdown" @click.stop>
               <div class="fund-item-header">
+                <PanelCloseButton label="資金項目の選択を閉じる" @click="showAccountDropdown = false" />
                 <button type="button" @click="store.toggleAllFundItems(); refreshData()" class="toggle-all-btn">
                   {{ store.selectedFundItems.length === store.actualFundItems.length ? '全解除' : '全選択' }}
                 </button>
@@ -277,64 +278,74 @@
     />
 
     <div v-if="showDesktopIdleSettings" class="reauth-overlay" @click.self="closeDesktopIdleSettings">
-      <form class="reauth-card" role="dialog" aria-modal="true" aria-labelledby="desktop-idle-title" @submit.prevent="saveDesktopIdleSettings">
-        <h3 id="desktop-idle-title">Desktop 自動ロック</h3>
-        <label class="reauth-label" for="desktop-idle-minutes">無操作時間（5〜120分）</label>
-        <input
-          id="desktop-idle-minutes"
-          v-model.number="desktopIdleDraftMinutes"
-          class="reauth-input"
-          type="number"
-          min="5"
-          max="120"
-          step="1"
-          required
-        >
-        <div v-if="desktopIdleSettingsError" class="reauth-error" role="alert">{{ desktopIdleSettingsError }}</div>
-        <div class="reauth-actions">
-          <button type="button" class="reauth-cancel" @click="closeDesktopIdleSettings">キャンセル</button>
-          <button type="submit" class="reauth-submit">保存</button>
+      <form class="reauth-card floating-close-panel" role="dialog" aria-modal="true" aria-labelledby="desktop-idle-title" @submit.prevent="saveDesktopIdleSettings">
+        <PanelCloseButton class="panel-floating-close" @click="closeDesktopIdleSettings" />
+        <div class="panel-scroll-content">
+          <div class="panel-header">
+            <h3 id="desktop-idle-title">Desktop 自動ロック</h3>
+          </div>
+          <label class="reauth-label" for="desktop-idle-minutes">無操作時間（5〜120分）</label>
+          <input
+            id="desktop-idle-minutes"
+            v-model.number="desktopIdleDraftMinutes"
+            class="reauth-input"
+            type="number"
+            min="5"
+            max="120"
+            step="1"
+            required
+          >
+          <div v-if="desktopIdleSettingsError" class="reauth-error" role="alert">{{ desktopIdleSettingsError }}</div>
+          <div class="reauth-actions">
+            <button type="button" class="reauth-cancel" @click="closeDesktopIdleSettings">キャンセル</button>
+            <button type="submit" class="reauth-submit">保存</button>
+          </div>
         </div>
       </form>
     </div>
 
     <CredentialSettingsModal
       v-if="showCredentialSettings"
-	  @close="showCredentialSettings = false"
-	  @session-invalidated="clearSensitiveStateForIdle(true)"
+      @close="showCredentialSettings = false"
+      @session-invalidated="clearSensitiveStateForIdle(true)"
       @signed-out="handleCredentialSignedOut"
     />
 
     <!-- 最近の認証が必要な操作用の再認証ダイアログ -->
     <div v-if="showReauthModal" class="reauth-overlay" @click.self="cancelReauthentication">
-      <div class="reauth-card" role="dialog" aria-modal="true" aria-labelledby="reauth-title">
-        <h3 id="reauth-title">重要な操作の確認</h3>
-        <form @submit.prevent="submitReauthentication">
-          <label class="reauth-label" for="reauth-password">パスワード</label>
-          <input
-            id="reauth-password"
-            ref="reauthPasswordInput"
-            v-model="reauthPassword"
-            class="reauth-input"
-            type="password"
-            autocomplete="current-password"
-			maxlength="1024"
-            required
-          >
-          <div v-if="reauthError" class="reauth-error">{{ reauthError }}</div>
-          <div class="reauth-actions">
-            <button type="button" class="reauth-cancel" :disabled="reauthLoading" @click="cancelReauthentication">キャンセル</button>
-            <button type="submit" class="reauth-submit" :disabled="reauthLoading">
-              {{ reauthLoading ? '確認中...' : '確認して実行' }}
-            </button>
+      <div class="reauth-card floating-close-panel" role="dialog" aria-modal="true" aria-labelledby="reauth-title">
+        <PanelCloseButton class="panel-floating-close" :disabled="reauthLoading" @click="cancelReauthentication" />
+        <div class="panel-scroll-content">
+          <div class="panel-header">
+            <h3 id="reauth-title">重要な操作の確認</h3>
           </div>
-          <template v-if="canUsePasskeyReauth">
-            <div class="reauth-divider"><span>または</span></div>
-            <button type="button" class="reauth-passkey" :disabled="reauthLoading" @click="submitPasskeyReauthentication">
-              {{ reauthLoading ? '確認中...' : 'パスキーで確認' }}
-            </button>
-          </template>
-        </form>
+          <form @submit.prevent="submitReauthentication">
+            <label class="reauth-label" for="reauth-password">パスワード</label>
+            <input
+              id="reauth-password"
+              ref="reauthPasswordInput"
+              v-model="reauthPassword"
+              class="reauth-input"
+              type="password"
+              autocomplete="current-password"
+              maxlength="1024"
+              required
+            >
+            <div v-if="reauthError" class="reauth-error">{{ reauthError }}</div>
+            <div class="reauth-actions">
+              <button type="button" class="reauth-cancel" :disabled="reauthLoading" @click="cancelReauthentication">キャンセル</button>
+              <button type="submit" class="reauth-submit" :disabled="reauthLoading">
+                {{ reauthLoading ? '確認中...' : '確認して実行' }}
+              </button>
+            </div>
+            <template v-if="canUsePasskeyReauth">
+              <div class="reauth-divider"><span>または</span></div>
+              <button type="button" class="reauth-passkey" :disabled="reauthLoading" @click="submitPasskeyReauthentication">
+                {{ reauthLoading ? '確認中...' : 'パスキーで確認' }}
+              </button>
+            </template>
+          </form>
+        </div>
       </div>
     </div>
 
@@ -358,6 +369,7 @@
 import { ref, computed, defineAsyncComponent, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useAppStore } from './store/index'
 import TransactionModal from './components/TransactionModal.vue'
+import PanelCloseButton from './components/PanelCloseButton.vue'
 import DesktopVaultGate from './components/DesktopVaultGate.vue'
 import { csvExportWarning } from './utils/csvSafety'
 import { isDesktopVaultUnlocked } from './utils/desktopVaultSafety'
