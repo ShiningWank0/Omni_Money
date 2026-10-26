@@ -2,23 +2,23 @@
 
 ## CI/CDの検査範囲
 
-`.github/workflows/ci.yml` は全PR、mainへのpush、毎週日曜03:30 UTC（日本時間12:30）のschedule、および`workflow_dispatch`による手動実行に対応する。GitHub側の負荷で定刻より遅れる場合がある。
+`.github/workflows/ci.yml` は全PR、mainへのpush、毎日01:30・14:30 UTC（日本時間10:30・23:30）のschedule、および`workflow_dispatch`による手動実行に対応する。定期実行の設定はmainへの反映後に有効になる。GitHub側の負荷で定刻より遅れる場合がある。
 
-修正後のmainで週次検査をすぐ確認するには、GitHubのActionsで`CI`を開き、`Run workflow`でbranchに`main`を選んで実行する。全検査、safe-update全件、レポート集約、Issue報告を実行する。ほかのbranchの手動実行では検査とartifact保存を行うが、Issue作成・追記は行わない。過去の実行の再実行は元のコミットを使うため、マージ済み修正の確認には新しい手動実行を使う。
+修正後のmainで定期検査をすぐ確認するには、GitHubのActionsで`CI`を開き、`Run workflow`でbranchに`main`を選んで実行する。全検査、safe-update全件、レポート集約、Issue報告を実行する。ほかのbranchの手動実行では検査とartifact保存を行うが、Issue作成・追記は行わない。過去の実行の再実行は元のコミットを使うため、マージ済み修正の確認には新しい手動実行を使う。
 
 | 検査 | 対象と失敗条件 |
 | --- | --- |
 | govulncheck | Go標準ライブラリ・依存関係の既知の脆弱性。呼び出し経路に到達する問題で失敗。Desktopとserverの両ビルド条件を検査 |
 | gosec | コードの危険な実装パターン。medium以上で失敗。Desktopとserverの両ビルド条件を検査 |
-| Parser fuzz | CSVのストリーム上限、認証JSONの重複キー、JPEG/PNG/GIF/WebPコンテナ境界。PRでは固定seed corpusを既存Go試験で実行。週次・手動では各120秒の入力変異試験を実行し、panic・不変条件違反・実行失敗で失敗 |
+| Parser fuzz | CSVのストリーム上限、認証JSONの重複キー、JPEG/PNG/GIF/WebPコンテナ境界。PRでは固定seed corpusを既存Go試験で実行。定期・手動では各120秒の入力変異試験を実行し、panic・不変条件違反・実行失敗で失敗 |
 | npm audit | frontendの依存関係。high以上で失敗 |
 | Trivy | Omni MoneyイメージのOS・ライブラリ。修正版のあるHIGH/CRITICALで失敗。`ignore-unfixed: true`のため未修正の問題は除外。Docker Releaseでは各アーキテクチャを**タグなしのdigestとしてpushしてから**スキャンし、両方成功した後にのみrelease tagを公開する |
 
-Goのgovulncheck/gosec等はPR、週次schedule、手動実行で実行し、main pushではGo checksジョブを省略する。各jobの条件は `ci.yml` を正とする。Docker Releaseは各アーキテクチャのTrivyを公開前に実行し、次の順序を守る: タグなしdigest push → アーキテクチャ毎のTrivyスキャン → staging index作成 → build provenance attestation付与 → `gh attestation verify`（署名workflow・source ref・GitHub-hosted runnerを固定）→ version/latestタグ公開。スキャン・attestation・検証のいずれかが失敗するとrelease tagは作られない。配備側は`scripts/resolve-image-digest.sh --verify --repo OWNER/REPO`でprovenance検証を必須とする。
+Goのgovulncheck/gosec等はPR、定期schedule、手動実行で実行し、main pushではGo checksジョブを省略する。各jobの条件は `ci.yml` を正とする。Docker Releaseは各アーキテクチャのTrivyを公開前に実行し、次の順序を守る: タグなしdigest push → アーキテクチャ毎のTrivyスキャン → staging index作成 → build provenance attestation付与 → `gh attestation verify`（署名workflow・source ref・GitHub-hosted runnerを固定）→ version/latestタグ公開。スキャン・attestation・検証のいずれかが失敗するとrelease tagは作られない。配備側は`scripts/resolve-image-digest.sh --verify --repo OWNER/REPO`でprovenance検証を必須とする。
 
 `release-docker.yml`は`workflow_dispatch`で**リハーサル**実行できる。releaseと同じビルド・スキャン・attestation・検証を行い、version/latestタグは公開しない（`rehearsal-staging`タグのみ更新）。VERSION変更を伴う本番Releaseの前に、GitHub Actions画面のRun workflowで対象branchを選び、経路全体を検証する。CI成功は、未修正の既知問題や静的解析で分からない設計上の問題がないことを保証しない。Pangolin、Newt、Gerbil、Traefik、Badger、VPS/TrueNASそのものは別配備のため、このCIの検査対象ではない。
 
-Parser fuzzは追加の定期・手動専用matrixで3対象を最大2job並列、各jobのfuzz workerを1に制限する。入力はCSV 16 KiB、JSON 8 KiB、画像コンテナ64 KiBを上限とし、DB・本番データ・外部サービスには接続しない。画像はコンテナ検証のみで、任意画像のピクセル展開は行わない。各対象の試験時間は120秒、失敗入力の縮小は10秒、Go試験全体は4分、子プロセスは6分、jobは10分で打ち切る。PR/pushではこのmatrixを省略するが、PRの既存`go test ./...`は固定seedを実行する。必須チェック名`Go tests`は週次・手動のfuzz成功、それ以外の省略を明示検査する。
+Parser fuzzは追加の定期・手動専用matrixで3対象を最大2job並列、各jobのfuzz workerを1に制限する。入力はCSV 16 KiB、JSON 8 KiB、画像コンテナ64 KiBを上限とし、DB・本番データ・外部サービスには接続しない。画像はコンテナ検証のみで、任意画像のピクセル展開は行わない。各対象の試験時間は120秒、失敗入力の縮小は10秒、Go試験全体は4分、子プロセスは6分、jobは10分で打ち切る。PR/pushではこのmatrixを省略するが、PRの既存`go test ./...`は固定seedを実行する。必須チェック名`Go tests`は定期・手動のfuzz成功、それ以外の省略を明示検査する。
 
 失敗したfuzz入力は`parser-corpus-*` artifact、結果は既存の`security-*` artifactで7日間保存する。再現入力を公開Issue本文に転載せず、実行ログへのリンクのみ通知する。失敗corpusを取得して該当packageの`testdata/fuzz`へ配置した後、そのpackageで`go test -run='Fuzz対象名/ハッシュ'`を実行して再現し、修正時はcorpusを回帰試験として追加する。対象名の誤りで試験が実行されない場合を成功扱いしないよう、GoのJSONイベントで対象の開始・変異実行数・対象とpackage両方の成功を確認する。時間制限内のfuzz成功は、すべての入力について安全であることの証明ではない。
 
