@@ -7,7 +7,8 @@ on:
     branches:
       - main
   schedule:
-    - cron: '30 3 * * 0'
+    # Daily at 10:30 and 23:30 Japan Standard Time (UTC+09:00).
+    - cron: '30 1,14 * * *'
   workflow_dispatch:
 
 permissions:
@@ -21,7 +22,7 @@ concurrency:
 jobs:
   go-checks:
     name: Go checks
-    # PR checks require an up-to-date base; retain weekly/manual scans without
+    # PR checks require an up-to-date base; retain scheduled/manual scans without
     # repeating the same suite after merging to main.
     if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
     runs-on: ubuntu-latest
