@@ -14,6 +14,8 @@
 !cmd/
 !cmd/omni-totp/
 !cmd/omni-totp/**
+!cmd/verify-public-assets/
+!cmd/verify-public-assets/main.go
 
 !scripts/
 !scripts/build-sqlcipher-linux.sh
@@ -23,6 +25,8 @@
 !frontend/package-lock.json
 !frontend/index.html
 !frontend/vite.config.js
+!frontend/build/
+!frontend/build/public-assets.mjs
 !frontend/src/
 !frontend/src/**
 

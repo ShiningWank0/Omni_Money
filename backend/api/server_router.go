@@ -112,9 +112,7 @@ func NewServerRouter(dependencies ServerDependencies) (http.Handler, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/login", handleLoginPage)
-	mux.HandleFunc("/login/", handleLoginPage)
-	mux.Handle("/", http.FileServer(http.Dir("frontend/dist")))
+	registerFrontendRoutes(mux)
 	mux.HandleFunc("/api/", httpjson.NotFound)
 	mux.HandleFunc("/api", httpjson.NotFound)
 

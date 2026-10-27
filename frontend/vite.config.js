@@ -1,8 +1,9 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import { publicAssetsPlugin } from './build/public-assets.mjs'
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vue(), publicAssetsPlugin()],
   server: {
     host: '127.0.0.1',
     strictPort: true,

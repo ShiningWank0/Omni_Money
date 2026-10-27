@@ -52,3 +52,5 @@ trivy-report.json
 secrets/
 
 build/bin/
+# Generated outside the public tree; copied into Docker only from the builder.
+frontend/public-assets-manifest.json

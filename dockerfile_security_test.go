@@ -9,6 +9,30 @@ import (
 
 var pinnedImagePattern = regexp.MustCompile(`^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$`)
 
+func TestDockerVerifiesFinalPublicOutputs(t *testing.T) {
+	contents, err := os.ReadFile("Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(contents)
+	runtime := dockerfile[strings.LastIndex(dockerfile, "\nFROM "):]
+	lastRun := strings.LastIndex(runtime, "\nRUN ")
+	if lastRun < 0 {
+		t.Fatal("runtime stage has no verification step")
+	}
+	verification := runtime[lastRun:]
+	if !strings.Contains(verification, "--mount=type=bind,from=backend-builder,source=/verify-public-assets,") ||
+		!strings.Contains(verification, "/tmp/verify-public-assets /app/frontend/dist /app/frontend/public-assets-manifest.json") {
+		t.Fatal("last runtime build step must verify the final public tree with the bundled inventory")
+	}
+	if strings.LastIndex(runtime, "\nCOPY ") > lastRun || strings.LastIndex(runtime, "\nADD ") > lastRun {
+		t.Fatal("runtime copies must precede public output verification")
+	}
+	if !strings.Contains(runtime, "COPY --from=frontend-builder /app/frontend/public-assets-manifest.json ./frontend/public-assets-manifest.json") {
+		t.Fatal("inventory must come from the frontend builder, outside the public directory")
+	}
+}
+
 func TestDockerBaseImagesUsePinnedSupportedVersions(t *testing.T) {
 	contents, err := os.ReadFile("Dockerfile")
 	if err != nil {

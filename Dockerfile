@@ -31,6 +31,8 @@ RUN go mod download
 # UIだけの変更でバックエンドビルドキャッシュが無効になることを避ける。
 COPY server.go ./
 COPY backend/ ./backend/
+COPY cmd/verify-public-assets/ ./cmd/verify-public-assets/
+RUN CGO_ENABLED=0 go build -trimpath -o /verify-public-assets ./cmd/verify-public-assets
 
 # サーバーモードでビルド（-tags server で server.go を使用）
 RUN CGO_ENABLED=1 \
@@ -66,9 +68,12 @@ WORKDIR /app
 COPY --from=backend-builder /omni_money_server ./omni_money_server
 COPY --from=backend-builder /usr/local/lib/libsqlite3.so /usr/local/lib/libsqlite3.so
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+COPY --from=frontend-builder /app/frontend/public-assets-manifest.json ./frontend/public-assets-manifest.json
 
 # DB、WAL、復元用backup、snapshotはすべてこの永続directory配下へ保存する。
-RUN mkdir -p /app/data /run/secrets && chown -R omni:omni /app
+RUN --mount=type=bind,from=backend-builder,source=/verify-public-assets,target=/tmp/verify-public-assets,ro \
+    /tmp/verify-public-assets /app/frontend/dist /app/frontend/public-assets-manifest.json && \
+    mkdir -p /app/data /run/secrets && chown -R omni:omni /app
 
 USER omni
 
