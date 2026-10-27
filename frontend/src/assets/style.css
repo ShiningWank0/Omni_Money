@@ -2407,21 +2407,22 @@ textarea:focus-visible,
     gap: 0.5rem;
 }
 
-/* A separate close-button column keeps scrolling content unobstructed. */
+/* Overlay the close button without reserving a column beside the body. */
 .floating-close-panel.floating-close-panel {
+  --floating-close-gap: 12px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 44px;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
-  column-gap: 12px;
   overflow: hidden;
   box-sizing: border-box;
   max-height: calc(100dvh - 2rem);
 }
 
 .floating-close-panel > .panel-floating-close {
-  grid-column: 2;
+  grid-column: 1;
   grid-row: 1;
   align-self: start;
+  justify-self: end;
   z-index: 1;
 }
 
@@ -2433,6 +2434,15 @@ textarea:focus-visible,
   overflow: auto;
   overscroll-behavior: contain;
   overflow-wrap: anywhere;
+}
+
+/* Only the heading needs clearance; forms and descriptions use the full width. */
+.floating-close-panel > .panel-scroll-content > :first-child {
+  box-sizing: border-box;
+  min-height: 44px;
+  /* Keep short, previously centered headings at their original top edge. */
+  align-items: flex-start;
+  padding-inline-end: calc(44px + var(--floating-close-gap));
 }
 
 .floating-close-panel .modal-buttons {
@@ -2447,8 +2457,8 @@ textarea:focus-visible,
 @media (max-width: 560px) {
   .floating-close-panel.floating-close-panel {
     --floating-panel-padding: 12px;
+    --floating-close-gap: 8px;
     padding: var(--floating-panel-padding);
-    column-gap: 8px;
   }
 }
 
