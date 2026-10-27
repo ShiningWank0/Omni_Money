@@ -87,9 +87,7 @@ func NewRouterWithError() (http.Handler, error) {
 	mux := http.NewServeMux()
 
 	// 静的ファイル配信（フロントエンドのビルド成果物）
-	mux.HandleFunc("/login", handleLoginPage)
-	mux.HandleFunc("/login/", handleLoginPage)
-	mux.Handle("/", http.FileServer(http.Dir("frontend/dist")))
+	registerFrontendRoutes(mux)
 	mux.HandleFunc("/api/", httpjson.NotFound)
 	mux.HandleFunc("/api", httpjson.NotFound)
 
@@ -197,10 +195,6 @@ func NewAIRouter(credentialStore *aicredentials.Store, auditStore *audithmac.Sto
 	handler = middleware.SecurityHeadersMiddleware(handler)
 	handler = middleware.CacheControlMiddleware(handler)
 	return handler
-}
-
-func handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	http.ServeFile(w, r, "frontend/dist/index.html")
 }
 
 // methodGuard は特定のHTTPメソッドのみ許可するラッパー
