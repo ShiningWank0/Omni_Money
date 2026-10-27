@@ -2440,6 +2440,8 @@ textarea:focus-visible,
 .floating-close-panel > .panel-scroll-content > :first-child {
   box-sizing: border-box;
   min-height: 44px;
+  /* Keep short, previously centered headings at their original top edge. */
+  align-items: flex-start;
   padding-inline-end: calc(44px + var(--floating-close-gap));
 }
 

@@ -82,6 +82,7 @@ async function expectCloseWhileScrolling(panel, close) {
   await body.evaluate(element => { element.scrollTop = 0 })
   const initial = await close.boundingBox()
   const heading = await body.locator('h2, h3').first().boundingBox()
+  expect(Math.abs(heading.y - initial.y)).toBeLessThan(1)
   expect(heading.x + heading.width).toBeLessThanOrEqual(initial.x - 8 + 1)
   const header = await body.locator(':scope > :first-child').boundingBox()
   expect(header.y + header.height).toBeGreaterThanOrEqual(initial.y + initial.height - 1)
