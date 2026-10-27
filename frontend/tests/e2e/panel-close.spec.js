@@ -79,14 +79,33 @@ async function expectCloseWhileScrolling(panel, close) {
     }
     return
   }
+  await body.evaluate(element => { element.scrollTop = 0 })
   const initial = await close.boundingBox()
+  const heading = await body.locator('h2, h3').first().boundingBox()
+  expect(Math.abs(heading.y - initial.y)).toBeLessThan(1)
+  expect(heading.x + heading.width).toBeLessThanOrEqual(initial.x - 8 + 1)
+  const header = await body.locator(':scope > :first-child').boundingBox()
+  expect(header.y + header.height).toBeGreaterThanOrEqual(initial.y + initial.height - 1)
+  const panelFrame = await panel.boundingBox()
+  const insets = await panel.evaluate(element => {
+    const style = getComputedStyle(element)
+    return {
+      left: parseFloat(style.paddingLeft) + parseFloat(style.borderLeftWidth),
+      right: parseFloat(style.paddingRight) + parseFloat(style.borderRightWidth),
+      top: parseFloat(style.paddingTop) + parseFloat(style.borderTopWidth),
+    }
+  })
+  expect(Math.abs(initial.y - panelFrame.y - insets.top)).toBeLessThan(1)
+  expect(Math.abs(initial.x + initial.width - panelFrame.x - panelFrame.width + insets.right)).toBeLessThan(1)
   for (const fraction of [0, 0.5, 1]) {
     await body.evaluate((element, value) => { element.scrollTop = (element.scrollHeight - element.clientHeight) * value }, fraction)
     await expectUsableClose(close)
     const current = await close.boundingBox()
     expect(Math.abs(current.y - initial.y)).toBeLessThan(1)
     const content = await body.boundingBox()
-    expect(content.x + content.width + 8).toBeLessThanOrEqual(current.x + 0.1)
+    // The body fills the panel, including the space below the overlaid button.
+    expect(Math.abs(content.x - panelFrame.x - insets.left)).toBeLessThan(1)
+    expect(Math.abs(content.x + content.width - current.x - current.width)).toBeLessThan(1)
     // The close target stays in front and receives clicks after scrolling.
     expect(await close.evaluate(element => {
       const rect = element.getBoundingClientRect()
@@ -157,3 +176,20 @@ for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 430 }
     expect(unexpected).toEqual([])
   })
 }
+
+test('floating close follows the panel corner when the viewport is resized', async ({ page }) => {
+  const unexpected = await mockPanelAPIs(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'メニューを開く', exact: true }).click()
+  await page.locator('#side-menu').getByRole('button', { name: 'クレジットカード設定', exact: true }).click()
+  const panel = page.locator('.cc-settings-modal')
+  const close = panel.locator(':scope > .panel-floating-close')
+  for (const viewport of [{ width: 320, height: 568 }, { width: 1280, height: 900 }, { width: 390, height: 430 }]) {
+    await page.setViewportSize(viewport)
+    await expectCloseWhileScrolling(panel, close)
+  }
+  await close.click()
+  await expect(panel).toHaveCount(0)
+  expect(unexpected).toEqual([])
+})
