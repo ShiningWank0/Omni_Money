@@ -178,6 +178,8 @@ base `compose.yaml`はPangolin/Newt用で、hostへportをpublishしません。
 
 TrueNAS Custom Appにはrepositoryの`compose.yaml`と同等のservice、secret、network制約を設定します。data root、control key、setup token、attestationは別々のmountとし、control keyやsetup tokenをdata root内へ置かないでください。
 
+TrueNAS 25.10.7のApps画面へWeb版と同じアイコンを登録する場合は、[Custom Appアイコンの登録手順](truenas-app-icon.md)を参照してください。Compose YAMLとは別のmetadata設定です。
+
 ## 5. Backupと復旧試験
 
 snapshot単体はDR setではありません。次の全てを別々の安全な場所へbackupします。

@@ -593,6 +593,8 @@ jobs:
         with:
           node-version-file: .node-version
       - run: node --test scripts/security-monitoring.test.mjs scripts/runtime-versions.test.mjs scripts/dependabot-node-sync.test.mjs scripts/check-node-sync-app.test.mjs
+      - name: Validate offline TrueNAS icon metadata
+        run: python3 -B -m unittest discover -s scripts -p 'truenas_icon_metadata_test.py'
       - name: Verify coordinated runtime versions
         run: node scripts/runtime-versions.mjs check
 
