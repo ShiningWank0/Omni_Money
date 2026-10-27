@@ -1,11 +1,10 @@
 package api
 
 import (
-	"io/fs"
 	"net/http"
-	"os"
-	"path"
 	"strings"
+
+	"omni_money/backend/publicassets"
 )
 
 func registerFrontendRoutes(mux *http.ServeMux) {
@@ -27,31 +26,16 @@ func frontendFileHandler(root string) http.Handler {
 		}
 
 		name := strings.TrimPrefix(r.URL.Path, "/")
-		contentType := ""
 		switch r.URL.Path {
 		case "/", "/index.html", "/login", "/login/":
-			name, contentType = "index.html", "text/html; charset=utf-8"
-		case "/favicon.svg":
-			contentType = "image/svg+xml"
-		default:
-			if strings.HasPrefix(r.URL.Path, "/assets/") {
-				contentType = frontendAssetContentType(path.Ext(name))
-			}
+			name = "index.html"
 		}
-		if contentType == "" || !fs.ValidPath(name) || strings.Contains(name, `\`) {
+		contentType := publicassets.ContentType(name)
+		if contentType == "" {
 			http.NotFound(w, r)
 			return
 		}
-		for _, segment := range strings.Split(name, "/") {
-			if strings.HasPrefix(segment, ".") {
-				http.NotFound(w, r)
-				return
-			}
-		}
-
-		// OpenInRoot confines symlink resolution as well as ordinary paths. A
-		// separate Clean/EvalSymlinks check would leave a check/open race.
-		file, err := os.OpenInRoot(root, name)
+		file, err := publicassets.Open(root, name)
 		if err != nil {
 			http.NotFound(w, r)
 			return
@@ -65,31 +49,4 @@ func frontendFileHandler(root string) http.Handler {
 		w.Header().Set("Content-Type", contentType)
 		http.ServeContent(w, r, name, info.ModTime(), file)
 	})
-}
-
-func frontendAssetContentType(extension string) string {
-	switch extension {
-	case ".js":
-		return "text/javascript; charset=utf-8"
-	case ".css":
-		return "text/css; charset=utf-8"
-	case ".svg":
-		return "image/svg+xml"
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".webp":
-		return "image/webp"
-	case ".gif":
-		return "image/gif"
-	case ".ico":
-		return "image/x-icon"
-	case ".woff":
-		return "font/woff"
-	case ".woff2":
-		return "font/woff2"
-	default:
-		return ""
-	}
 }

@@ -12,6 +12,7 @@ import (
 func frontendFixture(t *testing.T, root string) {
 	t.Helper()
 	for name, body := range map[string]string{
+		".env":                       "not-public",
 		"index.html":                 "<!doctype html><title>Omni Money</title>",
 		"favicon.svg":                "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
 		"assets/favicon-test.svg":    "<svg>fixed icon bytes</svg>",
@@ -37,8 +38,10 @@ func frontendFixture(t *testing.T, root string) {
 		t.Fatal(err)
 	}
 	for link, target := range map[string]string{
-		"assets/linked-key.svg": filepath.Join(outside, "key.svg"),
-		"assets/linked-dir":     outside,
+		"assets/linked-key.svg":   filepath.Join(outside, "key.svg"),
+		"assets/linked-dir":       outside,
+		"assets/internal-key.svg": "../.env",
+		"assets/internal-dir":     ".private",
 	} {
 		if err := os.Symlink(target, filepath.Join(root, filepath.FromSlash(link))); err != nil {
 			t.Fatal(err)
@@ -72,7 +75,7 @@ func TestFrontendFilesAreReadOnlyAndBounded(t *testing.T) {
 		})
 	}
 
-	for _, target := range []string{"/assets/", "/assets", "/favicon.ico", "/favicon.ico/shell.php", "/.env", "/assets/.env", "/assets/debug.txt", "/assets/debug.js.map", "/assets/upload.php", "/assets/upload.html", "/assets/.private/hidden.svg", "/assets/linked-key.svg", "/assets/linked-dir/key.svg", "/assets/../key.svg", "/assets/%2e%2e/key.svg", "/assets/%2fetc/passwd", "/assets/%5c..%5ckey.svg", "/login/unregistered", "/api/transactions"} {
+	for _, target := range []string{"/assets/", "/assets", "/favicon.ico", "/favicon.ico/shell.php", "/.env", "/assets/.env", "/assets/debug.txt", "/assets/debug.js.map", "/assets/upload.php", "/assets/upload.html", "/assets/.private/hidden.svg", "/assets/linked-key.svg", "/assets/linked-dir/key.svg", "/assets/internal-key.svg", "/assets/internal-dir/hidden.svg", "/assets/../key.svg", "/assets/%2e%2e/key.svg", "/assets/%2fetc/passwd", "/assets/%5c..%5ckey.svg", "/login/unregistered", "/api/transactions"} {
 		t.Run("reject "+target, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
@@ -115,7 +118,7 @@ func TestServerFrontendCannotReachSecretsOrProtectedAPIs(t *testing.T) {
 			t.Fatalf("%s: status=%d headers=%v", target, recorder.Code, recorder.Header())
 		}
 	}
-	for _, target := range []string{"/assets/", "/assets/linked-key.svg", "/assets/linked-dir/key.svg", "/assets/.env", "/favicon.ico"} {
+	for _, target := range []string{"/assets/", "/assets/linked-key.svg", "/assets/linked-dir/key.svg", "/assets/internal-key.svg", "/assets/internal-dir/hidden.svg", "/assets/.env", "/favicon.ico"} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "https://money.example.test"+target, nil))
 		if recorder.Code != http.StatusNotFound {
