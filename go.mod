@@ -8,7 +8,7 @@ go 1.26.10
 toolchain go1.27.3
 
 require (
-	github.com/fxamacker/cbor/v2 v2.9.6
+	github.com/fxamacker/cbor/v2 v2.10.0
 	github.com/go-webauthn/webauthn v0.18.2
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/wailsapp/wails/v2 v2.17.0
