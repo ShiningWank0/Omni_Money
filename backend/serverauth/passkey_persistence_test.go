@@ -17,8 +17,8 @@ import (
 
 // The required CI job sets OMNI_REQUIRE_SQLCIPHER_TESTS=1: an unavailable
 // cipher must fail that job, rather than turn the persistence check into a skip.
-func TestPasskeyCBORLegacyCredentialsSurviveEncryptedStoreRestart(t *testing.T) {
-	for _, f := range legacyCBORFixtures(t) {
+func TestPasskeyRegressionEncryptedStoreRestart(t *testing.T) {
+	for _, f := range passkeyCredentialFixtures(t) {
 		t.Run(f.Name, func(t *testing.T) {
 			ctx := context.Background()
 			directory := t.TempDir()
@@ -43,7 +43,7 @@ func TestPasskeyCBORLegacyCredentialsSurviveEncryptedStoreRestart(t *testing.T) 
 					t.Error(err)
 				}
 			})
-			template, memory := seedLegacyCredential(t, f, false)
+			template, memory := seedStoredCredential(t, f, false)
 			password, err := memory.GetPasswordCredential(ctx, serverAuthTestUserID)
 			if err != nil {
 				t.Fatal(err)
@@ -99,7 +99,7 @@ func TestPasskeyCBORLegacyCredentialsSurviveEncryptedStoreRestart(t *testing.T) 
 				t.Fatal(err)
 			}
 			now := time.Now().UTC()
-			session, err := service.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{CeremonyID: begin.CeremonyID, ClientKey: "client", CredentialJSON: legacyAssertion(t, begin, f, 1)}, now)
+			session, err := service.FinishDiscoverablePasskeyLogin(ctx, FinishPasskeyLoginInput{CeremonyID: begin.CeremonyID, ClientKey: "client", CredentialJSON: fixtureAssertion(t, begin, f, 1)}, now)
 			if err != nil || session == nil {
 				t.Fatalf("persisted login: %v", err)
 			}
@@ -112,7 +112,7 @@ func TestPasskeyCBORLegacyCredentialsSurviveEncryptedStoreRestart(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			input := FinishPasskeyLoginInput{CeremonyID: reauth.CeremonyID, ClientKey: "client", CredentialJSON: legacyAssertion(t, reauth, f, 2)}
+			input := FinishPasskeyLoginInput{CeremonyID: reauth.CeremonyID, ClientKey: "client", CredentialJSON: fixtureAssertion(t, reauth, f, 2)}
 			if err := service.FinishPasskeyReauthentication(ctx, serverAuthTestUserID, input, now.Add(time.Second)); err != nil {
 				t.Fatal(err)
 			}

@@ -129,24 +129,27 @@ main以外のブランチを選ぶとジョブをスキップする。既存の�
 
 ## マージ前の確認
 
-### CBOR更新のCI判定
+### パスキー関連変更の恒常的な回帰テスト
 
-CBOR v2.9.6 → v2.10.0は、通常CIに加えて`Passkey CBOR compatibility`で検証する。
-このジョブの失敗・キャンセル・予期しないスキップは、既存の必須チェック`Go tests`も失敗させる。
-テスト追加PRを先にmainへ取り込み、依存更新PRをそのmainへ更新した上で、最新コミットのCI成功を確認する。
-テスト追加PR自体でも、使い捨てのCI checkout内だけでCBORをv2.10.0へ切り替えて候補版を検証する。
-リポジトリの`go.mod`・`go.sum`の依存更新は別のDependabot PRに残す。
+WebAuthn、CBOR、暗号ライブラリ、フロントエンドを更新するPRでも、通常のコード変更PRでも、
+`Passkey regression tests`と既存の`Docker image build`でパスキーの契約を検証する。
+テストはそのPRの`go.mod`・`go.sum`・frontend lockfileをそのまま使う。
+CIによる依存版の上書きや、候補版・比較対象版の指定は行わない。依存更新のたびにworkflowを編集する必要はない。
 
-- `backend/serverauth/testdata/passkey-cbor-v2.9.6.json`は旧版で生成した固定バイト列。P-256、RSA、Ed25519の公開鍵と、拡張データあり／なしの登録応答を含む。
-- 独立した`testdata/cbor-legacy-generator`モジュールをv2.9.6に固定し、CIは生成元の版と固定データの再現性を確認する。通常のテスト中に固定データを生成し直さない。収録された秘密鍵は公開テスト用であり、実際のアカウントに使用しない。
-- 宣言中の版と候補版の両方で固定データを確認し、候補版では認証・control storeの全テストと、追加テストのrace検査を実行する。
-- SQLCipherを必須化した実DBへ旧公開鍵を保存し、close/reopen後のログイン、再認証、署名カウンター／revisionの更新、再送拒否を確認する。暗号化なしのテストやSQLCipher未導入によるスキップで代替しない。
-- CBORの重複キー、禁止タグ、不定長、切り詰め、末尾の余分なデータ、深さ超過を登録処理で拒否し、資格情報を保存しないことを確認する。
-- 実際に固定中のgo-webauthnモジュールを一時ディレクトリへコピーし、候補CBORとの組み合わせで`protocol/...`と`webauthn`の上流テストを実行する。
-- 候補版でDocker imageをビルドし、実Chromiumの仮想CTAP2認証器で、PRFなしの登録、メール／パスワードなしのdiscoverable login、再認証、CSRF更新、再送拒否まで確認する。UI・WebAuthn・API・SQLCipher serverの間に認証応答のmockを挟まない。
+- 固定資格情報によるP-256・RSA・Ed25519の登録・ログイン・再認証。固定データは更新対象のencoderで生成し直さない。
+- PRF/server-custodyの両形式と、再認証の完了・署名カウンター・revision・ログイン時刻・再送拒否。
+- SQLCipherの実DBに保存し、close/reopenした後の認証。CIはSQLCipher未導入によるスキップを許さない。
+- CBORの重複キー・禁止タグ・不定長・切り詰め・余分な末尾データ・深さ超過と、不正な署名・challenge・origin・ユーザー確認の拒否。
+- アプリケーションと同じ依存グラフを使った、固定中のWebAuthnモジュール自身の`protocol/...`・`webauthn`テスト。
+- 既存のDocker E2Eで、実UI・Chromium仮想CTAP2認証器・実API・SQLCipher serverを通したPRFなし登録、discoverable login、再認証、CSRF更新、再送拒否。認証応答をmockしない。
 
-CIによる取り込み判定の対象は上記の経路である。各パスキープロバイダー固有の拡張機能や、物理デバイス・OS固有の操作画面の互換性はこの仮想認証器の検証範囲に含まれない。
-候補版を変更するときは、workflowの`CBOR_CANDIDATE`とこの節の対象版を同時に更新する。
+必須チェック`Go tests`は、パスキーのGoテスト、frontendのunit/componentテスト、ブラウザE2Eを実行するDockerジョブに依存する。
+いずれかの失敗・キャンセル・予期しないスキップを成功扱いにしない。
+PRの最新コミットでこれらを含むCIが成功していることを、パスキー関連変更の取り込み判断に使用する。
+固定データの形式と来歴は`backend/serverauth/testdata/README.md`を参照する。
+
+各プロバイダー・物理デバイス・OS固有の画面は仮想認証器の検証対象に含まれない。
+サポートするパスキーの契約を変更する場合は、その契約と回帰テストを同じPRで更新する。
 
 ### その他の依存更新
 

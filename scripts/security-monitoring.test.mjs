@@ -405,31 +405,31 @@ test('missing fuzz reports create individual errors and failed downloads reject 
   assert.ok(collect(directory, false).every(r => r.status === 'error'));
 });
 
-test('required Go check rejects fuzz and passkey failure, cancellation and unexpected skips', t => {
+test('required Go check rejects fuzz, passkey, frontend and browser E2E failure, cancellation and unexpected skips', () => {
   const workflow = readFileSync(resolve('.github/workflows/ci.yml'), 'utf8');
   const gate = workflow.split('      - name: Require expected Go result and successful auxiliary checks\n')[1]
     ?.split('  security-issues:')[0];
   const block = gate?.match(/        run: \|\n((?:          .*\n|\n)+)/)?.[1];
   assert.ok(block, 'required-check script missing');
   const program = block.replace(/^          /gm, '');
+  const gatePasses = overrides => spawnSync('bash', ['-e', '-c', program], {
+    encoding: 'utf8', env: { ...process.env, GO_RESULT: 'success', EXPECTED_GO_RESULT: 'success',
+      SAFE_UPDATE_RESULT: 'success', WINDOWS_RESULT: 'success', SECURITY_AUTOMATION_RESULT: 'success',
+      PASSKEY_RESULT: 'success', FRONTEND_RESULT: 'success', DOCKER_RESULT: 'success',
+      FUZZ_RESULT: 'skipped', EXPECTED_FUZZ_RESULT: 'skipped', ...overrides },
+  }).status === 0;
+  const results = ['success', 'skipped', 'failure', 'cancelled', ''];
   for (const expected of ['success', 'skipped']) {
-    for (const result of ['success', 'skipped', 'failure', 'cancelled', '']) {
-      const child = spawnSync('bash', ['-e', '-c', program], {
-        encoding: 'utf8', env: { ...process.env, GO_RESULT: 'success', EXPECTED_GO_RESULT: 'success', PASSKEY_CBOR_RESULT: 'success',
-          SAFE_UPDATE_RESULT: 'success', WINDOWS_RESULT: 'success', SECURITY_AUTOMATION_RESULT: 'success',
-          FUZZ_RESULT: result, EXPECTED_FUZZ_RESULT: expected },
-      });
-      assert.equal(child.status === 0, result === expected, `${expected}/${result}`);
+    for (const result of results) {
+      assert.equal(gatePasses({ FUZZ_RESULT: result, EXPECTED_FUZZ_RESULT: expected }),
+        result === expected, `fuzz/${expected}/${result}`);
+      assert.equal(gatePasses({ GO_RESULT: expected, EXPECTED_GO_RESULT: expected, PASSKEY_RESULT: result }),
+        result === expected, `passkey/${expected}/${result}`);
     }
   }
-  for (const expected of ['success', 'skipped']) {
-    for (const result of ['success', 'skipped', 'failure', 'cancelled', '']) {
-      const child = spawnSync('bash', ['-e', '-c', program], {
-        encoding: 'utf8', env: { ...process.env, GO_RESULT: expected, EXPECTED_GO_RESULT: expected,
-          SAFE_UPDATE_RESULT: 'success', WINDOWS_RESULT: 'success', SECURITY_AUTOMATION_RESULT: 'success',
-          PASSKEY_CBOR_RESULT: result, FUZZ_RESULT: 'skipped', EXPECTED_FUZZ_RESULT: 'skipped' },
-      });
-      assert.equal(child.status === 0, result === expected, `passkey ${expected}/${result}`);
+  for (const required of ['DOCKER_RESULT', 'FRONTEND_RESULT']) {
+    for (const result of results) {
+      assert.equal(gatePasses({ [required]: result }), result === 'success', `${required}/${result}`);
     }
   }
   const fuzzJob = workflow.split('  parser-fuzz:\n')[1]?.split('  # Keep the existing required check name')[0];
@@ -437,9 +437,15 @@ test('required Go check rejects fuzz and passkey failure, cancellation and unexp
   assert.match(fuzzJob, /max-parallel: 2/);
   assert.match(fuzzJob, /fail-fast: false/);
   assert.match(fuzzJob, /target: \[fuzz-csv, fuzz-json, fuzz-image\]/);
-  assert.match(workflow, /needs: \[go-checks, safe-update, windows-security, security-automation, parser-fuzz, passkey-cbor\]/);
+  assert.match(workflow, /needs: \[go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker\]/);
   assert.match(workflow, /needs: \[go-checks, frontend, docker, security-automation, parser-fuzz\]/);
   assert.match(workflow, /EXPECTED_FUZZ_RESULT: .*'schedule'.*'workflow_dispatch'.*'success' \|\| 'skipped'/);
+  const passkeyJob = workflow.split('  passkey:\n')[1]?.split('  # Keep the existing required check name')[0];
+  assert.ok(passkeyJob, 'permanent passkey regression job missing');
+  assert.match(passkeyJob, /go test -mod=readonly -count=1 github\.com\/go-webauthn\/webauthn\/protocol\/\.\.\. github\.com\/go-webauthn\/webauthn\/webauthn/);
+  assert.match(passkeyJob, /git diff --exit-code -- go\.mod go\.sum/);
+  assert.doesNotMatch(passkeyJob, /go (?:get|mod (?:edit|tidy))\b/, 'passkey CI must test the PR dependency graph');
+  assert.doesNotMatch(passkeyJob, /CBOR_CANDIDATE|CANDIDATE_VERSION|BASELINE_VERSION/, 'dependency updates must not require a candidate version in CI');
 });
 
 

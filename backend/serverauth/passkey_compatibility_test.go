@@ -22,9 +22,9 @@ import (
 	"omni_money/backend/keyenvelope"
 )
 
-// No CBOR encoder is used here: both registration objects and saved public
-// keys are frozen output of the isolated v2.9.6 generator in testdata.
-type legacyCBORFixture struct {
+// Frozen credentials exercise the storage/wire contract independently of the
+// CBOR encoder under test. Keep them unchanged across dependency upgrades.
+type passkeyCredentialFixture struct {
 	Name                     string `json:"name"`
 	PrivateKey               string `json:"test_private_key_pkcs8_b64"`
 	CredentialID             string `json:"credential_id_b64"`
@@ -33,23 +33,23 @@ type legacyCBORFixture struct {
 	AttestationWithExtension string `json:"attestation_with_extension_b64"`
 }
 
-func legacyCBORFixtures(t *testing.T) []legacyCBORFixture {
+func passkeyCredentialFixtures(t *testing.T) []passkeyCredentialFixture {
 	t.Helper()
-	data, err := os.ReadFile("testdata/passkey-cbor-v2.9.6.json")
+	data, err := os.ReadFile("testdata/passkey-credentials-v1.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var corpus struct {
-		Version     string              `json:"generator_cbor_version"`
-		RPID        string              `json:"rp_id"`
-		Origin      string              `json:"origin"`
-		Credentials []legacyCBORFixture `json:"credentials"`
+		Version     int                        `json:"schema_version"`
+		RPID        string                     `json:"rp_id"`
+		Origin      string                     `json:"origin"`
+		Credentials []passkeyCredentialFixture `json:"credentials"`
 	}
 	if err := json.Unmarshal(data, &corpus); err != nil {
 		t.Fatal(err)
 	}
-	if corpus.Version != "v2.9.6" || corpus.RPID != "money.example.test" || corpus.Origin != "https://money.example.test" || len(corpus.Credentials) != 3 {
-		t.Fatal("unexpected legacy fixture provenance")
+	if corpus.Version != 1 || corpus.RPID != "money.example.test" || corpus.Origin != "https://money.example.test" || len(corpus.Credentials) != 3 {
+		t.Fatal("unexpected passkey fixture schema")
 	}
 	return corpus.Credentials
 }
@@ -63,7 +63,7 @@ func fixtureBytes(t *testing.T, encoded string) []byte {
 	return value
 }
 
-func legacyRegistrationResponse(t *testing.T, begin PasskeyRegistrationBegin, f legacyCBORFixture, object []byte) json.RawMessage {
+func fixtureRegistrationResponse(t *testing.T, begin PasskeyRegistrationBegin, f passkeyCredentialFixture, object []byte) json.RawMessage {
 	t.Helper()
 	client, err := json.Marshal(map[string]any{"type": "webauthn.create", "challenge": begin.Options.Response.Challenge.String(), "origin": "https://money.example.test"})
 	if err != nil {
@@ -81,12 +81,12 @@ func legacyRegistrationResponse(t *testing.T, begin PasskeyRegistrationBegin, f 
 	return response
 }
 
-func legacyAssertion(t *testing.T, begin PasskeyLoginBegin, f legacyCBORFixture, count uint32) json.RawMessage {
+func fixtureAssertion(t *testing.T, begin PasskeyLoginBegin, f passkeyCredentialFixture, count uint32) json.RawMessage {
 	t.Helper()
-	return legacyAssertionFor(t, begin, f, count, "https://money.example.test", 0x05)
+	return fixtureAssertionFor(t, begin, f, count, "https://money.example.test", 0x05)
 }
 
-func legacyAssertionFor(t *testing.T, begin PasskeyLoginBegin, f legacyCBORFixture, count uint32, origin string, flags byte) json.RawMessage {
+func fixtureAssertionFor(t *testing.T, begin PasskeyLoginBegin, f passkeyCredentialFixture, count uint32, origin string, flags byte) json.RawMessage {
 	t.Helper()
 	key, err := x509.ParsePKCS8PrivateKey(fixtureBytes(t, f.PrivateKey))
 	if err != nil {
@@ -126,7 +126,7 @@ func legacyAssertionFor(t *testing.T, begin PasskeyLoginBegin, f legacyCBORFixtu
 	return response
 }
 
-func seedLegacyCredential(t *testing.T, f legacyCBORFixture, prf bool) (*Service, *registrationTestStore) {
+func seedStoredCredential(t *testing.T, f passkeyCredentialFixture, prf bool) (*Service, *registrationTestStore) {
 	t.Helper()
 	dek := bytes.Repeat([]byte{37}, keyenvelope.DEKSize)
 	s, store := newRegistrationTestService(t, dek)
@@ -145,16 +145,16 @@ func seedLegacyCredential(t *testing.T, f legacyCBORFixture, prf bool) (*Service
 	return s, store
 }
 
-func TestPasskeyCBORLegacyCredentials(t *testing.T) {
-	for _, f := range legacyCBORFixtures(t) {
+func TestPasskeyRegressionStoredCredentials(t *testing.T) {
+	for _, f := range passkeyCredentialFixtures(t) {
 		for _, prf := range []bool{false, true} {
 			t.Run(f.Name+map[bool]string{false: "/server-custody", true: "/legacy-prf"}[prf], func(t *testing.T) {
-				s, store := seedLegacyCredential(t, f, prf)
+				s, store := seedStoredCredential(t, f, prf)
 				begin, err := s.BeginDiscoverablePasskeyLogin(context.Background(), "client")
 				if err != nil {
 					t.Fatal(err)
 				}
-				input := FinishPasskeyLoginInput{CeremonyID: begin.CeremonyID, ClientKey: "client", CredentialJSON: legacyAssertion(t, begin, f, 1)}
+				input := FinishPasskeyLoginInput{CeremonyID: begin.CeremonyID, ClientKey: "client", CredentialJSON: fixtureAssertion(t, begin, f, 1)}
 				if prf {
 					input.PRFResult = bytes.Repeat([]byte{41}, 32)
 				}
@@ -165,19 +165,19 @@ func TestPasskeyCBORLegacyCredentials(t *testing.T) {
 				if store.records[0].Credential.Authenticator.SignCount != 1 {
 					t.Fatal("login did not persist signature counter")
 				}
-				finishLegacyReauthentication(t, s, store, f)
+				finishFixtureReauthentication(t, s, store, f)
 			})
 		}
 	}
 }
 
-func finishLegacyReauthentication(t *testing.T, s *Service, store *registrationTestStore, f legacyCBORFixture) {
+func finishFixtureReauthentication(t *testing.T, s *Service, store *registrationTestStore, f passkeyCredentialFixture) {
 	t.Helper()
 	begin, err := s.BeginPasskeyReauthentication(context.Background(), serverAuthTestUserID, "client")
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := FinishPasskeyLoginInput{CeremonyID: begin.CeremonyID, ClientKey: "client", CredentialJSON: legacyAssertion(t, begin, f, 2)}
+	input := FinishPasskeyLoginInput{CeremonyID: begin.CeremonyID, ClientKey: "client", CredentialJSON: fixtureAssertion(t, begin, f, 2)}
 	if err := s.FinishPasskeyReauthentication(context.Background(), serverAuthTestUserID, input, time.Now().UTC()); err != nil {
 		t.Fatalf("old public key reauthentication: %v", err)
 	}
@@ -189,8 +189,8 @@ func finishLegacyReauthentication(t *testing.T, s *Service, store *registrationT
 	}
 }
 
-func TestPasskeyCBORLegacyRegistration(t *testing.T) {
-	for _, f := range legacyCBORFixtures(t) {
+func TestPasskeyRegressionRegistration(t *testing.T) {
+	for _, f := range passkeyCredentialFixtures(t) {
 		for _, ext := range []bool{false, true} {
 			t.Run(f.Name+map[bool]string{false: "/plain", true: "/credProtect"}[ext], func(t *testing.T) {
 				s, store := newRegistrationTestService(t, bytes.Repeat([]byte{37}, 32))
@@ -203,7 +203,7 @@ func TestPasskeyCBORLegacyRegistration(t *testing.T) {
 					object = f.AttestationWithExtension
 				}
 				_, err = s.FinishPasskeyRegistration(context.Background(), serverAuthTestUserID, FinishPasskeyRegistrationInput{
-					CeremonyID: begin.CeremonyID, ClientKey: "client", Name: f.Name, CredentialJSON: legacyRegistrationResponse(t, begin, f, fixtureBytes(t, object)),
+					CeremonyID: begin.CeremonyID, ClientKey: "client", Name: f.Name, CredentialJSON: fixtureRegistrationResponse(t, begin, f, fixtureBytes(t, object)),
 				}, time.Now().UTC())
 				if err != nil {
 					t.Fatal(err)
@@ -211,17 +211,17 @@ func TestPasskeyCBORLegacyRegistration(t *testing.T) {
 				if len(store.records) != 1 || !bytes.Equal(store.records[0].Credential.PublicKey, fixtureBytes(t, f.PublicKey)) {
 					t.Fatal("old registration public key was not preserved")
 				}
-				finishLegacyReauthentication(t, s, store, f)
+				finishFixtureReauthentication(t, s, store, f)
 			})
 		}
 	}
 }
 
-func TestPasskeyCBORReauthenticationRejectsInvalidAssertions(t *testing.T) {
-	f := legacyCBORFixtures(t)[0]
+func TestPasskeyRegressionReauthenticationRejectsInvalidAssertions(t *testing.T) {
+	f := passkeyCredentialFixtures(t)[0]
 	for _, bad := range []string{"signature", "challenge", "origin", "no-uv", "other-user", "expired", "wrong-client", "login-ceremony"} {
 		t.Run(bad, func(t *testing.T) {
-			s, store := seedLegacyCredential(t, f, false)
+			s, store := seedStoredCredential(t, f, false)
 			begin, err := s.BeginPasskeyReauthentication(context.Background(), serverAuthTestUserID, "client")
 			if bad == "login-ceremony" {
 				begin, err = s.BeginPasskeyLogin(context.Background(), "person@example.test", "client")
@@ -242,7 +242,7 @@ func TestPasskeyCBORReauthenticationRejectsInvalidAssertions(t *testing.T) {
 				options.Response.Challenge = []byte("wrong-challenge")
 				signingBegin.Options = &options
 			}
-			payload := legacyAssertionFor(t, signingBegin, f, 1, origin, flags)
+			payload := fixtureAssertionFor(t, signingBegin, f, 1, origin, flags)
 			var response map[string]any
 			if err := json.Unmarshal(payload, &response); err != nil {
 				t.Fatal(err)
@@ -283,8 +283,8 @@ func rawAttestation(auth []byte) []byte {
 	return append(out, auth...)
 }
 
-func TestPasskeyCBORMalformedRegistrationIsRejected(t *testing.T) {
-	f := legacyCBORFixtures(t)[0]
+func TestPasskeyRegressionMalformedRegistrationIsRejected(t *testing.T) {
+	f := passkeyCredentialFixtures(t)[0]
 	key, id := fixtureBytes(t, f.PublicKey), fixtureBytes(t, f.CredentialID)
 	rp := sha256.Sum256([]byte("money.example.test"))
 	prefix := append(append([]byte{}, rp[:]...), 0x45, 0, 0, 0, 0)
@@ -299,7 +299,7 @@ func TestPasskeyCBORMalformedRegistrationIsRejected(t *testing.T) {
 		}
 		object := rawAttestation(append(bytes.Clone(prefix), key...))
 		_, err = s.FinishPasskeyRegistration(context.Background(), serverAuthTestUserID, FinishPasskeyRegistrationInput{
-			CeremonyID: begin.CeremonyID, ClientKey: "client", Name: "valid-control", CredentialJSON: legacyRegistrationResponse(t, begin, f, object),
+			CeremonyID: begin.CeremonyID, ClientKey: "client", Name: "valid-control", CredentialJSON: fixtureRegistrationResponse(t, begin, f, object),
 		}, time.Now().UTC())
 		if err != nil || len(store.records) != 1 {
 			t.Fatalf("manual outer encoding must work before testing malformed inner CBOR: %v", err)
@@ -339,7 +339,7 @@ func TestPasskeyCBORMalformedRegistrationIsRejected(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = s.FinishPasskeyRegistration(context.Background(), serverAuthTestUserID, FinishPasskeyRegistrationInput{CeremonyID: begin.CeremonyID, ClientKey: "client", Name: "invalid", CredentialJSON: legacyRegistrationResponse(t, begin, f, object)}, time.Now().UTC())
+			_, err = s.FinishPasskeyRegistration(context.Background(), serverAuthTestUserID, FinishPasskeyRegistrationInput{CeremonyID: begin.CeremonyID, ClientKey: "client", Name: "invalid", CredentialJSON: fixtureRegistrationResponse(t, begin, f, object)}, time.Now().UTC())
 			if err == nil || len(store.records) != 0 || len(store.created) != 0 {
 				t.Fatalf("invalid CBOR registered a credential: %v", err)
 			}
