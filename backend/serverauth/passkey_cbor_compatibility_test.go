@@ -291,6 +291,20 @@ func TestPasskeyCBORMalformedRegistrationIsRejected(t *testing.T) {
 	prefix = append(prefix, make([]byte, 16)...)
 	prefix = binary.BigEndian.AppendUint16(prefix, uint16(len(id)))
 	prefix = append(prefix, id...)
+	t.Run("valid-manual-wrapper", func(t *testing.T) {
+		s, store := newRegistrationTestService(t, bytes.Repeat([]byte{37}, 32))
+		begin, err := s.BeginPasskeyRegistration(context.Background(), serverAuthTestUserID, "client")
+		if err != nil {
+			t.Fatal(err)
+		}
+		object := rawAttestation(append(bytes.Clone(prefix), key...))
+		_, err = s.FinishPasskeyRegistration(context.Background(), serverAuthTestUserID, FinishPasskeyRegistrationInput{
+			CeremonyID: begin.CeremonyID, ClientKey: "client", Name: "valid-control", CredentialJSON: legacyRegistrationResponse(t, begin, f, object),
+		}, time.Now().UTC())
+		if err != nil || len(store.records) != 1 {
+			t.Fatalf("manual outer encoding must work before testing malformed inner CBOR: %v", err)
+		}
+	})
 	object := fixtureBytes(t, f.Attestation)
 	duplicateOuter := append([]byte{0xa4}, object[1:]...)
 	duplicateOuter = append(duplicateOuter, 0x63, 'f', 'm', 't', 0x64, 'n', 'o', 'n', 'e')
@@ -301,18 +315,18 @@ func TestPasskeyCBORMalformedRegistrationIsRejected(t *testing.T) {
 	deepKey = append(deepKey, 0x18, 99, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0)
 	cases := map[string][]byte{
 		"outer-truncated": object[:len(object)-1], "outer-trailing": append(bytes.Clone(object), 0),
-		"outer-tag": append([]byte{0xc0}, object...), "outer-indefinite": indefiniteOuter, "outer-duplicate": duplicateOuter,
+		"outer-tag": append([]byte{0xd9, 0xd9, 0xf7}, object...), "outer-indefinite": indefiniteOuter, "outer-duplicate": duplicateOuter,
 		"outer-invalid-utf8": bytes.Replace(object, []byte{0x63, 'f', 'm', 't'}, []byte{0x63, 0xff, 'm', 't'}, 1),
 	}
 	for name, badKey := range map[string][]byte{
 		"truncated": key[:len(key)-1], "trailing": append(bytes.Clone(key), 0), "duplicate": duplicateKey,
-		"tag": append([]byte{0xc0}, key...), "indefinite": append(append([]byte{0xbf}, key[1:]...), 0xff), "depth": deepKey,
+		"tag": append([]byte{0xd9, 0xd9, 0xf7}, key...), "indefinite": append(append([]byte{0xbf}, key[1:]...), 0xff), "depth": deepKey,
 	} {
 		cases["key-"+name] = rawAttestation(append(bytes.Clone(prefix), badKey...))
 	}
 	for name, extension := range map[string][]byte{
 		"truncated": {0xa1, 0x61, 'x'}, "trailing": {0xa0, 0}, "duplicate": {0xa2, 0x61, 'x', 1, 0x61, 'x', 2},
-		"tag": {0xc0, 0xa0}, "indefinite": {0xbf, 0xff}, "depth": {0xa1, 0x61, 'x', 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0},
+		"tag": {0xd9, 0xd9, 0xf7, 0xa0}, "indefinite": {0xbf, 0xff}, "depth": {0xa1, 0x61, 'x', 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0},
 	} {
 		auth := append(bytes.Clone(prefix), key...)
 		auth[32] |= 0x80
