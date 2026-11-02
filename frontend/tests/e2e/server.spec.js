@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { expect, test } from '@playwright/test'
 import { verifyLogoutBehindProxy } from './proxy-logout.js'
+import { verifyPasskeyRoundTrip } from './passkey-roundtrip.js'
 
 // Minimal server/browser E2E. Runs only against the disposable hardened
 // container started by tests/e2e/run-server-e2e.sh (E2E_BASE_URL is unset
@@ -197,6 +198,7 @@ test('server round trip: bootstrap admin, persist a transaction, CSV v3 export a
 
   await test.step('Persisted XSS rendering and transaction details', () => verifyPersistedXSSRendering(page, addBtn))
   await test.step('Responsive transaction table columns', () => verifyTransactionTableLayout(page))
+  await test.step('Passkey registration, discoverable login and reauthentication', () => verifyPasskeyRoundTrip(page))
   await test.step('Logout preserves authenticating proxy access', () => verifyLogoutBehindProxy(page))
 })
 
