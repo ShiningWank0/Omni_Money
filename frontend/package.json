@@ -29,5 +29,14 @@
     "postcss": "^8.5.32",
     "vite": "^8.3.5",
     "vitest": "^5.0.5"
+  },
+  "//": "親依存が未対応のminimatch脆弱性への一時対策。上流対応後はjs-beautify配下のoverridesを解除する。",
+  "overrides": {
+    "js-beautify": {
+      "glob": "^14.0.3",
+      "editorconfig": {
+        "minimatch": "^11.0.4"
+      }
+    }
   }
 }
