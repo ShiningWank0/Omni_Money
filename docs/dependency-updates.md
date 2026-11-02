@@ -129,6 +129,27 @@ main以外のブランチを選ぶとジョブをスキップする。既存の�
 
 ## マージ前の確認
 
+### CBOR更新のCI判定
+
+CBOR v2.9.6 → v2.10.0は、通常CIに加えて`Passkey CBOR compatibility`で検証する。
+このジョブの失敗・キャンセル・予期しないスキップは、既存の必須チェック`Go tests`も失敗させる。
+テスト追加PRを先にmainへ取り込み、依存更新PRをそのmainへ更新した上で、最新コミットのCI成功を確認する。
+テスト追加PR自体でも、使い捨てのCI checkout内だけでCBORをv2.10.0へ切り替えて候補版を検証する。
+リポジトリの`go.mod`・`go.sum`の依存更新は別のDependabot PRに残す。
+
+- `backend/serverauth/testdata/passkey-cbor-v2.9.6.json`は旧版で生成した固定バイト列。P-256、RSA、Ed25519の公開鍵と、拡張データあり／なしの登録応答を含む。
+- 独立した`testdata/cbor-legacy-generator`モジュールをv2.9.6に固定し、CIは生成元の版と固定データの再現性を確認する。通常のテスト中に固定データを生成し直さない。収録された秘密鍵は公開テスト用であり、実際のアカウントに使用しない。
+- 宣言中の版と候補版の両方で固定データを確認し、候補版では認証・control storeの全テストと、追加テストのrace検査を実行する。
+- SQLCipherを必須化した実DBへ旧公開鍵を保存し、close/reopen後のログイン、再認証、署名カウンター／revisionの更新、再送拒否を確認する。暗号化なしのテストやSQLCipher未導入によるスキップで代替しない。
+- CBORの重複キー、禁止タグ、不定長、切り詰め、末尾の余分なデータ、深さ超過を登録処理で拒否し、資格情報を保存しないことを確認する。
+- 実際に固定中のgo-webauthnモジュールを一時ディレクトリへコピーし、候補CBORとの組み合わせで`protocol/...`と`webauthn`の上流テストを実行する。
+- 候補版でDocker imageをビルドし、実Chromiumの仮想CTAP2認証器で、PRFなしの登録、メール／パスワードなしのdiscoverable login、再認証、CSRF更新、再送拒否まで確認する。UI・WebAuthn・API・SQLCipher serverの間に認証応答のmockを挟まない。
+
+CIによる取り込み判定の対象は上記の経路である。各パスキープロバイダー固有の拡張機能や、物理デバイス・OS固有の操作画面の互換性はこの仮想認証器の検証範囲に含まれない。
+候補版を変更するときは、workflowの`CBOR_CANDIDATE`とこの節の対象版を同時に更新する。
+
+### その他の依存更新
+
 通常のCIに加え、Wails更新は4構成のdesktop buildとSQLCipher検証、WebAuthn更新はPRFなしの登録・discoverable login・再認証、server-custody envelope、旧形式移行、ユーザー列挙防止のテストを確認する。PRFを標準パスキーの必須条件へ戻さない。
 フロントエンドのmajor更新はdesktopモードの画面・ストア操作とserver E2Eを確認する。
 

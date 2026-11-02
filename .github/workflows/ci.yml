@@ -75,7 +75,7 @@ jobs:
           CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib
           LD_LIBRARY_PATH: /tmp/omni-sqlcipher/lib
           OMNI_REQUIRE_SQLCIPHER_TESTS: "1"
-        run: go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/securedb ./backend/database ./backend/control ./backend/vault ./backend/desktopaccount ./backend/api
+        run: go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/securedb ./backend/database ./backend/control ./backend/vault ./backend/desktopaccount ./backend/api ./backend/serverauth
       - name: Cross-build Windows secret boundaries
         env:
           CGO_ENABLED: "0"
@@ -646,11 +646,89 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  passkey-cbor:
+    name: Passkey CBOR compatibility
+    if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CBOR_CANDIDATE: v2.10.0
+      SQLCIPHER_PREFIX: /tmp/omni-passkey-sqlcipher
+      SQLCIPHER_BUILD_JOBS: "2"
+      CGO_CFLAGS: -I/tmp/omni-passkey-sqlcipher/include
+      CGO_LDFLAGS: -L/tmp/omni-passkey-sqlcipher/lib
+      LD_LIBRARY_PATH: /tmp/omni-passkey-sqlcipher/lib
+      OMNI_REQUIRE_SQLCIPHER_TESTS: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install SQLCipher build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl tcl libssl-dev
+      - name: Verify frozen v2.9.6 fixture provenance
+        working-directory: backend/serverauth/testdata/cbor-legacy-generator
+        run: go run -mod=readonly .
+      - name: Build checksum-pinned SQLCipher
+        run: sh scripts/build-sqlcipher-linux.sh
+      - name: Test legacy fixtures against the declared dependency
+        run: |
+          go list -m github.com/fxamacker/cbor/v2 github.com/go-webauthn/webauthn
+          go test -mod=readonly -count=1 -tags "libsqlite3 sqlite_omit_load_extension" -run '^TestPasskeyCBOR' ./backend/serverauth
+      # This disposable checkout is the only place the dependency is changed.
+      # The test PR itself never modifies production go.mod/go.sum.
+      - name: Select and verify candidate CBOR dependency
+        run: |
+          go mod edit -require="github.com/fxamacker/cbor/v2@$CBOR_CANDIDATE"
+          go mod download github.com/fxamacker/cbor/v2
+          test "$(go list -m -f '{{.Version}}' github.com/fxamacker/cbor/v2)" = "$CBOR_CANDIDATE"
+          go mod verify
+      - name: Test candidate authentication and encrypted persistence
+        run: |
+          go test -mod=readonly -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/serverauth ./backend/control
+          go test -mod=readonly -race -count=1 -tags "libsqlite3 sqlite_omit_load_extension" -run '^TestPasskeyCBOR' ./backend/serverauth
+      - name: Test the exact WebAuthn module with candidate CBOR
+        run: |
+          webauthn_source="$(go list -m -f '{{.Dir}}' github.com/go-webauthn/webauthn)"
+          webauthn_version="$(go list -m -f '{{.Version}}' github.com/go-webauthn/webauthn)"
+          test -n "$webauthn_source"
+          test -n "$webauthn_version"
+          echo "Testing go-webauthn $webauthn_version with CBOR $CBOR_CANDIDATE"
+          webauthn_test_dir="$(mktemp -d "$RUNNER_TEMP/webauthn-cbor.XXXXXX")"
+          cp -R "$webauthn_source/." "$webauthn_test_dir/"
+          chmod -R u+w "$webauthn_test_dir"
+          cd "$webauthn_test_dir"
+          go mod edit -require="github.com/fxamacker/cbor/v2@$CBOR_CANDIDATE"
+          go mod download github.com/fxamacker/cbor/v2
+          test "$(go list -m -f '{{.Version}}' github.com/fxamacker/cbor/v2)" = "$CBOR_CANDIDATE"
+          go test -mod=readonly -count=1 ./protocol/... ./webauthn
+      - name: Build hardened server image with candidate CBOR
+        run: docker build --build-arg VERSION=cbor-compatibility --tag omni-money:cbor-compatibility .
+      - name: Install browser test dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts
+      - name: Test real Chromium passkeys against candidate server
+        working-directory: frontend
+        env:
+          OMNI_E2E_IMAGE: omni-money:cbor-compatibility
+        run: bash tests/e2e/run-server-e2e.sh --with-deps
+
   # Keep the existing required check name, and include the auxiliary security
   # and update tests in its verdict before GitHub allows the PR to merge.
   go:
     name: Go tests
-    needs: [go-checks, safe-update, windows-security, security-automation, parser-fuzz]
+    needs: [go-checks, safe-update, windows-security, security-automation, parser-fuzz, passkey-cbor]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -658,6 +736,7 @@ jobs:
       - name: Require expected Go result and successful auxiliary checks
         env:
           GO_RESULT: ${{ needs.go-checks.result }}
+          PASSKEY_CBOR_RESULT: ${{ needs.passkey-cbor.result }}
           EXPECTED_GO_RESULT: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'skipped' || 'success' }}
           SAFE_UPDATE_RESULT: ${{ needs.safe-update.result }}
           WINDOWS_RESULT: ${{ needs.windows-security.result }}
@@ -666,6 +745,7 @@ jobs:
           EXPECTED_FUZZ_RESULT: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'success' || 'skipped' }}
         run: |
           test "$GO_RESULT" = "$EXPECTED_GO_RESULT"
+          test "$PASSKEY_CBOR_RESULT" = "$EXPECTED_GO_RESULT"
           test "$SAFE_UPDATE_RESULT" = success
           test "$WINDOWS_RESULT" = success
           test "$SECURITY_AUTOMATION_RESULT" = success
