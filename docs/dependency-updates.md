@@ -129,6 +129,30 @@ main以外のブランチを選ぶとジョブをスキップする。既存の�
 
 ## マージ前の確認
 
+### パスキー関連変更の恒常的な回帰テスト
+
+WebAuthn、CBOR、暗号ライブラリ、フロントエンドを更新するPRでも、通常のコード変更PRでも、
+`Passkey regression tests`と既存の`Docker image build`でパスキーの契約を検証する。
+テストはそのPRの`go.mod`・`go.sum`・frontend lockfileをそのまま使う。
+CIによる依存版の上書きや、候補版・比較対象版の指定は行わない。依存更新のたびにworkflowを編集する必要はない。
+
+- 固定資格情報によるP-256・RSA・Ed25519の登録・ログイン・再認証。固定データは更新対象のencoderで生成し直さない。
+- PRF/server-custodyの両形式と、再認証の完了・署名カウンター・revision・ログイン時刻・再送拒否。
+- SQLCipherの実DBに保存し、close/reopenした後の認証。CIはSQLCipher未導入によるスキップを許さない。
+- CBORの重複キー・禁止タグ・不定長・切り詰め・余分な末尾データ・深さ超過と、不正な署名・challenge・origin・ユーザー確認の拒否。
+- アプリケーションと同じ依存グラフを使った、固定中のWebAuthnモジュール自身の`protocol/...`・`webauthn`テスト。
+- 既存のDocker E2Eで、実UI・Chromium仮想CTAP2認証器・実API・SQLCipher serverを通したPRFなし登録、discoverable login、再認証、CSRF更新、再送拒否。認証応答をmockしない。
+
+必須チェック`Go tests`は、パスキーのGoテスト、frontendのunit/componentテスト、ブラウザE2Eを実行するDockerジョブに依存する。
+いずれかの失敗・キャンセル・予期しないスキップを成功扱いにしない。
+PRの最新コミットでこれらを含むCIが成功していることを、パスキー関連変更の取り込み判断に使用する。
+固定データの形式と来歴は`backend/serverauth/testdata/README.md`を参照する。
+
+各プロバイダー・物理デバイス・OS固有の画面は仮想認証器の検証対象に含まれない。
+サポートするパスキーの契約を変更する場合は、その契約と回帰テストを同じPRで更新する。
+
+### その他の依存更新
+
 通常のCIに加え、Wails更新は4構成のdesktop buildとSQLCipher検証、WebAuthn更新はPRFなしの登録・discoverable login・再認証、server-custody envelope、旧形式移行、ユーザー列挙防止のテストを確認する。PRFを標準パスキーの必須条件へ戻さない。
 フロントエンドのmajor更新はdesktopモードの画面・ストア操作とserver E2Eを確認する。
 
