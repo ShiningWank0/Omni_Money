@@ -75,7 +75,7 @@ jobs:
           CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib
           LD_LIBRARY_PATH: /tmp/omni-sqlcipher/lib
           OMNI_REQUIRE_SQLCIPHER_TESTS: "1"
-        run: go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/securedb ./backend/database ./backend/control ./backend/vault ./backend/desktopaccount ./backend/api
+        run: go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/securedb ./backend/database ./backend/control ./backend/vault ./backend/desktopaccount ./backend/api ./backend/serverauth
       - name: Cross-build Windows secret boundaries
         env:
           CGO_ENABLED: "0"
@@ -646,11 +646,52 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  passkey:
+    name: Passkey regression tests
+    if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SQLCIPHER_PREFIX: /tmp/omni-passkey-sqlcipher
+      SQLCIPHER_BUILD_JOBS: "2"
+      CGO_CFLAGS: -I/tmp/omni-passkey-sqlcipher/include
+      CGO_LDFLAGS: -L/tmp/omni-passkey-sqlcipher/lib
+      LD_LIBRARY_PATH: /tmp/omni-passkey-sqlcipher/lib
+      OMNI_REQUIRE_SQLCIPHER_TESTS: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Record the dependency versions declared by this PR
+        run: go list -mod=readonly -m all
+      - name: Install SQLCipher build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl tcl libssl-dev
+      - name: Build checksum-pinned SQLCipher
+        run: sh scripts/build-sqlcipher-linux.sh
+      - name: Test passkey authentication and encrypted persistence
+        run: |
+          go test -mod=readonly -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/serverauth ./backend/control ./backend/keyenvelope ./backend/middleware
+          go test -mod=readonly -race -count=1 -tags "libsqlite3 sqlite_omit_load_extension" -run '^TestPasskeyRegression' ./backend/serverauth
+      # Test the installed WebAuthn module from this application's module root.
+      # Its tests use the same dependency graph as the application, including
+      # this PR's CBOR and cryptography versions. No dependency is rewritten.
+      - name: Test WebAuthn using this PR's dependency graph
+        run: go test -mod=readonly -count=1 github.com/go-webauthn/webauthn/protocol/... github.com/go-webauthn/webauthn/webauthn
+      - name: Verify dependency manifests stayed unchanged
+        if: ${{ always() }}
+        run: git diff --exit-code -- go.mod go.sum
+
   # Keep the existing required check name, and include the auxiliary security
   # and update tests in its verdict before GitHub allows the PR to merge.
   go:
     name: Go tests
-    needs: [go-checks, safe-update, windows-security, security-automation, parser-fuzz]
+    needs: [go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -658,6 +699,9 @@ jobs:
       - name: Require expected Go result and successful auxiliary checks
         env:
           GO_RESULT: ${{ needs.go-checks.result }}
+          PASSKEY_RESULT: ${{ needs.passkey.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          DOCKER_RESULT: ${{ needs.docker.result }}
           EXPECTED_GO_RESULT: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'skipped' || 'success' }}
           SAFE_UPDATE_RESULT: ${{ needs.safe-update.result }}
           WINDOWS_RESULT: ${{ needs.windows-security.result }}
@@ -666,6 +710,9 @@ jobs:
           EXPECTED_FUZZ_RESULT: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'success' || 'skipped' }}
         run: |
           test "$GO_RESULT" = "$EXPECTED_GO_RESULT"
+          test "$PASSKEY_RESULT" = "$EXPECTED_GO_RESULT"
+          test "$FRONTEND_RESULT" = success
+          test "$DOCKER_RESULT" = success
           test "$SAFE_UPDATE_RESULT" = success
           test "$WINDOWS_RESULT" = success
           test "$SECURITY_AUTOMATION_RESULT" = success
