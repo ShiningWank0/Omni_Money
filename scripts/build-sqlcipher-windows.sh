@@ -139,6 +139,9 @@ if find "$stage_prefix" -type f \( -name '*.dll' -o -name '*.dll.a' -o -name '*.
   fail "staged prefix contains a dynamic library or import library"
 fi
 
+mkdir -p "$stage_prefix/share/licenses/sqlcipher"
+install -m 0644 "$source_dir/LICENSE.md" "$stage_prefix/share/licenses/sqlcipher/LICENSE.md"
+
 mv "$stage_prefix" "$SQLCIPHER_PREFIX"
 stage_prefix=""
 printf 'Built SQLCipher %s static archive at %s\n' "$SQLCIPHER_VERSION" "$SQLCIPHER_PREFIX"

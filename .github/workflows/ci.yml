@@ -10,6 +10,11 @@ on:
     # Daily at 10:30 and 23:30 Japan Standard Time (UTC+09:00).
     - cron: '30 1,14 * * *'
   workflow_dispatch:
+    inputs:
+      release_rehearsal:
+        description: Run the Docker release chain without publishing version/latest tags
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -20,7 +25,104 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
 
 jobs:
+  oss:
+    name: OSS licenses
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOPATH: ${{ github.workspace }}/.oss-cache/go
+      GOMODCACHE: ${{ github.workspace }}/.oss-cache/go/pkg/mod
+      GOCACHE: ${{ github.workspace }}/.oss-cache/go-build
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Build production frontend inventory
+        working-directory: frontend
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+      - name: Resolve pinned Go dependencies
+        run: go mod download
+      - name: Check OSS coverage and approved notices once for all release targets
+        run: |
+          node --test scripts/oss-notices.test.mjs scripts/release-plan.test.mjs
+          node scripts/oss-notices.mjs check
+      - name: Test public and locked license screens
+        working-directory: frontend
+        run: npx --no-install vitest run tests/component/Licenses.test.js
+      - name: Install browser for public license layout tests
+        working-directory: frontend
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Verify vertical-only scrolling and mobile license layout
+        working-directory: frontend
+        run: npx --no-install playwright test --config playwright.licenses.config.js
+      - name: Save failed license layout screenshots
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: oss-license-layout-failure
+          path: .oss-cache/browser-tests/
+          if-no-files-found: ignore
+
+  release-plan:
+    name: Plan release builds
+    needs: oss
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      desktop: ${{ steps.plan.outputs.desktop }}
+      docker: ${{ steps.plan.outputs.docker }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Select release builds using immutable event refs
+        id: plan
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RELEASE_REHEARSAL: ${{ inputs.release_rehearsal || false }}
+        run: node scripts/release-plan.mjs
+
+  release-desktop:
+    name: Desktop release
+    needs: [oss, release-plan]
+    if: needs.release-plan.outputs.desktop == 'true'
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    uses: ./.github/workflows/release-desktop.yml
+
+  release-docker:
+    name: Docker release
+    needs: [oss, release-plan]
+    if: needs.release-plan.outputs.docker == 'true'
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release-docker.yml
+
   go-checks:
+    needs: oss
     name: Go checks
     # PR checks require an up-to-date base; retain scheduled/manual scans without
     # repeating the same suite after merging to main.
@@ -258,6 +360,7 @@ jobs:
           retention-days: 7
 
   safe-update:
+    needs: oss
     name: Safe-update full matrix
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -354,6 +457,7 @@ jobs:
         run: echo "safe-update full matrix is not required for this event"
 
   frontend:
+    needs: oss
     name: Frontend build
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -382,7 +486,10 @@ jobs:
         run: node scripts/security-reports.mjs npm
 
       - name: Test frontend security boundaries
-        run: npm test
+        # License component tests already ran in the common OSS prerequisite.
+        run: |
+          npm run test:unit
+          npx --no-install vitest run --exclude tests/component/Licenses.test.js
 
       - name: Build frontend
         run: npm run build
@@ -397,6 +504,7 @@ jobs:
           retention-days: 7
 
   windows-security:
+    needs: oss
     name: Windows security boundaries
     runs-on: windows-latest
     timeout-minutes: 15
@@ -424,6 +532,7 @@ jobs:
           go test -count=1 -run '^TestPrepareDesktopSQLCipherSelfTestStorageIsPrivateBeforeOpen$' ./desktop_sqlcipher_storage.go ./desktop_sqlcipher_selftest_test.go
 
   docker:
+    needs: oss
     name: Docker image build
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -583,6 +692,7 @@ jobs:
           retention-days: 7
 
   security-automation:
+    needs: oss
     name: Security issue reporting tests
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -600,6 +710,7 @@ jobs:
         run: node scripts/runtime-versions.mjs check
 
   parser-fuzz:
+    needs: oss
     name: Parser fuzz (${{ matrix.target }})
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
@@ -647,6 +758,7 @@ jobs:
           retention-days: 7
 
   passkey:
+    needs: oss
     name: Passkey regression tests
     if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
     runs-on: ubuntu-latest
@@ -691,13 +803,14 @@ jobs:
   # and update tests in its verdict before GitHub allows the PR to merge.
   go:
     name: Go tests
-    needs: [go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker]
+    needs: [oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require expected Go result and successful auxiliary checks
         env:
+          OSS_RESULT: ${{ needs.oss.result }}
           GO_RESULT: ${{ needs.go-checks.result }}
           PASSKEY_RESULT: ${{ needs.passkey.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
@@ -709,6 +822,7 @@ jobs:
           FUZZ_RESULT: ${{ needs.parser-fuzz.result }}
           EXPECTED_FUZZ_RESULT: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'success' || 'skipped' }}
         run: |
+          test "$OSS_RESULT" = success
           test "$GO_RESULT" = "$EXPECTED_GO_RESULT"
           test "$PASSKEY_RESULT" = "$EXPECTED_GO_RESULT"
           test "$FRONTEND_RESULT" = success

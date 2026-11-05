@@ -1,0 +1,79 @@
+[
+  {
+    "id": "desktop-darwin-amd64",
+    "mode": "desktop",
+    "goos": "darwin",
+    "goarch": "amd64",
+    "tags": [
+      "libsqlite3",
+      "sqlite_omit_load_extension",
+      "desktop",
+      "production"
+    ],
+    "entry": "."
+  },
+  {
+    "id": "desktop-darwin-arm64",
+    "mode": "desktop",
+    "goos": "darwin",
+    "goarch": "arm64",
+    "tags": [
+      "libsqlite3",
+      "sqlite_omit_load_extension",
+      "desktop",
+      "production"
+    ],
+    "entry": "."
+  },
+  {
+    "id": "desktop-windows-amd64",
+    "mode": "desktop",
+    "goos": "windows",
+    "goarch": "amd64",
+    "tags": [
+      "libsqlite3",
+      "sqlite_omit_load_extension",
+      "desktop",
+      "production"
+    ],
+    "entry": "."
+  },
+  {
+    "id": "desktop-linux-amd64",
+    "mode": "desktop",
+    "goos": "linux",
+    "goarch": "amd64",
+    "tags": [
+      "libsqlite3",
+      "sqlite_omit_load_extension",
+      "desktop",
+      "production",
+      "webkit2_41"
+    ],
+    "entry": "."
+  },
+  {
+    "id": "server-linux-amd64",
+    "mode": "server",
+    "goos": "linux",
+    "goarch": "amd64",
+    "tags": [
+      "libsqlite3",
+      "sqlite_omit_load_extension",
+      "server"
+    ],
+    "entry": "./server.go"
+  },
+  {
+    "id": "server-linux-arm64",
+    "mode": "server",
+    "goos": "linux",
+    "goarch": "arm64",
+    "tags": [
+      "libsqlite3",
+      "sqlite_omit_load_extension",
+      "server"
+    ],
+    "entry": "./server.go"
+  }
+]

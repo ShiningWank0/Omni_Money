@@ -1,30 +1,7 @@
 name: Desktop Release (Wails)
 
 on:
-  pull_request:
-    paths:
-      - '**/*.go'
-      - 'frontend/src/**'
-      - 'frontend/wailsjs/**'
-      - 'frontend/public/**'
-      - 'frontend/index.html'
-      - 'frontend/vite.config.js'
-      - 'frontend/package.json'
-      - 'frontend/package-lock.json'
-      - 'build/**'
-      - 'scripts/build-openssl-darwin.sh'
-      - 'scripts/backup-data-root*.sh'
-      - 'scripts/build-sqlcipher-*.sh'
-      - '.node-version'
-      - 'go.mod'
-      - 'go.sum'
-      - 'wails.json'
-      - '.github/workflows/release-desktop.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'VERSION'
-      - '.github/workflows/release-desktop.yml'
+  workflow_call:
 
 permissions: {}
 
@@ -359,6 +336,43 @@ jobs:
             esac
           done < <(sed -n 's/^[[:space:]]*DLL Name:[[:space:]]*//p' /tmp/omni-money-imports.txt | tr -d '\r')
 
+      - name: Prepare and verify desktop license bundle
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          SQLCIPHER_PREFIX: ${{ runner.temp }}/omni-sqlcipher-4.18.0
+        run: |
+          set -euo pipefail
+          target="desktop-${BUILD_PLATFORM/\//-}"
+          node scripts/oss-notices.mjs package "$target"
+          if [ "$RUNNER_OS" = macOS ]; then
+            export OSS_OPENSSL_LICENSE_DIRECTORY="${{ runner.temp }}/omni-openssl-3.5.8/share/licenses/openssl"
+            binary='build/bin/Omni Money.app/Contents/MacOS/omni_money'
+            openssl_version='OpenSSL 3.5.8'
+          else
+            binary=build/bin/omni_money
+            openssl_version="$(openssl version)"
+          fi
+          node scripts/oss-artifact.mjs "$target" "$binary" "$SQLCIPHER_PREFIX" "$openssl_version"
+          if [ "$RUNNER_OS" = macOS ]; then
+            mkdir -p 'build/bin/Omni Money.app/Contents/Resources/licenses'
+            cp -R "licenses/build/$target/." 'build/bin/Omni Money.app/Contents/Resources/licenses/'
+          else
+            mkdir -p build/bin/licenses
+            cp -R "licenses/build/$target/." build/bin/licenses/
+          fi
+
+      - name: Prepare and verify Windows license bundle
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          node scripts/oss-notices.mjs package desktop-windows-amd64
+          export OSS_OPENSSL_LICENSE_DIRECTORY="$(cygpath -m /ucrt64/share/licenses/openssl)"
+          node scripts/oss-artifact.mjs desktop-windows-amd64 build/bin/omni_money.exe "$(cygpath -m /ucrt64/omni-sqlcipher-4.18.0)" "$(openssl version)"
+          mkdir -p build/bin/licenses
+          cp -R licenses/build/desktop-windows-amd64/. build/bin/licenses/
+
       # macOSの場合: ad-hoc署名 + dittoでバンドル構造保持ZIP
       - name: Package macOS app
         if: runner.os == 'macOS'
@@ -375,6 +389,7 @@ jobs:
           destination="$(mktemp -d)"
           ditto -x -k "${ARTIFACT_NAME}-v${APP_VERSION}.zip" "$destination"
           codesign --verify --strict "$destination/Omni Money.app"
+          node scripts/oss-notices.mjs verify "desktop-${BUILD_PLATFORM/\//-}" "$destination/Omni Money.app/Contents/Resources/licenses"
           "$destination/Omni Money.app/Contents/MacOS/omni_money" --self-test-sqlcipher
 
       # Linuxの場合: バイナリをtar.gz圧縮
@@ -382,7 +397,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cd build/bin
-          tar czf "../../${ARTIFACT_NAME}-v${APP_VERSION}.tar.gz" omni_money
+          tar czf "../../${ARTIFACT_NAME}-v${APP_VERSION}.tar.gz" omni_money licenses
 
       - name: Verify packaged Linux app
         if: runner.os == 'Linux'
@@ -390,6 +405,7 @@ jobs:
         run: |
           destination="$(mktemp -d)"
           tar xzf "${ARTIFACT_NAME}-v${APP_VERSION}.tar.gz" -C "$destination"
+          node scripts/oss-notices.mjs verify desktop-linux-amd64 "$destination/licenses"
           env -u DISPLAY -u WAYLAND_DISPLAY "$destination/omni_money" --self-test-sqlcipher
 
       # Windowsの場合: exeをzip圧縮
@@ -398,7 +414,7 @@ jobs:
         shell: pwsh
         run: |
           $destination = "$env:ARTIFACT_NAME-v$env:APP_VERSION.zip"
-          Compress-Archive -Path "build\bin\omni_money.exe" -DestinationPath $destination
+          Compress-Archive -Path "build\bin\omni_money.exe", "build\bin\licenses" -DestinationPath $destination
 
       - name: Verify packaged Windows app
         if: runner.os == 'Windows'
@@ -406,6 +422,8 @@ jobs:
         run: |
           $destination = Join-Path $env:RUNNER_TEMP 'omni-money-packaged'
           Expand-Archive -Path "$env:ARTIFACT_NAME-v$env:APP_VERSION.zip" -DestinationPath $destination
+          node scripts/oss-notices.mjs verify desktop-windows-amd64 "$destination\licenses"
+          if ($LASTEXITCODE -ne 0) { throw "Packaged licenses failed verification" }
           $originalPath = $env:Path
           try {
             $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"

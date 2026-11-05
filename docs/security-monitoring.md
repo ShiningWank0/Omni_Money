@@ -16,7 +16,7 @@
 
 Goのgovulncheck/gosec等はPR、定期schedule、手動実行で実行し、main pushではGo checksジョブを省略する。各jobの条件は `ci.yml` を正とする。Docker Releaseは各アーキテクチャのTrivyを公開前に実行し、次の順序を守る: タグなしdigest push → アーキテクチャ毎のTrivyスキャン → staging index作成 → build provenance attestation付与 → `gh attestation verify`（署名workflow・source ref・GitHub-hosted runnerを固定）→ version/latestタグ公開。スキャン・attestation・検証のいずれかが失敗するとrelease tagは作られない。配備側は`scripts/resolve-image-digest.sh --verify --repo OWNER/REPO`でprovenance検証を必須とする。
 
-`release-docker.yml`は`workflow_dispatch`で**リハーサル**実行できる。releaseと同じビルド・スキャン・attestation・検証を行い、version/latestタグは公開しない（`rehearsal-staging`タグのみ更新）。VERSION変更を伴う本番Releaseの前に、GitHub Actions画面のRun workflowで対象branchを選び、経路全体を検証する。CI成功は、未修正の既知問題や静的解析で分からない設計上の問題がないことを保証しない。Pangolin、Newt、Gerbil、Traefik、Badger、VPS/TrueNASそのものは別配備のため、このCIの検査対象ではない。
+`ci.yml`の`workflow_dispatch`で`release_rehearsal`を有効にすると、共通OSSチェック後に`release-docker.yml`を**リハーサル**実行できる。releaseと同じビルド・スキャン・attestation・検証を行い、version/latestタグは公開しない（`rehearsal-staging`タグのみ更新）。VERSION変更を伴う本番Releaseの前に、GitHub ActionsのCI画面のRun workflowで対象branchを選び、`release_rehearsal`を有効にして、経路全体を検証する。CI成功は、未修正の既知問題や静的解析で分からない設計上の問題がないことを保証しない。Pangolin、Newt、Gerbil、Traefik、Badger、VPS/TrueNASそのものは別配備のため、このCIの検査対象ではない。
 
 Parser fuzzは追加の定期・手動専用matrixで3対象を最大2job並列、各jobのfuzz workerを1に制限する。入力はCSV 16 KiB、JSON 8 KiB、画像コンテナ64 KiBを上限とし、DB・本番データ・外部サービスには接続しない。画像はコンテナ検証のみで、任意画像のピクセル展開は行わない。各対象の試験時間は120秒、失敗入力の縮小は10秒、Go試験全体は4分、子プロセスは6分、jobは10分で打ち切る。PR/pushではこのmatrixを省略するが、PRの既存`go test ./...`は固定seedを実行する。必須チェック名`Go tests`は定期・手動のfuzz成功、それ以外の省略を明示検査する。
 

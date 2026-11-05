@@ -113,6 +113,7 @@
 
         </form>
       </div>
+      <footer class="license-footer"><LicenseEntry /></footer>
     </div>
   </div>
 </template>
@@ -120,6 +121,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import BuildInfo from '../components/BuildInfo.vue'
+import LicenseEntry from '../components/LicenseEntry.vue'
 import {
   acceptServerInvitation,
   completeServerPasswordReset,
@@ -423,8 +425,9 @@ async function handlePasskeyLogin() {
 </script>
 
 <style scoped>
-.login-root { width: 100%; min-height: calc(100vh - 2rem); display: flex; align-items: center; justify-content: center; overflow: auto; }
-.login-container { width: 100%; max-width: 440px; padding: 1rem; }
+.login-root { width: 100%; min-height: calc(100vh - 2rem); display: flex; align-items: flex-start; justify-content: center; overflow: auto; }
+.login-container { width: 100%; max-width: 440px; padding: 1rem; margin-block: auto; }
+.license-footer { margin-top: 0.75rem; text-align: center; }
 .login-card { background: rgba(255, 255, 255, 0.94); border-radius: 20px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2); backdrop-filter: blur(10px); padding: 2rem; box-sizing: border-box; }
 .login-header { text-align: center; margin-bottom: 1.25rem; }
 .app-title { font-size: 2rem; font-weight: 700; margin: 0 0 0.4rem; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }

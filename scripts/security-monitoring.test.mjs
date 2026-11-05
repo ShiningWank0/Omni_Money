@@ -413,7 +413,7 @@ test('required Go check rejects fuzz, passkey, frontend and browser E2E failure,
   assert.ok(block, 'required-check script missing');
   const program = block.replace(/^          /gm, '');
   const gatePasses = overrides => spawnSync('bash', ['-e', '-c', program], {
-    encoding: 'utf8', env: { ...process.env, GO_RESULT: 'success', EXPECTED_GO_RESULT: 'success',
+    encoding: 'utf8', env: { ...process.env, OSS_RESULT: 'success', GO_RESULT: 'success', EXPECTED_GO_RESULT: 'success',
       SAFE_UPDATE_RESULT: 'success', WINDOWS_RESULT: 'success', SECURITY_AUTOMATION_RESULT: 'success',
       PASSKEY_RESULT: 'success', FRONTEND_RESULT: 'success', DOCKER_RESULT: 'success',
       FUZZ_RESULT: 'skipped', EXPECTED_FUZZ_RESULT: 'skipped', ...overrides },
@@ -427,7 +427,7 @@ test('required Go check rejects fuzz, passkey, frontend and browser E2E failure,
         result === expected, `passkey/${expected}/${result}`);
     }
   }
-  for (const required of ['DOCKER_RESULT', 'FRONTEND_RESULT']) {
+  for (const required of ['OSS_RESULT', 'DOCKER_RESULT', 'FRONTEND_RESULT']) {
     for (const result of results) {
       assert.equal(gatePasses({ [required]: result }), result === 'success', `${required}/${result}`);
     }
@@ -437,7 +437,7 @@ test('required Go check rejects fuzz, passkey, frontend and browser E2E failure,
   assert.match(fuzzJob, /max-parallel: 2/);
   assert.match(fuzzJob, /fail-fast: false/);
   assert.match(fuzzJob, /target: \[fuzz-csv, fuzz-json, fuzz-image\]/);
-  assert.match(workflow, /needs: \[go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker\]/);
+  assert.match(workflow, /needs: \[oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker\]/);
   assert.match(workflow, /needs: \[go-checks, frontend, docker, security-automation, parser-fuzz\]/);
   assert.match(workflow, /EXPECTED_FUZZ_RESULT: .*'schedule'.*'workflow_dispatch'.*'success' \|\| 'skipped'/);
   const passkeyJob = workflow.split('  passkey:\n')[1]?.split('  # Keep the existing required check name')[0];

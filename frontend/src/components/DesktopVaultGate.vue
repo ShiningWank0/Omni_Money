@@ -1,5 +1,6 @@
 <template>
   <main class="desktop-vault-gate">
+    <div class="desktop-vault-container">
     <section class="desktop-vault-card" aria-labelledby="desktop-vault-title">
       <div class="desktop-vault-mark" aria-hidden="true">OM</div>
       <h1 id="desktop-vault-title">Omni Money</h1>
@@ -85,12 +86,15 @@
         <button class="link-button" type="button" :disabled="busy" @click="startRecovery">パスワードを忘れた場合</button>
       </form>
     </section>
+    <footer class="license-footer"><LicenseEntry /></footer>
+    </div>
   </main>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
 import BuildInfo from './BuildInfo.vue'
+import LicenseEntry from './LicenseEntry.vue'
 import {
 	acknowledgeDesktopVaultRecovery,
   migrateLegacyDesktopVault,
@@ -266,15 +270,23 @@ async function finishRecoveryDelivery() {
 
 <style scoped>
 .desktop-vault-gate {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
+  min-height: 0;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 24px;
   background: linear-gradient(145deg, #eef1ff 0%, #f9faff 50%, #f3f5fa 100%);
 }
+.desktop-vault-container { width: min(100%, 546px); min-width: 0; margin-block: auto; }
+.license-footer { margin-top: 0.75rem; text-align: center; }
 
 .desktop-vault-card {
-  width: min(100%, 480px);
+  width: 100%;
+  box-sizing: border-box;
   padding: 32px;
   border: 1px solid #d8def7;
   border-radius: 20px;

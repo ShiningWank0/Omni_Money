@@ -32,6 +32,14 @@ func TestGitHubActionsArePinnedAndCheckoutDropsCredentials(t *testing.T) {
 				continue
 			}
 			action := strings.TrimSpace(strings.TrimPrefix(trimmed, "uses:"))
+			// Local reusable workflows are bound to this checkout's immutable
+			// commit. Only workflow files inside this repository are allowed.
+			if strings.HasPrefix(action, "./.github/workflows/") && !strings.Contains(action, "..") {
+				if _, err := os.Stat(strings.TrimPrefix(action, "./")); err != nil {
+					t.Errorf("local reusable workflow is missing: %s", action)
+				}
+				continue
+			}
 			if commentIndex := strings.Index(action, " #"); commentIndex >= 0 {
 				action = action[:commentIndex]
 			}
@@ -149,7 +157,7 @@ func TestDockerReleasePassesVersionBuildArg(t *testing.T) {
 		"--source-ref",
 		"--deny-self-hosted-runners",
 		"--dry-run",
-		"workflow_dispatch:",
+		"workflow_call:",
 		"rehearsal-staging",
 		"if: github.event_name != 'workflow_dispatch'",
 	} {
