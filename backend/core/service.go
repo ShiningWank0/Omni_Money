@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
@@ -2438,22 +2439,59 @@ func parseTagPathSegments(path string) ([]string, error) {
 }
 
 func createTagPathIn(db *sql.DB, segments []string) (*models.Tag, error) {
-	tx, err := db.Begin()
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("タグtransaction開始エラー: %w", err)
 	}
-	defer tx.Rollback()
-	tag, err := createTagPathWithinTx(tx, segments)
+	defer conn.Close()
+	// Acquire SQLite's writer reservation before reading the tag tree. A
+	// deferred transaction can read an old tree and then fail immediately when
+	// upgrading to a writer, even though busy_timeout is configured. SQLite
+	// coordinates this reservation per database, including other processes;
+	// independent vaults remain independent.
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return nil, fmt.Errorf("タグtransaction開始エラー: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			if _, err := conn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+				// Never return a possibly open transaction to the connection pool.
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			}
+		}
+	}()
+	tag, err := createTagPathWithinTx(tagPathConnection{conn}, segments)
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return nil, fmt.Errorf("タグtransaction確定エラー: %w", err)
 	}
+	committed = true
 	return tag, nil
 }
 
-func createTagPathWithinTx(tx *sql.Tx, segments []string) (*models.Tag, error) {
+// Both an existing ledger transaction and the dedicated immediate transaction
+// use the same tag-path implementation. Ledger saves keep their outer atomic
+// transaction; this helper must never start a nested transaction.
+type tagPathQueries interface {
+	Exec(string, ...any) (sql.Result, error)
+	QueryRow(string, ...any) *sql.Row
+}
+
+type tagPathConnection struct{ *sql.Conn }
+
+func (c tagPathConnection) Exec(query string, args ...any) (sql.Result, error) {
+	return c.ExecContext(context.Background(), query, args...)
+}
+
+func (c tagPathConnection) QueryRow(query string, args ...any) *sql.Row {
+	return c.QueryRowContext(context.Background(), query, args...)
+}
+
+func createTagPathWithinTx(tx tagPathQueries, segments []string) (*models.Tag, error) {
 	var parentID *int64
 	var tag *models.Tag
 	var err error
