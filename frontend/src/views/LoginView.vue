@@ -5,7 +5,7 @@
         <div class="login-header">
           <h1 class="app-title">Omni Money</h1>
           <BuildInfo />
-          <p class="app-subtitle">{{ pageTitle }}</p>
+          <p v-if="pageTitle" class="app-subtitle">{{ pageTitle }}</p>
         </div>
 
         <div v-if="!setupRequired" class="auth-mode-tabs" aria-label="アカウント操作">
@@ -169,7 +169,7 @@ const pageTitle = computed(() => {
   if (setupRequired.value) return '最初の管理者を作成'
   if (mode.value === 'invite') return '招待されたアカウントを作成'
   if (mode.value === 'reset') return 'パスワードと回復コードを再設定'
-  return 'サーバーモードにログイン'
+  return ''
 })
 const submitLabel = computed(() => {
   if (loading.value) return '処理中...'

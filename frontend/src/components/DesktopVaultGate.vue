@@ -3,7 +3,6 @@
     <section class="desktop-vault-card" aria-labelledby="desktop-vault-title">
       <div class="desktop-vault-mark" aria-hidden="true">OM</div>
       <h1 id="desktop-vault-title">Omni Money</h1>
-      <p class="desktop-vault-subtitle">暗号化されたローカル保管庫</p>
 
       <BuildInfo />
 
@@ -298,7 +297,6 @@ async function finishRecoveryDelivery() {
 h1, h2 { margin: 0; text-align: center; color: #252a44; }
 h1 { font-size: 1.65rem; }
 h2 { margin-bottom: 10px; font-size: 1.15rem; }
-.desktop-vault-subtitle { margin: 6px 0 26px; text-align: center; color: #66708f; }
 .desktop-vault-form { display: grid; gap: 12px; }
 .desktop-vault-form p { margin: 0 0 4px; color: #5b6277; line-height: 1.55; }
 label { color: #353b54; font-size: 0.92rem; font-weight: 650; }
