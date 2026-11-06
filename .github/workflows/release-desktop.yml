@@ -182,7 +182,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential curl tcl libssl-dev binutils file libgtk-3-dev libwebkit2gtk-4.1-dev
+          sudo apt-get install -y build-essential curl tcl libssl-dev binutils file libgtk-3-dev libwebkit2gtk-4.1-dev xvfb xauth dbus-x11 openbox wmctrl xdotool python3-gi gir1.2-atspi-2.0 at-spi2-core libatk-adaptor
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
@@ -422,13 +422,30 @@ jobs:
           tar czf "../../${ARTIFACT_NAME}-v${APP_VERSION}.tar.gz" omni_money licenses
 
       - name: Verify packaged Linux app
+        id: wails-native
         if: runner.os == 'Linux'
+        timeout-minutes: 8
         shell: bash
         run: |
-          destination="$(mktemp -d)"
+          set -euo pipefail
+          destination="$(mktemp -d "$RUNNER_TEMP/omni-wails-package.XXXXXX")"
+          trap 'rm -rf "$destination"' EXIT
           tar xzf "${ARTIFACT_NAME}-v${APP_VERSION}.tar.gz" -C "$destination"
           node scripts/oss-notices.mjs verify desktop-linux-amd64 "$destination/licenses"
           env -u DISPLAY -u WAYLAND_DISPLAY "$destination/omni_money" --self-test-sqlcipher
+          # Issue #299: native production UI is the temporary automatic path;
+          # it does not establish that development Echo/browser IPC is fixed.
+          timeout --signal=TERM --kill-after=20s 300s xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" dbus-run-session -- node scripts/wails-native-integration.mjs "$destination/omni_money"
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Save native WebView integration evidence
+        if: ${{ always() && runner.os == 'Linux' && steps.wails-native.outcome != '' && steps.wails-native.outcome != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wails-native-linux-integration
+          path: .oss-cache/wails-native-results/
+          if-no-files-found: warn
+          retention-days: 7
 
       # Windowsの場合: exeをzip圧縮
       - name: Package Windows app

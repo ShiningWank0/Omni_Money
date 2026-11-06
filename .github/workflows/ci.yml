@@ -165,7 +165,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential curl tcl libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev xvfb xauth dbus-x11
+          sudo apt-get install -y build-essential curl tcl libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Build frontend assets for Go embed
         id: go-security-setup
@@ -194,34 +194,9 @@ jobs:
           go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/securedb ./backend/database ./backend/control ./backend/vault ./backend/desktopaccount ./backend/api ./backend/serverauth
           go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" -run '^TestEncryptedLedgerMutationsWaitForCompetingWriter$' ./backend/core
 
-      - name: Install browser for Wails and Echo integration
-        working-directory: frontend
-        run: npx --no-install playwright install --with-deps chromium
-
-      - name: Test actual Wails development runtime with the selected Echo
-        id: wails-dev
-        timeout-minutes: 8
-        env:
-          CGO_ENABLED: "1"
-          CGO_CFLAGS: -I/tmp/omni-sqlcipher/include
-          CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib -lcrypto
-          LD_LIBRARY_PATH: /tmp/omni-sqlcipher/lib
-        run: |
-          set -euo pipefail
-          WAILS_TEST_BUILD_DIR="$(mktemp -d "$RUNNER_TEMP/omni-wails-build.XXXXXX")"
-          trap 'rm -rf "$WAILS_TEST_BUILD_DIR"' EXIT
-          go build -mod=readonly -tags "dev,desktop,webkit2_41,libsqlite3,sqlite_omit_load_extension" -o "$WAILS_TEST_BUILD_DIR/omni-wails-dev" .
-          timeout --signal=TERM --kill-after=15s 180s dbus-run-session -- xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" node scripts/wails-dev-integration.mjs "$WAILS_TEST_BUILD_DIR/omni-wails-dev"
-          git diff --exit-code -- go.mod go.sum
-
-      - name: Save Wails and Echo integration evidence
-        if: ${{ always() && steps.wails-dev.outcome != 'skipped' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: wails-echo-dev-integration
-          path: .oss-cache/wails-dev-results/
-          if-no-files-found: warn
-          retention-days: 7
+      # Temporary replacement for the development-browser integration: the
+      # desktop release job tests the packaged native WebView automatically.
+      # Restore the browser test here after the conditions in Issue #299 pass.
       - name: Cross-build Windows secret boundaries
         env:
           CGO_ENABLED: "0"
@@ -747,7 +722,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
-      - run: node --test scripts/security-monitoring.test.mjs scripts/runtime-versions.test.mjs scripts/wails-dev-integration.test.mjs scripts/dependabot-node-sync.test.mjs scripts/check-node-sync-app.test.mjs
+      - run: node --test scripts/security-monitoring.test.mjs scripts/runtime-versions.test.mjs scripts/wails-dev-integration.test.mjs scripts/wails-native-integration.test.mjs scripts/dependabot-node-sync.test.mjs scripts/check-node-sync-app.test.mjs
       - name: Validate offline TrueNAS icon metadata
         run: python3 -B -m unittest discover -s scripts -p 'truenas_icon_metadata_test.py'
       - name: Verify coordinated runtime versions
@@ -847,7 +822,7 @@ jobs:
   # and update tests in its verdict before GitHub allows the PR to merge.
   go:
     name: Go tests
-    needs: [oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker]
+    needs: [oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker, release-plan, release-desktop]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -859,6 +834,9 @@ jobs:
           PASSKEY_RESULT: ${{ needs.passkey.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           DOCKER_RESULT: ${{ needs.docker.result }}
+          RELEASE_PLAN_RESULT: ${{ needs.release-plan.result }}
+          DESKTOP_REQUIRED: ${{ needs.release-plan.outputs.desktop }}
+          DESKTOP_RESULT: ${{ needs.release-desktop.result }}
           EXPECTED_GO_RESULT: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'skipped' || 'success' }}
           SAFE_UPDATE_RESULT: ${{ needs.safe-update.result }}
           WINDOWS_RESULT: ${{ needs.windows-security.result }}
@@ -871,6 +849,12 @@ jobs:
           test "$PASSKEY_RESULT" = "$EXPECTED_GO_RESULT"
           test "$FRONTEND_RESULT" = success
           test "$DOCKER_RESULT" = success
+          test "$RELEASE_PLAN_RESULT" = success
+          case "$DESKTOP_REQUIRED" in
+            true) test "$DESKTOP_RESULT" = success ;;
+            false) test "$DESKTOP_RESULT" = skipped ;;
+            *) exit 1 ;;
+          esac
           test "$SAFE_UPDATE_RESULT" = success
           test "$WINDOWS_RESULT" = success
           test "$SECURITY_AUTOMATION_RESULT" = success

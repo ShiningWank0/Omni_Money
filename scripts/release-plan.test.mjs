@@ -58,3 +58,8 @@ test('manual Docker rehearsals are opt-in; scheduled scans never publish', () =>
   assert.deepEqual(releasePlan('schedule', ['VERSION']), { desktop: false, docker: false })
   assert.throws(() => releasePlan('release', []), /Unexpected/)
 })
+test('native and development Wails harness changes automatically validate desktop artifacts', () => {
+  for (const path of ['scripts/wails-native-integration.mjs', 'scripts/wails-native-ui.py', 'scripts/wails-native-integration.test.mjs', 'scripts/wails-dev-integration.mjs']) {
+    assert.deepEqual(releasePlan('pull_request', [path]), { desktop: true, docker: false })
+  }
+})

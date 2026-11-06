@@ -405,7 +405,7 @@ test('missing fuzz reports create individual errors and failed downloads reject 
   assert.ok(collect(directory, false).every(r => r.status === 'error'));
 });
 
-test('required Go check rejects fuzz, passkey, frontend and browser E2E failure, cancellation and unexpected skips', () => {
+test('required Go check rejects native WebView, fuzz, passkey, frontend and browser E2E failure, cancellation and unexpected skips', () => {
   const workflow = readFileSync(resolve('.github/workflows/ci.yml'), 'utf8');
   const gate = workflow.split('      - name: Require expected Go result and successful auxiliary checks\n')[1]
     ?.split('  security-issues:')[0];
@@ -416,6 +416,7 @@ test('required Go check rejects fuzz, passkey, frontend and browser E2E failure,
     encoding: 'utf8', env: { ...process.env, OSS_RESULT: 'success', GO_RESULT: 'success', EXPECTED_GO_RESULT: 'success',
       SAFE_UPDATE_RESULT: 'success', WINDOWS_RESULT: 'success', SECURITY_AUTOMATION_RESULT: 'success',
       PASSKEY_RESULT: 'success', FRONTEND_RESULT: 'success', DOCKER_RESULT: 'success',
+      RELEASE_PLAN_RESULT: 'success', DESKTOP_REQUIRED: 'false', DESKTOP_RESULT: 'skipped',
       FUZZ_RESULT: 'skipped', EXPECTED_FUZZ_RESULT: 'skipped', ...overrides },
   }).status === 0;
   const results = ['success', 'skipped', 'failure', 'cancelled', ''];
@@ -427,17 +428,24 @@ test('required Go check rejects fuzz, passkey, frontend and browser E2E failure,
         result === expected, `passkey/${expected}/${result}`);
     }
   }
-  for (const required of ['OSS_RESULT', 'DOCKER_RESULT', 'FRONTEND_RESULT']) {
+  for (const required of ['OSS_RESULT', 'DOCKER_RESULT', 'FRONTEND_RESULT', 'RELEASE_PLAN_RESULT']) {
     for (const result of results) {
       assert.equal(gatePasses({ [required]: result }), result === 'success', `${required}/${result}`);
     }
   }
+  for (const required of ['true', 'false']) {
+    for (const result of results) {
+      assert.equal(gatePasses({ DESKTOP_REQUIRED: required, DESKTOP_RESULT: result }),
+        result === (required === 'true' ? 'success' : 'skipped'), `desktop/${required}/${result}`);
+    }
+  }
+  assert.equal(gatePasses({ DESKTOP_REQUIRED: '' }), false, 'missing release plan output must fail closed');
   const fuzzJob = workflow.split('  parser-fuzz:\n')[1]?.split('  # Keep the existing required check name')[0];
   assert.match(fuzzJob, /if: \$\{\{ github.event_name == 'schedule' \|\| github.event_name == 'workflow_dispatch' \}\}/);
   assert.match(fuzzJob, /max-parallel: 2/);
   assert.match(fuzzJob, /fail-fast: false/);
   assert.match(fuzzJob, /target: \[fuzz-csv, fuzz-json, fuzz-image\]/);
-  assert.match(workflow, /needs: \[oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker\]/);
+  assert.match(workflow, /needs: \[oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker, release-plan, release-desktop\]/);
   assert.match(workflow, /needs: \[go-checks, frontend, docker, security-automation, parser-fuzz\]/);
   assert.match(workflow, /EXPECTED_FUZZ_RESULT: .*'schedule'.*'workflow_dispatch'.*'success' \|\| 'skipped'/);
   const passkeyJob = workflow.split('  passkey:\n')[1]?.split('  # Keep the existing required check name')[0];
