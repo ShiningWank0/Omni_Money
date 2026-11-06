@@ -3,7 +3,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { bounded, privateAppEnvironment, requireCI, stopProcessGroup, verifyDevBuild, watchExit } from './wails-dev-integration.mjs'
+import { bounded, browserErrorDetails, privateAppEnvironment, requireCI, stopProcessGroup, verifyDevBuild, watchExit } from './wails-dev-integration.mjs'
 
 const expected = { 'github.com/wailsapp/wails/v2': 'v2.90.0', 'github.com/labstack/echo/v4': 'v4.90.0' }
 const info = `app: go1.27.3
@@ -51,6 +51,14 @@ test('isolates data and neutralizes Wails environment overrides without changing
 
 test('a missing response fails at its deadline', async () => {
   await assert.rejects(bounded(new Promise(() => {}), 10, 'response deadline'), /response deadline/)
+})
+
+test('browser diagnostics preserve the original source stack and stage', () => {
+  const error = new TypeError("Cannot read properties of null (reading 'nodes')")
+  error.stack = `${error.name}: ${error.message}\n    at runtime (http://127.0.0.1:1234/wails/ipc.js:1:42)`
+  assert.deepEqual(browserErrorDetails(error, 'loading application'), {
+    stage: 'loading application', name: 'TypeError', message: error.message, stack: error.stack,
+  })
 })
 
 for (const ignoreTerm of [false, true]) test(`cleanup stops the owned process group (ignore SIGTERM: ${ignoreTerm})`, async t => {

@@ -41,6 +41,10 @@ export function privateAppEnvironment(directory, inherited) {
   return env
 }
 
+export function browserErrorDetails(error, stage) {
+  return { stage, name: error.name, message: error.message, stack: error.stack || null }
+}
+
 export function watchExit(child) {
   return new Promise((resolve, reject) => {
     child.once('error', reject)
@@ -134,6 +138,8 @@ export async function runIntegration(binaryArgument) {
   const directory = mkdtempSync(join(runnerTemp, 'omni-wails-dev-'))
   let child, exit, context, failure, port, log, owned = false, interrupted = false, gracefulExit = false, listenerClosed = false
   let sent = 0, received = 0
+  let stage = 'starting'
+  const browserErrors = []
   const interrupt = () => {
     interrupted = true
     void context?.close().catch(() => {})
@@ -165,27 +171,31 @@ export async function runIntegration(binaryArgument) {
     assert.equal(interrupted, false, 'Integration was interrupted')
     const page = await context.newPage()
     page.setDefaultTimeout(20_000)
-    const errors = []
-    page.on('pageerror', error => errors.push(error.message))
+    page.on('pageerror', error => browserErrors.push(browserErrorDetails(error, stage)))
     page.on('websocket', socket => {
       if (socket.url().startsWith(`${baseURL.replace('http:', 'ws:')}/wails/ipc`)) {
         socket.on('framesent', () => sent++)
         socket.on('framereceived', () => received++)
       }
     })
+    stage = 'loading application'
     const response = await page.goto(baseURL, { waitUntil: 'domcontentloaded', timeout: 30_000 })
     assert.equal(response.status(), 200)
     await page.waitForFunction(() => typeof window.go?.main?.App?.GetDesktopVaultStatus === 'function')
+    stage = 'calling Go through WebSocket'
     const status = await bounded(page.evaluate(() => window.go.main.App.GetDesktopVaultStatus()), 15_000, 'The real Go binding did not reply')
     assert.deepEqual(status, { configured: false, unlocked: false, legacy_migration_required: false, role: '' })
     assert.ok(sent > 0 && received > 0, 'The actual Wails WebSocket IPC must exchange frames')
     await page.locator('.desktop-vault-gate').waitFor({ state: 'visible' })
     await page.getByRole('heading', { name: 'Omni Money', exact: true }).waitFor({ state: 'visible' })
+    stage = 'opening license dialog'
     await page.getByRole('button', { name: 'オープンソースライセンス', exact: true }).click()
     await page.getByRole('dialog').waitFor({ state: 'visible' })
+    stage = 'closing license dialog'
     await page.getByRole('button', { name: 'ライセンスを閉じる', exact: true }).click()
     await page.getByRole('dialog').waitFor({ state: 'detached' })
-    assert.deepEqual(errors, [], 'The real application reported a browser error')
+    assert.deepEqual(browserErrors, [], 'The real application reported a browser error')
+    stage = 'requesting graceful exit'
     await page.evaluate(() => window.runtime.Quit())
     assert.deepEqual(await bounded(exit, 15_000, 'Wails did not exit after runtime.Quit'), { code: 0, signal: null })
     gracefulExit = true
@@ -206,8 +216,9 @@ export async function runIntegration(binaryArgument) {
     process.removeListener('SIGTERM', interrupt)
     if (interrupted) failure ||= new Error('Integration was interrupted')
     if (!existsSync(directory) && !failure) assert.ok(gracefulExit && listenerClosed && sent > 0 && received > 0, 'Incomplete integration evidence')
+    writeFileSync(join(output, 'browser-errors.json'), JSON.stringify(browserErrors, null, 2) + '\n')
     writeFileSync(join(output, 'result.json'), JSON.stringify({ passed: !failure, modules: expected, websocketFrames: { sent, received }, gracefulExit, listenerClosed, isolatedDataRemoved: !existsSync(directory),
-      error: failure?.message || null }, null, 2) + '\n')
+      stage, error: failure?.message || null }, null, 2) + '\n')
   }
   if (failure) throw failure
   console.log('Wails/Echo development integration passed: real UI, Go IPC, graceful exit and cleanup')
