@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { bounded, privateAppEnvironment, requireCI, stopProcessGroup, verifyDevBuild, watchExit } from './wails-dev-integration.mjs'
 
 const expected = { 'github.com/wailsapp/wails/v2': 'v2.90.0', 'github.com/labstack/echo/v4': 'v4.90.0' }
@@ -21,7 +22,7 @@ test('requires CI Linux and a virtual display before starting the real app', () 
 })
 
 test('the command refuses local execution before opening a GUI or listener', () => {
-  const result = spawnSync(process.execPath, [new URL('./wails-dev-integration.mjs', import.meta.url).pathname], {
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('./wails-dev-integration.mjs', import.meta.url))], {
     env: { ...process.env, GITHUB_ACTIONS: 'false' }, encoding: 'utf8', timeout: 5000,
   })
   assert.equal(result.status, 1)
@@ -65,7 +66,8 @@ for (const ignoreTerm of [false, true]) test(`cleanup stops the owned process gr
 })
 
 test('startup failure is observed and cleanup does not target another process', async () => {
-  const child = spawn('/nonexistent-omni-wails-fixture', [], { detached: true, stdio: 'ignore' })
+  const missing = fileURLToPath(new URL('./__missing_wails_dev_fixture__', import.meta.url))
+  const child = spawn(missing, [], { detached: true, stdio: 'ignore' })
   await assert.rejects(watchExit(child), /ENOENT/)
   await stopProcessGroup(child)
 })
