@@ -58,7 +58,7 @@ func (s *Service) AddAITransaction(ctx context.Context, req models.TransactionRe
 	if err != nil {
 		return nil, err
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := beginLedgerWrite(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("トランザクション開始エラー: %w", err)
 	}

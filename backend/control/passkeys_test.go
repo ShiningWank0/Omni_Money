@@ -3,6 +3,7 @@ package control
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"strings"
@@ -13,6 +14,116 @@ import (
 
 	"omni_money/backend/keyenvelope"
 )
+
+func TestPasskeyCreationWaitsForWriterAndRechecksLimit(t *testing.T) {
+	for _, atLimit := range []bool{false, true} {
+		name := "available"
+		if atLimit {
+			name = "limit-reached-while-waiting"
+		}
+		t.Run(name, func(t *testing.T) {
+			store := openTestStore(t)
+			admin := bootstrapTestAdmin(t, store)
+			ctx := context.Background()
+			if atLimit {
+				for index := range MaxPasskeysPerUser - 1 {
+					if _, err := store.CreatePasskeyCredential(ctx, testPasskeyInput(admin.ID, "existing", byte(index+1)), testNow); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			blocker, err := store.db.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer blocker.Close()
+			if _, err := blocker.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+				t.Fatal(err)
+			}
+			defer blocker.ExecContext(ctx, "ROLLBACK")
+			if atLimit {
+				_, credential, envelope, err := preparePasskeyCredential(testPasskeyInput(admin.ID, "competing", 60))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := blocker.ExecContext(ctx, `INSERT INTO passkey_credentials
+					(credential_id,user_id,name,credential_json,prf_salt,vault_envelope_json,revision,created_at_ms,updated_at_ms)
+					VALUES(?,?,?,?,?,?,1,?,?)`, bytes.Repeat([]byte{60}, 32), admin.ID, "competing", credential,
+					bytes.Repeat([]byte{62}, 32), envelope, testNow.UnixMilli(), testNow.UnixMilli()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, err := store.CreatePasskeyCredential(ctx, testPasskeyInput(admin.ID, "waiting", 80), testNow)
+				done <- err
+			}()
+			received := false
+			defer func() {
+				_, _ = blocker.ExecContext(ctx, "ROLLBACK")
+				if !received {
+					select {
+					case <-done:
+					case <-time.After(7 * time.Second):
+						t.Error("passkey registration did not finish after rollback")
+					}
+				}
+			}()
+			select {
+			case err := <-done:
+				received = true
+				t.Fatalf("registration returned before competing writer committed: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			if _, err := blocker.ExecContext(ctx, "COMMIT"); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				received = true
+				if atLimit && !errors.Is(err, ErrConflict) || !atLimit && err != nil {
+					t.Fatalf("registration error = %v, atLimit=%v", err, atLimit)
+				}
+			case <-time.After(7 * time.Second):
+				t.Fatal("registration did not finish after competing writer committed")
+			}
+			var count int
+			if err := store.db.QueryRow("SELECT COUNT(*) FROM passkey_credentials WHERE user_id=?", admin.ID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			want := 1
+			if atLimit {
+				want = MaxPasskeysPerUser
+			}
+			if count != want {
+				t.Fatalf("passkeys=%d, want %d", count, want)
+			}
+		})
+	}
+}
+
+// Cancelling an immediate operation must release its writer and connection.
+func TestImmediateControlTransactionCancellationReturnsConnection(t *testing.T) {
+	store := openTestStore(t)
+	store.db.SetMaxOpenConns(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	err := store.withImmediate(ctx, func(conn *sql.Conn) error {
+		if _, err := conn.ExecContext(ctx, "INSERT INTO login_throttle(account_key,last_failure_ms,updated_at_ms) VALUES(?,1,1)", strings.Repeat("a", 64)); err != nil {
+			return err
+		}
+		cancel()
+		return ctx.Err()
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("operation error = %v", err)
+	}
+	check, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	var count int
+	if err := store.db.QueryRowContext(check, "SELECT COUNT(*) FROM login_throttle").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("cancelled operation left rows or connection: count=%d, err=%v", count, err)
+	}
+}
 
 func testPasskeyInput(userID, name string, seed byte) PasskeyCredentialInput {
 	id := bytes.Repeat([]byte{seed}, 32)

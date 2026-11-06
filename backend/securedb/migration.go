@@ -100,7 +100,7 @@ func migratePlaintext(ctx context.Context, path string, opener *Opener) (retErr 
 	if err := expectSQLiteIntegrity(ctx, source); err != nil {
 		return err
 	}
-	if _, err := source.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+	if err := CheckpointTruncate(ctx, source); err != nil {
 		return fmt.Errorf("checkpoint plaintext database: %w", err)
 	}
 

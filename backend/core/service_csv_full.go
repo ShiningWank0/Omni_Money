@@ -2839,7 +2839,7 @@ func (s *Service) importCSVLegacyRowsContext(ctx context.Context, rows []csvLega
 	if err != nil {
 		return 0, err
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := beginLedgerWrite(ctx, db)
 	if err != nil {
 		return 0, fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
@@ -2967,7 +2967,7 @@ func (s *Service) importCSVV3Parsed(ctx context.Context, parsed *csvV3Import, mo
 	if err != nil {
 		return 0, err
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := beginLedgerWrite(ctx, db)
 	if err != nil {
 		return 0, fmt.Errorf("CSV v3 transaction開始エラー: %w", err)
 	}

@@ -44,21 +44,8 @@ func TestSaveRequestIDsDeduplicateReplayButNotIdenticalContent(t *testing.T) {
 	errorsSeen := make(chan error, 8)
 	for range 8 {
 		group.Go(func() {
-			// SQLite may reject a deferred transaction upgrading concurrently;
-			// replaying the same durable ID must remain safe in that case too.
-			for attempt := 0; attempt < 20; attempt++ {
-				_, err := service.AcceptTransactionSave(saveTestID, 0, request)
-				if err == nil {
-					errorsSeen <- nil
-					return
-				}
-				if !errors.Is(err, ErrSaveStorageUnavailable) {
-					errorsSeen <- err
-					return
-				}
-				time.Sleep(time.Millisecond)
-			}
-			errorsSeen <- errors.New("concurrent receipt did not converge")
+			_, err := service.AcceptTransactionSave(saveTestID, 0, request)
+			errorsSeen <- err
 		})
 	}
 	group.Wait()

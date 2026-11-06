@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
@@ -253,7 +252,7 @@ func (s *Service) AddTransactionContext(ctx context.Context, req models.Transact
 		return nil, err
 	}
 
-	tx, err := db.Begin()
+	tx, err := beginLedgerWrite(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
@@ -373,7 +372,7 @@ func (s *Service) UpdateTransactionContext(ctx context.Context, id int64, req mo
 		return nil, err
 	}
 
-	tx, err := db.Begin()
+	tx, err := beginLedgerWrite(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
@@ -546,7 +545,7 @@ func (s *Service) DeleteTransaction(id int64) error {
 	if err != nil {
 		return err
 	}
-	tx, err := db.Begin()
+	tx, err := beginLedgerWrite(context.Background(), db)
 	if err != nil {
 		return fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
@@ -729,7 +728,7 @@ func (s *Service) saveStringSliceSetting(key string, items []string) error {
 	if err != nil {
 		return err
 	}
-	tx, err := db.Begin()
+	tx, err := beginLedgerWrite(context.Background(), db)
 	if err != nil {
 		return fmt.Errorf("設定transaction開始エラー: %w", err)
 	}
@@ -1396,7 +1395,7 @@ func (s *Service) importCSVContext(ctx context.Context, content string, mode str
 		parsedRows = append(parsedRows, importRow{account: account, date: date, item: item, txType: txType, amount: amount, memo: memo, archiveAmount: amount > validation.MaxTransactionAmount})
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := beginLedgerWrite(ctx, db)
 	if err != nil {
 		return 0, fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
@@ -1594,7 +1593,7 @@ func (s *Service) recalculateBalance(account string) error {
 	if err != nil {
 		return err
 	}
-	tx, err := db.Begin()
+	tx, err := beginLedgerWrite(context.Background(), db)
 	if err != nil {
 		return fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
@@ -1758,7 +1757,7 @@ func (s *Service) AddTransactionImageContext(ctx context.Context, transactionID 
 		return nil, err
 	}
 
-	tx, err := db.Begin()
+	tx, err := beginLedgerWrite(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("トランザクション開始エラー: %w", err)
 	}
@@ -2185,7 +2184,7 @@ func (s *Service) CreateTag(name string, parentID *int64) (*models.Tag, error) {
 		return nil, err
 	}
 
-	tx, err := db.Begin()
+	tx, err := beginLedgerWrite(context.Background(), db)
 	if err != nil {
 		return nil, fmt.Errorf("タグtransaction開始エラー: %w", err)
 	}
@@ -2345,7 +2344,7 @@ func (s *Service) UpdateTag(id int64, name string) error {
 	if err != nil {
 		return err
 	}
-	tx, err := db.Begin()
+	tx, err := beginLedgerWrite(context.Background(), db)
 	if err != nil {
 		return fmt.Errorf("タグtransaction開始エラー: %w", err)
 	}
@@ -2439,59 +2438,23 @@ func parseTagPathSegments(path string) ([]string, error) {
 }
 
 func createTagPathIn(db *sql.DB, segments []string) (*models.Tag, error) {
-	ctx := context.Background()
-	conn, err := db.Conn(ctx)
+	tx, err := beginLedgerWrite(context.Background(), db)
 	if err != nil {
 		return nil, fmt.Errorf("タグtransaction開始エラー: %w", err)
 	}
-	defer conn.Close()
-	// Acquire SQLite's writer reservation before reading the tag tree. A
-	// deferred transaction can read an old tree and then fail immediately when
-	// upgrading to a writer, even though busy_timeout is configured. SQLite
-	// coordinates this reservation per database, including other processes;
-	// independent vaults remain independent.
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return nil, fmt.Errorf("タグtransaction開始エラー: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			if _, err := conn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
-				// Never return a possibly open transaction to the connection pool.
-				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
-			}
-		}
-	}()
-	tag, err := createTagPathWithinTx(tagPathConnection{conn}, segments)
+	defer tx.Rollback()
+	tag, err := createTagPathWithinTx(tx, segments)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("タグtransaction確定エラー: %w", err)
 	}
-	committed = true
 	return tag, nil
 }
 
-// Both an existing ledger transaction and the dedicated immediate transaction
-// use the same tag-path implementation. Ledger saves keep their outer atomic
-// transaction; this helper must never start a nested transaction.
-type tagPathQueries interface {
-	Exec(string, ...any) (sql.Result, error)
-	QueryRow(string, ...any) *sql.Row
-}
-
-type tagPathConnection struct{ *sql.Conn }
-
-func (c tagPathConnection) Exec(query string, args ...any) (sql.Result, error) {
-	return c.ExecContext(context.Background(), query, args...)
-}
-
-func (c tagPathConnection) QueryRow(query string, args ...any) *sql.Row {
-	return c.QueryRowContext(context.Background(), query, args...)
-}
-
-func createTagPathWithinTx(tx tagPathQueries, segments []string) (*models.Tag, error) {
+// Keep tag creation inside an existing ledger save's atomic transaction.
+func createTagPathWithinTx(tx *sql.Tx, segments []string) (*models.Tag, error) {
 	var parentID *int64
 	var tag *models.Tag
 	var err error
@@ -2591,7 +2554,7 @@ func (s *Service) DeleteTag(id int64) error {
 	if err != nil {
 		return err
 	}
-	tx, err := db.Begin()
+	tx, err := beginLedgerWrite(context.Background(), db)
 	if err != nil {
 		return fmt.Errorf("タグtransaction開始エラー: %w", err)
 	}
@@ -2667,7 +2630,7 @@ func (s *Service) AddTransactionTags(transactionID int64, tagIDs []int64) error 
 	if err != nil {
 		return err
 	}
-	tx, err := db.Begin()
+	tx, err := beginLedgerWrite(context.Background(), db)
 	if err != nil {
 		return fmt.Errorf("タグtransaction開始エラー: %w", err)
 	}
@@ -3459,17 +3422,11 @@ func (s *Service) AddTransactionLink(parentID, childID int64) error {
 	if err != nil {
 		return err
 	}
-	tx, err := db.Begin()
+	tx, err := beginLedgerWrite(context.Background(), db)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	// Acquire SQLite's writer lock before reading the assignment. The no-op
-	// DELETE changes no rows, but concurrent additions cannot both validate
-	// the same unassigned card before either one commits.
-	if _, err := tx.Exec("DELETE FROM transaction_links WHERE 0"); err != nil {
-		return err
-	}
 	settings, err := loadLedgerSettingsIn(tx)
 	if err != nil {
 		return err
