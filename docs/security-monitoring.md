@@ -66,6 +66,12 @@ Wails本体は公式版のまま、`go.mod`でEchoの修正版を指定する。
 
 2026年11月6日の追加検査では、Goの脆弱性DBはv4.16.3にもGO-2026-6872／GO-2026-6875を報告し、修正版を未登録としている。公式の修正説明と実際の回帰試験の結果を併せて判断し、スキャナーの検出を無視する設定は加えない。
 
+CIの`Go checks`では、固定SQLCipherと`dev,desktop,webkit2_41`を使ってOmni Money本体もビルドし、Xvfb・D-Bus上で実際のWailsを起動する。`scripts/wails-dev-integration.mjs`はビルド情報から、選択されたWailsとEchoの組み込み版、devタグ、CGOを照合する。productionやbindings用バイナリでは成功しない。ローカル起動を防ぐため、Linux・GitHub Actions・仮想画面を必須にする。
+
+実際のfrontend生成物のコピーをEchoから配信し、テスト固有の確認ファイルで起動したインスタンスを識別する。ChromiumからWailsの実WebSocketを通して`GetDesktopVaultStatus`を呼び、未設定・ロック状態の応答、Desktop初期画面とOSS画面の表示、`runtime.Quit`による正常終了を検証する。通信・Goバインディング・画面をモックしない。HOMEは変更せず、XDGのデータ・設定・キャッシュをCI専用の一時ディレクトリへ向ける。通常終了・失敗時ともプロセス群とブラウザを終了させ、一時データを削除する。応答と終了には期限を設け、失敗をskipや成功に変換しない。
+
+`wails-echo-dev-integration` artifactにはビルド情報・アプリログ・通信数と終了／後片付けの判定結果を保存し、保管庫やブラウザプロファイルは含めない。この結合試験はLinuxのWails開発用HTTP/IPC経路を対象とし、各OSのネイティブ画面を操作する試験の代替ではない。
+
 ## パスキーログインの情報漏えい対策と限界
 
 現行Frontendのパスキーログインは `/api/auth/passkeys/discover/begin` と `/finish` を使用する。メール入力なしのdiscoverable ceremonyを開始し、開始応答にuser別のcredential候補を含めない。選択されたcredentialの署名、challenge、RP/origin、user handle、user verification、期限、一回限りの利用を検証してから本人のVaultを開く。標準パスキーはserver-custody envelopeを使用し、PRF出力を要求しない。旧形式の互換処理と自動移行は [server安全モデル](server-multi-vault.md#passkey-authentication) を参照。
