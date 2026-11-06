@@ -87,7 +87,7 @@ func (s *Service) AcceptTransactionSave(id string, targetID int64, request model
 	if err != nil {
 		return nil, err
 	}
-	tx, err := db.Begin()
+	tx, err := beginLedgerWrite(context.Background(), db)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +258,7 @@ func (s *Service) processTransactionSave(id string, raw []byte) error {
 	if err != nil {
 		return s.failTransactionSave(id, err)
 	}
-	tx, err := s.db.Begin()
+	tx, err := beginLedgerWrite(context.Background(), s.db)
 	if err != nil {
 		return err
 	}

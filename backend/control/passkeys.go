@@ -28,37 +28,33 @@ func (s *Store) CreatePasskeyCredential(ctx context.Context, input PasskeyCreden
 	if err != nil {
 		return PasskeyCredential{}, err
 	}
-	db, err := s.database()
+	timestamp := now.UTC().UnixMilli()
+	// Reserve the writer before counting. Concurrent registrations must see
+	// each other's committed credentials and preserve the per-user limit.
+	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
+		var count int
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM passkey_credentials WHERE user_id = ?", prepared.UserID).Scan(&count); err != nil {
+			return fmt.Errorf("count passkeys: %w", err)
+		}
+		if count >= MaxPasskeysPerUser {
+			return fmt.Errorf("%w: no more than %d passkeys may be registered", ErrConflict, MaxPasskeysPerUser)
+		}
+		_, err := conn.ExecContext(ctx, `INSERT INTO passkey_credentials(
+			credential_id, user_id, name, credential_json, prf_salt,
+			vault_envelope_json, revision, created_at_ms, updated_at_ms
+		) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+			prepared.ID, prepared.UserID, prepared.Name, credentialJSON, prepared.PRFSalt,
+			envelopeJSON, timestamp, timestamp)
+		if err != nil {
+			if isSQLiteConstraint(err) {
+				return fmt.Errorf("%w: passkey credential already exists", ErrConflict)
+			}
+			return fmt.Errorf("insert passkey credential: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return PasskeyCredential{}, err
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return PasskeyCredential{}, fmt.Errorf("begin passkey creation: %w", err)
-	}
-	defer tx.Rollback()
-	var count int
-	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM passkey_credentials WHERE user_id = ?", prepared.UserID).Scan(&count); err != nil {
-		return PasskeyCredential{}, fmt.Errorf("count passkeys: %w", err)
-	}
-	if count >= MaxPasskeysPerUser {
-		return PasskeyCredential{}, fmt.Errorf("%w: no more than %d passkeys may be registered", ErrConflict, MaxPasskeysPerUser)
-	}
-	timestamp := now.UTC().UnixMilli()
-	_, err = tx.ExecContext(ctx, `INSERT INTO passkey_credentials(
-		credential_id, user_id, name, credential_json, prf_salt,
-		vault_envelope_json, revision, created_at_ms, updated_at_ms
-	) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-		prepared.ID, prepared.UserID, prepared.Name, credentialJSON, prepared.PRFSalt,
-		envelopeJSON, timestamp, timestamp)
-	if err != nil {
-		if isSQLiteConstraint(err) {
-			return PasskeyCredential{}, fmt.Errorf("%w: passkey credential already exists", ErrConflict)
-		}
-		return PasskeyCredential{}, fmt.Errorf("insert passkey credential: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return PasskeyCredential{}, fmt.Errorf("commit passkey credential: %w", err)
 	}
 	prepared.Revision = 1
 	prepared.CreatedAt = now.UTC()
