@@ -1,6 +1,5 @@
-// verify-licenses verifies the actual notices copied into a release image.
-// Its trusted manifest is mounted from the frontend builder, not read from
-// the runtime directory being verified.
+// verify-licenses checks fixed release-image paths. Its trusted manifest is
+// mounted from the frontend builder independently of the runtime files.
 package main
 
 import (
@@ -9,10 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
 	"runtime/debug"
-	"strings"
 )
 
 type moduleVersion struct {
@@ -20,28 +18,38 @@ type moduleVersion struct {
 	Version string `json:"version"`
 }
 
-type manifest struct {
-	Target    string          `json:"target"`
-	GOOS      string          `json:"goos"`
-	GOARCH    string          `json:"goarch"`
-	GoVersion string          `json:"goVersion"`
-	Modules   []moduleVersion `json:"modules"`
-	Files     []struct {
-		Name   string `json:"name"`
-		SHA256 string `json:"sha256"`
-	} `json:"files"`
+type noticeFile struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"`
 }
 
-func verifyBinary(binary, manifestPath string) error {
-	data, err := os.ReadFile(manifestPath)
-	if err != nil {
-		return err
-	}
+type manifest struct {
+	Target             string          `json:"target"`
+	ApplicationModule  string          `json:"applicationModule"`
+	ApplicationVersion string          `json:"applicationVersion"`
+	GOOS               string          `json:"goos"`
+	GOARCH             string          `json:"goarch"`
+	GoVersion          string          `json:"goVersion"`
+	Modules            []moduleVersion `json:"modules"`
+	Files              []noticeFile    `json:"files"`
+}
+
+func readManifest(reader io.Reader) (manifest, error) {
 	var expected manifest
-	if err := json.Unmarshal(data, &expected); err != nil {
-		return err
+	decoder := json.NewDecoder(io.LimitReader(reader, 1024*1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&expected); err != nil {
+		return manifest{}, err
 	}
-	info, err := buildinfo.ReadFile(binary)
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return manifest{}, fmt.Errorf("invalid trailing manifest data")
+	}
+	return expected, nil
+}
+
+func verifyBinary(binary io.ReaderAt, expected manifest) error {
+	info, err := buildinfo.Read(binary)
 	if err != nil {
 		return err
 	}
@@ -49,8 +57,8 @@ func verifyBinary(binary, manifestPath string) error {
 }
 
 func verifyBuildInfo(info *debug.BuildInfo, expected manifest) error {
-	if info.GoVersion != expected.GoVersion {
-		return fmt.Errorf("unreviewed Go runtime in release image")
+	if expected.ApplicationModule == "" || info.GoVersion != expected.GoVersion {
+		return fmt.Errorf("missing application identity or unreviewed Go runtime")
 	}
 	settings := map[string]string{}
 	for _, setting := range info.Settings {
@@ -61,29 +69,39 @@ func verifyBuildInfo(info *debug.BuildInfo, expected manifest) error {
 	}
 	modules := map[string]string{}
 	for _, module := range expected.Modules {
+		if module.Path == "" || module.Version == "" || modules[module.Path] != "" || module.Path == expected.ApplicationModule {
+			return fmt.Errorf("invalid reviewed module inventory")
+		}
 		modules[module.Path] = module.Version
 	}
-	if len(modules) == 0 || len(modules) != len(info.Deps) {
-		return fmt.Errorf("release dependency inventory differs")
+	if len(modules) == 0 {
+		return fmt.Errorf("empty release dependency inventory")
 	}
+	seen := map[string]bool{}
 	for _, module := range info.Deps {
-		if module.Replace != nil || modules[module.Path] != module.Version {
+		if module == nil || module.Replace != nil || seen[module.Path] {
+			return fmt.Errorf("invalid or replaced release dependency")
+		}
+		seen[module.Path] = true
+		// A ./server.go build records our own module as a (devel) dependency
+		// of command-line-arguments. Exclude only that exact application identity.
+		if module.Path == expected.ApplicationModule && module.Version == "(devel)" {
+			continue
+		}
+		version, reviewed := modules[module.Path]
+		if !reviewed || version != module.Version {
 			return fmt.Errorf("unreviewed dependency in release image: %s", module.Path)
 		}
+		delete(modules, module.Path)
+	}
+	if len(modules) != 0 {
+		return fmt.Errorf("release dependency inventory differs")
 	}
 	return nil
 }
 
-func verify(directory, manifestPath, target string) error {
-	data, err := os.ReadFile(manifestPath)
-	if err != nil {
-		return err
-	}
-	var expected manifest
-	if err := json.Unmarshal(data, &expected); err != nil {
-		return err
-	}
-	if expected.Target != target || !strings.HasPrefix(target, "server-linux-") {
+func verify(directory *os.Root, expected manifest, target string) error {
+	if expected.Target != target || (target != "server-linux-amd64" && target != "server-linux-arm64") {
 		return fmt.Errorf("license target mismatch")
 	}
 	seen := map[string]bool{}
@@ -92,12 +110,11 @@ func verify(directory, manifestPath, target string) error {
 			return fmt.Errorf("invalid license inventory")
 		}
 		seen[file.Name] = true
-		filename := filepath.Join(directory, file.Name)
-		info, err := os.Lstat(filename)
+		info, err := directory.Lstat(file.Name)
 		if err != nil || !info.Mode().IsRegular() {
 			return fmt.Errorf("missing regular license file: %s", file.Name)
 		}
-		content, err := os.ReadFile(filename)
+		content, err := directory.ReadFile(file.Name)
 		if err != nil {
 			return err
 		}
@@ -112,16 +129,48 @@ func verify(directory, manifestPath, target string) error {
 	return nil
 }
 
+func run(target string) error {
+	licenses, err := os.OpenRoot("/app/licenses")
+	if err != nil {
+		return err
+	}
+	defer licenses.Close()
+	trusted, err := os.OpenRoot("/tmp")
+	if err != nil {
+		return err
+	}
+	defer trusted.Close()
+	file, err := trusted.Open("license-manifest.json")
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	expected, err := readManifest(file)
+	if err != nil {
+		return err
+	}
+	if err := verify(licenses, expected, target); err != nil {
+		return err
+	}
+	app, err := os.OpenRoot("/app")
+	if err != nil {
+		return err
+	}
+	defer app.Close()
+	binary, err := app.Open("omni_money_server")
+	if err != nil {
+		return err
+	}
+	defer binary.Close()
+	return verifyBinary(binary, expected)
+}
+
 func main() {
-	if len(os.Args) != 5 {
-		fmt.Fprintln(os.Stderr, "usage: verify-licenses DIRECTORY TRUSTED-MANIFEST TARGET BINARY")
+	if len(os.Args) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: verify-licenses TARGET")
 		os.Exit(1)
 	}
-	if err := verify(os.Args[1], os.Args[2], os.Args[3]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if err := verifyBinary(os.Args[4], os.Args[2]); err != nil {
+	if err := run(os.Args[1]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

@@ -15,7 +15,7 @@ export function bundledPackages(bundle, root) {
           try {
             const info = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'))
             if (info.name && info.version) {
-              packages.set(info.name, { name: info.name, version: info.version, directory: relative(root, directory).replace(/\\/g, '/') })
+              packages.set(`${info.name}@${info.version}`, { name: info.name, version: info.version, directory: relative(root, directory).replace(/\\/g, '/') })
               break
             }
           } catch (error) { if (error.code !== 'ENOENT') throw error }
@@ -24,7 +24,7 @@ export function bundledPackages(bundle, root) {
       } else if (clean.includes('vite/') || clean.includes('vite:')) {
         const directory = join(root, 'node_modules/vite')
         const info = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'))
-        packages.set(info.name, { name: info.name, version: info.version, directory: 'node_modules/vite' })
+        packages.set(`${info.name}@${info.version}`, { name: info.name, version: info.version, directory: 'node_modules/vite' })
       }
     }
   }

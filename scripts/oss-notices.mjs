@@ -14,6 +14,14 @@ const readJSON = path => JSON.parse(readFileSync(join(root, path), 'utf8'))
 const stable = value => `${JSON.stringify(value, null, 2)}\n`
 const textFile = /^(licen[cs]e|copying|notice|copyright|patents)([._-].*)?$/i
 
+export const normalizeLineEndings = text => text.replace(/\r\n?/g, '\n')
+
+export function applicationModule() {
+  const value = readFileSync(join(root, 'go.mod'), 'utf8').match(/^module\s+(\S+)\s*$/m)?.[1]
+  if (!value) throw new Error('Missing application module identity')
+  return value
+}
+
 export function parseObjects(input) {
   const objects = []
   let start = 0, depth = 0, quoted = false, escaped = false
@@ -102,6 +110,7 @@ function npmComponents() {
 export function validateCatalog(catalog, approved) {
   if (catalog.schema !== 1 || approved.schema !== 1) throw new Error('Unsupported OSS catalog schema')
   if (!catalog.applicationLicense?.trim()) throw new Error('Missing application license')
+  if (!catalog.applicationModule?.trim()) throw new Error('Missing application module identity')
   const ids = new Set()
   for (const component of catalog.components) {
     if (ids.has(component.id)) throw new Error(`Duplicate component ${component.id}`)
@@ -135,7 +144,7 @@ export function collect() {
   if (components.find(component => component.id === 'native:go').version !== goVersion) throw new Error('Go runtime license review required for new toolchain')
   const opensslVersion = readFileSync(join(root, 'scripts/build-openssl-darwin.sh'), 'utf8').match(/OPENSSL_VERSION="([^"]+)"/)?.[1]
   if (!components.find(component => component.id === 'native:openssl').version.includes(`macOS: ${opensslVersion})`)) throw new Error('OpenSSL notice version differs from macOS build')
-  return { schema: 1, applicationLicense: readFileSync(join(root, 'LICENSE'), 'utf8'), components }
+  return { schema: 1, applicationModule: applicationModule(), applicationLicense: readFileSync(join(root, 'LICENSE'), 'utf8'), components }
 }
 
 export function collectUsage(catalog) {
@@ -202,34 +211,37 @@ function main() {
       writeFileSync(join(root, 'licenses/dependency-usage.json'), stable(usage))
     } else if (stable(catalog) !== readFileSync(join(root, catalogPath), 'utf8') || stable(usage) !== readFileSync(join(root, 'licenses/dependency-usage.json'), 'utf8')) throw new Error('OSS inventory changed. Review approvals and run node scripts/oss-notices.mjs refresh.')
     console.log(`OSS check passed: ${catalog.components.length} components across ${targets.length} targets`)
-  } else if (mode === 'package') {
+  } else if (mode === 'package' || mode === 'package-all') {
     const catalog = readJSON(catalogPath)
     validateCatalog(catalog, readJSON(approvalPath))
     verifyBundledPackages(catalog, readJSON('frontend/bundled-dependencies.json'))
-    if (!targets.includes(target)) throw new Error('package requires an explicit release target')
-    const directory = join(root, 'licenses/build', target)
-    mkdirSync(join(directory, 'native'), { recursive: true })
-    writeFileSync(join(directory, 'THIRD_PARTY_NOTICES.txt'), noticeText(catalog, target))
-    writeFileSync(join(directory, 'LICENSE'), readFileSync(join(root, 'LICENSE')))
-    writeFileSync(join(directory, 'native/SQLCipher-LICENSE.txt'), catalog.components.find(component => component.id === 'native:sqlcipher').files[0].text)
-    const targetConfig = targetConfigs.find(config => config.id === target)
-    const manifest = { target, goos: targetConfig.goos, goarch: targetConfig.goarch,
-      applicationVersion: process.env.VITE_APP_VERSION || process.env.VERSION || readFileSync(join(root, 'VERSION'), 'utf8').trim(),
-      goVersion: `go${catalog.components.find(component => component.id === 'native:go').version}`,
-      modules: catalog.components.filter(component => component.id.startsWith('go:') && component.targets.includes(target)).map(component => ({ path: component.name, version: component.version })),
-      files: ['LICENSE', 'THIRD_PARTY_NOTICES.txt', 'native/SQLCipher-LICENSE.txt'].map(name => ({ name, sha256: hash(readFileSync(join(directory, name))) })) }
-    writeFileSync(join(directory, 'manifest.json'), stable(manifest))
+    if (mode === 'package' && !targets.includes(target)) throw new Error('package requires an explicit release target')
+    const selectedTargets = mode === 'package-all' ? targets : [target]
+    for (const target of selectedTargets) {
+      const directory = join(root, 'licenses/build', target)
+      mkdirSync(join(directory, 'native'), { recursive: true })
+      writeFileSync(join(directory, 'THIRD_PARTY_NOTICES.txt'), noticeText(catalog, target))
+      writeFileSync(join(directory, 'LICENSE'), readFileSync(join(root, 'LICENSE')))
+      writeFileSync(join(directory, 'native/SQLCipher-LICENSE.txt'), catalog.components.find(component => component.id === 'native:sqlcipher').files[0].text)
+      const targetConfig = targetConfigs.find(config => config.id === target)
+      const manifest = { target, applicationModule: catalog.applicationModule, goos: targetConfig.goos, goarch: targetConfig.goarch,
+        applicationVersion: process.env.VITE_APP_VERSION || process.env.VERSION || readFileSync(join(root, 'VERSION'), 'utf8').trim(),
+        goVersion: `go${catalog.components.find(component => component.id === 'native:go').version}`,
+        modules: catalog.components.filter(component => component.id.startsWith('go:') && component.targets.includes(target)).map(component => ({ path: component.name, version: component.version })),
+        files: ['LICENSE', 'THIRD_PARTY_NOTICES.txt', 'native/SQLCipher-LICENSE.txt'].map(name => ({ name, sha256: hash(readFileSync(join(directory, name))) })) }
+      writeFileSync(join(directory, 'manifest.json'), stable(manifest))
+    }
   } else if (mode === 'verify') {
     const directory = process.argv[4]
     if (!directory || !targets.includes(target)) throw new Error('verify requires target and extracted license directory')
     const actual = readFileSync(resolve(root, directory, 'THIRD_PARTY_NOTICES.txt'), 'utf8')
-    if (actual !== noticeText(readJSON(catalogPath), target)) throw new Error('Packaged third-party notices are missing or changed')
-    if (readFileSync(resolve(root, directory, 'LICENSE'), 'utf8') !== readFileSync(join(root, 'LICENSE'), 'utf8')) throw new Error('Packaged application license is missing or changed')
+    if (normalizeLineEndings(actual) !== normalizeLineEndings(noticeText(readJSON(catalogPath), target))) throw new Error('Packaged third-party notices are missing or changed')
+    if (normalizeLineEndings(readFileSync(resolve(root, directory, 'LICENSE'), 'utf8')) !== normalizeLineEndings(readFileSync(join(root, 'LICENSE'), 'utf8'))) throw new Error('Packaged application license is missing or changed')
     if (target.startsWith('desktop-')) {
       if (!readFileSync(resolve(root, directory, 'BUILD_DEPENDENCIES.txt'), 'utf8').trim()) throw new Error('Packaged build dependency inventory is missing')
-      if (readFileSync(resolve(root, directory, 'native/SQLCipher-LICENSE.txt'), 'utf8').trim() !== readFileSync(join(root, 'licenses/native/sqlcipher.txt'), 'utf8').trim()) throw new Error('Packaged native license is missing or changed')
+      if (normalizeLineEndings(readFileSync(resolve(root, directory, 'native/SQLCipher-LICENSE.txt'), 'utf8')).trim() !== normalizeLineEndings(readFileSync(join(root, 'licenses/native/sqlcipher.txt'), 'utf8')).trim()) throw new Error('Packaged native license is missing or changed')
     }
-  } else throw new Error('Usage: oss-notices.mjs check|review|refresh|package TARGET|verify TARGET DIRECTORY')
+  } else throw new Error('Usage: oss-notices.mjs check|review|refresh|package-all|package TARGET|verify TARGET DIRECTORY')
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

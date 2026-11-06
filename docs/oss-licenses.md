@@ -22,6 +22,8 @@ mainのVERSION変更時はDesktop/Dockerを実行し、PRでは変更パスに�
 
 `licenses/targets.json` に配布構成と実際のビルドタグを定義します。`licenses/dependency-usage.json` はnpm lock/Go module graph内の各依存について、版、直接・間接・開発依存の区別、配布対象／除外、対象構成、ライセンスと判定根拠を記録する生成物です。開発依存でも配布コードを含む場合は `included` になります。`externalTargets` はOS提供の実行時ライブラリを示します。最終配布物のmanifestにはアプリのリリース版も記録します。テストに配布OSS一覧やその版を複製しません。
 
+`frontend/bundled-dependencies.json` もGit管理し、本番ビルドで得た一覧とコミット済みの一覧が一致することを共通チェックで確認します。依存の更新時にはこのファイルも同じPRに含めます。`licenses/build/` は配布構成・アプリ版ごとに生成し、共通チェックの `oss-license-inventories` artifactと最終配布物に保存します。原文・承認情報・対象構成・表示用一覧はGitでレビューできます。
+
 UIのcomponent testに加え、共通チェックで320/375/768/1280pxのブラウザ検証を行い、横方向のoverflowがないこと、本文が縦にスクロールすること、×ボタンがスクロールで移動しないこと、閉じた後のフォーカス復帰を確認します。
 
 ## 依存更新時の手順
@@ -38,6 +40,8 @@ UIのcomponent testに加え、共通チェックで320/375/768/1280pxのブラ�
 Desktopはアーカイブ内の `licenses/`、macOSはappの `Contents/Resources/licenses/`、Dockerは `/app/licenses/` にアプリのLICENSEと対象別THIRD_PARTY_NOTICESを同梱します。
 
 Desktopではバイナリの `go version -m` と確認済みの対象別モジュール一覧を照合します。SQLCipherの実際のライセンスをchecksum固定sourceから保存し、macOS/WindowsではOpenSSLの提供元のライセンスも保持します。圧縮後に展開し、文書の欠落・変更を検査してから出所証明・公開へ進みます。
+
+単一ファイルからのserverビルドでは、Goがアプリ自身を `(devel)` の依存として記録します。`go.mod` から取得した `applicationModule` と完全一致し、置換されていないこの1件だけを外部OSSの比較から除外します。それ以外の追加・欠落・版違い・置換は不合格です。Windowsの原文照合では双方のCRLF/LFだけを揃え、著作権表示やライセンス本文の変更は引き続き検出します。
 
 Dockerは独立したbuilderからマウントした検証器・manifestで、実際のファイルのハッシュ、SQLCipher原文、バイナリのモジュール・Go版を確認します。公開assetsの既存allowlistは広げません。ライセンスデータはJavaScriptに組み込まれ、一般のファイルシステムを公開しません。
 

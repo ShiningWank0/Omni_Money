@@ -86,7 +86,7 @@ COPY scripts/record-image-licenses.sh /app/record-image-licenses.sh
 RUN --mount=type=bind,from=backend-builder,source=/verify-public-assets,target=/tmp/verify-public-assets,ro \
     --mount=type=bind,from=backend-builder,source=/verify-licenses,target=/tmp/verify-licenses,ro \
     --mount=type=bind,from=frontend-builder,source=/app/licenses/build/server-linux-${TARGETARCH}/manifest.json,target=/tmp/license-manifest.json,ro \
-    /tmp/verify-licenses /app/licenses /tmp/license-manifest.json "server-linux-${TARGETARCH}" /app/omni_money_server && \
+    /tmp/verify-licenses "server-linux-${TARGETARCH}" && \
     sh /app/record-image-licenses.sh /app/licenses && \
     rm /app/record-image-licenses.sh && \
     /tmp/verify-public-assets /app/frontend/dist /app/frontend/public-assets-manifest.json && \

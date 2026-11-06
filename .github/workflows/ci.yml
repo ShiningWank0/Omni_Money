@@ -49,12 +49,25 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm run build
+          git ls-files --error-unmatch bundled-dependencies.json > /dev/null
+          git diff --exit-code -- bundled-dependencies.json
       - name: Resolve pinned Go dependencies
         run: go mod download
       - name: Check OSS coverage and approved notices once for all release targets
         run: |
           node --test scripts/oss-notices.test.mjs scripts/release-plan.test.mjs
           node scripts/oss-notices.mjs check
+      - name: Generate reviewable release notice inventories
+        run: node scripts/oss-notices.mjs package-all
+      - name: Save release notice inventories
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: oss-license-inventories
+          path: |
+            frontend/bundled-dependencies.json
+            licenses/dependency-usage.json
+            licenses/build/
+          if-no-files-found: error
       - name: Test public and locked license screens
         working-directory: frontend
         run: npx --no-install vitest run tests/component/Licenses.test.js

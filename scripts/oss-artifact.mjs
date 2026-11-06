@@ -2,12 +2,18 @@ import { spawnSync } from 'node:child_process'
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { root, targets, targetConfigs } from './oss-notices.mjs'
+import { root, targets, targetConfigs, normalizeLineEndings } from './oss-notices.mjs'
 
 export function verifyDependencies(buildInfo, catalog, target) {
   if (!targets.includes(target)) throw new Error('Unknown release target')
+  if (!catalog.applicationModule) throw new Error('Missing application module identity')
   const expected = catalog.components.filter(component => component.id.startsWith('go:') && component.targets.includes(target)).map(component => `${component.name}@${component.version}`).sort()
-  const actual = [...buildInfo.matchAll(/^\s*dep\s+(\S+)\s+(\S+)/gm)].map(match => `${match[1]}@${match[2]}`).sort()
+  if (/^\s*=>/m.test(buildInfo)) throw new Error('Replaced Go dependency requires review')
+  const dependencies = [...buildInfo.matchAll(/^\s*dep\s+(\S+)\s+(\S+)/gm)]
+  if (new Set(dependencies.map(match => match[1])).size !== dependencies.length) throw new Error('Duplicate built Go dependency')
+  const actual = dependencies
+    .filter(match => !(match[1] === catalog.applicationModule && match[2] === '(devel)'))
+    .map(match => `${match[1]}@${match[2]}`).sort()
   if (JSON.stringify(expected) !== JSON.stringify(actual)) throw new Error(`Built Go dependencies differ from reviewed OSS inventory for ${target}`)
   const goVersion = catalog.components.find(component => component.id === 'native:go').version
   if (!buildInfo.split('\n')[0].includes(`go${goVersion}`)) throw new Error('Built Go toolchain differs from reviewed runtime')
@@ -21,6 +27,10 @@ export function canonicalApacheLicense(text) {
   return text.split(/APPENDIX:/)[0].replace(/https?:\/\/www\.apache\.org\/licenses\//g, 'APACHE-LICENSE-URL').replace(/\s+/g, ' ').trim()
 }
 
+export function verifyNativeLicense(actual, reviewed) {
+  if (normalizeLineEndings(actual).trim() !== normalizeLineEndings(reviewed).trim()) throw new Error('Built SQLCipher license differs from approved text')
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [target, binary, sqlcipherPrefix, opensslVersion] = process.argv.slice(2)
@@ -31,9 +41,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (!/^OpenSSL 3\./.test(opensslVersion || '')) throw new Error('Native OpenSSL license review required for a different release series')
     const directory = join(root, 'licenses/build', target)
     mkdirSync(join(directory, 'native'), { recursive: true })
-    const sqlcipherLicense = readFileSync(join(sqlcipherPrefix, 'share/licenses/sqlcipher/LICENSE.md'), 'utf8').replace(/\r\n/g, '\n')
+    const sqlcipherLicense = normalizeLineEndings(readFileSync(join(sqlcipherPrefix, 'share/licenses/sqlcipher/LICENSE.md'), 'utf8'))
     const reviewed = readFileSync(join(root, 'licenses/native/sqlcipher.txt'), 'utf8')
-    if (sqlcipherLicense.trim() !== reviewed.trim()) throw new Error('Built SQLCipher license differs from approved text')
+    verifyNativeLicense(sqlcipherLicense, reviewed)
     writeFileSync(join(directory, 'native/SQLCipher-LICENSE.txt'), sqlcipherLicense)
     if (process.env.OSS_OPENSSL_LICENSE_DIRECTORY) {
       const source = process.env.OSS_OPENSSL_LICENSE_DIRECTORY
