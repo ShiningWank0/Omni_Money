@@ -54,6 +54,18 @@ Issue報告ジョブは同じ実行・同じattemptのartifactだけを読む。
 
 無効化されていてもCIは成功するため、定期実行のたびにこの節の設定が有効か確認する。
 
+## Wailsの開発・ビルド用Echo
+
+EchoのIPヘッダー偽装による回数制限回避（CVE-2026-118653）と、リバースプロキシによる偽の`X-Real-IP`転送（CVE-2026-118651）は、公式のv4.16.3で修正されている。[公式の修正説明](https://pkg.go.dev/github.com/labstack/echo/v4@v4.16.3#readme-client-ip-security-migration-since-v4-16-3)
+
+Wails本体は公式版のまま、`go.mod`でEchoの修正版を指定する。Echoを使うWailsの開発用アプリには、このプロジェクトの依存指定が適用される。別途`go install .../cmd/wails@バージョン`で導入するCLI自体はプロジェクトの依存指定を使わないが、現行CLIにはEchoが含まれない。DesktopのCIでは導入したCLIの`go version -m`も読み、Wailsが`go.mod`の選択版と一致すること、独自置換がないことを確認する。将来CLIがEchoを含む場合は、その版もプロジェクトの選択版と一致しなければビルドへ進めない。
+
+サーバーのHTTP処理はEchoを使わず、信頼するプロキシだけから転送情報を受け取り、処理後に転送ヘッダーを除去する。直接接続と信頼プロキシ経由の両方について、偽のIPを変えてもログインの回数制限を回避できないことを回帰テストで確認する。配布対象への実際の組み込みはOSSの6構成の依存検査で判定し、CLI依存を理由に配布用ライセンス画面へ追加しない。
+
+`backend/middleware/echo_security_test.go`は選択されたEcho自体についても2件の挙動を検証する。テストだけでEchoのmiddlewareをimportするため、`go.mod`上のEchoは直接依存になるが、productionへの組み込みを意味しない。回数制限とプロキシの検証には記録用のHTTP request/responseと代替transportを使い、待受ポートは開かない。
+
+2026年11月6日の追加検査では、Goの脆弱性DBはv4.16.3にもGO-2026-6872／GO-2026-6875を報告し、修正版を未登録としている。公式の修正説明と実際の回帰試験の結果を併せて判断し、スキャナーの検出を無視する設定は加えない。
+
 ## パスキーログインの情報漏えい対策と限界
 
 現行Frontendのパスキーログインは `/api/auth/passkeys/discover/begin` と `/finish` を使用する。メール入力なしのdiscoverable ceremonyを開始し、開始応答にuser別のcredential候補を含めない。選択されたcredentialの署名、challenge、RP/origin、user handle、user verification、期限、一回限りの利用を検証してから本人のVaultを開く。標準パスキーはserver-custody envelopeを使用し、PRF出力を要求しない。旧形式の互換処理と自動移行は [server安全モデル](server-multi-vault.md#passkey-authentication) を参照。

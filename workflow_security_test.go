@@ -81,6 +81,8 @@ func TestDesktopReleaseUsesLeastPrivilegeAndReproducibleTools(t *testing.T) {
 		"node-version-file: .node-version",
 		"VITE_APP_VERSION: ${{ needs.prepare.outputs.version }}",
 		"github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION",
+		`go version -m "$WAILS_BIN"`,
+		`verify_tool_module github.com/labstack/echo/v4 "$ECHO_VERSION"`,
 		"SHA256SUMS",
 		"actions/attest@",
 	} {

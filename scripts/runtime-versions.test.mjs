@@ -49,17 +49,29 @@ test('rejects missing digests and ambiguous builder stages', t => {
   assert.throws(() => syncRuntimeVersions(valid), /exactly one/)
 })
 
-test('Wails installation retries are bounded and preserve the pinned-version failure gate', t => {
+test('Wails installation verifies the pinned CLI and any linked Echo dependency', t => {
   const workflow = readFileSync(new URL('../.github/workflows/release-desktop.yml', import.meta.url), 'utf8')
   const step = workflow.split('      - name: Install Wails CLI\n')[1]
   const block = step?.match(/        run: \|\n((?:          .*\n|\n)+)/)?.[1]
   assert.ok(block, 'Wails installation step is missing')
   const program = block.replace(/^          /gm, '')
-  for (const [failures, version, expectedAttempts, success] of [
-    [0, 'v2.16.0', 1, true],
-    [1, 'v2.16.0', 2, true],
-    [9, 'v2.16.0', 3, false],
-    [0, 'latest', 0, false],
+  const wailsVersion = 'v2.16.0'
+  const echoVersion = 'v4.99.1'
+  const buildInfo = `wails: go1.27.3\n\tmod\tgithub.com/wailsapp/wails/v2\t${wailsVersion}\th1:wails\n`
+  const withEcho = buildInfo + `\tdep\tgithub.com/labstack/echo/v4\t${echoVersion}\th1:echo\n`
+  for (const [name, overrides, expectedAttempts, success] of [
+    ['first attempt', {}, 1, true],
+    ['retry', { MOCK_FAILURES: '1' }, 2, true],
+    ['exhausted retries', { MOCK_FAILURES: '9' }, 3, false],
+    ['unpinned Wails', { MOCK_WAILS_VERSION: 'latest' }, 0, false],
+    ['linked Echo matches', { MOCK_BUILD_INFO: withEcho }, 1, true],
+    ['old Echo', { MOCK_BUILD_INFO: withEcho.replace(echoVersion, 'v4.1.0') }, 1, false],
+    ['old Wails', { MOCK_BUILD_INFO: buildInfo.replace(wailsVersion, 'v2.1.0') }, 1, false],
+    ['duplicate Echo', { MOCK_BUILD_INFO: withEcho + withEcho.split('\n').find(line => line.includes('labstack/echo')) + '\n' }, 1, false],
+    ['replacement', { MOCK_BUILD_INFO: buildInfo + '\t=>\t../custom-echo\t(devel)\n' }, 1, false],
+    ['replacement in a large inventory', { MOCK_BUILD_INFO: buildInfo + '\t=>\t../custom-echo\t(devel)\n' + '\tbuild\tlarge=value\n'.repeat(4000) }, 1, false],
+    ['inspection failed', { MOCK_INSPECTION_FAILURE: '1' }, 1, false],
+    ['Windows executable', { MOCK_GOEXE: '.exe' }, 1, true],
   ]) {
     const directory = mkdtempSync(join(tmpdir(), 'omni-wails-install-'))
     t.after(() => rmSync(directory, { recursive: true, force: true }))
@@ -67,8 +79,18 @@ test('Wails installation retries are bounded and preserve the pinned-version fai
     writeFileSync(join(directory, 'bin/go'), `#!${process.execPath}
 const fs = require('node:fs');
 const args = process.argv.slice(2);
-if (args[0] === 'list') { console.log(process.env.MOCK_WAILS_VERSION); process.exit(0); }
-if (args.length !== 2 || args[0] !== 'install' || args[1] !== 'github.com/wailsapp/wails/v2/cmd/wails@v2.16.0') process.exit(2);
+if (args[0] === 'list') {
+  const version = args.at(-1) === 'github.com/wailsapp/wails/v2' ? process.env.MOCK_WAILS_VERSION : process.env.MOCK_ECHO_VERSION;
+  console.log(version); process.exit(0);
+}
+if (args[0] === 'env') {
+  console.log(args[1] === 'GOEXE' ? process.env.MOCK_GOEXE : process.cwd()); process.exit(0);
+}
+if (args[0] === 'version' && args[1] === '-m') {
+  if (args[2] !== process.cwd() + '/bin/wails' + process.env.MOCK_GOEXE) process.exit(2);
+  process.stdout.write(process.env.MOCK_BUILD_INFO); process.exit(Number(process.env.MOCK_INSPECTION_FAILURE));
+}
+if (JSON.stringify(args) !== JSON.stringify(['install', 'github.com/wailsapp/wails/v2/cmd/wails@' + process.env.MOCK_WAILS_VERSION])) process.exit(2);
 const attempts = fs.existsSync('attempts') ? Number(fs.readFileSync('attempts', 'utf8')) : 0;
 fs.writeFileSync('attempts', String(attempts + 1));
 process.exit(attempts < Number(process.env.MOCK_FAILURES) ? 1 : 0);
@@ -77,10 +99,11 @@ process.exit(attempts < Number(process.env.MOCK_FAILURES) ? 1 : 0);
     const child = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', program], {
       cwd: directory, encoding: 'utf8', timeout: 10000,
       env: { ...process.env, PATH: `${join(directory, 'bin')}:${process.env.PATH}`,
-        MOCK_WAILS_VERSION: version, MOCK_FAILURES: String(failures) },
+        MOCK_WAILS_VERSION: wailsVersion, MOCK_ECHO_VERSION: echoVersion,
+        MOCK_FAILURES: '0', MOCK_BUILD_INFO: buildInfo, MOCK_GOEXE: '', MOCK_INSPECTION_FAILURE: '0', ...overrides },
     })
-    assert.equal(child.status === 0, success, `${version}/${failures}: ${child.stderr}`)
+    assert.equal(child.status === 0, success, `${name}: ${child.stderr}`)
     const attempts = join(directory, 'attempts')
-    assert.equal(existsSync(attempts) ? Number(readFileSync(attempts, 'utf8')) : 0, expectedAttempts)
+    assert.equal(existsSync(attempts) ? Number(readFileSync(attempts, 'utf8')) : 0, expectedAttempts, name)
   }
 })
