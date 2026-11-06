@@ -196,6 +196,7 @@ jobs:
             echo "::error::go.mod must pin a stable Wails v2 release"
             exit 1
           }
+          ECHO_VERSION="$(go list -m -f '{{.Version}}' github.com/labstack/echo/v4)"
           for attempt in 1 2 3; do
             if go install "github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION"; then
               break
@@ -206,6 +207,27 @@ jobs:
             fi
             sleep "$((attempt * 5))"
           done
+          WAILS_BIN="$(go env GOPATH)/bin/wails$(go env GOEXE)"
+          WAILS_BUILD_INFO="$(go version -m "$WAILS_BIN")"
+          if printf '%s\n' "$WAILS_BUILD_INFO" | grep -E '^[[:space:]]*=>[[:space:]]' > /dev/null; then
+            echo "::error::Wails CLI contains a replaced module"
+            exit 1
+          fi
+          verify_tool_module() {
+            local actual
+            actual="$(printf '%s\n' "$WAILS_BUILD_INFO" | awk -v module="$1" '($1 == "mod" || $1 == "dep") && $2 == module { print $3 }')"
+            if [ "$actual" != "$2" ]; then
+              echo "::error::Wails CLI $1 does not match go.mod ($actual != $2)"
+              exit 1
+            fi
+          }
+          verify_tool_module github.com/wailsapp/wails/v2 "$WAILS_VERSION"
+          # The current CLI does not link Echo. If a future CLI does, require
+          # the same patched version selected for the development application.
+          if printf '%s\n' "$WAILS_BUILD_INFO" | grep -E '^[[:space:]]*(mod|dep)[[:space:]]+github.com/labstack/echo/v4[[:space:]]' > /dev/null; then
+            verify_tool_module github.com/labstack/echo/v4 "$ECHO_VERSION"
+          fi
+          printf '%s\n' "$WAILS_BUILD_INFO"
 
       - name: Build pinned static SQLCipher on Linux
         if: runner.os == 'Linux'
