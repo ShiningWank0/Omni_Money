@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"os"
@@ -188,7 +189,10 @@ func (s *Store) withImmediate(ctx context.Context, operation func(*sql.Conn) err
 	committed := false
 	defer func() {
 		if !committed {
-			_, _ = connection.ExecContext(context.Background(), "ROLLBACK")
+			if _, rollbackErr := connection.ExecContext(context.Background(), "ROLLBACK"); rollbackErr != nil {
+				// Do not reuse a connection with an uncertain transaction state.
+				_ = connection.Raw(func(any) error { return driver.ErrBadConn })
+			}
 		}
 	}()
 	if err = operation(connection); err != nil {

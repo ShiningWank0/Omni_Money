@@ -3333,7 +3333,7 @@ func (i *Instance) RestoreSnapshotContext(ctx context.Context, snapshotDir, snap
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if _, err := i.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+	if err := securedb.CheckpointTruncate(ctx, i.db); err != nil {
 		return fmt.Errorf("現行DBのcheckpointエラー: %w", err)
 	}
 	closeErr := i.db.Close()
@@ -3575,7 +3575,7 @@ func checkpointAndCloseContext(ctx context.Context, target *sql.DB, path string)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if _, err := target.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+	if err := securedb.CheckpointTruncate(ctx, target); err != nil {
 		_ = target.Close()
 		return err
 	}
