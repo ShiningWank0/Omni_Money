@@ -1,7 +1,8 @@
 """CI-only AT-SPI operations against the unmodified packaged Wails window.
 
 No JS injection, HTTP test endpoint, mocked bindings, screenshots or vault dumps.
-Only fixed step names are reported; passwords/recovery codes are never recorded.
+Reports contain fixed UI labels and structural diagnostics, never arbitrary text
+or password/recovery-code values.
 """
 
 import json
@@ -30,6 +31,50 @@ def owned_window_id(listing, pid):
     return matches[0]
 
 
+def ledger_ready(items, api, record):
+    """Read static text through AT-SPI Text, without recording arbitrary UI data."""
+    expected = "現在の残高"
+    text_roles = {api.Role.STATIC, api.Role.TEXT, api.Role.LABEL, api.Role.PARAGRAPH,
+                  api.Role.SECTION, api.Role.PANEL}
+    probe = {"expected_text": expected, "text_nodes": 0, "name_matches": 0,
+             "text_matches": 0, "visible_text_matches": 0, "visible_matches": 0, "visible_alerts": 0,
+             "candidates": []}
+    for item in items:
+        role = item.get_role()
+        states = item.get_state_set()
+        visible = states.contains(api.StateType.VISIBLE)
+        showing = states.contains(api.StateType.SHOWING)
+        if role == api.Role.ALERT and visible and showing:
+            probe["visible_alerts"] += 1
+        if role not in text_roles or states.contains(api.StateType.EDITABLE):
+            continue
+        name_matches = item.get_name() == expected
+        text_matches = False
+        text = item.get_text_iface()
+        if text is not None:
+            probe["text_nodes"] += 1
+            count = text.get_character_count()
+            # Avoid reading large containers. Never inspect password/entry values.
+            if 0 < count <= 128:
+                text_matches = text.get_text(0, count).strip() == expected
+        probe["name_matches"] += int(name_matches)
+        probe["text_matches"] += int(text_matches)
+        probe["visible_text_matches"] += int(text_matches and visible and showing)
+        # AT-SPI STATIC objects may expose their displayed text only as a name.
+        # When a Text interface exists, its actual body takes precedence.
+        static_name_match = role == api.Role.STATIC and text is None and name_matches
+        probe["visible_matches"] += int((text_matches or static_name_match) and visible and showing)
+        if (name_matches or text_matches) and len(probe["candidates"]) < 8:
+            probe["candidates"].append({"role": int(role), "name_matches": name_matches,
+                                        "text_available": text is not None,
+                                        "matched_text": expected if text_matches else None,
+                                        "visible": visible, "showing": showing})
+    record(probe)
+    if probe["visible_alerts"]:
+        raise RuntimeError("The real native application displayed an error alert while loading the ledger")
+    return probe["visible_matches"] > 0
+
+
 def run(pid, scenario, report):
     require_ci(sys.platform, os.environ)
     if pid <= 1 or scenario not in ("setup", "reopen"):
@@ -43,11 +88,17 @@ def run(pid, scenario, report):
     Atspi.set_timeout(2000, 5000)
     desktop = Atspi.get_desktop(0)
     steps = []
+    diagnostics = {}
     phase = "finding owned Wails application"
 
     def save(passed=False, error=None):
         report.write_text(json.dumps({"passed": passed, "scenario": scenario, "phase": phase,
-                                      "steps": steps, "error": error}, ensure_ascii=False, indent=2) + "\n")
+                                      "steps": steps, "diagnostics": diagnostics,
+                                      "error": error}, ensure_ascii=False, indent=2) + "\n")
+
+    def record_ledger_probe(probe):
+        diagnostics["ledger"] = probe
+        save()
 
     def pump():
         context = GLib.MainContext.default()
@@ -152,7 +203,7 @@ def run(pid, scenario, report):
 
     def ledger():
         control("メニューを開く")
-        wait(lambda: bool(matches("現在の残高")), "loading the real ledger")
+        wait(lambda: ledger_ready(nodes(app), Atspi, record_ledger_probe), "loading the real ledger")
         no_alerts()
 
     try:

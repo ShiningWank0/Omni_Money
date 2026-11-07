@@ -82,6 +82,13 @@ ui.require_ci('linux', {'GITHUB_ACTIONS': 'true', 'RUNNER_TEMP': '/ci', 'DISPLAY
   assert.equal(result.status, 0, result.stderr || result.error?.message)
 })
 
+test('native static-text lookup and privacy regression tests pass without a real GUI', () => {
+  const result = spawnSync('python3', ['-B', 'scripts/wails-native-ui.test.py'], {
+    cwd: root, encoding: 'utf8', timeout: 10_000,
+  })
+  assert.equal(result.status, 0, result.stderr || result.error?.message)
+})
+
 test('manual browser reproduction stays strict while packaged native UI is automatic', () => {
   const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8')
   const manual = readFileSync(join(root, '.github/workflows/wails-dev-integration.yml'), 'utf8')
