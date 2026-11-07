@@ -18,8 +18,20 @@ class TextInterface:
         return self.text.get_text(start, end)
 
 
+class ComponentInterface:
+    def scroll_to(self, where):
+        self.scroll_calls += 1
+        if self.can_scroll and not getattr(self, "defer_scroll", False):
+            self.states.values.add(API.StateType.SHOWING)
+        return self.can_scroll
+
+
 class API:
     Text = TextInterface
+    Component = ComponentInterface
+
+    class ScrollType:
+        ANYWHERE = 6
 
     class Role:
         STATIC, TEXT, LABEL, PARAGRAPH, SECTION, PANEL, ALERT, PASSWORD_TEXT, ENTRY, PUSH_BUTTON = range(10)
@@ -49,9 +61,10 @@ class Text:
         return self.value[start:end]
 
 
-class Node(TextInterface):
-    def __init__(self, *, name="", text=None, role=API.Role.STATIC, visible=True, showing=True, editable=False):
+class Node(TextInterface, ComponentInterface):
+    def __init__(self, *, name="", text=None, role=API.Role.STATIC, visible=True, showing=True, editable=False, can_scroll=True):
         self.name, self.text, self.role = name, Text(text) if text is not None else None, role
+        self.can_scroll, self.scroll_calls = can_scroll, 0
         self.states = States({state for enabled, state in [
             (visible, API.StateType.VISIBLE), (showing, API.StateType.SHOWING),
             (editable, API.StateType.EDITABLE)] if enabled})
@@ -75,6 +88,9 @@ class Node(TextInterface):
     def get_text(self):
         # Reproduce Accessible.get_text() shadowing Text.get_text(start, end).
         return self.get_text_iface()
+
+    def get_component_iface(self):
+        return self
 
 
 class LedgerTextTest(unittest.TestCase):
@@ -163,6 +179,59 @@ class LedgerTextTest(unittest.TestCase):
 
     def test_hidden_alert_does_not_mask_visible_content(self):
         self.assertTrue(self.check([Node(text="現在の残高"), Node(role=API.Role.ALERT, showing=False)])[0])
+
+
+class NativeControlTest(unittest.TestCase):
+    def check(self, nodes):
+        reports = []
+        control = ui.control_ready(nodes, "オープンソースライセンス", API.Role.PUSH_BUTTON, API, reports.append)
+        return control, reports[-1]
+
+    def test_offscreen_control_is_scrolled_and_must_become_showing(self):
+        node = Node(name="オープンソースライセンス", role=API.Role.PUSH_BUTTON, showing=False)
+        control, probe = self.check([node])
+        self.assertIs(control, node)
+        self.assertEqual(node.scroll_calls, 1)
+        self.assertTrue(probe["scroll_requested"] and probe["scroll_succeeded"] and probe["showing"])
+
+    def test_already_showing_control_does_not_scroll(self):
+        node = Node(name="オープンソースライセンス", role=API.Role.PUSH_BUTTON)
+        self.assertIs(self.check([node])[0], node)
+        self.assertEqual(node.scroll_calls, 0)
+
+    def test_hidden_control_cannot_be_made_actionable(self):
+        node = Node(name="オープンソースライセンス", role=API.Role.PUSH_BUTTON, visible=False, showing=False)
+        self.assertIsNone(self.check([node])[0])
+        self.assertEqual(node.scroll_calls, 0)
+
+    def test_failed_scroll_does_not_bypass_the_showing_requirement(self):
+        node = Node(name="オープンソースライセンス", role=API.Role.PUSH_BUTTON, showing=False, can_scroll=False)
+        control, probe = self.check([node])
+        self.assertIsNone(control)
+        self.assertTrue(probe["scroll_requested"])
+        self.assertFalse(probe["showing"])
+
+    def test_successful_scroll_request_waits_for_the_actual_visibility_update(self):
+        node = Node(name="オープンソースライセンス", role=API.Role.PUSH_BUTTON, showing=False)
+        node.defer_scroll = True
+        control, probe = self.check([node])
+        self.assertIsNone(control)
+        self.assertTrue(probe["scroll_succeeded"])
+        self.assertFalse(probe["showing"])
+        node.states.values.add(API.StateType.SHOWING)
+        self.assertIs(self.check([node])[0], node)
+
+    def test_missing_and_ambiguous_controls_do_not_pass(self):
+        self.assertIsNone(self.check([])[0])
+        nodes = [Node(name="オープンソースライセンス", role=API.Role.PUSH_BUTTON) for _ in range(2)]
+        with self.assertRaisesRegex(RuntimeError, "Ambiguous"):
+            self.check(nodes)
+
+    def test_diagnostics_do_not_record_unrelated_names_or_text(self):
+        sentinel = "synthetic-private-value-never-log"
+        control, probe = self.check([Node(name=sentinel, text=sentinel, role=API.Role.PUSH_BUTTON)])
+        self.assertIsNone(control)
+        self.assertNotIn(sentinel, json.dumps(probe))
 
 
 if __name__ == "__main__":

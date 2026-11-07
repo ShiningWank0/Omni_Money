@@ -77,6 +77,28 @@ def ledger_ready(items, api, record):
     return probe["visible_matches"] > 0
 
 
+def control_ready(items, name, role, api, record):
+    """Scroll an existing visible control into view before allowing an action."""
+    matches = [item for item in items if item.get_role() == role and item.get_name() == name]
+    visible = [item for item in matches if item.get_state_set().contains(api.StateType.VISIBLE)]
+    probe = {"matching_nodes": len(matches), "visible_nodes": len(visible),
+             "scroll_requested": False, "scroll_succeeded": False, "showing": False}
+    if len(visible) > 1:
+        record(probe)
+        raise RuntimeError("Ambiguous native UI control")
+    item = visible[0] if visible else None
+    if item is not None:
+        if not item.get_state_set().contains(api.StateType.SHOWING):
+            component = item.get_component_iface()
+            if component is not None:
+                probe["scroll_requested"] = True
+                probe["scroll_succeeded"] = bool(api.Component.scroll_to(component, api.ScrollType.ANYWHERE))
+        states = item.get_state_set()
+        probe["showing"] = states.contains(api.StateType.VISIBLE) and states.contains(api.StateType.SHOWING)
+    record(probe)
+    return item if probe["showing"] else None
+
+
 def run(pid, scenario, report):
     require_ci(sys.platform, os.environ)
     if pid <= 1 or scenario not in ("setup", "reopen"):
@@ -100,6 +122,15 @@ def run(pid, scenario, report):
 
     def record_ledger_probe(probe):
         diagnostics["ledger"] = probe
+        save()
+
+    def record_control_probe(name, probe):
+        # Names come only from this script's fixed UI labels, never input values.
+        controls = diagnostics.setdefault("controls", {})
+        previous = controls.get(name, {})
+        controls[name] = {**probe,
+                          "scroll_attempts": previous.get("scroll_attempts", 0) + int(probe["scroll_requested"]),
+                          "scroll_successes": previous.get("scroll_successes", 0) + int(probe["scroll_succeeded"])}
         save()
 
     def pump():
@@ -165,7 +196,8 @@ def run(pid, scenario, report):
         return found[0] if found else None
 
     def control(name, role=Atspi.Role.PUSH_BUTTON):
-        return wait(lambda: unique(name, role), f"finding {name}")
+        return wait(lambda: control_ready(nodes(app), name, role, Atspi,
+                                         lambda probe: record_control_probe(name, probe)), f"finding {name}")
 
     def enabled(item):
         return item.get_state_set().contains(Atspi.StateType.ENABLED)
