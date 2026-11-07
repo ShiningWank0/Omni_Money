@@ -6,6 +6,10 @@
 !Dockerfile
 !go.mod
 !go.sum
+!LICENSE
+!licenses/
+!licenses/approved.json
+!licenses/targets.json
 !server.go
 
 !backend/
@@ -16,9 +20,13 @@
 !cmd/omni-totp/**
 !cmd/verify-public-assets/
 !cmd/verify-public-assets/main.go
+!cmd/verify-licenses/
+!cmd/verify-licenses/main.go
 
 !scripts/
 !scripts/build-sqlcipher-linux.sh
+!scripts/oss-notices.mjs
+!scripts/record-image-licenses.sh
 
 !frontend/
 !frontend/package.json
@@ -27,6 +35,7 @@
 !frontend/vite.config.js
 !frontend/build/
 !frontend/build/public-assets.mjs
+!frontend/build/oss-inventory.mjs
 !frontend/src/
 !frontend/src/**
 

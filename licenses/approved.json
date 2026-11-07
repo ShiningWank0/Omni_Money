@@ -1,0 +1,225 @@
+{
+  "schema": 1,
+  "components": {
+    "go:git.sr.ht/~jackmordaunt/go-toast/v2": {
+      "version": "v2.0.3",
+      "license": "Unlicense OR MIT",
+      "sha256": "f0c6c67661e3ecb6c43cd5ce0704a0075132825678348904ce6bf21db1f67155"
+    },
+    "go:github.com/bep/debounce": {
+      "version": "v1.2.1",
+      "license": "MIT",
+      "sha256": "8f5d706e582cf6a54f182e24f9fbef81e1d2784a06e0d6396d4bf26bd34944c6"
+    },
+    "go:github.com/fxamacker/cbor/v2": {
+      "version": "v2.10.0",
+      "license": "MIT",
+      "sha256": "33d2a95b8d7a0694631f3089f84a667cea088aea53568f00be9f94414860aaea"
+    },
+    "go:github.com/gabriel-vasile/mimetype": {
+      "version": "v1.4.16",
+      "license": "MIT",
+      "sha256": "d32eea2bcef3777528078ea79cdd59a539d772ace639c16444d554260114cbe4"
+    },
+    "go:github.com/go-ole/go-ole": {
+      "version": "v1.3.0",
+      "license": "MIT",
+      "sha256": "c631cbf509d3f53a3004167c373cbc0c88d514f81c9a887fb432653d247f324e"
+    },
+    "go:github.com/go-viper/mapstructure/v2": {
+      "version": "v2.5.0",
+      "license": "MIT",
+      "sha256": "1041f61d0f4caffaa0a383096521da99bebdd0451847179c38aaf9e85aad4e5e"
+    },
+    "go:github.com/go-webauthn/webauthn": {
+      "version": "v0.18.2",
+      "license": "BSD-3-Clause",
+      "sha256": "5cd433d04a592e4f1970b8770eefe94446596687b9874cee9a46cf9f692d0bd1"
+    },
+    "go:github.com/go-webauthn/x": {
+      "version": "v0.3.1",
+      "license": "BSD-3-Clause AND BSD-2-Clause AND ISC",
+      "sha256": "28b298c87e453a0b688439ae3b21d975ac6df97b051f1d3ecc9e037bd05af342"
+    },
+    "go:github.com/godbus/dbus/v5": {
+      "version": "v5.1.0",
+      "license": "BSD-2-Clause",
+      "sha256": "44c822bab7e4c6b5607abc4d6a2af3998967cc6893385392729695805744da43"
+    },
+    "go:github.com/golang-jwt/jwt/v5": {
+      "version": "v5.3.1",
+      "license": "MIT",
+      "sha256": "950b54907c10697da1d7a9837510c1b3e2dd07dcfaaeb21226961b69d32df01e"
+    },
+    "go:github.com/google/go-tpm": {
+      "version": "v0.9.8",
+      "license": "Apache-2.0",
+      "sha256": "2255daa348ec6acb7edb6835865ea9864fd6bbae81ed546f9c477f34a63b6c88"
+    },
+    "go:github.com/google/uuid": {
+      "version": "v1.6.0",
+      "license": "BSD-3-Clause",
+      "sha256": "98bc73021dd2340584df9fa552528b7336d0ec2f2ef6cb72df0bb8d9dafdbc24"
+    },
+    "go:github.com/leaanthony/go-ansi-parser": {
+      "version": "v1.6.1",
+      "license": "MIT",
+      "sha256": "32094857e95e19435bd9cf2ef040f913ab7c9dbf402e7b29d714ab8244f31b54"
+    },
+    "go:github.com/leaanthony/slicer": {
+      "version": "v1.6.0",
+      "license": "MIT",
+      "sha256": "1012f0e3f2819339938f4962fcf1b17af10f5443f797dc5fce47be1c0cfea3b1"
+    },
+    "go:github.com/leaanthony/u": {
+      "version": "v1.1.1",
+      "license": "MIT",
+      "sha256": "7aaa0f5a00aa44dc479152412e111268e48b265b34574ec62398a182e5c0ca37"
+    },
+    "go:github.com/mattn/go-sqlite3": {
+      "version": "v1.14.52",
+      "license": "MIT",
+      "sha256": "31ccca318fd8aade366a73440061fd06b43ecf10f665bf2bad69ecf979c07f9e"
+    },
+    "go:github.com/philhofer/fwd": {
+      "version": "v1.2.0",
+      "license": "MIT",
+      "sha256": "36f5008c9a6527a8ce8f5d21d4089a9d014101c61eeebfba2d20abbcae1171b8"
+    },
+    "go:github.com/pkg/browser": {
+      "version": "v0.0.0-20240102092130-5ac0b6a4141c",
+      "license": "BSD-2-Clause",
+      "sha256": "4999af1b5489ad189208335d29ebf6175842e9918759796b662f034aaf7b687e"
+    },
+    "go:github.com/pkg/errors": {
+      "version": "v0.9.1",
+      "license": "BSD-2-Clause",
+      "sha256": "59c504f3dfa748360ceeb6d248ad565d63f51417cc7b700f0d69b1e2e88f8bfc"
+    },
+    "go:github.com/rivo/uniseg": {
+      "version": "v0.4.7",
+      "license": "MIT",
+      "sha256": "8a8b517e4942adae21617063d730f87285946122d9f4b373883cc5a314b861b8"
+    },
+    "go:github.com/samber/lo": {
+      "version": "v1.49.1",
+      "license": "MIT",
+      "sha256": "d5fd85a7d1eb032f2f182bf28497b6ecb6985463e0fb599b4f0db92211f57e47"
+    },
+    "go:github.com/tinylib/msgp": {
+      "version": "v1.6.4",
+      "license": "MIT",
+      "sha256": "2c9faae6ee96fcf88d535527777bf313d04827eba3fe91181417d0e81c143abe"
+    },
+    "go:github.com/tkrajina/go-reflector": {
+      "version": "v0.5.8",
+      "license": "Apache-2.0",
+      "sha256": "9b3c4d1d62bf8ce647dc46cebaf5738dedb6211044a2e49f00c09caefe511736"
+    },
+    "go:github.com/wailsapp/go-webview2": {
+      "version": "v1.0.22",
+      "license": "MIT AND ISC",
+      "sha256": "d56b60c6b33f0196644685265b4f819ce334ffe673298add12d63ec4cadfef3e"
+    },
+    "go:github.com/wailsapp/wails/v2": {
+      "version": "v2.17.0",
+      "license": "MIT",
+      "sha256": "0ee6678b63d869c89aabd80b8a971add201883b99eccaf6bb20b0a2839d977da"
+    },
+    "go:github.com/x448/float16": {
+      "version": "v0.8.4",
+      "license": "MIT",
+      "sha256": "4bcacbf3f84cd738cbdfc61080be423083de940b87d3db719b420aea952a2d4c"
+    },
+    "go:golang.org/x/crypto": {
+      "version": "v0.58.0",
+      "license": "BSD-3-Clause",
+      "sha256": "d4dbf5bb0080d2b598a694bdbd86c016472bcf54934aeddfa43fd1e078bb8564"
+    },
+    "go:golang.org/x/image": {
+      "version": "v0.47.0",
+      "license": "BSD-3-Clause",
+      "sha256": "d4dbf5bb0080d2b598a694bdbd86c016472bcf54934aeddfa43fd1e078bb8564"
+    },
+    "go:golang.org/x/net": {
+      "version": "v0.60.0",
+      "license": "BSD-3-Clause",
+      "sha256": "d4dbf5bb0080d2b598a694bdbd86c016472bcf54934aeddfa43fd1e078bb8564"
+    },
+    "go:golang.org/x/sys": {
+      "version": "v0.49.0",
+      "license": "BSD-3-Clause",
+      "sha256": "d4dbf5bb0080d2b598a694bdbd86c016472bcf54934aeddfa43fd1e078bb8564"
+    },
+    "go:golang.org/x/text": {
+      "version": "v0.43.0",
+      "license": "BSD-3-Clause",
+      "sha256": "d4dbf5bb0080d2b598a694bdbd86c016472bcf54934aeddfa43fd1e078bb8564"
+    },
+    "native:go": {
+      "version": "1.27.3",
+      "license": "BSD-3-Clause",
+      "sha256": "038794f79c728cc1b4ff3caf7eec332cd79658f5885d9ef43246ec95606c87dc"
+    },
+    "native:openssl": {
+      "version": "3.x (macOS: 3.5.8)",
+      "license": "Apache-2.0",
+      "sha256": "8005250db5e7143cdfb62f8145ec9ccd1ccf1f22e8ec3410268da2e0e03d6189"
+    },
+    "native:sqlcipher": {
+      "version": "4.18.0",
+      "license": "BSD-3-Clause",
+      "sha256": "c26bc4d65a2fc00de4a2ff68fd7881d51d6faa6e14232100b4942072e30e85c7"
+    },
+    "native:sqlite": {
+      "version": "SQLCipher 4.18.0",
+      "license": "Public-Domain",
+      "sha256": "25c118b0af64412afc2c391fbc6e5b597e2d83359eb4eaa38fb3e07af5219c35"
+    },
+    "npm:@kurkle/color": {
+      "version": "0.3.4",
+      "license": "MIT",
+      "sha256": "ecf9c1549f38a0e690250d56ff67040cf0694e1382ced0efb93ba740c33d6856"
+    },
+    "npm:@vue/reactivity": {
+      "version": "3.5.44",
+      "license": "MIT",
+      "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
+    },
+    "npm:@vue/runtime-core": {
+      "version": "3.5.44",
+      "license": "MIT",
+      "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
+    },
+    "npm:@vue/runtime-dom": {
+      "version": "3.5.44",
+      "license": "MIT",
+      "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
+    },
+    "npm:@vue/shared": {
+      "version": "3.5.44",
+      "license": "MIT",
+      "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
+    },
+    "npm:chart.js": {
+      "version": "4.6.1",
+      "license": "MIT",
+      "sha256": "15b729b63309a82476f05e5132392f7dc275bd2338d2df7961b92e954219a604"
+    },
+    "npm:pinia": {
+      "version": "4.1.0",
+      "license": "MIT",
+      "sha256": "9ef601416fdec1277f6246cdfe8c0c93cd5822ab66a4c5a89446608344653ebe"
+    },
+    "npm:vite": {
+      "version": "8.3.5",
+      "license": "MIT",
+      "sha256": "614c975ac994720a48b213a04d4aa19e1913122e9c89f83d5c9f2a29429b1cfe"
+    },
+    "npm:vue-chartjs": {
+      "version": "5.3.4",
+      "license": "MIT",
+      "sha256": "ea01d6073dfa559e2e4fb50bb28d35c1b7577201cd51e94c023b7c06f635c16d"
+    }
+  }
+}

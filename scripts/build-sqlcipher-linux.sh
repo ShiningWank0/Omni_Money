@@ -93,3 +93,5 @@ fi
 
 install -m 0644 sqlite3.h "$SQLCIPHER_PREFIX/include/sqlite3.h"
 install -m 0644 "$source_dir/src/sqlite3ext.h" "$SQLCIPHER_PREFIX/include/sqlite3ext.h"
+mkdir -p "$SQLCIPHER_PREFIX/share/licenses/sqlcipher"
+install -m 0644 "$source_dir/LICENSE.md" "$SQLCIPHER_PREFIX/share/licenses/sqlcipher/LICENSE.md"

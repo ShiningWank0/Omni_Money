@@ -125,6 +125,12 @@ if find "$staging_prefix" -type f \( -name '*.dylib' -o -name '*.so' -o -name 'l
   fail "staged OpenSSL prefix contains an unexpected library"
 fi
 
+mkdir -p "$staging_prefix/share/licenses/openssl"
+install -m 0644 "$source_dir/LICENSE.txt" "$staging_prefix/share/licenses/openssl/LICENSE.txt"
+for notice in "$source_dir"/NOTICE*; do
+  [[ ! -f "$notice" ]] || install -m 0644 "$notice" "$staging_prefix/share/licenses/openssl/"
+done
+
 mv "$staging_prefix" "$destination_path"
 trap - EXIT INT TERM
 rm -rf "$temporary_root"

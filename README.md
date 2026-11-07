@@ -300,6 +300,8 @@ SQLCipher・Desktop配布・Docker・server/browser E2Eの本番条件はGitHub 
 
 `VERSION` を更新して `main` に反映すると、GitHub Actions がリリース処理を実行します。
 
+共通入口は `ci.yml` です。配布構成別のOSSチェックを1回行い、成功後に通常CI・Desktop・Dockerの処理を並列で進めます。リリース用の2ファイルは共通入口から呼び出します。
+
 - `validate-version.yml`: PR で `VERSION` の後退を検知
 - `release-desktop.yml`: 関連pathを変更したPRではmacOS Intel、macOS Apple Silicon、Windows、Linuxの4 Desktop artifactを固定Wails/SQLCipherでbuild検証するが、配布Releaseやversion tagはpublishしない。`main`ではVERSIONまたはrelease workflow自体の変更時に4 artifactをbuildし、version releaseをpublishする。
 - `release-docker.yml`: 関連pathのPRでは本番と同じActionでlinux/amd64 + linux/arm64を公開せずbuild検証する。`main`のVERSION変更時にGHCR向けmulti-arch manifestをbuildし、stable releaseだけ`latest`を更新する。
@@ -320,3 +322,5 @@ SQLCipher・Desktop配布・Docker・server/browser E2Eの本番条件はGitHub 
 ## ライセンス
 
 このプロジェクトは `LICENSE` を参照してください。
+
+第三者OSSの原文はアプリ内の「オープンソースライセンス」から閲覧できます。掲載対象、依存更新時のレビュー、配布物への同梱と共通CIチェックは [OSSライセンス運用](docs/oss-licenses.md) を参照してください。

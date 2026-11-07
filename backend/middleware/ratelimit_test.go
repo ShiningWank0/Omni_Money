@@ -1,11 +1,59 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+func TestLoginRateLimitCannotBeBypassedBySpoofedForwardingHeaders(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		remoteAddr string
+		xff        string
+	}{
+		{name: "direct peer", remoteAddr: "203.0.113.10:12345", xff: "%s"},
+		{name: "trusted proxy chain", remoteAddr: "10.0.0.1:12345", xff: "%s, 203.0.113.10"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &ProxyConfig{trustedCIDRs: parseTrustedProxies("10.0.0.0/24")}
+			accepted := 0
+			handler := ProxyMiddleware(cfg, RateLimitMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				accepted++
+				if got := ClientIPFromRequest(r); got != "203.0.113.10" {
+					t.Errorf("client IP = %q, want the real client", got)
+				}
+				for _, name := range []string{"X-Real-IP", "X-Forwarded-For"} {
+					if r.Header.Get(name) != "" {
+						t.Errorf("untrusted %s reached the handler", name)
+					}
+				}
+				w.WriteHeader(http.StatusNoContent)
+			})))
+			for index := 0; index < 2*loginRateLimitPerMinute; index++ {
+				spoofedIP := fmt.Sprintf("198.51.100.%d", index+1)
+				request := httptest.NewRequest(http.MethodPost, "https://money.example/api/auth/login", nil)
+				request.RemoteAddr = test.remoteAddr
+				request.Header.Set("X-Forwarded-For", fmt.Sprintf(test.xff, spoofedIP))
+				request.Header.Set("X-Real-IP", spoofedIP)
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				want := http.StatusNoContent
+				if index >= loginRateLimitPerMinute {
+					want = http.StatusTooManyRequests
+				}
+				if response.Code != want {
+					t.Fatalf("request %d: status = %d, want %d", index+1, response.Code, want)
+				}
+			}
+			if accepted != loginRateLimitPerMinute {
+				t.Fatalf("accepted %d login attempts, want %d", accepted, loginRateLimitPerMinute)
+			}
+		})
+	}
+}
 
 func TestRateLimiterBoundsClientKeyMapAndUsesOverflowBucket(t *testing.T) {
 	limiter := NewRateLimiterWithMaxEntries(2)

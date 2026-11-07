@@ -1,23 +1,7 @@
 name: Docker Release
 
 on:
-  pull_request:
-    paths:
-      - Dockerfile
-      - go.mod
-      - go.sum
-      - '.node-version'
-      - 'frontend/**'
-      - 'backend/**'
-      - server.go
-      - 'scripts/build-sqlcipher-*.sh'
-      - '.github/workflows/release-docker.yml'
-  push:
-    branches: [main]
-    paths: ['VERSION']
-  # Manual rehearsal: runs the exact release chain (build by digest, scan,
-  # stage index, attest, verify) without publishing version/latest tags.
-  workflow_dispatch:
+  workflow_call:
 
 permissions: {}
 

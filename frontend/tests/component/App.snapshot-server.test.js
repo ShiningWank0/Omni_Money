@@ -97,6 +97,22 @@ beforeEach(() => {
   })
 })
 
+it('opens offline licenses from the menu for a non-admin server user', async () => {
+  api.getTransactions.mockResolvedValue([])
+  const wrapper = mount(App, { global: { plugins: [createPinia()] }, attachTo: document.body })
+  await flushPromises()
+  await wrapper.get('.hamburger-menu').trigger('click')
+  expect(wrapper.text()).not.toContain('サーバーユーザー管理')
+  await clickButton(wrapper, 'オープンソースライセンス')
+  await vi.dynamicImportSettled()
+  await flushPromises()
+  const dialog = document.querySelector('[role="dialog"]')
+  expect(dialog.textContent).toContain('ZETETIC')
+  dialog.querySelector('.panel-close-button').click()
+  await flushPromises()
+  expect(document.querySelector('[role="dialog"]')).toBeNull()
+})
+
 it('shows failed saves after login and purges their private input on logout', async () => {
   api.getTransactions.mockResolvedValue([])
   api.getTransactionSaveNotices.mockResolvedValueOnce([{ request_id: 'save-id', state: 'failed', error: '保存に失敗しました', request: { date: '2026-10-04', account: 'cash', item: 'private failed input', amount: 100 } }])
@@ -661,7 +677,7 @@ it('keeps all server menu actions in the scroll area and logout in a separate fo
   expect(wrapper.get('.side-menu-items').findAll('button').map(button => button.text())).toEqual([
     'CSVバックアップ', 'CSVインポート', 'クレジットカード設定', '銀行口座設定',
     '残高推移グラフ表示', 'タグ別分析', 'タグ管理', 'スナップショット管理',
-    '認証情報の管理', 'パスキー設定', 'サーバーユーザー管理'
+    '認証情報の管理', 'パスキー設定', 'サーバーユーザー管理', 'オープンソースライセンス'
   ])
   expect(wrapper.get('.side-menu > .logout-btn').text()).toBe('ログアウト')
   expect(wrapper.find('.side-menu-items .logout-btn').exists()).toBe(false)

@@ -1,0 +1,49 @@
+[
+  {
+    "id": "native:go",
+    "name": "Go runtime and standard library",
+    "version": "1.27.3",
+    "license": "BSD-3-Clause",
+    "url": "https://go.dev/LICENSE",
+    "targets": "all",
+    "files": [
+      "go.txt"
+    ]
+  },
+  {
+    "id": "native:sqlcipher",
+    "name": "SQLCipher Community Edition",
+    "version": "4.18.0",
+    "license": "BSD-3-Clause",
+    "url": "https://www.zetetic.net/sqlcipher/license/",
+    "targets": "all",
+    "files": [
+      "sqlcipher.txt"
+    ]
+  },
+  {
+    "id": "native:sqlite",
+    "name": "SQLite (included in SQLCipher)",
+    "version": "SQLCipher 4.18.0",
+    "license": "Public-Domain",
+    "url": "https://www.sqlite.org/copyright.html",
+    "targets": "all",
+    "files": [
+      "sqlite.txt"
+    ]
+  },
+  {
+    "id": "native:openssl",
+    "name": "OpenSSL",
+    "version": "3.x (macOS: 3.5.8)",
+    "license": "Apache-2.0",
+    "url": "https://openssl-library.org/source/license/",
+    "targets": "all",
+    "files": [
+      "openssl.txt"
+    ],
+    "externalTargets": [
+      "desktop-linux-amd64"
+    ]
+  }
+]
