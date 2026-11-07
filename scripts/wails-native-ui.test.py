@@ -10,7 +10,17 @@ ui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ui)
 
 
+class TextInterface:
+    def get_character_count(self):
+        return self.text.get_character_count()
+
+    def get_text(self, start, end):
+        return self.text.get_text(start, end)
+
+
 class API:
+    Text = TextInterface
+
     class Role:
         STATIC, TEXT, LABEL, PARAGRAPH, SECTION, PANEL, ALERT, PASSWORD_TEXT, ENTRY, PUSH_BUTTON = range(10)
 
@@ -39,7 +49,7 @@ class Text:
         return self.value[start:end]
 
 
-class Node:
+class Node(TextInterface):
     def __init__(self, *, name="", text=None, role=API.Role.STATIC, visible=True, showing=True, editable=False):
         self.name, self.text, self.role = name, Text(text) if text is not None else None, role
         self.states = States({state for enabled, state in [
@@ -58,7 +68,13 @@ class Node:
     def get_text_iface(self):
         if self.role in (API.Role.PASSWORD_TEXT, API.Role.ENTRY) or self.states.contains(API.StateType.EDITABLE):
             raise AssertionError("Secret/entry values must not be inspected")
-        return self.text
+        # PyGObject returns the same Accessible object implementing Text,
+        # rather than a separate Python wrapper with only Text methods.
+        return self if self.text is not None else None
+
+    def get_text(self):
+        # Reproduce Accessible.get_text() shadowing Text.get_text(start, end).
+        return self.get_text_iface()
 
 
 class LedgerTextTest(unittest.TestCase):
@@ -67,6 +83,14 @@ class LedgerTextTest(unittest.TestCase):
         ready = ui.ledger_ready(nodes, API, reports.append)
         self.assertEqual(len(reports), 1)
         return ready, reports[0]
+
+    def test_fixture_reproduces_native_get_text_method_collision(self):
+        node = Node(text="現在の残高")
+        text = node.get_text_iface()
+        self.assertIs(text, node)
+        with self.assertRaises(TypeError):
+            text.get_text(0, 6)
+        self.assertEqual(API.Text.get_text(text, 0, 6), "現在の残高")
 
     def test_visible_text_with_empty_accessible_name_is_found(self):
         node = Node(text="現在の残高")

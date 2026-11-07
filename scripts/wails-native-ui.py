@@ -53,10 +53,12 @@ def ledger_ready(items, api, record):
         text = item.get_text_iface()
         if text is not None:
             probe["text_nodes"] += 1
-            count = text.get_character_count()
+            count = api.Text.get_character_count(text)
             # Avoid reading large containers. Never inspect password/entry values.
             if 0 < count <= 128:
-                text_matches = text.get_text(0, count).strip() == expected
+                # get_text_iface() returns an Accessible implementing Text.
+                # Its deprecated get_text() getter shadows Text.get_text().
+                text_matches = api.Text.get_text(text, 0, count).strip() == expected
         probe["name_matches"] += int(name_matches)
         probe["text_matches"] += int(text_matches)
         probe["visible_text_matches"] += int(text_matches and visible and showing)
