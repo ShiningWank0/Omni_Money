@@ -1,30 +1,7 @@
 name: Desktop Release (Wails)
 
 on:
-  pull_request:
-    paths:
-      - '**/*.go'
-      - 'frontend/src/**'
-      - 'frontend/wailsjs/**'
-      - 'frontend/public/**'
-      - 'frontend/index.html'
-      - 'frontend/vite.config.js'
-      - 'frontend/package.json'
-      - 'frontend/package-lock.json'
-      - 'build/**'
-      - 'scripts/build-openssl-darwin.sh'
-      - 'scripts/backup-data-root*.sh'
-      - 'scripts/build-sqlcipher-*.sh'
-      - '.node-version'
-      - 'go.mod'
-      - 'go.sum'
-      - 'wails.json'
-      - '.github/workflows/release-desktop.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'VERSION'
-      - '.github/workflows/release-desktop.yml'
+  workflow_call:
 
 permissions: {}
 
@@ -205,7 +182,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential curl tcl libssl-dev binutils file libgtk-3-dev libwebkit2gtk-4.1-dev
+          sudo apt-get install -y build-essential curl tcl libssl-dev binutils file libgtk-3-dev libwebkit2gtk-4.1-dev xvfb xauth dbus-x11 openbox wmctrl xdotool python3-gi gir1.2-atspi-2.0 at-spi2-core libatk-adaptor
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
@@ -219,6 +196,7 @@ jobs:
             echo "::error::go.mod must pin a stable Wails v2 release"
             exit 1
           }
+          ECHO_VERSION="$(go list -m -f '{{.Version}}' github.com/labstack/echo/v4)"
           for attempt in 1 2 3; do
             if go install "github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION"; then
               break
@@ -229,6 +207,27 @@ jobs:
             fi
             sleep "$((attempt * 5))"
           done
+          WAILS_BIN="$(go env GOPATH)/bin/wails$(go env GOEXE)"
+          WAILS_BUILD_INFO="$(go version -m "$WAILS_BIN")"
+          if printf '%s\n' "$WAILS_BUILD_INFO" | grep -E '^[[:space:]]*=>[[:space:]]' > /dev/null; then
+            echo "::error::Wails CLI contains a replaced module"
+            exit 1
+          fi
+          verify_tool_module() {
+            local actual
+            actual="$(printf '%s\n' "$WAILS_BUILD_INFO" | awk -v module="$1" '($1 == "mod" || $1 == "dep") && $2 == module { print $3 }')"
+            if [ "$actual" != "$2" ]; then
+              echo "::error::Wails CLI $1 does not match go.mod ($actual != $2)"
+              exit 1
+            fi
+          }
+          verify_tool_module github.com/wailsapp/wails/v2 "$WAILS_VERSION"
+          # The current CLI does not link Echo. If a future CLI does, require
+          # the same patched version selected for the development application.
+          if printf '%s\n' "$WAILS_BUILD_INFO" | grep -E '^[[:space:]]*(mod|dep)[[:space:]]+github.com/labstack/echo/v4[[:space:]]' > /dev/null; then
+            verify_tool_module github.com/labstack/echo/v4 "$ECHO_VERSION"
+          fi
+          printf '%s\n' "$WAILS_BUILD_INFO"
 
       - name: Build pinned static SQLCipher on Linux
         if: runner.os == 'Linux'
@@ -359,6 +358,43 @@ jobs:
             esac
           done < <(sed -n 's/^[[:space:]]*DLL Name:[[:space:]]*//p' /tmp/omni-money-imports.txt | tr -d '\r')
 
+      - name: Prepare and verify desktop license bundle
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          SQLCIPHER_PREFIX: ${{ runner.temp }}/omni-sqlcipher-4.18.0
+        run: |
+          set -euo pipefail
+          target="desktop-${BUILD_PLATFORM/\//-}"
+          node scripts/oss-notices.mjs package "$target"
+          if [ "$RUNNER_OS" = macOS ]; then
+            export OSS_OPENSSL_LICENSE_DIRECTORY="${{ runner.temp }}/omni-openssl-3.5.8/share/licenses/openssl"
+            binary='build/bin/Omni Money.app/Contents/MacOS/omni_money'
+            openssl_version='OpenSSL 3.5.8'
+          else
+            binary=build/bin/omni_money
+            openssl_version="$(openssl version)"
+          fi
+          node scripts/oss-artifact.mjs "$target" "$binary" "$SQLCIPHER_PREFIX" "$openssl_version"
+          if [ "$RUNNER_OS" = macOS ]; then
+            mkdir -p 'build/bin/Omni Money.app/Contents/Resources/licenses'
+            cp -R "licenses/build/$target/." 'build/bin/Omni Money.app/Contents/Resources/licenses/'
+          else
+            mkdir -p build/bin/licenses
+            cp -R "licenses/build/$target/." build/bin/licenses/
+          fi
+
+      - name: Prepare and verify Windows license bundle
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          node scripts/oss-notices.mjs package desktop-windows-amd64
+          export OSS_OPENSSL_LICENSE_DIRECTORY="$(cygpath -m /ucrt64/share/licenses/openssl)"
+          node scripts/oss-artifact.mjs desktop-windows-amd64 build/bin/omni_money.exe "$(cygpath -m /ucrt64/omni-sqlcipher-4.18.0)" "$(openssl version)"
+          mkdir -p build/bin/licenses
+          cp -R licenses/build/desktop-windows-amd64/. build/bin/licenses/
+
       # macOSの場合: ad-hoc署名 + dittoでバンドル構造保持ZIP
       - name: Package macOS app
         if: runner.os == 'macOS'
@@ -375,6 +411,7 @@ jobs:
           destination="$(mktemp -d)"
           ditto -x -k "${ARTIFACT_NAME}-v${APP_VERSION}.zip" "$destination"
           codesign --verify --strict "$destination/Omni Money.app"
+          node scripts/oss-notices.mjs verify "desktop-${BUILD_PLATFORM/\//-}" "$destination/Omni Money.app/Contents/Resources/licenses"
           "$destination/Omni Money.app/Contents/MacOS/omni_money" --self-test-sqlcipher
 
       # Linuxの場合: バイナリをtar.gz圧縮
@@ -382,15 +419,33 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cd build/bin
-          tar czf "../../${ARTIFACT_NAME}-v${APP_VERSION}.tar.gz" omni_money
+          tar czf "../../${ARTIFACT_NAME}-v${APP_VERSION}.tar.gz" omni_money licenses
 
       - name: Verify packaged Linux app
+        id: wails-native
         if: runner.os == 'Linux'
+        timeout-minutes: 8
         shell: bash
         run: |
-          destination="$(mktemp -d)"
+          set -euo pipefail
+          destination="$(mktemp -d "$RUNNER_TEMP/omni-wails-package.XXXXXX")"
+          trap 'rm -rf "$destination"' EXIT
           tar xzf "${ARTIFACT_NAME}-v${APP_VERSION}.tar.gz" -C "$destination"
+          node scripts/oss-notices.mjs verify desktop-linux-amd64 "$destination/licenses"
           env -u DISPLAY -u WAYLAND_DISPLAY "$destination/omni_money" --self-test-sqlcipher
+          # Issue #299: native production UI is the temporary automatic path;
+          # it does not establish that development Echo/browser IPC is fixed.
+          timeout --signal=TERM --kill-after=20s 300s xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" dbus-run-session -- node scripts/wails-native-integration.mjs "$destination/omni_money"
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Save native WebView integration evidence
+        if: ${{ always() && runner.os == 'Linux' && steps.wails-native.outcome != '' && steps.wails-native.outcome != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wails-native-linux-integration
+          path: .oss-cache/wails-native-results/
+          if-no-files-found: warn
+          retention-days: 7
 
       # Windowsの場合: exeをzip圧縮
       - name: Package Windows app
@@ -398,7 +453,7 @@ jobs:
         shell: pwsh
         run: |
           $destination = "$env:ARTIFACT_NAME-v$env:APP_VERSION.zip"
-          Compress-Archive -Path "build\bin\omni_money.exe" -DestinationPath $destination
+          Compress-Archive -Path "build\bin\omni_money.exe", "build\bin\licenses" -DestinationPath $destination
 
       - name: Verify packaged Windows app
         if: runner.os == 'Windows'
@@ -406,6 +461,8 @@ jobs:
         run: |
           $destination = Join-Path $env:RUNNER_TEMP 'omni-money-packaged'
           Expand-Archive -Path "$env:ARTIFACT_NAME-v$env:APP_VERSION.zip" -DestinationPath $destination
+          node scripts/oss-notices.mjs verify desktop-windows-amd64 "$destination\licenses"
+          if ($LASTEXITCODE -ne 0) { throw "Packaged licenses failed verification" }
           $originalPath = $env:Path
           try {
             $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
@@ -451,14 +508,17 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          pattern: omni-money-*
           path: dist/
 
       - name: Attest release artifacts
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
-            dist/**/*.zip
-            dist/**/*.tar.gz
+            dist/omni-money-macos-arm64/*.zip
+            dist/omni-money-macos-amd64/*.zip
+            dist/omni-money-windows/*.zip
+            dist/omni-money-linux/*.tar.gz
 
   release:
     name: Publish GitHub release
@@ -480,13 +540,28 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          pattern: omni-money-*
           path: dist/
 
       - name: Generate checksums
         shell: bash
         run: |
+          set -euo pipefail
+          RELEASE_FILES=()
+          for artifact_dir in omni-money-macos-arm64 omni-money-macos-amd64 omni-money-windows omni-money-linux; do
+            if [ ! -d "dist/$artifact_dir" ]; then
+              echo "::error::missing release artifact directory: $artifact_dir"
+              exit 1
+            fi
+            mapfile -d '' PACKAGE_FILES < <(find "dist/$artifact_dir" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) -print0)
+            if [ "${#PACKAGE_FILES[@]}" -ne 1 ]; then
+              echo "::error::expected exactly one packaged artifact in $artifact_dir"
+              exit 1
+            fi
+            RELEASE_FILES+=("${PACKAGE_FILES[0]#dist/}")
+          done
           CHECKSUM_FILE="$(mktemp)"
-          (cd dist && find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$CHECKSUM_FILE"
+          (cd dist && printf '%s\0' "${RELEASE_FILES[@]}" | sort -z | xargs -0 sha256sum) > "$CHECKSUM_FILE"
           mv "$CHECKSUM_FILE" dist/SHA256SUMS
 
       - name: Create GitHub Release
@@ -532,7 +607,8 @@ jobs:
               exit 1
             fi
           done
-          mapfile -d '' RELEASE_FILES < <(find dist/ -type f -print0)
+          mapfile -d '' RELEASE_FILES < <(find dist/omni-money-macos-arm64 dist/omni-money-macos-amd64 dist/omni-money-windows dist/omni-money-linux -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) -print0)
+          RELEASE_FILES+=(dist/SHA256SUMS)
           gh release create "v${APP_VERSION}" \
             --repo "$RELEASE_REPOSITORY" \
             --title "Omni Money v${APP_VERSION}" \

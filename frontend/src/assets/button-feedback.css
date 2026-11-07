@@ -2,7 +2,7 @@
    --omni-button-shadow-* properties on a button to customise its shadows. */
 :is(
     .side-menu .menu-btn,
-    .login-root button,
+    .login-root button:not(.license-link),
     .header .add-btn,
     .transaction-modal button:not(.dropdown-toggle-btn, .tag-remove, .link-remove)
 ) {
@@ -14,7 +14,7 @@
 @media (hover: hover) and (pointer: fine) {
     :is(
         .side-menu .menu-btn,
-        .login-root button,
+        .login-root button:not(.license-link),
         .header .add-btn,
         .transaction-modal button:not(.dropdown-toggle-btn, .tag-remove, .link-remove)
     ):not(:disabled):hover {
@@ -26,7 +26,7 @@
 /* Keep the pressed state outside the hover media query for touch input. */
 :is(
     .side-menu .menu-btn,
-    .login-root button,
+    .login-root button:not(.license-link),
     .header .add-btn,
     .transaction-modal button:not(.dropdown-toggle-btn, .tag-remove, .link-remove)
 ):not(:disabled):active {
@@ -36,7 +36,7 @@
 
 :is(
     .side-menu .menu-btn,
-    .login-root button,
+    .login-root button:not(.license-link),
     .header .add-btn,
     .transaction-modal button:not(.dropdown-toggle-btn, .tag-remove, .link-remove)
 ):disabled {
@@ -47,7 +47,7 @@
 @media (prefers-reduced-motion: reduce) {
     :is(
         .side-menu .menu-btn,
-        .login-root button,
+        .login-root button:not(.license-link),
         .header .add-btn,
         .transaction-modal button:not(.dropdown-toggle-btn, .tag-remove, .link-remove)
     ) {

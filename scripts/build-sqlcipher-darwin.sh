@@ -182,6 +182,9 @@ symbols_file="$temporary_root/libsqlite3.symbols"
 grep -Eq '[[:space:]]_sqlite3_open_v2$' "$symbols_file" || fail "generated archive lacks sqlite3_open_v2"
 grep -Eq '[[:space:]]_sqlite3_key$' "$symbols_file" || fail "generated archive lacks SQLCipher sqlite3_key"
 
+mkdir -p "$staging_prefix/share/licenses/sqlcipher"
+install -m 0644 "$source_dir/LICENSE.md" "$staging_prefix/share/licenses/sqlcipher/LICENSE.md"
+
 mv "$staging_prefix" "$destination_path"
 trap - EXIT INT TERM
 rm -rf "$temporary_root"

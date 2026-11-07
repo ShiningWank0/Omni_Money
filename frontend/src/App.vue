@@ -103,6 +103,7 @@
           <button class="menu-btn menu-group-start" @click="openCredentialSettings">認証情報の管理</button>
           <button v-if="!isWailsMode && serverFeatures.passkeys" class="menu-btn menu-group-start" @click="openPasskeySettings">パスキー設定</button>
           <button v-if="serverFeatures.admin" class="menu-btn menu-group-start" @click="openServerAccountAdmin">サーバーユーザー管理</button>
+          <LicenseEntry menu />
         </div>
         <button v-if="isWailsMode" class="menu-btn logout-btn" @click="lockDesktopVaultNow">保管庫をロック</button>
         <button v-if="!isWailsMode" class="menu-btn logout-btn" @click="logout">ログアウト</button>
@@ -371,6 +372,7 @@ import { useAppStore } from './store/index'
 import TransactionModal from './components/TransactionModal.vue'
 import PanelCloseButton from './components/PanelCloseButton.vue'
 import DesktopVaultGate from './components/DesktopVaultGate.vue'
+import LicenseEntry from './components/LicenseEntry.vue'
 import { csvExportWarning } from './utils/csvSafety'
 import { isDesktopVaultUnlocked } from './utils/desktopVaultSafety'
 import {
