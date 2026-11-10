@@ -11,13 +11,11 @@ const repo = { id: 1171756271, full_name: repository }
 const branch = 'dependabot/go_modules/go-modules-minor-patch-example'
 const stable = value => `${JSON.stringify(value, null, 2)}\n`
 const read = path => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
-// Always model a new update, including on PRs whose dependencies and OSS
-// inventories have already reached a previously hardcoded fixture version.
 const nextPatch = version => {
-  const match = /^(v?)(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(version)
-  assert.ok(match, `expected semver fixture version: ${version}`)
-  const [, prefix, major, minor, patch] = match
-  return `${prefix}${major}.${minor}.${Number(patch) + 1}`
+  const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(version)
+  assert.ok(match, `expected simple semver: ${version}`)
+  const [, major, minor, patch] = match
+  return `${version.startsWith('v') ? 'v' : ''}${major}.${minor}.${Number(patch) + 1}`
 }
 
 function fixture(kind = 'go') {
