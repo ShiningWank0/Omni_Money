@@ -999,7 +999,7 @@
     {
       "id": "go:github.com/mattn/go-sqlite3",
       "name": "github.com/mattn/go-sqlite3",
-      "version": "v1.14.52",
+      "version": "v1.14.53",
       "dependencyType": "direct",
       "distribution": "included",
       "targets": [
@@ -1439,7 +1439,7 @@
     {
       "id": "go:github.com/wailsapp/wails/v2",
       "name": "github.com/wailsapp/wails/v2",
-      "version": "v2.17.0",
+      "version": "v2.17.1",
       "dependencyType": "direct",
       "distribution": "included",
       "targets": [
@@ -1527,7 +1527,7 @@
     {
       "id": "go:github.com/yuin/goldmark",
       "name": "github.com/yuin/goldmark",
-      "version": "v1.7.4",
+      "version": "v1.7.17",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -1958,7 +1958,7 @@
     {
       "id": "npm:@babel/helper-string-parser",
       "name": "@babel/helper-string-parser",
-      "version": "7.29.7",
+      "version": "7.29.13",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -1982,7 +1982,7 @@
     {
       "id": "npm:@babel/parser",
       "name": "@babel/parser",
-      "version": "7.29.9",
+      "version": "7.29.13",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -1994,7 +1994,7 @@
     {
       "id": "npm:@babel/types",
       "name": "@babel/types",
-      "version": "7.29.8",
+      "version": "7.29.11",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -2188,7 +2188,7 @@
     {
       "id": "npm:@oxc-project/types",
       "name": "@oxc-project/types",
-      "version": "0.155.0",
+      "version": "0.156.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2200,7 +2200,7 @@
     {
       "id": "npm:@playwright/test",
       "name": "@playwright/test",
-      "version": "1.64.1",
+      "version": "1.65.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2212,7 +2212,7 @@
     {
       "id": "npm:@rolldown/binding-android-arm-eabi",
       "name": "@rolldown/binding-android-arm-eabi",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2224,7 +2224,7 @@
     {
       "id": "npm:@rolldown/binding-android-arm64",
       "name": "@rolldown/binding-android-arm64",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2236,7 +2236,7 @@
     {
       "id": "npm:@rolldown/binding-darwin-arm64",
       "name": "@rolldown/binding-darwin-arm64",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2248,7 +2248,7 @@
     {
       "id": "npm:@rolldown/binding-darwin-x64",
       "name": "@rolldown/binding-darwin-x64",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2260,7 +2260,7 @@
     {
       "id": "npm:@rolldown/binding-freebsd-x64",
       "name": "@rolldown/binding-freebsd-x64",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2272,7 +2272,7 @@
     {
       "id": "npm:@rolldown/binding-linux-arm-gnueabihf",
       "name": "@rolldown/binding-linux-arm-gnueabihf",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2284,7 +2284,7 @@
     {
       "id": "npm:@rolldown/binding-linux-arm64-gnu",
       "name": "@rolldown/binding-linux-arm64-gnu",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2296,7 +2296,7 @@
     {
       "id": "npm:@rolldown/binding-linux-arm64-musl",
       "name": "@rolldown/binding-linux-arm64-musl",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2308,7 +2308,7 @@
     {
       "id": "npm:@rolldown/binding-linux-ppc64-gnu",
       "name": "@rolldown/binding-linux-ppc64-gnu",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2320,7 +2320,7 @@
     {
       "id": "npm:@rolldown/binding-linux-s390x-gnu",
       "name": "@rolldown/binding-linux-s390x-gnu",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2332,7 +2332,7 @@
     {
       "id": "npm:@rolldown/binding-linux-x64-gnu",
       "name": "@rolldown/binding-linux-x64-gnu",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2344,7 +2344,7 @@
     {
       "id": "npm:@rolldown/binding-linux-x64-musl",
       "name": "@rolldown/binding-linux-x64-musl",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2356,7 +2356,7 @@
     {
       "id": "npm:@rolldown/binding-openharmony-arm64",
       "name": "@rolldown/binding-openharmony-arm64",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2368,7 +2368,7 @@
     {
       "id": "npm:@rolldown/binding-win32-arm64-msvc",
       "name": "@rolldown/binding-win32-arm64-msvc",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2380,7 +2380,7 @@
     {
       "id": "npm:@rolldown/binding-win32-x64-msvc",
       "name": "@rolldown/binding-win32-x64-msvc",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2428,7 +2428,7 @@
     {
       "id": "npm:@types/estree",
       "name": "@types/estree",
-      "version": "1.0.9",
+      "version": "1.0.10",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2452,7 +2452,7 @@
     {
       "id": "npm:@vitest/mocker",
       "name": "@vitest/mocker",
-      "version": "5.0.5",
+      "version": "5.1.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2464,7 +2464,7 @@
     {
       "id": "npm:@vitest/spy",
       "name": "@vitest/spy",
-      "version": "5.0.5",
+      "version": "5.1.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2476,7 +2476,7 @@
     {
       "id": "npm:@vue/compiler-core",
       "name": "@vue/compiler-core",
-      "version": "3.5.44",
+      "version": "3.5.45",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -2488,7 +2488,7 @@
     {
       "id": "npm:@vue/compiler-dom",
       "name": "@vue/compiler-dom",
-      "version": "3.5.44",
+      "version": "3.5.45",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -2500,7 +2500,7 @@
     {
       "id": "npm:@vue/compiler-sfc",
       "name": "@vue/compiler-sfc",
-      "version": "3.5.44",
+      "version": "3.5.45",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -2512,7 +2512,7 @@
     {
       "id": "npm:@vue/compiler-ssr",
       "name": "@vue/compiler-ssr",
-      "version": "3.5.44",
+      "version": "3.5.45",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -2560,7 +2560,7 @@
     {
       "id": "npm:@vue/reactivity",
       "name": "@vue/reactivity",
-      "version": "3.5.44",
+      "version": "3.5.45",
       "dependencyType": "runtime",
       "distribution": "included",
       "targets": [
@@ -2586,7 +2586,7 @@
     {
       "id": "npm:@vue/runtime-core",
       "name": "@vue/runtime-core",
-      "version": "3.5.44",
+      "version": "3.5.45",
       "dependencyType": "runtime",
       "distribution": "included",
       "targets": [
@@ -2612,7 +2612,7 @@
     {
       "id": "npm:@vue/runtime-dom",
       "name": "@vue/runtime-dom",
-      "version": "3.5.44",
+      "version": "3.5.45",
       "dependencyType": "runtime",
       "distribution": "included",
       "targets": [
@@ -2638,7 +2638,7 @@
     {
       "id": "npm:@vue/server-renderer",
       "name": "@vue/server-renderer",
-      "version": "3.5.44",
+      "version": "3.5.45",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -2650,7 +2650,7 @@
     {
       "id": "npm:@vue/shared",
       "name": "@vue/shared",
-      "version": "3.5.44",
+      "version": "3.5.45",
       "dependencyType": "runtime",
       "distribution": "included",
       "targets": [
@@ -3242,7 +3242,7 @@
     {
       "id": "npm:magic-string",
       "name": "magic-string",
-      "version": "1.4.3",
+      "version": "1.4.5",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3448,7 +3448,7 @@
     {
       "id": "npm:playwright",
       "name": "playwright",
-      "version": "1.64.1",
+      "version": "1.65.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3460,7 +3460,7 @@
     {
       "id": "npm:playwright-core",
       "name": "playwright-core",
-      "version": "1.64.1",
+      "version": "1.65.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3520,7 +3520,7 @@
     {
       "id": "npm:rolldown",
       "name": "rolldown",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3676,7 +3676,7 @@
     {
       "id": "npm:vite",
       "name": "vite",
-      "version": "8.3.5",
+      "version": "8.3.6",
       "dependencyType": "development",
       "distribution": "included",
       "targets": [
@@ -3702,7 +3702,7 @@
     {
       "id": "npm:vitest",
       "name": "vitest",
-      "version": "5.0.5",
+      "version": "5.1.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3714,7 +3714,7 @@
     {
       "id": "npm:vue",
       "name": "vue",
-      "version": "3.5.44",
+      "version": "3.5.45",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
