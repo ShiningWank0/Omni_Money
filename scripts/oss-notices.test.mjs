@@ -100,3 +100,17 @@ test('all release and CI builds wait for the single common OSS gate', () => {
   assert.match(workflow, /OSS_RESULT: \$\{\{ needs\.oss\.result \}\}/)
   assert.match(workflow, /test "\$OSS_RESULT" = success/)
 })
+test('release builders pin the displayed OSS to the same mode, OS and CPU as the artifact', () => {
+  const desktop = readFileSync(new URL('../.github/workflows/release-desktop.yml', import.meta.url), 'utf8')
+  assert.match(desktop, /VITE_OSS_TARGET: \$\{\{ matrix\.oss_target \}\}/)
+  const mappings = [...desktop.matchAll(/platform: ([a-z]+)\/([a-z0-9]+)\n\s+oss_target: (\S+)/g)]
+  assert.equal(mappings.length, targetConfigs.filter(target => target.mode === 'desktop').length)
+  for (const [, os, arch, target] of mappings) assert.equal(target, `desktop-${os}-${arch}`)
+  const docker = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8')
+  assert.match(docker, /VITE_OSS_TARGET="server-linux-\$\{TARGETARCH\}" npm run build/)
+  const ci = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  assert.match(ci, /run: node scripts\/oss-ui-matrix\.mjs/)
+  const wails = JSON.parse(readFileSync(new URL('../wails.json', import.meta.url)))
+  assert.equal(wails['frontend:build'], 'node build/desktop.mjs build')
+  assert.equal(wails['frontend:dev:watcher'], 'node build/desktop.mjs dev')
+})
