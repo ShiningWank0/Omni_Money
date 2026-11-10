@@ -15,7 +15,7 @@ COPY LICENSE /app/LICENSE
 COPY licenses/approved.json /app/licenses/approved.json
 COPY licenses/targets.json /app/licenses/targets.json
 COPY scripts/oss-notices.mjs /app/scripts/oss-notices.mjs
-RUN VITE_APP_VERSION="$VERSION" npm run build
+RUN VITE_APP_VERSION="$VERSION" VITE_OSS_TARGET="server-linux-${TARGETARCH}" npm run build
 RUN node /app/scripts/oss-notices.mjs package "server-linux-${TARGETARCH}"
 
 # ===== Stage 2: バックエンドのビルド =====

@@ -15,6 +15,7 @@ import LoginView from '../../src/views/LoginView.vue'
 import DesktopVaultGate from '../../src/components/DesktopVaultGate.vue'
 import LicenseEntry from '../../src/components/LicenseEntry.vue'
 import LicenseDialog from '../../src/components/LicenseDialog.vue'
+import displayedCatalog from 'virtual:omni-oss-notices'
 
 beforeEach(() => {
   api.getAuthStatus.mockResolvedValue({ authenticated: false, setup_required: false })
@@ -41,6 +42,8 @@ for (const [name, component, props] of [
   expect(dialog.textContent).toContain('ZETETIC')
   expect(dialog.textContent).toContain('Apache-2.0')
   expect(dialog.querySelector('.panel-close-button')).not.toBeNull()
+  expect(dialog.dataset.ossTarget).toBe(displayedCatalog.target.id)
+  expect([...dialog.querySelectorAll('[data-oss-component]')].map(element => element.dataset.ossComponent)).toEqual(displayedCatalog.components.map(component => component.id))
   expect(globalThis.fetch).not.toHaveBeenCalled()
   dialog.querySelector('[aria-label="ライセンスを閉じる"]').click()
   await flushPromises()
