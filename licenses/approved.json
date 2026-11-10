@@ -77,7 +77,7 @@
       "sha256": "7aaa0f5a00aa44dc479152412e111268e48b265b34574ec62398a182e5c0ca37"
     },
     "go:github.com/mattn/go-sqlite3": {
-      "version": "v1.14.52",
+      "version": "v1.14.53",
       "license": "MIT",
       "sha256": "31ccca318fd8aade366a73440061fd06b43ecf10f665bf2bad69ecf979c07f9e"
     },

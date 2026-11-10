@@ -274,8 +274,8 @@
     {
       "id": "go:github.com/mattn/go-sqlite3",
       "name": "github.com/mattn/go-sqlite3",
-      "version": "v1.14.52",
-      "url": "https://pkg.go.dev/github.com/mattn/go-sqlite3@v1.14.52",
+      "version": "v1.14.53",
+      "url": "https://pkg.go.dev/github.com/mattn/go-sqlite3@v1.14.53",
       "targets": [
         "desktop-darwin-amd64",
         "desktop-darwin-arm64",

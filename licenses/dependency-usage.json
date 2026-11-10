@@ -999,7 +999,7 @@
     {
       "id": "go:github.com/mattn/go-sqlite3",
       "name": "github.com/mattn/go-sqlite3",
-      "version": "v1.14.52",
+      "version": "v1.14.53",
       "dependencyType": "direct",
       "distribution": "included",
       "targets": [
