@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { advanceUnchangedApprovals, usageFromInputs } from './oss-notices.mjs'
+import { advanceUnchangedApprovals, targetConfigs, usageFromInputs } from './oss-notices.mjs'
 import { applyOSSSync, dependencyPaths, generatedPaths, planOSSSync, validateCandidate, validateDependencyInputs } from './dependabot-oss-sync.mjs'
 
 const repository = 'ShiningWank0/Omni_Money'
@@ -21,12 +21,14 @@ function fixture(kind = 'go') {
   const modules = usage.dependencies.filter(entry => entry.id.startsWith('go:')).map(entry => ({
     Path: entry.name, Version: entry.version, Indirect: entry.dependencyType === 'indirect',
   }))
-  if (kind === 'go') {
-    const component = catalog.components.find(component => component.id === 'go:github.com/mattn/go-sqlite3')
+  const goUpdate = kind !== 'npm'
+  if (goUpdate) {
+    const module = kind === 'wails' ? 'github.com/wailsapp/wails/v2' : 'github.com/mattn/go-sqlite3'
+    const component = catalog.components.find(component => component.id === `go:${module}`)
     const previous = component.version
-    const next = 'v1.14.53'
-    inputs['go.mod'] = inputs['go.mod'].replace(`github.com/mattn/go-sqlite3 ${previous}`, `github.com/mattn/go-sqlite3 ${next}`)
-    inputs['go.sum'] = inputs['go.sum'].replaceAll(`github.com/mattn/go-sqlite3 ${previous}`, `github.com/mattn/go-sqlite3 ${next}`)
+    const next = kind === 'wails' ? 'v2.17.1' : 'v1.14.53'
+    inputs['go.mod'] = inputs['go.mod'].replace(`${module} ${previous}`, `${module} ${next}`)
+    inputs['go.sum'] = inputs['go.sum'].replaceAll(`${module} ${previous}`, `${module} ${next}`)
     component.version = next
     component.url = `https://pkg.go.dev/${component.name}@${next}`
     modules.find(module => module.Path === component.name).Version = next
@@ -49,10 +51,10 @@ function fixture(kind = 'go') {
       name: 'CI', event: 'pull_request', path: '.github/workflows/ci.yml', conclusion: 'failure',
       head_repository: { ...repo }, head_branch: branch, head_sha: head, pull_requests: [{ number: 302 }],
     } },
-    pr: { state: 'open', draft: false, changed_files: kind === 'go' ? 2 : 2,
+    pr: { state: 'open', draft: false, changed_files: 2,
       user: { id: 49699333, login: 'dependabot[bot]', type: 'Bot' },
       base: { ref: 'main', sha: base, repo: { ...repo } }, head: { ref: branch, sha: head, repo: { ...repo } } },
-    changed: (kind === 'go' ? ['go.mod', 'go.sum'] : ['frontend/package.json', 'frontend/package-lock.json']).map(filename => ({ filename, status: 'modified' })),
+    changed: (goUpdate ? ['go.mod', 'go.sum'] : ['frontend/package.json', 'frontend/package-lock.json']).map(filename => ({ filename, status: 'modified' })),
     before, inputs, baseline, current: structuredClone(baseline), treeMode: '100644', calls: [], race: false, finalRace: false,
     candidate: { schema: 1, repository, number: 302, branch, head, base, files },
   }
@@ -109,6 +111,21 @@ test('test-only jsdom update refreshes usage without approving or distributing t
   assert.equal(jsdom.version, '31.0.0')
   assert.equal(jsdom.distribution, 'excluded')
   assert.equal(JSON.parse(state.candidate.files[generatedPaths[1]]).components['npm:jsdom'], undefined)
+})
+
+test('Wails version synchronization preserves every OS/CPU/mode boundary used by the display builds', () => {
+  const state = fixture('wails')
+  validateCandidate(state.plan, state.candidate)
+  const previous = JSON.parse(state.baseline[generatedPaths[2]])
+  const next = JSON.parse(state.candidate.files[generatedPaths[2]])
+  for (const target of targetConfigs) {
+    const before = previous.components.filter(component => component.targets.includes(target.id))
+    const after = next.components.filter(component => component.targets.includes(target.id))
+    assert.deepEqual(after.map(component => component.id), before.map(component => component.id))
+    const wails = after.find(component => component.id === 'go:github.com/wailsapp/wails/v2')
+    assert.equal(Boolean(wails), target.mode === 'desktop')
+    if (wails) assert.equal(wails.version, 'v2.17.1')
+  }
 })
 
 test('a Vue/Vite runtime update must synchronize bundle, approvals, display and usage together', () => {
