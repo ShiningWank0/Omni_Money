@@ -116,6 +116,7 @@ jobs:
       APP_VERSION: ${{ needs.prepare.outputs.version }}
       VITE_APP_VERSION: ${{ needs.prepare.outputs.version }}
       BUILD_PLATFORM: ${{ matrix.platform }}
+      VITE_OSS_TARGET: ${{ matrix.oss_target }}
       ARTIFACT_NAME: ${{ matrix.artifact_name }}
     strategy:
       fail-fast: false
@@ -123,17 +124,21 @@ jobs:
         include:
           - os: macos-15-intel
             platform: darwin/amd64
+            oss_target: desktop-darwin-amd64
             artifact_name: omni-money-macos-amd64
             deployment_target: '10.13'
           - os: macos-15
             platform: darwin/arm64
+            oss_target: desktop-darwin-arm64
             artifact_name: omni-money-macos-arm64
             deployment_target: '11.0'
           - os: windows-latest
             platform: windows/amd64
+            oss_target: desktop-windows-amd64
             artifact_name: omni-money-windows
           - os: ubuntu-24.04
             platform: linux/amd64
+            oss_target: desktop-linux-amd64
             artifact_name: omni-money-linux
 
     runs-on: ${{ matrix.os }}
