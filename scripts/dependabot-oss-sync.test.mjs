@@ -11,6 +11,12 @@ const repo = { id: 1171756271, full_name: repository }
 const branch = 'dependabot/go_modules/go-modules-minor-patch-example'
 const stable = value => `${JSON.stringify(value, null, 2)}\n`
 const read = path => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
+const nextPatch = version => {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(version)
+  assert.ok(match, `expected simple semver: ${version}`)
+  const [, major, minor, patch] = match
+  return `${version.startsWith('v') ? 'v' : ''}${major}.${minor}.${Number(patch) + 1}`
+}
 
 function fixture(kind = 'go') {
   const before = Object.fromEntries(dependencyPaths.map(path => [path, read(path)]))
@@ -26,7 +32,7 @@ function fixture(kind = 'go') {
     const module = kind === 'wails' ? 'github.com/wailsapp/wails/v2' : 'github.com/mattn/go-sqlite3'
     const component = catalog.components.find(component => component.id === `go:${module}`)
     const previous = component.version
-    const next = kind === 'wails' ? 'v2.17.1' : 'v1.14.53'
+    const next = nextPatch(previous)
     inputs['go.mod'] = inputs['go.mod'].replace(`${module} ${previous}`, `${module} ${next}`)
     inputs['go.sum'] = inputs['go.sum'].replaceAll(`${module} ${previous}`, `${module} ${next}`)
     component.version = next
@@ -98,7 +104,8 @@ test('a go-sqlite3 update carries unchanged notices forward and changes only OSS
   assert.ok(state.calls.every(call => call.method === 'GET'))
   const changed = validateCandidate(plan, state.candidate)
   assert.deepEqual(Object.keys(changed).sort(), generatedPaths.slice(1).sort())
-  assert.equal(JSON.parse(changed['licenses/approved.json']).components['go:github.com/mattn/go-sqlite3'].version, 'v1.14.53')
+  const previous = JSON.parse(state.baseline[generatedPaths[2]]).components.find(component => component.id === 'go:github.com/mattn/go-sqlite3').version
+  assert.equal(JSON.parse(changed['licenses/approved.json']).components['go:github.com/mattn/go-sqlite3'].version, nextPatch(previous))
 })
 
 test('test-only jsdom update refreshes usage without approving or distributing test tools', async () => {
@@ -118,13 +125,14 @@ test('Wails version synchronization preserves every OS/CPU/mode boundary used by
   validateCandidate(state.plan, state.candidate)
   const previous = JSON.parse(state.baseline[generatedPaths[2]])
   const next = JSON.parse(state.candidate.files[generatedPaths[2]])
+  const nextWailsVersion = nextPatch(previous.components.find(component => component.id === 'go:github.com/wailsapp/wails/v2').version)
   for (const target of targetConfigs) {
     const before = previous.components.filter(component => component.targets.includes(target.id))
     const after = next.components.filter(component => component.targets.includes(target.id))
     assert.deepEqual(after.map(component => component.id), before.map(component => component.id))
     const wails = after.find(component => component.id === 'go:github.com/wailsapp/wails/v2')
     assert.equal(Boolean(wails), target.mode === 'desktop')
-    if (wails) assert.equal(wails.version, 'v2.17.1')
+    if (wails) assert.equal(wails.version, nextWailsVersion)
   }
 })
 
