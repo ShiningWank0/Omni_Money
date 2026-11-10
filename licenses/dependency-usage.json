@@ -1439,7 +1439,7 @@
     {
       "id": "go:github.com/wailsapp/wails/v2",
       "name": "github.com/wailsapp/wails/v2",
-      "version": "v2.17.0",
+      "version": "v2.17.1",
       "dependencyType": "direct",
       "distribution": "included",
       "targets": [
@@ -1527,7 +1527,7 @@
     {
       "id": "go:github.com/yuin/goldmark",
       "name": "github.com/yuin/goldmark",
-      "version": "v1.7.4",
+      "version": "v1.7.17",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
