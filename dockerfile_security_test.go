@@ -100,8 +100,27 @@ func TestDockerBuildPropagatesVersionToFrontendAndRuntime(t *testing.T) {
 	if stageVersionArgs != 3 {
 		t.Errorf("each build/runtime stage must redeclare VERSION exactly once, got %d stage declarations", stageVersionArgs)
 	}
+	frontendStage := strings.SplitN(dockerfile[firstFrom+1:], "\nFROM ", 2)[0]
+	build := regexp.MustCompile(`(?m)^RUN ((?:[A-Z_][A-Z0-9_]*="[^"\r\n]*"[ \t]+)+)npm run build[ \t]*$`).FindAllStringSubmatch(frontendStage, -1)
+	if len(build) != 1 {
+		t.Fatal("frontend builder must run npm run build exactly once with explicit environment assignments")
+	}
+	environment := make(map[string]string)
+	for _, assignment := range regexp.MustCompile(`([A-Z_][A-Z0-9_]*)="([^"\r\n]*)"`).FindAllStringSubmatch(build[0][1], -1) {
+		if _, exists := environment[assignment[1]]; exists {
+			t.Fatalf("frontend build assigns %s more than once", assignment[1])
+		}
+		environment[assignment[1]] = assignment[2]
+	}
+	for name, expected := range map[string]string{
+		"VITE_APP_VERSION": "$VERSION",
+		"VITE_OSS_TARGET":  "server-linux-${TARGETARCH}",
+	} {
+		if environment[name] != expected {
+			t.Errorf("frontend build must pass %s=%q, got %q", name, expected, environment[name])
+		}
+	}
 	for _, required := range []string{
-		`RUN VITE_APP_VERSION="$VERSION" npm run build`,
 		`-ldflags "-X main.version=${VERSION} -s -w"`,
 		"ENV VERSION=${VERSION}",
 	} {

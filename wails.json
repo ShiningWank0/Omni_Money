@@ -3,8 +3,8 @@
     "name": "Omni Money",
     "outputfilename": "omni_money",
     "frontend:install": "npm ci --ignore-scripts",
-    "frontend:build": "npm run build",
-    "frontend:dev:watcher": "npm run dev",
+    "frontend:build": "node build/desktop.mjs build",
+    "frontend:dev:watcher": "node build/desktop.mjs dev",
     "frontend:dev:serverUrl": "auto",
     "author": {
         "name": "ShiningWank0",

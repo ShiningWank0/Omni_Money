@@ -1,0 +1,162 @@
+name: Sync Dependabot OSS inventories
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: dependabot-oss-sync-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    if: >-
+      github.repository == 'ShiningWank0/Omni_Money' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (startsWith(github.event.workflow_run.head_branch, 'dependabot/go_modules/') ||
+       startsWith(github.event.workflow_run.head_branch, 'dependabot/npm_and_yarn/frontend/'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      candidate: ${{ steps.pack.outputs.eligible }}
+    env:
+      OSS_SYNC_SOURCE: ${{ github.workspace }}/oss-sync-source
+      OSS_SYNC_CANDIDATE: ${{ github.workspace }}/.oss-sync/candidate.json
+      GOTOOLCHAIN: local
+      GOWORK: 'off'
+      GOPROXY: https://proxy.golang.org
+      GOSUMDB: sum.golang.org
+      GOPATH: ${{ github.workspace }}/.oss-cache/oss-sync-go
+      GOMODCACHE: ${{ github.workspace }}/.oss-cache/oss-sync-go/pkg/mod
+      GOCACHE: ${{ github.workspace }}/.oss-cache/oss-sync-go-build
+    steps:
+      - name: Checkout trusted synchronization code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Setup trusted Node version
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Inspect dependency-only PR with read-only access
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/dependabot-oss-sync.mjs plan
+      # Checkout main at the inspected immutable base, never PR scripts/source.
+      # Only the four validated dependency manifests are overlaid afterwards.
+      - name: Checkout trusted application source
+        if: steps.plan.outputs.eligible == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.plan.outputs.base }}
+          path: oss-sync-source
+          persist-credentials: false
+      - name: Setup trusted Go toolchain without shared caches
+        if: steps.plan.outputs.eligible == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: oss-sync-source/go.mod
+          cache: false
+      - name: Revalidate and overlay dependency manifests
+        id: prepare
+        if: steps.plan.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OSS_SYNC_BASE: ${{ steps.plan.outputs.base }}
+        run: node scripts/dependabot-oss-sync.mjs prepare
+      # Dependencies can execute here, but this job has read-only permissions,
+      # no App credentials, no shared caches and no persistent checkout token.
+      - name: Generate production frontend inventory
+        if: steps.prepare.outputs.eligible == 'true'
+        working-directory: oss-sync-source/frontend
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+      - name: Synchronize only unchanged notices and inventory metadata
+        if: steps.prepare.outputs.eligible == 'true'
+        working-directory: oss-sync-source
+        run: |
+          go mod download
+          node scripts/oss-notices.mjs sync-unchanged
+          node scripts/oss-notices.mjs check
+      - name: Validate and pack bounded JSON candidate
+        id: pack
+        if: steps.prepare.outputs.eligible == 'true'
+        run: node scripts/dependabot-oss-sync.mjs pack
+      - name: Save candidate for the separate writer
+        if: steps.pack.outputs.eligible == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: oss-sync-candidate
+          path: ${{ github.workspace }}/.oss-sync/candidate.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: generate
+    if: needs.generate.outputs.candidate == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OSS_SYNC_CANDIDATE: ${{ github.workspace }}/.oss-sync/candidate.json
+    steps:
+      - name: Checkout trusted writer code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Setup trusted Node version
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      # Same workflow run only. Treat the artifact as untrusted JSON data; never
+      # execute it, install dependencies or checkout PR code in this job.
+      - name: Download this run's candidate
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: oss-sync-candidate
+          path: ${{ github.workspace }}/.oss-sync
+      - name: Independently validate candidate against the current PR
+        id: inspect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/dependabot-oss-sync.mjs inspect
+      - name: Check existing synchronization App configuration
+        id: config
+        if: steps.inspect.outputs.eligible == 'true'
+        env:
+          SYNC_CLIENT_ID: ${{ vars.NODE_SYNC_APP_CLIENT_ID }}
+          SYNC_PRIVATE_KEY: ${{ secrets.NODE_SYNC_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$SYNC_CLIENT_ID" ] && [ -n "$SYNC_PRIVATE_KEY" ]; then
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          else
+            echo '::warning::OSS sync reuses the Node sync GitHub App; follow docs/dependency-updates.md'
+            echo 'Node同期用GitHub Appの設定が必要です。既存のOSS必須検査は維持します。docs/dependency-updates.mdを参照してください。' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Create repository-scoped short-lived write token
+        id: app
+        if: steps.config.outputs.configured == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.NODE_SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.NODE_SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: read
+      - name: Revalidate and commit only the four OSS files
+        if: steps.config.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: node scripts/dependabot-oss-sync.mjs apply

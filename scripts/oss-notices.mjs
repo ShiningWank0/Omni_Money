@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { selectDisplayCatalog, verifyDisplayInventory } from '../frontend/build/oss-catalog.mjs'
 
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const targetConfigs = JSON.parse(readFileSync(join(root, 'licenses/targets.json'), 'utf8'))
@@ -126,6 +127,34 @@ export function validateCatalog(catalog, approved) {
   if (stale.length) throw new Error(`Stale OSS approvals: ${stale.join(', ')}`)
 }
 
+// Carry an existing review forward only when the complete notice content and
+// distribution boundary are identical. A version change is not a license review.
+export function advanceUnchangedApprovals(previous, catalog, approved) {
+  validateCatalog(previous, approved)
+  if (stable({ ...catalog, components: [] }) !== stable({ ...previous, components: [] }) ||
+      catalog.components.length !== previous.components.length) {
+    throw new Error('OSS manual review required: application or distributed component set changed')
+  }
+  const old = new Map(previous.components.map(component => [component.id, component]))
+  const updated = structuredClone(approved)
+  for (const component of catalog.components) {
+    const before = old.get(component.id)
+    if (!before || stable({ ...component, version: before.version, url: before.url }) !== stable(before)) {
+      throw new Error(`OSS manual review required: notices, license or distribution changed for ${component.id}`)
+    }
+    const expectedURL = component.id.startsWith('go:')
+      ? `https://pkg.go.dev/${component.name}@${component.version}`
+      : component.id.startsWith('npm:')
+        ? `https://www.npmjs.com/package/${component.name}/v/${component.version}` : before.url
+    if (component.url !== expectedURL || (component.id.startsWith('native:') && component.version !== before.version)) {
+      throw new Error(`OSS manual review required: native version or source URL changed for ${component.id}`)
+    }
+    updated.components[component.id].version = component.version
+  }
+  validateCatalog(catalog, updated)
+  return updated
+}
+
 export function collect() {
   validateTargetCoverage()
   const approved = readJSON(approvalPath)
@@ -147,7 +176,7 @@ export function collect() {
   return { schema: 1, applicationModule: applicationModule(), applicationLicense: readFileSync(join(root, 'LICENSE'), 'utf8'), components }
 }
 
-export function collectUsage(catalog) {
+export function usageFromInputs(catalog, lock, modules) {
   const included = new Map(catalog.components.map(component => [component.id, component]))
   const usage = []
   const add = (id, name, version, dependencyType, evidence) => {
@@ -161,7 +190,7 @@ export function collectUsage(catalog) {
       evidence: component ? evidence : `Not present in ${evidence}`,
     })
   }
-  for (const [path, pkg] of Object.entries(readJSON('frontend/package-lock.json').packages)) {
+  for (const [path, pkg] of Object.entries(lock.packages)) {
     if (!path) continue
     const name = path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length)
     // Keep nested package instances separate, including build-only packages
@@ -172,16 +201,22 @@ export function collectUsage(catalog) {
       usage.push({ id: `npm:${path}`, name, version: pkg.version, dependencyType: pkg.dev ? 'development' : 'runtime', distribution: 'excluded', targets: [], includedTargets: [], externalTargets: [], license: null, evidence: 'This package instance is not retained in the production bundle' })
     } else add(id, name, pkg.version, pkg.dev ? 'development' : 'runtime', 'production frontend bundle module inventory')
   }
-  for (const module of parseObjects(command('go', ['list', '-mod=readonly', '-m', '-json', 'all']))) {
+  for (const module of modules) {
     if (!module.Main) add(`go:${module.Path}`, module.Path, module.Version, module.Indirect ? 'indirect' : 'direct', 'production Go dependency graphs for the configured release targets')
   }
   for (const component of catalog.components.filter(component => component.id.startsWith('native:'))) add(component.id, component.name, component.version, 'native', 'reviewed native build recipes; externalTargets identify system-provided runtime libraries')
   return { schema: 1, targets: targetConfigs, dependencies: usage.sort((a, b) => a.id.localeCompare(b.id, 'en')) }
 }
 
+export function collectUsage(catalog) {
+  return usageFromInputs(catalog, readJSON('frontend/package-lock.json'),
+    parseObjects(command('go', ['list', '-mod=readonly', '-m', '-json', 'all'])))
+}
+
 export function noticeText(catalog, target) {
   if (target && !targets.includes(target)) throw new Error(`Unknown OSS target: ${target}`)
-  return 'Omni Money — Third-party software notices\n\n' + catalog.components.filter(component => !target || component.targets.includes(target)).map(component =>
+  const components = target ? selectDisplayCatalog(catalog, target).components : catalog.components
+  return 'Omni Money — Third-party software notices\n\n' + components.map(component =>
     `${component.name} ${component.version}\n${component.license}\n${component.url}\n\n${component.files.map(file => `[${file.path}]\n${file.text}`).join('\n\n')}`
   ).join('\n\n' + '='.repeat(72) + '\n\n') + '\n'
 }
@@ -202,6 +237,15 @@ function main() {
     mkdirSync(join(root, 'licenses/build'), { recursive: true })
     writeFileSync(join(root, 'licenses/build/review.json'), stable(review))
     console.log('Review licenses/build/review.json. This command does not change approvals or the displayed catalog.')
+  } else if (mode === 'sync-unchanged') {
+    const previous = readJSON(catalogPath)
+    const catalog = collect()
+    const approved = advanceUnchangedApprovals(previous, catalog, readJSON(approvalPath))
+    const usage = collectUsage(catalog)
+    writeFileSync(join(root, approvalPath), stable(approved))
+    writeFileSync(join(root, catalogPath), stable(catalog))
+    writeFileSync(join(root, 'licenses/dependency-usage.json'), stable(usage))
+    console.log('Synchronized versions and inventories; existing notice text and distribution boundaries are unchanged')
   } else if (mode === 'refresh' || mode === 'check') {
     const catalog = collect()
     const usage = collectUsage(catalog)
@@ -216,6 +260,7 @@ function main() {
     validateCatalog(catalog, readJSON(approvalPath))
     verifyBundledPackages(catalog, readJSON('frontend/bundled-dependencies.json'))
     if (mode === 'package' && !targets.includes(target)) throw new Error('package requires an explicit release target')
+    if (mode === 'package') verifyDisplayInventory(join(root, 'frontend'), catalog, target)
     const selectedTargets = mode === 'package-all' ? targets : [target]
     for (const target of selectedTargets) {
       const directory = join(root, 'licenses/build', target)
@@ -241,7 +286,7 @@ function main() {
       if (!readFileSync(resolve(root, directory, 'BUILD_DEPENDENCIES.txt'), 'utf8').trim()) throw new Error('Packaged build dependency inventory is missing')
       if (normalizeLineEndings(readFileSync(resolve(root, directory, 'native/SQLCipher-LICENSE.txt'), 'utf8')).trim() !== normalizeLineEndings(readFileSync(join(root, 'licenses/native/sqlcipher.txt'), 'utf8')).trim()) throw new Error('Packaged native license is missing or changed')
     }
-  } else throw new Error('Usage: oss-notices.mjs check|review|refresh|package-all|package TARGET|verify TARGET DIRECTORY')
+  } else throw new Error('Usage: oss-notices.mjs check|review|refresh|sync-unchanged|package-all|package TARGET|verify TARGET DIRECTORY')
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

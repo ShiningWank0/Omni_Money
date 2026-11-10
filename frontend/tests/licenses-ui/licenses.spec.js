@@ -1,4 +1,9 @@
 import { expect, test } from '@playwright/test'
+import { readFileSync } from 'node:fs'
+import { resolveDisplayTarget, selectDisplayCatalog } from '../../build/oss-catalog.mjs'
+
+const target = process.env.OSS_TEST_TARGET || resolveDisplayTarget()
+const expectedCatalog = selectDisplayCatalog(JSON.parse(readFileSync(new URL('../../src/generated/thirdPartyNotices.json', import.meta.url), 'utf8')), target)
 
 for (const width of [320, 375, 768, 1280]) test(`license overlay wraps text and scrolls vertically at ${width}px`, async ({ page }) => {
   await page.setViewportSize({ width, height: 640 })
@@ -9,6 +14,11 @@ for (const width of [320, 375, 768, 1280]) test(`license overlay wraps text and 
   await trigger.click()
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
+  await expect(dialog).toHaveAttribute('data-oss-target', target)
+  const shown = await dialog.locator('[data-oss-component]').evaluateAll(elements => elements.map(element => ({ id: element.dataset.ossComponent, version: element.dataset.ossVersion })))
+  expect(shown).toEqual(expectedCatalog.components.map(({ id, version }) => ({ id, version })))
+  if (target.startsWith('server-')) await expect(dialog).not.toContainText('github.com/wailsapp/wails/v2')
+  else await expect(dialog).not.toContainText('github.com/go-webauthn/webauthn')
   await dialog.locator('summary').first().click()
   const content = dialog.locator('.license-content')
   const before = await content.evaluate(element => ({ width: element.clientWidth, scrollWidth: element.scrollWidth, height: element.clientHeight, scrollHeight: element.scrollHeight }))

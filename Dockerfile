@@ -2,7 +2,7 @@
 ARG VERSION=dev
 
 # ===== Stage 1: フロントエンドのビルド =====
-FROM node:26.13.0-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94 AS frontend-builder
+FROM node:26.13.0-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS frontend-builder
 
 ARG VERSION
 ARG TARGETARCH
@@ -15,7 +15,7 @@ COPY LICENSE /app/LICENSE
 COPY licenses/approved.json /app/licenses/approved.json
 COPY licenses/targets.json /app/licenses/targets.json
 COPY scripts/oss-notices.mjs /app/scripts/oss-notices.mjs
-RUN VITE_APP_VERSION="$VERSION" npm run build
+RUN VITE_APP_VERSION="$VERSION" VITE_OSS_TARGET="server-linux-${TARGETARCH}" npm run build
 RUN node /app/scripts/oss-notices.mjs package "server-linux-${TARGETARCH}"
 
 # ===== Stage 2: バックエンドのビルド =====
