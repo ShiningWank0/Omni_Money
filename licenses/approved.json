@@ -122,7 +122,7 @@
       "sha256": "d56b60c6b33f0196644685265b4f819ce334ffe673298add12d63ec4cadfef3e"
     },
     "go:github.com/wailsapp/wails/v2": {
-      "version": "v2.17.0",
+      "version": "v2.17.1",
       "license": "MIT",
       "sha256": "0ee6678b63d869c89aabd80b8a971add201883b99eccaf6bb20b0a2839d977da"
     },
