@@ -45,6 +45,13 @@ UIのcomponent testに加え、共通チェックで6構成それぞれの本番
 
 ## 依存更新時の手順
 
+DependabotのGo/npm更新で、ライセンス原文・ライセンス種別・構成別配布対象が変わらない場合は、
+`Sync Dependabot OSS inventories`が版と生成物を同じPRへ自動同期します。
+確認済み内容の引継ぎに限定し、新しい原文や配布対象の自動承認はしません。
+通常のOSS必須チェックは維持し、同期コミット後のCI成功を確認して取り込みます。
+初回設定・既存PRへの適用方法は[依存更新のレビュー](dependency-updates.md#dependabotのoss情報の自動同期)を参照してください。
+自動同期の対象外、または手動変更の場合は以下の手順を使います。
+
 1. 依存とlockを更新して `cd frontend && npm ci --ignore-scripts && npm run build` を実行します。
 2. リポジトリのルートから `go mod download` と `node scripts/oss-notices.mjs review` を実行します。
 3. `licenses/build/review.json` の追加・変更・削除、原文、著作権表示、NOTICE、複数ライセンス、対象構成を確認します。必要に応じてネイティブ構成情報も更新します。
