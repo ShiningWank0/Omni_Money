@@ -41,10 +41,11 @@ function fixture(kind = 'go') {
   } else {
     const pkg = JSON.parse(inputs['frontend/package.json'])
     const lock = JSON.parse(inputs['frontend/package-lock.json'])
-    pkg.devDependencies.jsdom = '^31.0.0'
-    lock.packages[''].devDependencies.jsdom = '^31.0.0'
-    lock.packages['node_modules/jsdom'].version = '31.0.0'
-    lock.packages['node_modules/jsdom'].resolved = 'https://registry.npmjs.org/jsdom/-/jsdom-31.0.0.tgz'
+    const next = nextPatch(lock.packages['node_modules/jsdom'].version)
+    pkg.devDependencies.jsdom = `^${next}`
+    lock.packages[''].devDependencies.jsdom = `^${next}`
+    lock.packages['node_modules/jsdom'].version = next
+    lock.packages['node_modules/jsdom'].resolved = `https://registry.npmjs.org/jsdom/-/jsdom-${next}.tgz`
     inputs['frontend/package.json'] = stable(pkg)
     inputs['frontend/package-lock.json'] = stable(lock)
   }
@@ -115,14 +116,15 @@ test('test-only jsdom update refreshes usage without approving or distributing t
   const changed = validateCandidate(plan, state.candidate)
   assert.deepEqual(Object.keys(changed), ['licenses/dependency-usage.json'])
   const jsdom = JSON.parse(changed['licenses/dependency-usage.json']).dependencies.find(entry => entry.id === 'npm:jsdom')
-  assert.equal(jsdom.version, '31.0.0')
+  const previous = JSON.parse(state.before['frontend/package-lock.json']).packages['node_modules/jsdom'].version
+  assert.equal(jsdom.version, nextPatch(previous))
   assert.equal(jsdom.distribution, 'excluded')
   assert.equal(JSON.parse(state.candidate.files[generatedPaths[1]]).components['npm:jsdom'], undefined)
 })
 
 test('Wails version synchronization preserves every OS/CPU/mode boundary used by the display builds', () => {
   const state = fixture('wails')
-  validateCandidate(state.plan, state.candidate)
+  assert.deepEqual(Object.keys(validateCandidate(state.plan, state.candidate)).sort(), generatedPaths.slice(1).sort())
   const previous = JSON.parse(state.baseline[generatedPaths[2]])
   const next = JSON.parse(state.candidate.files[generatedPaths[2]])
   const nextWailsVersion = nextPatch(previous.components.find(component => component.id === 'go:github.com/wailsapp/wails/v2').version)
@@ -143,12 +145,13 @@ test('a Vue/Vite runtime update must synchronize bundle, approvals, display and 
   const lock = JSON.parse(state.inputs['frontend/package-lock.json'])
   const pkg = JSON.parse(state.inputs['frontend/package.json'])
   const component = catalog.components.find(component => component.id === 'npm:vite')
-  component.version = '8.3.6'
-  component.url = 'https://www.npmjs.com/package/vite/v/8.3.6'
-  bundle.find(entry => entry.name === 'vite').version = '8.3.6'
-  pkg.devDependencies.vite = lock.packages[''].devDependencies.vite = '^8.3.6'
-  lock.packages['node_modules/vite'].version = '8.3.6'
-  lock.packages['node_modules/vite'].resolved = 'https://registry.npmjs.org/vite/-/vite-8.3.6.tgz'
+  const next = nextPatch(component.version)
+  component.version = next
+  component.url = `https://www.npmjs.com/package/vite/v/${next}`
+  bundle.find(entry => entry.name === 'vite').version = next
+  pkg.devDependencies.vite = lock.packages[''].devDependencies.vite = `^${next}`
+  lock.packages['node_modules/vite'].version = next
+  lock.packages['node_modules/vite'].resolved = `https://registry.npmjs.org/vite/-/vite-${next}.tgz`
   state.inputs['frontend/package.json'] = stable(pkg)
   state.inputs['frontend/package-lock.json'] = stable(lock)
   state.candidate.files[generatedPaths[0]] = stable(bundle)
