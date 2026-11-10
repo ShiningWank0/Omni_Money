@@ -74,9 +74,8 @@ jobs:
       - name: Install browser for public license layout tests
         working-directory: frontend
         run: npx --no-install playwright install --with-deps chromium
-      - name: Verify vertical-only scrolling and mobile license layout
-        working-directory: frontend
-        run: npx --no-install playwright test --config playwright.licenses.config.js
+      - name: Verify exact OSS display and mobile layout for all release targets
+        run: node scripts/oss-ui-matrix.mjs
       - name: Save failed license layout screenshots
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

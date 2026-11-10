@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { selectDisplayCatalog, verifyDisplayInventory } from '../frontend/build/oss-catalog.mjs'
 
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const targetConfigs = JSON.parse(readFileSync(join(root, 'licenses/targets.json'), 'utf8'))
@@ -181,7 +182,8 @@ export function collectUsage(catalog) {
 
 export function noticeText(catalog, target) {
   if (target && !targets.includes(target)) throw new Error(`Unknown OSS target: ${target}`)
-  return 'Omni Money — Third-party software notices\n\n' + catalog.components.filter(component => !target || component.targets.includes(target)).map(component =>
+  const components = target ? selectDisplayCatalog(catalog, target).components : catalog.components
+  return 'Omni Money — Third-party software notices\n\n' + components.map(component =>
     `${component.name} ${component.version}\n${component.license}\n${component.url}\n\n${component.files.map(file => `[${file.path}]\n${file.text}`).join('\n\n')}`
   ).join('\n\n' + '='.repeat(72) + '\n\n') + '\n'
 }
@@ -216,6 +218,7 @@ function main() {
     validateCatalog(catalog, readJSON(approvalPath))
     verifyBundledPackages(catalog, readJSON('frontend/bundled-dependencies.json'))
     if (mode === 'package' && !targets.includes(target)) throw new Error('package requires an explicit release target')
+    if (mode === 'package') verifyDisplayInventory(join(root, 'frontend'), catalog, target)
     const selectedTargets = mode === 'package-all' ? targets : [target]
     for (const target of selectedTargets) {
       const directory = join(root, 'licenses/build', target)
