@@ -129,6 +129,44 @@ main以外のブランチを選ぶとジョブをスキップする。既存の�
 
 ## マージ前の確認
 
+### DependabotのOSS情報の自動同期
+
+DependabotはGo/npmの依存指定とlockを更新するが、Omni Money独自のOSS記録は生成しない。
+例えばgo-sqlite3の更新だけでは`licenses/approved.json`の確認済み版が旧版に残り、
+Vue/Viteの更新では本番バンドル一覧も変わる。jsdomのような配布しないテスト依存も依存用途一覧には記録する。
+
+`Sync Dependabot OSS inventories`は、Go/npm更新PRのCI完了後にこの記録を同じPRへ同期する。
+対象はOmni_Money内のDependabot作成・main向け・openなPRで、変更が依存ファイルとOSS生成物だけの場合に限る。
+Goの最低版・toolchain・置換、npm scripts・engines・overrides、直接依存の追加削除、外部レジストリを伴う変更は手動レビューする。
+
+自動同期では既に確認済みのライセンス原文・著作権・NOTICE・ライセンス種別・構成別の配布対象がすべて同一のときだけ、版と生成一覧を更新する。
+配布する構成要素の追加削除、原文や対象構成の変更、ネイティブライブラリの版変更は自動承認せず、Actions Summaryに中止理由を表示する。
+OS・CPU・Desktop/Server別の`targets`は維持し、構成別表示・配布物の判定に同じ記録を使う。テスト専用依存を表示対象へ追加しない。
+
+変更するファイルは次の4件に限定する。更新が不要なファイルには変更を加えない。
+
+- `frontend/bundled-dependencies.json`: 本番JavaScriptへ残るnpmパッケージ。
+- `licenses/approved.json`: 原文と対象構成が変わらない既存OSSの版。
+- `frontend/src/generated/thirdPartyNotices.json`: 表示と構成別配布の元データ。
+- `licenses/dependency-usage.json`: 配布する依存・配布しない開発依存の用途一覧。
+
+生成jobは固定mainのアプリ・スクリプトへ検証済みの依存指定だけを重ね、read-only権限で`npm ci --ignore-scripts`、本番ビルド、Go一覧取得を行う。
+PR側のスクリプトや生成済みの承認を実行・採用しない。依存コードが動く生成jobにはApp秘密鍵を渡さず、共有キャッシュも使用しない。
+別のwriter jobが同じworkflow runのJSON候補をデータとして読み、固定mainの承認原文・対象構成・PRのlockと最新headをAPIで再照合する。
+検証したheadを親に4ファイルだけのコミットを作り、競合・更新があれば強制pushや別headへの再試行を行わない。
+
+書き込みには既存Node同期Appの`NODE_SYNC_APP_CLIENT_ID`と`NODE_SYNC_APP_PRIVATE_KEY`を再利用する。App・権限・秘密鍵の追加設定は不要。
+未設定ならSummaryに案内し、必須OSSチェックは引き続き失敗する。通常CIやマージ条件を緩和しない。
+Appによる同期コミットから通常PR CIが新しく起動するため、取り込みにはその最新コミットの全必須チェック成功を使う。
+同期済みならコミットを追加しない。自動マージ・PRコメント・Issue操作は行わない。
+
+workflowをmainへマージした後に有効になる。既存の対象PRにも、CIを再実行して完了させれば`workflow_run: completed`から適用できる。
+このworkflowはNode同期の`requested`と異なり、CI再実行後の完了も対象にする。古いheadのrun、キャンセルされたrunは処理しない。
+Summaryの「手動レビュー」が出た場合は`docs/oss-licenses.md`の手順で該当変更を確認する。
+
+`node --test scripts/dependabot-oss-sync.test.mjs`はGo・npm・テスト専用依存の同期、原文・構成変更の拒否、
+fork・スクリプト変更・候補改ざん・競合・同期済みの無変更を検証する。通常CIでも必須実行する。
+
 ### パスキー関連変更の恒常的な回帰テスト
 
 WebAuthn、CBOR、暗号ライブラリ、フロントエンドを更新するPRでも、通常のコード変更PRでも、
