@@ -10,7 +10,22 @@
 - ネイティブ: Goランタイム、SQLCipher、SQLite、OpenSSLを含めます。SQLCipher・macOS OpenSSL・Go toolchainの指定版と掲載版を照合します。
 - フォント: 現在のNunitoは本番バンドルに含まれません。使用する変更ではフォントとOFLの掲載・同梱もレビュー対象にしてください。
 
-画面はDesktop/Server共通の一覧を使い、各項目に対象モードを表示します。配布用テキストは対象構成に絞ります。OpenSSLはWindows/macOSでは静的リンクし、Linux/Desktopではシステム提供ライブラリを使うため、一覧では版系列を示し、配布物の `BUILD_DEPENDENCIES.txt` にビルド時の具体的な版を記録します。
+画面・配布用テキストとも、その配布物のOS・CPUアーキテクチャ・Desktop/Serverに一致するOSSだけを掲載します。
+ビルド時に`licenses/targets.json`の6構成のいずれかへ固定し、閲覧するブラウザのOSやCPU、ログイン状態からは推測しません。
+共通で使うOSSは各構成へ掲載し、DesktopだけのWailsやWindowsだけのWebView、ServerだけのWebAuthnは該当する構成だけに含めます。
+表示用JavaScriptには選択した構成の一覧だけを組み込み、他構成の一覧を隠すだけの実装にはしません。
+OpenSSLはmacOSでは固定版だけを表示し、その他では利用する3.x系列を示します。別OSの版は併記しません。
+配布物の`BUILD_DEPENDENCIES.txt`やAlpineパッケージ一覧では、ビルド時に確認した具体的な版も記録します。
+
+DockerはBuildKitの`TARGETARCH`から`server-linux-amd64/arm64`を選択し、Desktop releaseはmatrixで4構成を明示します。
+通常の`wails build/dev`は専用frontendコマンドでDesktopのホスト構成を選択します。
+クロスビルドで直接Wailsを使う場合は、同じ対象を`VITE_OSS_TARGET`にも指定してください。
+例えばdarwin/amd64向けなら、既存の固定版Wails呼出しに`VITE_OSS_TARGET=desktop-darwin-amd64`を渡します。
+サポート外や矛盾した対象はビルドを失敗させます。
+
+frontendビルドは公開ディレクトリ外に`oss-display-inventory.json`を生成し、対象・表示するOSSと版・一覧を含むJavaScriptのSHA-256を記録します。
+Desktop/Dockerの対象別パッケージ作成時に、原本catalogとの一致、対象の取り違え、出力JSの変更を検査します。
+構成別表示も同じ`thirdPartyNotices.json`と`targets`から生成するため、DependabotのOSS情報自動同期で更新する元データを重複させません。
 
 ## 共通チェック
 
@@ -24,7 +39,9 @@ mainのVERSION変更時はDesktop/Dockerを実行し、PRでは変更パスに�
 
 `frontend/bundled-dependencies.json` もGit管理し、本番ビルドで得た一覧とコミット済みの一覧が一致することを共通チェックで確認します。依存の更新時にはこのファイルも同じPRに含めます。`licenses/build/` は配布構成・アプリ版ごとに生成し、共通チェックの `oss-license-inventories` artifactと最終配布物に保存します。原文・承認情報・対象構成・表示用一覧はGitでレビューできます。
 
-UIのcomponent testに加え、共通チェックで320/375/768/1280pxのブラウザ検証を行い、横方向のoverflowがないこと、本文が縦にスクロールすること、×ボタンがスクロールで移動しないこと、閉じた後のフォーカス復帰を確認します。
+UIのcomponent testに加え、共通チェックで6構成それぞれの本番frontendをビルドし、320/375/768/1280pxで実際の画面を検証します。
+表示されるOSSのID・版・配布構成が原本catalogの対象別一覧と完全一致すること、他モードのOSSが混ざらないことを確認します。
+横方向のoverflow、本文の縦スクロール、×ボタンの位置、閉じた後のフォーカス復帰も同じ検証に含めます。
 
 ## 依存更新時の手順
 
