@@ -74,9 +74,8 @@ jobs:
       - name: Install browser for public license layout tests
         working-directory: frontend
         run: npx --no-install playwright install --with-deps chromium
-      - name: Verify vertical-only scrolling and mobile license layout
-        working-directory: frontend
-        run: npx --no-install playwright test --config playwright.licenses.config.js
+      - name: Verify exact OSS display and mobile layout for all release targets
+        run: node scripts/oss-ui-matrix.mjs
       - name: Save failed license layout screenshots
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -722,7 +721,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
-      - run: node --test scripts/security-monitoring.test.mjs scripts/runtime-versions.test.mjs scripts/wails-dev-integration.test.mjs scripts/wails-native-integration.test.mjs scripts/dependabot-node-sync.test.mjs scripts/check-node-sync-app.test.mjs
+      - run: node --test scripts/security-monitoring.test.mjs scripts/runtime-versions.test.mjs scripts/wails-dev-integration.test.mjs scripts/wails-native-integration.test.mjs scripts/dependabot-node-sync.test.mjs scripts/check-node-sync-app.test.mjs scripts/dependabot-oss-sync.test.mjs
       - name: Validate offline TrueNAS icon metadata
         run: python3 -B -m unittest discover -s scripts -p 'truenas_icon_metadata_test.py'
       - name: Verify coordinated runtime versions

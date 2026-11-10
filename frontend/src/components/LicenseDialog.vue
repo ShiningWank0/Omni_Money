@@ -1,21 +1,20 @@
 <template>
   <Teleport to="body">
     <div class="license-overlay" @click.self="$emit('close')">
-      <section ref="dialog" class="license-dialog" role="dialog" aria-modal="true" aria-labelledby="license-title" tabindex="-1" @keydown="handleKeydown">
+      <section ref="dialog" class="license-dialog" role="dialog" aria-modal="true" aria-labelledby="license-title" :data-oss-target="catalog.target.id" tabindex="-1" @keydown="handleKeydown">
         <header class="license-header">
           <h2 id="license-title">オープンソースライセンス</h2>
           <PanelCloseButton label="ライセンスを閉じる" @click="$emit('close')" />
         </header>
         <div class="license-content">
           <p>Omni Moneyは、以下のオープンソースソフトウェアを利用しています。</p>
-          <p>Desktop・サーバーの構成によって利用するソフトウェアが異なります。各ソフトウェアの条件は原文をご確認ください。</p>
+          <p>{{ targetLabel }}で使用するソフトウェアを掲載しています。各ソフトウェアの条件は原文をご確認ください。</p>
           <details class="license-item">
             <summary>Omni Money — Apache-2.0</summary>
             <pre>{{ catalog.applicationLicense }}</pre>
           </details>
-          <details v-for="component in catalog.components" :key="component.id" class="license-item">
+          <details v-for="component in catalog.components" :key="component.id" class="license-item" :data-oss-component="component.id" :data-oss-version="component.version">
             <summary>{{ component.name }} <span>{{ component.version }} · {{ component.license }}</span></summary>
-            <p class="license-scope">{{ component.targets.every(target => target.startsWith('desktop-')) ? 'Desktop版' : component.targets.every(target => target.startsWith('server-')) ? 'サーバー版' : 'Desktop・サーバー共通' }}</p>
             <a :href="component.url" target="_blank" rel="noopener noreferrer">公式情報・配布元</a>
             <template v-for="file in component.files" :key="file.path">
               <p class="license-filename">{{ file.path }}</p>
@@ -31,7 +30,8 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import PanelCloseButton from './PanelCloseButton.vue'
-import catalog from '../generated/thirdPartyNotices.json'
+import catalog from 'virtual:omni-oss-notices'
+const targetLabel = `${catalog.target.mode === 'desktop' ? 'Desktop版' : 'サーバー版'}（${{ darwin: 'macOS', windows: 'Windows', linux: 'Linux' }[catalog.target.goos]} / ${catalog.target.goarch}）`
 const emit = defineEmits(['close'])
 const dialog = ref(null)
 onMounted(() => dialog.value?.focus())
