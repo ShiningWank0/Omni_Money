@@ -274,8 +274,8 @@
     {
       "id": "go:github.com/mattn/go-sqlite3",
       "name": "github.com/mattn/go-sqlite3",
-      "version": "v1.14.52",
-      "url": "https://pkg.go.dev/github.com/mattn/go-sqlite3@v1.14.52",
+      "version": "v1.14.53",
+      "url": "https://pkg.go.dev/github.com/mattn/go-sqlite3@v1.14.53",
       "targets": [
         "desktop-darwin-amd64",
         "desktop-darwin-arm64",
@@ -444,8 +444,8 @@
     {
       "id": "go:github.com/wailsapp/wails/v2",
       "name": "github.com/wailsapp/wails/v2",
-      "version": "v2.17.0",
-      "url": "https://pkg.go.dev/github.com/wailsapp/wails/v2@v2.17.0",
+      "version": "v2.17.1",
+      "url": "https://pkg.go.dev/github.com/wailsapp/wails/v2@v2.17.1",
       "targets": [
         "desktop-darwin-amd64",
         "desktop-darwin-arm64",
