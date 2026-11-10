@@ -1932,30 +1932,6 @@
       "evidence": "reviewed native build recipes; externalTargets identify system-provided runtime libraries"
     },
     {
-      "id": "npm:@asamuzakjp/css-color",
-      "name": "@asamuzakjp/css-color",
-      "version": "7.1.4",
-      "dependencyType": "development",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
-    },
-    {
-      "id": "npm:@asamuzakjp/dom-selector",
-      "name": "@asamuzakjp/dom-selector",
-      "version": "10.0.3",
-      "dependencyType": "development",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
-    },
-    {
       "id": "npm:@babel/helper-string-parser",
       "name": "@babel/helper-string-parser",
       "version": "7.29.13",
@@ -1996,90 +1972,6 @@
       "name": "@babel/types",
       "version": "7.29.11",
       "dependencyType": "runtime",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
-    },
-    {
-      "id": "npm:@bramus/specificity",
-      "name": "@bramus/specificity",
-      "version": "2.4.2",
-      "dependencyType": "development",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
-    },
-    {
-      "id": "npm:@csstools/color-helpers",
-      "name": "@csstools/color-helpers",
-      "version": "6.1.2",
-      "dependencyType": "development",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
-    },
-    {
-      "id": "npm:@csstools/css-calc",
-      "name": "@csstools/css-calc",
-      "version": "3.4.3",
-      "dependencyType": "development",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
-    },
-    {
-      "id": "npm:@csstools/css-color-parser",
-      "name": "@csstools/css-color-parser",
-      "version": "4.2.6",
-      "dependencyType": "development",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
-    },
-    {
-      "id": "npm:@csstools/css-parser-algorithms",
-      "name": "@csstools/css-parser-algorithms",
-      "version": "4.0.2",
-      "dependencyType": "development",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
-    },
-    {
-      "id": "npm:@csstools/css-syntax-patches-for-csstree",
-      "name": "@csstools/css-syntax-patches-for-csstree",
-      "version": "1.1.15",
-      "dependencyType": "development",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
-    },
-    {
-      "id": "npm:@csstools/css-tokenizer",
-      "name": "@csstools/css-tokenizer",
-      "version": "4.0.2",
-      "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
       "includedTargets": [],
@@ -2722,9 +2614,21 @@
       "evidence": "Not present in production frontend bundle module inventory"
     },
     {
-      "id": "npm:bidi-js",
-      "name": "bidi-js",
-      "version": "1.1.0",
+      "id": "npm:bcp-47",
+      "name": "bcp-47",
+      "version": "2.1.2",
+      "dependencyType": "development",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production frontend bundle module inventory"
+    },
+    {
+      "id": "npm:bcp-47-match",
+      "name": "bcp-47-match",
+      "version": "2.0.3",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2820,18 +2724,6 @@
       "evidence": "Not present in production frontend bundle module inventory"
     },
     {
-      "id": "npm:css-tree",
-      "name": "css-tree",
-      "version": "3.2.1",
-      "dependencyType": "development",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
-    },
-    {
       "id": "npm:csstype",
       "name": "csstype",
       "version": "3.2.3",
@@ -2906,7 +2798,7 @@
     {
       "id": "npm:entities",
       "name": "entities",
-      "version": "8.0.0",
+      "version": "9.0.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3036,6 +2928,42 @@
       "evidence": "Not present in production frontend bundle module inventory"
     },
     {
+      "id": "npm:is-alphabetical",
+      "name": "is-alphabetical",
+      "version": "2.0.1",
+      "dependencyType": "development",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production frontend bundle module inventory"
+    },
+    {
+      "id": "npm:is-alphanumerical",
+      "name": "is-alphanumerical",
+      "version": "2.0.1",
+      "dependencyType": "development",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production frontend bundle module inventory"
+    },
+    {
+      "id": "npm:is-decimal",
+      "name": "is-decimal",
+      "version": "2.0.1",
+      "dependencyType": "development",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production frontend bundle module inventory"
+    },
+    {
       "id": "npm:is-potential-custom-element-name",
       "name": "is-potential-custom-element-name",
       "version": "1.0.1",
@@ -3074,7 +3002,7 @@
     {
       "id": "npm:jsdom",
       "name": "jsdom",
-      "version": "30.1.3",
+      "version": "31.0.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3276,18 +3204,6 @@
       "evidence": "Not present in production frontend bundle module inventory"
     },
     {
-      "id": "npm:mdn-data",
-      "name": "mdn-data",
-      "version": "2.27.1",
-      "dependencyType": "development",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
-    },
-    {
       "id": "npm:minimatch",
       "name": "minimatch",
       "version": "11.0.4",
@@ -3362,7 +3278,19 @@
     {
       "id": "npm:parse5",
       "name": "parse5",
-      "version": "8.0.1",
+      "version": "8.1.0",
+      "dependencyType": "development",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production frontend bundle module inventory"
+    },
+    {
+      "id": "npm:parse5-parser-stream",
+      "name": "parse5-parser-stream",
+      "version": "8.1.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3497,18 +3425,6 @@
       "id": "npm:punycode",
       "name": "punycode",
       "version": "2.3.1",
-      "dependencyType": "development",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
-    },
-    {
-      "id": "npm:require-from-string",
-      "name": "require-from-string",
-      "version": "2.0.2",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3664,7 +3580,7 @@
     {
       "id": "npm:undici",
       "name": "undici",
-      "version": "8.12.2",
+      "version": "8.12.4",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3800,7 +3716,7 @@
     {
       "id": "npm:whatwg-url",
       "name": "whatwg-url",
-      "version": "17.2.0",
+      "version": "17.3.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
