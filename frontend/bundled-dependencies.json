@@ -6,22 +6,22 @@
   },
   {
     "name": "@vue/reactivity",
-    "version": "3.5.44",
+    "version": "3.5.45",
     "directory": "node_modules/@vue/reactivity"
   },
   {
     "name": "@vue/runtime-core",
-    "version": "3.5.44",
+    "version": "3.5.45",
     "directory": "node_modules/@vue/runtime-core"
   },
   {
     "name": "@vue/runtime-dom",
-    "version": "3.5.44",
+    "version": "3.5.45",
     "directory": "node_modules/@vue/runtime-dom"
   },
   {
     "name": "@vue/shared",
-    "version": "3.5.44",
+    "version": "3.5.45",
     "directory": "node_modules/@vue/shared"
   },
   {
@@ -36,7 +36,7 @@
   },
   {
     "name": "vite",
-    "version": "8.3.5",
+    "version": "8.3.6",
     "directory": "node_modules/vite"
   },
   {

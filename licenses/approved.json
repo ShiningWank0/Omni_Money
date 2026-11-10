@@ -77,7 +77,7 @@
       "sha256": "7aaa0f5a00aa44dc479152412e111268e48b265b34574ec62398a182e5c0ca37"
     },
     "go:github.com/mattn/go-sqlite3": {
-      "version": "v1.14.52",
+      "version": "v1.14.53",
       "license": "MIT",
       "sha256": "31ccca318fd8aade366a73440061fd06b43ecf10f665bf2bad69ecf979c07f9e"
     },
@@ -122,7 +122,7 @@
       "sha256": "d56b60c6b33f0196644685265b4f819ce334ffe673298add12d63ec4cadfef3e"
     },
     "go:github.com/wailsapp/wails/v2": {
-      "version": "v2.17.0",
+      "version": "v2.17.1",
       "license": "MIT",
       "sha256": "0ee6678b63d869c89aabd80b8a971add201883b99eccaf6bb20b0a2839d977da"
     },
@@ -182,22 +182,22 @@
       "sha256": "ecf9c1549f38a0e690250d56ff67040cf0694e1382ced0efb93ba740c33d6856"
     },
     "npm:@vue/reactivity": {
-      "version": "3.5.44",
+      "version": "3.5.45",
       "license": "MIT",
       "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
     },
     "npm:@vue/runtime-core": {
-      "version": "3.5.44",
+      "version": "3.5.45",
       "license": "MIT",
       "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
     },
     "npm:@vue/runtime-dom": {
-      "version": "3.5.44",
+      "version": "3.5.45",
       "license": "MIT",
       "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
     },
     "npm:@vue/shared": {
-      "version": "3.5.44",
+      "version": "3.5.45",
       "license": "MIT",
       "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
     },
@@ -212,7 +212,7 @@
       "sha256": "9ef601416fdec1277f6246cdfe8c0c93cd5822ab66a4c5a89446608344653ebe"
     },
     "npm:vite": {
-      "version": "8.3.5",
+      "version": "8.3.6",
       "license": "MIT",
       "sha256": "614c975ac994720a48b213a04d4aa19e1913122e9c89f83d5c9f2a29429b1cfe"
     },
