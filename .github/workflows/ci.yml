@@ -722,7 +722,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
-      - run: node --test scripts/security-monitoring.test.mjs scripts/runtime-versions.test.mjs scripts/wails-dev-integration.test.mjs scripts/wails-native-integration.test.mjs scripts/dependabot-node-sync.test.mjs scripts/check-node-sync-app.test.mjs
+      - run: node --test scripts/security-monitoring.test.mjs scripts/runtime-versions.test.mjs scripts/wails-dev-integration.test.mjs scripts/wails-native-integration.test.mjs scripts/dependabot-node-sync.test.mjs scripts/check-node-sync-app.test.mjs scripts/dependabot-oss-sync.test.mjs
       - name: Validate offline TrueNAS icon metadata
         run: python3 -B -m unittest discover -s scripts -p 'truenas_icon_metadata_test.py'
       - name: Verify coordinated runtime versions
