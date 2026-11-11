@@ -1,11 +1,11 @@
 module omni_money
 
-// Go 1.26.10 includes the crypto/x509 fix for GO-2026-6809, in addition
-// to the earlier standard-library security fixes. CI and release builds
-// use the pinned toolchain below.
-go 1.26.10
+// Go 1.26.11 includes the net/http fix for GO-2026-6859 and the cgo
+// security fixes, in addition to the earlier standard-library fixes.
+// CI and release builds use the pinned toolchain below.
+go 1.26.11
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/fxamacker/cbor/v2 v2.10.0
