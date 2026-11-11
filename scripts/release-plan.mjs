@@ -11,7 +11,7 @@ export function releasePlan(event, paths, rehearsal = false) {
     docker: paths.includes('VERSION'),
   }
   if (event !== 'pull_request') throw new Error(`Unexpected pipeline event ${event}`)
-  const shared = path => /^(licenses\/|scripts\/oss-|frontend\/|\.github\/workflows\/)/.test(path) || ['go.mod', 'go.sum', '.node-version', 'LICENSE'].includes(path)
+  const shared = path => /^(licenses\/|scripts\/oss-|frontend\/|\.github\/workflows\/)/.test(path) || ['go.mod', 'go.sum', '.node-version', 'LICENSE', 'scripts/ci_ubuntu_apt.py'].includes(path)
   return {
     desktop: paths.some(path => shared(path) || path.endsWith('.go') || path.startsWith('build/') || /^scripts\/(build-(sqlcipher|openssl)-|wails-(native|dev)-)/.test(path) || path === 'wails.json'),
     docker: paths.some(path => shared(path) || path.startsWith('backend/') || ['Dockerfile', '.dockerignore', 'server.go'].includes(path) || path.startsWith('scripts/build-sqlcipher-')),

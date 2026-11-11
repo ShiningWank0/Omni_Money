@@ -71,9 +71,13 @@ jobs:
       - name: Test public and locked license screens
         working-directory: frontend
         run: npx --no-install vitest run tests/component/Licenses.test.js
+      - name: Test Ubuntu package mirror configuration
+        run: python3 -m unittest discover -s scripts -p ci_ubuntu_apt_test.py
       - name: Install browser for public license layout tests
         working-directory: frontend
-        run: npx --no-install playwright install --with-deps chromium
+        run: |
+          sudo python3 ../scripts/ci_ubuntu_apt.py
+          npx --no-install playwright install --with-deps chromium
       - name: Verify exact OSS display and mobile layout for all release targets
         run: node scripts/oss-ui-matrix.mjs
       - name: Save failed license layout screenshots
@@ -163,6 +167,7 @@ jobs:
 
       - name: Install Linux dependencies
         run: |
+          sudo python3 scripts/ci_ubuntu_apt.py
           sudo apt-get update
           sudo apt-get install -y build-essential curl tcl libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 
@@ -801,7 +806,10 @@ jobs:
       - name: Record the dependency versions declared by this PR
         run: go list -mod=readonly -m all
       - name: Install SQLCipher build dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential curl tcl libssl-dev
+        run: |
+          sudo python3 scripts/ci_ubuntu_apt.py
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl tcl libssl-dev
       - name: Build checksum-pinned SQLCipher
         run: sh scripts/build-sqlcipher-linux.sh
       - name: Test passkey authentication and encrypted persistence
