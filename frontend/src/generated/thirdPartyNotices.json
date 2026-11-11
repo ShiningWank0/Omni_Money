@@ -613,7 +613,7 @@
     {
       "id": "native:go",
       "name": "Go runtime and standard library",
-      "version": "1.27.3",
+      "version": "1.27.4",
       "license": "BSD-3-Clause",
       "url": "https://go.dev/LICENSE",
       "targets": [

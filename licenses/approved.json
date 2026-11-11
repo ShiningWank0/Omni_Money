@@ -157,7 +157,7 @@
       "sha256": "d4dbf5bb0080d2b598a694bdbd86c016472bcf54934aeddfa43fd1e078bb8564"
     },
     "native:go": {
-      "version": "1.27.3",
+      "version": "1.27.4",
       "license": "BSD-3-Clause",
       "sha256": "038794f79c728cc1b4ff3caf7eec332cd79658f5885d9ef43246ec95606c87dc"
     },
