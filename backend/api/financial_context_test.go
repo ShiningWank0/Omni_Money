@@ -34,6 +34,14 @@ func TestFinancialRoutesNeverFallBackToInitializedGlobalDatabase(t *testing.T) {
 		body   string
 	}{
 		{http.MethodGet, "/api/accounts", ""},
+		{http.MethodGet, "/api/subscriptions", ""},
+		{http.MethodPost, "/api/subscriptions", `{}`},
+		{http.MethodPut, "/api/subscriptions/6425a5b7-bf0d-4a2f-bb61-5ef6dd4196a3", `{}`},
+		{http.MethodGet, "/api/subscriptions/6425a5b7-bf0d-4a2f-bb61-5ef6dd4196a3/transactions", ""},
+		{http.MethodPost, "/api/subscription-sync", ""},
+		{http.MethodGet, "/api/subscription-calendar?month=2026-11", ""},
+		{http.MethodGet, "/api/subscription-candidates", ""},
+		{http.MethodDelete, "/api/subscription-candidates/1111111111111111111111111111111111111111111111111111111111111111", ""},
 		{http.MethodGet, "/api/items", ""},
 		{http.MethodGet, "/api/transactions", ""},
 		{http.MethodPost, "/api/transactions", `{}`},

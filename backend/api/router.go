@@ -138,6 +138,12 @@ func NewRouterWithError() (http.Handler, error) {
 // the request-scoped core Service. The legacy router explicitly installs one;
 // multi-user server routers obtain one only from VaultSessionAuthMiddleware.
 func registerFinancialRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/subscriptions", handleSubscriptions)
+	mux.HandleFunc("/api/subscriptions/", handleSubscriptionByID)
+	mux.HandleFunc("/api/subscription-sync", methodGuard(http.MethodPost, handleSubscriptionSync))
+	mux.HandleFunc("/api/subscription-calendar", methodGuard(http.MethodGet, handleSubscriptionCalendar))
+	mux.HandleFunc("/api/subscription-candidates", methodGuard(http.MethodGet, handleSubscriptionCandidates))
+	mux.HandleFunc("/api/subscription-candidates/", methodGuard(http.MethodDelete, handleSubscriptionCandidateDismiss))
 	mux.HandleFunc("/api/accounts", methodGuard(http.MethodGet, handleAccounts))
 	mux.HandleFunc("/api/items", methodGuard(http.MethodGet, handleItems))
 	mux.HandleFunc("/api/transactions", handleTransactions)

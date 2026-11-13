@@ -179,6 +179,7 @@ type TransactionRequest struct {
 
 // TransactionResponse はフロントエンドに返す取引データ
 type TransactionResponse struct {
+	Subscription *SubscriptionProvenance    `json:"subscription,omitempty"`
 	ID           int64                      `json:"id"`
 	FundItem     string                     `json:"fundItem"`
 	Account      string                     `json:"account"`
@@ -192,6 +193,18 @@ type TransactionResponse struct {
 	Memo         string                     `json:"memo"`
 	Images       []TransactionImageResponse `json:"images,omitempty"`
 	Tags         []Tag                      `json:"tags,omitempty"`
+}
+
+// SubscriptionProvenance survives ordinary edits and confirmation. It is
+// supplied by the ledger, never accepted from transaction-save clients.
+type SubscriptionProvenance struct {
+	RuleID         string `json:"rule_id"`
+	Unconfirmed    bool   `json:"unconfirmed"`
+	Currency       string `json:"currency"`
+	OriginalAmount string `json:"original_amount"`
+	Rate           string `json:"rate"`
+	RateDate       string `json:"rate_date"`
+	YenAmountExact string `json:"yen_amount_exact"`
 }
 
 // BalanceHistoryResponse は残高推移データのレスポンス
