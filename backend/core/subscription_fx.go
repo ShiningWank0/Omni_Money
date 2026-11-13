@@ -8,12 +8,14 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"omni_money/backend/validation"
 )
@@ -23,6 +25,8 @@ var ErrSubscriptionRateUnavailable = errors.New("為替レートを取得でき�
 var subscriptionCurrencies = map[string]bool{"JPY": true, "USD": true, "EUR": true, "GBP": true, "AUD": true, "CAD": true, "CHF": true, "CNY": true, "HKD": true, "SGD": true}
 var subscriptionMoneyPattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,11})(\.[0-9]{1,2})?$`)
 var subscriptionRatePattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,9})(\.[0-9]{1,16})?$`)
+
+const subscriptionRateBodyLimit = 16 * 1024
 
 type subscriptionRate struct {
 	Date string
@@ -68,29 +72,29 @@ func fetchSubscriptionRate(ctx context.Context, currency, due string) (subscript
 		return subscriptionRate{}, ErrSubscriptionRateUnavailable
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
+	// The documented JSON representation is the only format we request. Do not
+	// sniff HTML/error pages or allow ambiguous Content-Type headers/encodings.
+	contentTypes := response.Header.Values("Content-Type")
+	if response.StatusCode != http.StatusOK || len(contentTypes) != 1 {
 		return subscriptionRate{}, ErrSubscriptionRateUnavailable
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, 16385))
-	if err != nil || len(data) > 16384 {
+	mediaType, params, err := mime.ParseMediaType(contentTypes[0])
+	if err != nil || mediaType != "application/json" || (params["charset"] != "" && !strings.EqualFold(params["charset"], "utf-8")) {
+		return subscriptionRate{}, ErrSubscriptionRateUnavailable
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, subscriptionRateBodyLimit+1))
+	if err != nil {
 		return subscriptionRate{}, ErrSubscriptionRateUnavailable
 	}
 	return decodeSubscriptionRate(data, currency, due)
 }
 
+// This intentionally accepts less than the general Frankfurter Rate schema:
+// the fixed ECB query does not request expand=providers, other pairs, or formats.
+// Validate tokens before creating domain values: struct decoding silently folds
+// key case, overwrites duplicate keys and accepts quoted json.Number values.
 func decodeSubscriptionRate(data []byte, currency, due string) (subscriptionRate, error) {
-	var rows []struct {
-		Date  string      `json:"date"`
-		Base  string      `json:"base"`
-		Quote string      `json:"quote"`
-		Rate  json.Number `json:"rate"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	if err := decoder.Decode(&rows); err != nil || len(rows) == 0 || len(rows) > 8 {
-		return subscriptionRate{}, ErrSubscriptionRateUnavailable
-	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
+	if len(data) > subscriptionRateBodyLimit || !utf8.Valid(data) || !subscriptionCurrencies[currency] || currency == "JPY" {
 		return subscriptionRate{}, ErrSubscriptionRateUnavailable
 	}
 	date, err := subscriptionDate(due)
@@ -98,18 +102,76 @@ func decodeSubscriptionRate(data []byte, currency, due string) (subscriptionRate
 		return subscriptionRate{}, ErrSubscriptionRateUnavailable
 	}
 	minimum := date.AddDate(0, 0, -7).Format(time.DateOnly)
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if token, err := decoder.Token(); err != nil || token != json.Delim('[') {
+		return subscriptionRate{}, ErrSubscriptionRateUnavailable
+	}
 	chosen := subscriptionRate{}
 	seen := make(map[string]bool)
-	for _, row := range rows {
-		if _, err := subscriptionDate(row.Date); err != nil || row.Date < minimum || row.Date > due || !strings.EqualFold(row.Base, currency) || !strings.EqualFold(row.Quote, "JPY") || seen[row.Date] || !validSubscriptionRate(row.Rate.String()) {
+	for decoder.More() {
+		// The inclusive seven-day lookback has at most eight distinct dates.
+		if len(seen) == 8 {
 			return subscriptionRate{}, ErrSubscriptionRateUnavailable
 		}
-		seen[row.Date] = true
-		if row.Date > chosen.Date {
-			chosen = subscriptionRate{row.Date, row.Rate.String()}
+		row, err := decodeSubscriptionRateRow(decoder)
+		if err != nil {
+			return subscriptionRate{}, ErrSubscriptionRateUnavailable
+		}
+		if _, err := subscriptionDate(row["date"]); err != nil || row["date"] < minimum || row["date"] > due || row["base"] != currency || row["quote"] != "JPY" || seen[row["date"]] || !validSubscriptionRate(row["rate"]) {
+			return subscriptionRate{}, ErrSubscriptionRateUnavailable
+		}
+		seen[row["date"]] = true
+		if row["date"] > chosen.Date {
+			chosen = subscriptionRate{row["date"], row["rate"]}
 		}
 	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim(']') || chosen.Date == "" {
+		return subscriptionRate{}, ErrSubscriptionRateUnavailable
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return subscriptionRate{}, ErrSubscriptionRateUnavailable
+	}
 	return chosen, nil
+}
+
+func decodeSubscriptionRateRow(decoder *json.Decoder) (map[string]string, error) {
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return nil, ErrSubscriptionRateUnavailable
+	}
+	row := make(map[string]string, 4)
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok || (key != "date" && key != "base" && key != "quote" && key != "rate") {
+			return nil, ErrSubscriptionRateUnavailable
+		}
+		// Token unescapes keys first, so ra\u0074e cannot hide a duplicate rate.
+		if _, duplicate := row[key]; duplicate {
+			return nil, ErrSubscriptionRateUnavailable
+		}
+		value, err := decoder.Token()
+		if err != nil {
+			return nil, ErrSubscriptionRateUnavailable
+		}
+		if key == "rate" {
+			number, ok := value.(json.Number)
+			if !ok {
+				return nil, ErrSubscriptionRateUnavailable
+			}
+			row[key] = number.String()
+		} else {
+			text, ok := value.(string)
+			if !ok {
+				return nil, ErrSubscriptionRateUnavailable
+			}
+			row[key] = text
+		}
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') || len(row) != 4 {
+		return nil, ErrSubscriptionRateUnavailable
+	}
+	return row, nil
 }
 
 func validSubscriptionRate(rate string) bool {

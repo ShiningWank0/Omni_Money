@@ -15,6 +15,28 @@
 - CSV v3はサブスク拡張を含まない範囲を明示する。appendは手動取引、replaceは既存ルールを停止し、削除した取引・タグの参照を切り離す。処理済み支払回は保持する。完全なサブスク復元はschema 7のsnapshot/whole-data-root backupで行う。
 - 一覧・履歴・カレンダーの自動登録取引にopacity .55を適用する。説明文字・バッジ・tooltip・専用色は追加しない。保存が失敗・未完了なら解除せず、serverのcompletedと同じtransactionで確認状態を確定する。
 
+### 外部レート応答の検証
+
+2026-11-13に[公式OpenAPI（API version 2.1.1）](https://api.frankfurter.dev/v2/openapi.json)と、固定先 `https://api.frankfurter.dev/v2/providers/ecb/rates?base=USD&quotes=JPY&from=2024-05-08&to=2024-05-15` の実応答を照合した。HTTP 200、`Content-Type: application/json; charset=utf-8`、各要素に必須の `date` / `base` / `quote` / `rate` があるJSON配列だった。例は `{"date":"2024-05-15","base":"USD","quote":"JPY","rate":155.49}`。`rate` の公式型は正のJSON数値であり、数値を含む文字列ではない。ECBの元データはEUR基準で、他のbaseへの変換はFrankfurter側で算出される。
+
+外部応答は信頼せず、以下をアプリ側の受入条件とする。公式の汎用schemaより狭い条件であり、仕様変更時も自動で許容範囲を広げない。
+
+- HTTP 200と単一のJSON Content-Typeを要求し、charset指定がある場合はUTF-8のみ許可する。読み取る本文は展開後16 KiBまで、parserでも同じ上限とUTF-8の妥当性を確認する。
+- 配列は1～8件。各要素は小文字の4キーだけを各1回持つobjectとする。未知・欠落・重複・大文字小文字違いのキー、文字列escapeで隠した重複、入れ子や別の型を拒否する。`expand=providers` を要求しないため、公式の任意項目 `providers` も受け入れない。配列末尾の空白以外のデータも拒否する。
+- `date` / `base` / `quote` は文字列、`rate` はJSON数値として受け取る。`"155.49"`、null、boolean、配列、object、NaN、Infinity、コードやURLなどを数値に変換して救済しない。現行のdecimal受入条件は整数部10桁以内・小数部16桁以内・正の値で、指数表記も受け入れない。浮動小数点数には変換しない。
+- 実在する日付、支払日以前7日以内、日付の重複なし、要求した大文字のbaseと `JPY` の一致を全件で確認してから最新日を採用する。1件でも異常があれば、ほかに有効な行があっても応答全体を拒否する。円換算後も既存の取引額上限を適用する。
+- 検証失敗時はそのルールの取引・残高・処理済み回・次回日付を変更せず、定型の取得失敗を返して次回利用時に再試行する。外部本文や外部エラー文字列をUI・DBへ渡さず、外部指定のURLやコードを実行しない。TLS検証・redirect禁止・proxy不使用・timeoutも維持する。
+
+回帰テストは実応答fixture、休日・順序違いの正常例、異常な型・重複・注入・サイズ超過、検証失敗時のledger/schedule不変と正常応答後の1回だけの登録を含む。`FuzzSubscriptionRateJSON` は通常のGo testでseedを実行する。追加の探索は `go test -run='^$' -fuzz='^FuzzSubscriptionRateJSON$' -fuzztime=45s -parallel=1 ./backend/core` で実行できる。専用の継続fuzz CI jobは追加していない。
+
+この検証はデータの形式・範囲と処理境界を守る。侵害された配信元が、形式も範囲も正しい架空のレートを返す場合の真偽判定は行わない。別経路のレート照合や変動率による異常検知は実装していない。
+
+### 外部APIの利用料金とデータ条件
+
+2026-11-13時点の[Frankfurter公式FAQ](https://frankfurter.dev/#faq)では公開APIは無料・APIキー不要で、商用利用も可能。月次・日次quotaはないが、濫用防止のrate limitがある。利用規約変更、停止、欠測が起きても、有料サービスや別の取得先へ自動で切り替えない。利用料金や無停止を将来にわたって保証するものではない。
+
+[Frankfurterのデータ利用条件](https://frankfurter.dev/license/)ではprovider直指定には元providerの条件が適用される。[ECBの条件](https://www.ecb.europa.eu/services/using-our-site/disclaimer/html/index.en.html)では情報は無料で利用できるが、再掲時の正確性とECBの出典表示、加工した場合の明示などが必要となる。管理画面・取引詳細・利用ガイドでECB / Frankfurterを表示し、円換算方法を説明する。これは日次参照値であり、カード請求額や実行可能な市場価格を保証しない。
+
 後続の節は元の確定条件と実装検討の記録として保持する。本書の削除はmain統合前に利用者の確認を受けて行う。
 
 ## 1. 目的と対象
