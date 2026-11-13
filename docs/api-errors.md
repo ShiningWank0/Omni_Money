@@ -21,6 +21,25 @@ Frontendは `ApiError` の `message/status/code/retryable` で失敗を扱いま
 認証情報更新の4xx拒否だけをdefinitiveResponseとして扱い、5xx・通信断・壊れた成功応答は適用済みの可能性を残します。
 
 
+## サブスク管理と自動登録
+
+サブスクの自動登録・管理APIも認証済み本人のvault leaseと既存のCSRF・no-store境界を使用します。
+
+| Endpoint | 成功応答と意味 |
+| --- | --- |
+| `GET /api/subscriptions` | 200。停止分を含む本人のルール一覧。上限256件 |
+| `POST /api/subscriptions` | 201。既存の手動支出を起点にルール作成 |
+| `PUT /api/subscriptions/{id}` | 200。revision一致を条件に編集・停止・再開。競合は409、本人vaultに存在しないIDは404 |
+| `POST /api/subscription-sync` | 200。`created`、`has_more`、`errors`。1回24件・15秒以内。当日までの支払回を同じledger transactionで取引・残高・処理記録とともに確定 |
+| `GET /api/subscriptions/{id}/transactions` | 200。`account/search/start/end/offset`で検索。開始・終了日はinclusive、日付・ID昇順。100件と`next_offset`（終端は-1）を返す |
+| `GET /api/subscription-calendar?month=YYYY-MM` | 200。月の実績・予定。読み取り専用。年月は0001-01～9998-12、実績上限2,048件 |
+| `GET /api/subscription-candidates` | 200。候補一覧。保存前の生成・外部AI送信は行わない |
+| `DELETE /api/subscription-candidates/{fingerprint}` | 200 `{"success":true}`。その候補パターンの拒否を本人vaultへ保存 |
+
+ルール入力は`source_transaction_id`、`revision`、`account`、`item`、`memo`、`currency`、decimal文字列の`original_amount`、`interval`（monthly/yearly）、`anchor_day`、`anchor_month`、`timezone`、`next_date`、`enabled`、`tags`。未知フィールド・末尾JSON・32 KiB超の入力は拒否します。通貨は固定allowlist、日付はYYYY-MM-DD、timezoneは明示したIANA名（Localは拒否）です。任意URLや外貨レートを受け付ける入力はありません。
+
+取引responseの`subscription`には不変の`rule_id`、`unconfirmed`、元の通貨・金額、rate・公表日・初回円換算額を返します。transaction-save requestからこれらを書き換えることはできません。開く・取得する操作では確認状態を変えず、変更なしを含めた既存取引の保存が成功した場合だけ、取引変更・completed記録と一緒に確認状態を確定します。画面は保存受付の202だけで表示を変更しません。
+
 ## サーバーの取引保存受付
 
 取引エディターの作成・更新は次のAPIを使用します。DesktopのWails呼出し、CSVインポート、取引削除などには適用しません。
