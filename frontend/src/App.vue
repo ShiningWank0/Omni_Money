@@ -98,6 +98,7 @@
           <button class="menu-btn menu-group-start" @click="showGraphModal">残高推移グラフ表示</button>
           <button class="menu-btn" @click="openTagChart">タグ別分析</button>
           <button class="menu-btn" @click="openTagManager">タグ管理</button>
+          <button class="menu-btn" @click="openSubscriptionManager">サブスク管理</button>
           <button v-if="serverFeatures.snapshots" class="menu-btn menu-group-start" @click="openSnapshotManager">スナップショット管理</button>
           <button v-if="isWailsMode" class="menu-btn menu-group-start" @click="openDesktopIdleSettings">自動ロック設定</button>
           <button class="menu-btn menu-group-start" @click="openCredentialSettings">認証情報の管理</button>
@@ -122,6 +123,7 @@
         <button type="button" :disabled="retryingData" @click="retryPrivateData">再読み込み</button>
       </div>
 
+      <p v-if="subscriptionError" class="load-error" role="alert">{{ subscriptionError }}</p>
       <div class="transaction-section" :aria-busy="isTableLoading">
         <table class="transaction-table">
           <caption class="sr-only">取引履歴</caption>
@@ -157,6 +159,7 @@
               <tr
                 v-for="transaction in sortedTransactions"
                 :key="transaction.id"
+                :class="{ 'subscription-faded': transaction.subscription?.unconfirmed }"
                 tabindex="0"
                 :aria-label="getTransactionAriaLabel(transaction)"
                 @click="showTransactionDetails(transaction)"
@@ -177,10 +180,19 @@
       </div>
     </div>
 
+    <SubscriptionManager
+      v-if="showSubscriptionManager"
+      :source-transaction="subscriptionSource"
+      @close="showSubscriptionManager = false; subscriptionSource = null"
+      @changed="handleSubscriptionChanged"
+      @open-transaction="showSubscriptionManager = false; subscriptionSource = null; showTransactionDetails($event)"
+    />
+
     <TransactionDetailsModal
       v-if="viewingTransaction && !showAddTransactionModal"
       :transaction="viewingTransaction"
       @edit="editViewedTransaction"
+      @subscribe="subscribeViewedTransaction"
       @remove-image="editViewedTransaction"
       @close="viewingTransaction = null"
     />
@@ -399,7 +411,9 @@ const AIAPIConsoleModal = defineAsyncComponent(() => import('./components/AIAPIC
 const ServerAccountAdminModal = defineAsyncComponent(() => import('./components/ServerAccountAdminModal.vue'))
 const PasskeySettingsModal = defineAsyncComponent(() => import('./components/PasskeySettingsModal.vue'))
 const CredentialSettingsModal = defineAsyncComponent(() => import('./components/CredentialSettingsModal.vue'))
+const SubscriptionManager = defineAsyncComponent(() => import('./components/SubscriptionManager.vue'))
 import {
+  syncSubscriptions,
   addTransaction,
   updateTransaction,
   getTransactionSaveNotices,
@@ -464,6 +478,11 @@ const logoutError = ref('')
 let transactionSaveIntent = null
 const transactionSaveNotices = ref([])
 let transactionSaveNoticeTimer = null
+const showSubscriptionManager = ref(false)
+const subscriptionSource = ref(null)
+const subscriptionError = ref('')
+let subscriptionTimer = null
+let subscriptionSyncGeneration = null
 const desktopVaultStatus = ref(null)
 const desktopVaultLoading = ref(isWailsMode)
 const desktopVaultError = ref('')
@@ -618,6 +637,59 @@ function showAddModal() {
 function showTransactionDetails(tx) {
   viewingTransaction.value = { ...tx }
 }
+
+function openSubscriptionManager() {
+  showMenu.value = false
+  subscriptionSource.value = null
+  showSubscriptionManager.value = true
+}
+
+function subscribeViewedTransaction() {
+  const transaction = viewingTransaction.value
+  if (!transaction || transaction.type !== 'expense' || transaction.subscription) return
+  subscriptionSource.value = { ...transaction }
+  viewingTransaction.value = null
+  showSubscriptionManager.value = true
+}
+
+async function handleSubscriptionChanged() {
+  await syncSubscriptionsForUI(true)
+}
+
+async function syncSubscriptionsForUI(refresh = true, duringHydration = false) {
+  const generation = financialUIGeneration
+  if (!componentMounted || subscriptionSyncGeneration === generation || (!duringHydration &&
+      (idleScreenLocked.value || document.visibilityState === 'hidden' || (isWailsMode && !desktopVaultUnlocked.value)))) return
+  clearTimeout(subscriptionTimer)
+  subscriptionSyncGeneration = generation
+  let hasMore = false
+  try {
+    const result = await syncSubscriptions()
+    if (generation !== financialUIGeneration || !componentMounted) return
+    subscriptionError.value = [...new Set(result.errors)].join('。')
+    hasMore = result.has_more
+    if (refresh && result.created > 0) await refreshLedger()
+  } catch {
+    if (generation === financialUIGeneration && componentMounted) {
+      subscriptionError.value = 'サブスクの自動登録を完了できませんでした。次回利用時に再試行します。'
+      // Earlier occurrences may have committed before a later failure or a
+      // lost response. Read their balances even when this pass was ambiguous.
+      if (refresh) await refreshLedger()
+    }
+  } finally {
+    if (subscriptionSyncGeneration === generation) subscriptionSyncGeneration = null
+    if (generation === financialUIGeneration && componentMounted) subscriptionTimer = setTimeout(() => syncSubscriptionsForUI(), hasMore ? 250 : 60000)
+  }
+}
+
+function resumeSubscriptionSync() {
+  if (!isWailsMode) checkIdleTimeout()
+  if (document.visibilityState !== 'hidden') void syncSubscriptionsForUI()
+}
+
+watch([desktopVaultUnlocked, idleScreenLocked], ([unlocked, locked]) => {
+  if (unlocked && !locked) void syncSubscriptionsForUI()
+})
 
 function editViewedTransaction(imageId = null) {
   const tx = viewingTransaction.value
@@ -973,6 +1045,11 @@ function stopIdleLock() {
 // navigating away. The v-if guards also unmount open modals and clear their
 // component-local form state.
 function clearSensitiveStateForIdle(preserveCredentialSettings = false) {
+  clearTimeout(subscriptionTimer)
+  subscriptionTimer = null
+  showSubscriptionManager.value = false
+  subscriptionSource.value = null
+  subscriptionError.value = ''
   transactionSaveIntent = null
   transactionSaveNotices.value = []
   clearTimeout(transactionSaveNoticeTimer)
@@ -1027,6 +1104,8 @@ function clearSensitiveStateForIdle(preserveCredentialSettings = false) {
 
 async function fetchPrivateData() {
   const generation = financialUIGeneration
+  await syncSubscriptionsForUI(false, true)
+  if (generation !== financialUIGeneration) throw new Error('データの読み込みは終了しました')
   if (!isWailsMode) await refreshSaveNotices()
   if (generation !== financialUIGeneration) throw new Error('データの読み込みは終了しました')
   await store.fetchAccounts({ throwOnError: true })
@@ -1480,6 +1559,7 @@ function handleGlobalClick() {
 onMounted(async () => {
   const generation = financialUIGeneration
   componentMounted = true
+  document.addEventListener('visibilitychange', resumeSubscriptionSync)
   document.addEventListener('click', handleGlobalClick)
   window.addEventListener('omni-money:reauth-required', handleReauthRequired)
   window.addEventListener('omni-money:session-expired', handleSessionExpired)
@@ -1544,6 +1624,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  clearTimeout(subscriptionTimer)
+  document.removeEventListener('visibilitychange', resumeSubscriptionSync)
   clearTimeout(transactionSaveNoticeTimer)
   financialUIGeneration++
   store.resetState()
@@ -1565,6 +1647,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.subscription-faded { opacity: .55; }
 .save-notices {
   margin: 1rem;
   padding: 1rem;

@@ -3,6 +3,7 @@ import { createPinia } from 'pinia'
 import { beforeEach, expect, it, vi } from 'vitest'
 
 const api = vi.hoisted(() => ({
+  syncSubscriptions: vi.fn().mockResolvedValue({ created: 0, has_more: false, errors: [] }),
   addTransaction: vi.fn(),
   updateTransaction: vi.fn(),
   getTransactionSaveNotices: vi.fn(),
@@ -70,6 +71,7 @@ async function clickButton(wrapper, label) {
 }
 
 beforeEach(() => {
+  api.syncSubscriptions.mockResolvedValue({ created: 0, has_more: false, errors: [] })
   api.getTransactionSaveNotices.mockResolvedValue([])
   api.getAuthStatus.mockResolvedValue({
     authenticated: true,
@@ -254,6 +256,38 @@ async function openTransactionEditor(wrapper) {
   await wrapper.get('.details-icon-button[aria-label="取引を編集"]').trigger('click')
   await flushPromises()
 }
+
+it('keeps generated rows faded when opened or cancelled and changes them only after a completed save', async () => {
+  const generated = { ...existingTransaction, subscription: { rule_id: '6425a5b7-bf0d-4a2f-bb61-5ef6dd4196a3', unconfirmed: true } }
+  const wrapper = await mountTransactionApp([generated])
+  expect(wrapper.get('tbody tr[tabindex="0"]').classes()).toContain('subscription-faded')
+  await openTransactionEditor(wrapper)
+  await wrapper.get('.transaction-modal .cancel-btn').trigger('click'); await flushPromises()
+  expect(wrapper.get('tbody tr[tabindex="0"]').classes()).toContain('subscription-faded')
+  await wrapper.get('.details-icon-button[aria-label="取引を編集"]').trigger('click'); await flushPromises()
+  const pending = deferred()
+  api.updateTransaction.mockReturnValueOnce(pending.promise)
+  await wrapper.get('.transaction-modal form').trigger('submit'); await flushPromises()
+  expect(wrapper.get('tbody tr[tabindex="0"]').classes()).toContain('subscription-faded')
+  api.getTransactions.mockResolvedValue([{ ...generated, subscription: { ...generated.subscription, unconfirmed: false } }])
+  pending.resolve({ transaction: { ...generated, subscription: { ...generated.subscription, unconfirmed: false } } })
+  await flushPromises()
+  expect(wrapper.get('tbody tr[tabindex="0"]').classes()).not.toContain('subscription-faded')
+})
+
+it('refreshes potentially committed payments after a failed sync and stops polling after unmount', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  const wrapper = await mountTransactionApp([])
+  const reads = api.getTransactions.mock.calls.length
+  api.syncSubscriptions.mockRejectedValueOnce(new Error('lost response'))
+  await vi.advanceTimersByTimeAsync(60000); await flushPromises()
+  expect(api.getTransactions.mock.calls.length).toBeGreaterThan(reads)
+  expect(wrapper.text()).toContain('サブスクの自動登録を完了できませんでした')
+  wrapper.unmount()
+  const calls = api.syncSubscriptions.mock.calls.length
+  await vi.advanceTimersByTimeAsync(120000)
+  expect(api.syncSubscriptions.mock.calls.length).toBe(calls)
+})
 
 it('shows saved images in read-only details before the pencil opens editing', async () => {
   const image = { id: 3, filename: 'receipt.png', data_url: 'data:image/png;base64,iVBORw0KGgo=' }
@@ -676,7 +710,7 @@ it('keeps all server menu actions in the scroll area and logout in a separate fo
   await wrapper.get('.hamburger-menu').trigger('click')
   expect(wrapper.get('.side-menu-items').findAll('button').map(button => button.text())).toEqual([
     'CSVバックアップ', 'CSVインポート', 'クレジットカード設定', '銀行口座設定',
-    '残高推移グラフ表示', 'タグ別分析', 'タグ管理', 'スナップショット管理',
+    '残高推移グラフ表示', 'タグ別分析', 'タグ管理', 'サブスク管理', 'スナップショット管理',
     '認証情報の管理', 'パスキー設定', 'サーバーユーザー管理', 'オープンソースライセンス'
   ])
   expect(wrapper.get('.side-menu > .logout-btn').text()).toBe('ログアウト')

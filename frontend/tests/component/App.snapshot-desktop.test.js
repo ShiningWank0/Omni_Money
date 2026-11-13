@@ -3,6 +3,7 @@ import { createPinia } from 'pinia'
 import { beforeEach, expect, it, vi } from 'vitest'
 
 const api = vi.hoisted(() => ({
+  syncSubscriptions: vi.fn().mockResolvedValue({ created: 0, has_more: false, errors: [] }),
   addTransaction: vi.fn(), updateTransaction: vi.fn(), deleteTransaction: vi.fn(),
   backupToCSVFile: vi.fn(), saveCreditCardSettings: vi.fn(), saveBankAccountSettings: vi.fn(),
   getBalanceHistoryFiltered: vi.fn(), logout: vi.fn(), getAuthStatus: vi.fn(),

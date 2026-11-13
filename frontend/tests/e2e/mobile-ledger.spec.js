@@ -31,6 +31,7 @@ async function mockLedger(page, columns, amount, empty = false) {
       },
       '/api/accounts': accounts,
       '/api/transaction-saves': { saves: [] },
+      '/api/subscription-sync': { created: 0, has_more: false, errors: [] },
       '/api/transactions': transactions,
       '/api/credit_card_settings': [],
       '/api/bank_account_settings': accounts,

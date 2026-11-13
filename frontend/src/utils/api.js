@@ -822,6 +822,56 @@ export async function getTransactions(account = '', search = '') {
   return await expectList(res, schema.transactions)
 }
 
+const subscriptionRuleSchema = value => isObject(value) && typeof value.id === 'string' &&
+  Number.isSafeInteger(value.revision) && value.revision > 0 && typeof value.enabled === 'boolean' &&
+  ['monthly', 'yearly'].includes(value.interval) && ['account', 'item', 'memo', 'currency', 'original_amount', 'next_date', 'timezone'].every(key => typeof value[key] === 'string') &&
+  Number.isSafeInteger(value.source_transaction_id) && Number.isInteger(value.anchor_day) && Number.isInteger(value.anchor_month) && Array.isArray(value.tags)
+const subscriptionRulesSchema = value => Array.isArray(value) && value.every(subscriptionRuleSchema)
+const subscriptionSyncSchema = value => isObject(value) && Number.isInteger(value.created) && typeof value.has_more === 'boolean' && Array.isArray(value.errors) && value.errors.every(item => typeof item === 'string')
+const subscriptionHistorySchema = value => isObject(value) && schema.transactions(value.transactions) && Number.isInteger(value.next_offset)
+const subscriptionCalendarSchema = value => Array.isArray(value) && value.every(entry => isObject(entry) &&
+  ['date', 'rule_id', 'item', 'account', 'currency', 'original_amount'].every(key => typeof entry[key] === 'string') &&
+  (entry.transaction == null || schema.transaction(entry.transaction)))
+const subscriptionCandidatesSchema = value => Array.isArray(value) && value.every(candidate => isObject(candidate) && typeof candidate.fingerprint === 'string' && ['monthly', 'yearly'].includes(candidate.interval) && schema.transaction(candidate.transaction))
+
+export async function getSubscriptions() {
+  if (isWails) return validateData(await desktopFinancialCall(() => window.go.main.App.GetSubscriptions()), subscriptionRulesSchema, { status: 200 })
+  return expectJSON(await apiFetch('/api/subscriptions'), subscriptionRulesSchema)
+}
+
+export async function saveSubscription(id, input) {
+  if (isWails) return validateData(await desktopFinancialCall(() => window.go.main.App.SaveSubscription(id, input)), subscriptionRuleSchema, { status: 200 })
+  return expectJSON(await apiFetch(id ? `/api/subscriptions/${encodeURIComponent(id)}` : '/api/subscriptions', {
+    method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input)
+  }), subscriptionRuleSchema)
+}
+
+export async function syncSubscriptions() {
+  if (isWails) return validateData(await desktopFinancialCall(() => window.go.main.App.SyncSubscriptions()), subscriptionSyncSchema, { status: 200 })
+  return expectJSON(await apiFetch('/api/subscription-sync', { method: 'POST' }), subscriptionSyncSchema)
+}
+
+export async function getSubscriptionTransactions(id, { account = '', search = '', start = '', end = '', offset = 0 } = {}) {
+  if (isWails) return validateData(await desktopFinancialCall(() => window.go.main.App.GetSubscriptionTransactions(id, account, search, start, end, offset)), subscriptionHistorySchema, { status: 200 })
+  const params = new URLSearchParams({ account, search, start, end, offset: String(offset) })
+  return expectJSON(await apiFetch(`/api/subscriptions/${encodeURIComponent(id)}/transactions?${params}`), subscriptionHistorySchema)
+}
+
+export async function getSubscriptionCalendar(month) {
+  if (isWails) return validateData(await desktopFinancialCall(() => window.go.main.App.GetSubscriptionCalendar(month)), subscriptionCalendarSchema, { status: 200 })
+  return expectJSON(await apiFetch(`/api/subscription-calendar?${new URLSearchParams({ month })}`), subscriptionCalendarSchema)
+}
+
+export async function getSubscriptionCandidates() {
+  if (isWails) return validateData(await desktopFinancialCall(() => window.go.main.App.GetSubscriptionCandidates()), subscriptionCandidatesSchema, { status: 200 })
+  return expectJSON(await apiFetch('/api/subscription-candidates'), subscriptionCandidatesSchema)
+}
+
+export async function dismissSubscriptionCandidate(fingerprint) {
+  if (isWails) return desktopFinancialCall(() => window.go.main.App.DismissSubscriptionCandidate(fingerprint))
+  await expectVoid(await apiFetch(`/api/subscription-candidates/${encodeURIComponent(fingerprint)}`, { method: 'DELETE' }), schema.success)
+}
+
 /**
  * 取引を追加
  * @param {object} data

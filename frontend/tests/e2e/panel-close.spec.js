@@ -10,6 +10,7 @@ async function mockPanelAPIs(page) {
     '/api/items': [],
     '/api/transactions': [],
     '/api/transaction-saves': { saves: [] },
+    '/api/subscription-sync': { created: 0, has_more: false, errors: [] },
     '/api/credit_card_settings': [],
     '/api/bank_account_settings': [],
     '/api/balance_history_filtered': { accounts: [], dates: [], balances: {} },

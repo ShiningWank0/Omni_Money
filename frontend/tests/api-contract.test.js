@@ -14,7 +14,14 @@ const api = await import('../src/utils/api.js')
 const tx = { id: 1, date: '2026-01-01', account: 'cash', fundItem: 'cash', item: 'coffee', type: 'expense', amount: 100, balance: -100, memo: '' }
 const tag = { id: 1, name: 'food', parent_id: null, level: 1 }
 const entity = { id: 'user-1' }
+const subscription = { id: '6425a5b7-bf0d-4a2f-bb61-5ef6dd4196a3', revision: 1, enabled: true, interval: 'monthly', account: 'card', item: 'Music', memo: '', currency: 'USD', original_amount: '9.99', next_date: '2026-11-30', timezone: 'Asia/Tokyo', source_transaction_id: 1, anchor_day: 31, anchor_month: 1, tags: [] }
 const cases = [
+  ['getSubscriptions', [], [subscription]], ['saveSubscription', ['', subscription], subscription],
+  ['syncSubscriptions', [], { created: 1, has_more: false, errors: [] }],
+  ['getSubscriptionTransactions', [subscription.id], { transactions: [tx], next_offset: -1 }],
+  ['getSubscriptionCalendar', ['2026-11'], [{ date: '2026-11-30', rule_id: subscription.id, item: 'Music', account: 'card', currency: 'USD', original_amount: '9.99' }]],
+  ['getSubscriptionCandidates', [], [{ fingerprint: 'a'.repeat(64), interval: 'monthly', transaction: tx }]],
+  ['dismissSubscriptionCandidate', ['a'.repeat(64)], { success: true }],
   ['getAccounts', [], ['cash']], ['getItems', [], ['coffee']], ['getTransactions', [], [tx]],
   ['deleteTransaction', [1], { message: 'deleted' }],
   ['getBalanceHistory', [], { accounts: ['cash'], dates: ['2026-01-01'], balances: { cash: [-100] } }],
