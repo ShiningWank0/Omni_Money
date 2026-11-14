@@ -254,6 +254,7 @@ export async function runIntegration(binaryArgument, mode = 'assets') {
       const cliBinary = join(project, 'build/bin/omni_money-dev-linux-amd64')
       const builtInfo = go(['version', '-m', cliBinary], project)
       verifyDevBuild(builtInfo, expected)
+      for (const manifest of ['go.mod', 'go.sum']) assert.equal(readFileSync(join(project, manifest), 'utf8'), readFileSync(join(root, manifest), 'utf8'), `Wails CLI changed ${manifest}`)
       writeFileSync(join(output, 'cli-build-info.txt'), builtInfo)
       result.cliBinarySHA256 = createHash('sha256').update(readFileSync(cliBinary)).digest('hex')
       result.checks.cliBuild = true

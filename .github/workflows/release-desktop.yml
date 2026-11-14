@@ -315,6 +315,7 @@ jobs:
             -ldflags "-X main.version=${APP_VERSION}"
           go build -mod=readonly -tags "dev,desktop,$BUILD_TAGS" -o "$RUNNER_TEMP/omni-wails-dev" .
           node scripts/wails-dev-build.mjs "$RUNNER_TEMP/omni-wails-dev" "$BUILD_PLATFORM" > "$RUNNER_TEMP/wails-dev-build-info.json"
+          git diff --exit-code -- go.mod go.sum
 
       - name: Build application on Windows
         if: runner.os == 'Windows'
@@ -334,8 +335,10 @@ jobs:
             -ldflags "-X main.version=${APP_VERSION}"
           mkdir -p build/bin
           go build -mod=readonly -tags "dev,desktop,libsqlite3,sqlite_omit_load_extension" -o build/bin/omni-wails-dev.exe .
-          node scripts/wails-dev-build.mjs build/bin/omni-wails-dev.exe "$BUILD_PLATFORM" > "$RUNNER_TEMP/wails-dev-build-info.json"
+          WAILS_EVIDENCE_DIR="$(cygpath -u "$RUNNER_TEMP")"
+          node scripts/wails-dev-build.mjs build/bin/omni-wails-dev.exe "$BUILD_PLATFORM" > "$WAILS_EVIDENCE_DIR/wails-dev-build-info.json"
           rm build/bin/omni-wails-dev.exe
+          git diff --exit-code -- go.mod go.sum
 
       - name: Save development dependency evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -466,8 +469,8 @@ jobs:
           tar xzf "${ARTIFACT_NAME}-v${APP_VERSION}.tar.gz" -C "$destination"
           node scripts/oss-notices.mjs verify desktop-linux-amd64 "$destination/licenses"
           env -u DISPLAY -u WAYLAND_DISPLAY "$destination/omni_money" --self-test-sqlcipher
-          # Issue #299: native production UI is the temporary automatic path;
-          # it does not establish that development Echo/browser IPC is fixed.
+          # Issue #299: production and development have separate runtime gates.
+          # This packaged UI check does not establish development IPC compatibility.
           timeout --signal=TERM --kill-after=20s 300s xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" dbus-run-session -- node scripts/wails-native-integration.mjs "$destination/omni_money"
           git diff --exit-code -- go.mod go.sum
 
