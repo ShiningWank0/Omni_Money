@@ -64,7 +64,7 @@ Wails本体は公式版のまま、`go.mod`でEchoの修正版を指定する。
 
 `backend/middleware/echo_security_test.go`は選択されたEcho自体についても2件の挙動を検証する。テストだけでEchoのmiddlewareをimportするため、`go.mod`上のEchoは直接依存になるが、productionへの組み込みを意味しない。回数制限とプロキシの検証には記録用のHTTP request/responseと代替transportを使い、待受ポートは開かない。
 
-2026年11月6日の追加検査では、Goの脆弱性DBはv4.16.3にもGO-2026-6872／GO-2026-6875を報告し、修正版を未登録としている。公式の修正説明と実際の回帰試験の結果を併せて判断し、スキャナーの検出を無視する設定は加えない。
+Echoは公式v4.16.4、`golang.org/x/net`はv0.62.0を`go.mod`で選択する。後者はdev用検査が検出したGO-2026-6860／GO-2026-6866のDB記載修正版である。2026年11月15日の確認では、Goの脆弱性DBはGO-2026-6872／GO-2026-6875についてEcho v4系の修正版を未登録としている。公式のv4.16.3以降の修正説明と実際の回帰試験の結果を併せて記録し、スキャナーの指摘も失敗として維持する。
 
 開発ブラウザ経路は、`.github/workflows/wails-dev-integration.yml`を再利用可能なworkflowとして通常CIへ組み込む。PR・定期実行・手動実行と、Desktopリリース対象のmain pushで同じコミットを検査する。既知の再接続オーバーレイの`null.nodes`例外も失敗として扱う。[Issue #299](https://github.com/ShiningWank0/Omni_Money/issues/299)は、検査を追加しただけでは解決にならず、上流修正版を含む実行結果を確認するまで閉じない。
 

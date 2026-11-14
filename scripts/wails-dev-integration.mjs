@@ -30,12 +30,13 @@ export function verifyDevBuild(info, expected, platform = 'linux/amd64') {
   }
   const tags = new Set((info.match(/^\s*build\s+-tags=(.+)$/m)?.[1] || '').replace(/^"|"$/g, '').split(','))
   const [goos, goarch] = platform.split('/')
+  assert.equal(platform, `${goos}/${goarch}`, 'Expected exactly OS/CPU for the development build platform')
   assert.ok(['linux', 'darwin', 'windows'].includes(goos) && ['amd64', 'arm64'].includes(goarch), 'Unsupported development build platform')
   for (const tag of ['dev', 'desktop', 'libsqlite3', 'sqlite_omit_load_extension', ...(goos === 'linux' ? ['webkit2_41'] : [])]) assert.ok(tags.has(tag), `Missing integration build tag: ${tag}`)
   for (const tag of ['production', 'bindings', 'server']) assert.ok(!tags.has(tag), `Wrong integration build tag: ${tag}`)
   assert.match(info, /^\s*build\s+CGO_ENABLED=1$/m)
-  assert.match(info, new RegExp(`^\\s*build\\s+GOOS=${goos}$`, 'm'))
-  assert.match(info, new RegExp(`^\\s*build\\s+GOARCH=${goarch}$`, 'm'))
+  assert.equal(info.match(/^\s*build\s+GOOS=(\S+)$/m)?.[1], goos, 'Built operating system differs from the requested platform')
+  assert.equal(info.match(/^\s*build\s+GOARCH=(\S+)$/m)?.[1], goarch, 'Built CPU differs from the requested platform')
 }
 
 export function privateAppEnvironment(directory, inherited) {

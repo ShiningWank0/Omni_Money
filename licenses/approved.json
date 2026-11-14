@@ -142,7 +142,7 @@
       "sha256": "d4dbf5bb0080d2b598a694bdbd86c016472bcf54934aeddfa43fd1e078bb8564"
     },
     "go:golang.org/x/net": {
-      "version": "v0.60.0",
+      "version": "v0.62.0",
       "license": "BSD-3-Clause",
       "sha256": "d4dbf5bb0080d2b598a694bdbd86c016472bcf54934aeddfa43fd1e078bb8564"
     },

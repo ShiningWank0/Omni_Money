@@ -29,6 +29,17 @@ test('development metadata checks all four Desktop platforms and rejects another
     const metadata = info.replace('GOOS=linux', `GOOS=${os}`).replace('GOARCH=amd64', `GOARCH=${arch}`)
     verifyDevBuild(metadata, expected, platform)
     assert.throws(() => verifyDevBuild(metadata.replace(`GOARCH=${arch}`, 'GOARCH=invalid'), expected, platform))
+    assert.throws(() => verifyDevBuild(metadata.replace(`GOOS=${os}`, 'GOOS=invalid'), expected, platform))
+  }
+})
+
+test('platform arguments cannot supply regular expressions or trailing path segments', () => {
+  for (const platform of ['lin.x/amd64', 'linux/amd64|arm64', 'linux/amd64/extra', 'linux/amd64\n', 'linux/amd64$']) {
+    assert.throws(() => verifyDevBuild(info, expected, platform), platform)
+  }
+  for (const setting of ['GOOS=linux', 'GOARCH=amd64']) {
+    assert.throws(() => verifyDevBuild(info.replace(setting, `${setting}-extra`), expected))
+    assert.throws(() => verifyDevBuild(info.replace(setting, 'unrelated=value'), expected))
   }
 })
 
