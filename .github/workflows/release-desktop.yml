@@ -2,6 +2,11 @@ name: Desktop Release (Wails)
 
 on:
   workflow_call:
+    inputs:
+      wails_echo_result:
+        description: Result of this commit's Wails and Echo compatibility workflow
+        required: true
+        type: string
 
 permissions: {}
 
@@ -105,6 +110,16 @@ jobs:
         id: pull_request
         if: github.event_name == 'pull_request'
         run: echo "exists=false" >> "$GITHUB_OUTPUT"
+
+  compatibility-gate:
+    name: Require Wails and Echo compatibility before publishing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require a successful result from the caller
+        env:
+          WAILS_ECHO_RESULT: ${{ inputs.wails_echo_result }}
+        run: test "$WAILS_ECHO_RESULT" = success
 
   build:
     name: Build desktop artifacts
@@ -298,6 +313,8 @@ jobs:
           "$(go env GOPATH)/bin/wails" build -platform "$BUILD_PLATFORM" \
             -tags "$BUILD_TAGS" \
             -ldflags "-X main.version=${APP_VERSION}"
+          go build -mod=readonly -tags "dev,desktop,$BUILD_TAGS" -o "$RUNNER_TEMP/omni-wails-dev" .
+          node scripts/wails-dev-build.mjs "$RUNNER_TEMP/omni-wails-dev" "$BUILD_PLATFORM" > "$RUNNER_TEMP/wails-dev-build-info.json"
 
       - name: Build application on Windows
         if: runner.os == 'Windows'
@@ -315,6 +332,17 @@ jobs:
           "$WAILS_EXE" build -platform "$BUILD_PLATFORM" \
             -tags "libsqlite3,sqlite_omit_load_extension" \
             -ldflags "-X main.version=${APP_VERSION}"
+          mkdir -p build/bin
+          go build -mod=readonly -tags "dev,desktop,libsqlite3,sqlite_omit_load_extension" -o build/bin/omni-wails-dev.exe .
+          node scripts/wails-dev-build.mjs build/bin/omni-wails-dev.exe "$BUILD_PLATFORM" > "$RUNNER_TEMP/wails-dev-build-info.json"
+          rm build/bin/omni-wails-dev.exe
+
+      - name: Save development dependency evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wails-dev-build-${{ matrix.oss_target }}
+          path: ${{ runner.temp }}/wails-dev-build-info.json
+          if-no-files-found: error
 
       - name: Verify macOS SQLCipher linkage
         if: runner.os == 'macOS'
@@ -495,13 +523,14 @@ jobs:
 
   attest:
     name: Attest desktop artifacts
-    needs: [prepare, build]
+    needs: [prepare, build, compatibility-gate]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     if: >-
       github.event_name == 'push' &&
       needs.prepare.outputs.release_exists == 'false' &&
-      needs.build.result == 'success'
+      needs.build.result == 'success' &&
+      needs.compatibility-gate.result == 'success'
     permissions:
       actions: read # required to download build artifacts
       contents: read # required by actions/attest provenance metadata
@@ -527,14 +556,15 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: [prepare, build, attest]
+    needs: [prepare, build, attest, compatibility-gate]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     if: >-
       github.event_name == 'push' &&
       needs.prepare.outputs.release_exists == 'false' &&
       needs.build.result == 'success' &&
-      needs.attest.result == 'success'
+      needs.attest.result == 'success' &&
+      needs.compatibility-gate.result == 'success'
     permissions:
       actions: read # required to download build artifacts
       contents: write # required only for creating the GitHub Release

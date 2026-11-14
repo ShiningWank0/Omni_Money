@@ -89,12 +89,14 @@ test('native static-text lookup and privacy regression tests pass without a real
   assert.equal(result.status, 0, result.stderr || result.error?.message)
 })
 
-test('manual browser reproduction stays strict while packaged native UI is automatic', () => {
+test('reusable browser integration and packaged native UI are both strict automatic checks', () => {
   const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8')
   const manual = readFileSync(join(root, '.github/workflows/wails-dev-integration.yml'), 'utf8')
   const desktop = readFileSync(join(root, '.github/workflows/release-desktop.yml'), 'utf8')
   assert.doesNotMatch(ci, /node scripts\/wails-dev-integration\.mjs/)
   assert.match(manual, /^  workflow_dispatch:/m)
+  assert.match(manual, /^  workflow_call:/m)
+  assert.match(ci, /uses: \.\/\.github\/workflows\/wails-dev-integration.yml/)
   assert.doesNotMatch(manual, /^  (pull_request|push|schedule):/m)
   assert.match(manual, /node scripts\/wails-dev-integration\.mjs/)
   const packaged = desktop.split('      - name: Verify packaged Linux app\n')[1]?.split('\n      - name: ')[0]
@@ -106,4 +108,23 @@ test('manual browser reproduction stays strict while packaged native UI is autom
   for (const source of [manual, packaged]) assert.doesNotMatch(source, /continue-on-error|\|\| true/)
   assert.match(manual, /Issue #299/)
   assert.match(packaged, /Issue #299/)
+})
+
+test('Desktop publishing rejects every compatibility result except success', () => {
+  const desktop = readFileSync(join(root, '.github/workflows/release-desktop.yml'), 'utf8')
+  const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8')
+  const gate = desktop.split('  compatibility-gate:\n')[1]?.split('  build:\n')[0]
+  const program = gate?.match(/        run: (.+)/)?.[1]
+  assert.ok(program)
+  for (const result of ['success', 'failure', 'cancelled', 'skipped', '']) {
+    assert.equal(spawnSync('bash', ['-e', '-c', program], { env: { ...process.env, WAILS_ECHO_RESULT: result }, timeout: 5000 }).status === 0,
+      result === 'success', result)
+  }
+  assert.match(ci, /needs: \[oss, release-plan, wails-echo\]/)
+  assert.match(ci, /wails_echo_result: \$\{\{ needs.wails-echo.result \}\}/)
+  for (const job of ['attest', 'release']) {
+    const block = desktop.split(`  ${job}:\n`)[1]?.split('    permissions:')[0]
+    assert.match(block, /needs: \[.*compatibility-gate\]/)
+    assert.match(block, /needs.compatibility-gate.result == 'success'/)
+  }
 })

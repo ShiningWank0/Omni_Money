@@ -364,6 +364,22 @@ test('CLI enforces failure on govulncheck JSON findings even when tool exits suc
   }
 });
 
+test('development scanner selects the real dev graph and reports reachable vulnerabilities without suppressing them', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'omni-dev-scanner-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  mkdirSync(join(directory, 'bin'));
+  for (const [output, status] of [[goInput, 'findings'], [stream([goConfig, goSBOM]), 'clean'], ['{}', 'error']]) {
+    writeFileSync(join(directory, 'bin/go'), `#!${process.execPath}\nrequire('node:fs').writeFileSync('scanner-args.json', JSON.stringify(process.argv.slice(2)));\nprocess.stdout.write(${JSON.stringify(output)});\n`, { mode: 0o755 });
+    const child = spawnSync(process.execPath, [resolve('scripts/security-reports.mjs'), 'govulncheck-dev'], {
+      cwd: directory, env: { ...process.env, PATH: `${join(directory, 'bin')}:${process.env.PATH}` }, encoding: 'utf8', timeout: 5000,
+    });
+    assert.equal(child.status, status === 'clean' ? 0 : 1);
+    assert.equal(JSON.parse(readFileSync(join(directory, 'security-reports/govulncheck-dev.json'), 'utf8')).status, status);
+    assert.deepEqual(JSON.parse(readFileSync(join(directory, 'scanner-args.json'), 'utf8')),
+      ['run', 'golang.org/x/vuln/cmd/govulncheck@v1.6.0', '-json', '-tags', 'dev,desktop,webkit2_41,libsqlite3,sqlite_omit_load_extension', './...']);
+  }
+});
+
 
 const fuzzOutput = scan => {
   const [pkg, target] = fuzzTargets[scan];
@@ -416,12 +432,14 @@ test('required Go check rejects native WebView, fuzz, passkey, frontend and brow
     encoding: 'utf8', env: { ...process.env, OSS_RESULT: 'success', GO_RESULT: 'success', EXPECTED_GO_RESULT: 'success',
       SAFE_UPDATE_RESULT: 'success', WINDOWS_RESULT: 'success', SECURITY_AUTOMATION_RESULT: 'success',
       PASSKEY_RESULT: 'success', FRONTEND_RESULT: 'success', DOCKER_RESULT: 'success',
+      WAILS_ECHO_RESULT: 'success', EXPECTED_WAILS_ECHO_RESULT: 'success',
       RELEASE_PLAN_RESULT: 'success', DESKTOP_REQUIRED: 'false', DESKTOP_RESULT: 'skipped',
       FUZZ_RESULT: 'skipped', EXPECTED_FUZZ_RESULT: 'skipped', ...overrides },
   }).status === 0;
   const results = ['success', 'skipped', 'failure', 'cancelled', ''];
   for (const expected of ['success', 'skipped']) {
     for (const result of results) {
+      assert.equal(gatePasses({ WAILS_ECHO_RESULT: result, EXPECTED_WAILS_ECHO_RESULT: expected }), result === expected, `wails/${expected}/${result}`);
       assert.equal(gatePasses({ FUZZ_RESULT: result, EXPECTED_FUZZ_RESULT: expected }),
         result === expected, `fuzz/${expected}/${result}`);
       assert.equal(gatePasses({ GO_RESULT: expected, EXPECTED_GO_RESULT: expected, PASSKEY_RESULT: result }),
@@ -445,8 +463,8 @@ test('required Go check rejects native WebView, fuzz, passkey, frontend and brow
   assert.match(fuzzJob, /max-parallel: 2/);
   assert.match(fuzzJob, /fail-fast: false/);
   assert.match(fuzzJob, /target: \[fuzz-csv, fuzz-json, fuzz-image\]/);
-  assert.match(workflow, /needs: \[oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker, release-plan, release-desktop\]/);
-  assert.match(workflow, /needs: \[go-checks, frontend, docker, security-automation, parser-fuzz\]/);
+  assert.match(workflow, /needs: \[oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker, release-plan, release-desktop, wails-echo\]/);
+  assert.match(workflow, /needs: \[go-checks, frontend, docker, security-automation, parser-fuzz, wails-echo\]/);
   assert.match(workflow, /EXPECTED_FUZZ_RESULT: .*'schedule'.*'workflow_dispatch'.*'success' \|\| 'skipped'/);
   const passkeyJob = workflow.split('  passkey:\n')[1]?.split('  # Keep the existing required check name')[0];
   assert.ok(passkeyJob, 'permanent passkey regression job missing');

@@ -3,7 +3,8 @@ import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { bounded, browserErrorDetails, privateAppEnvironment, requireCI, stopProcessGroup, verifyDevBuild, watchExit } from './wails-dev-integration.mjs'
+import { bounded, browserErrorDetails, privateAppEnvironment, requireCI, stopProcessGroup, verifyDevBuild, verifyEvidence, watchExit } from './wails-dev-integration.mjs'
+import { verifyCLI } from './wails-dev-evidence.mjs'
 
 const expected = { 'github.com/wailsapp/wails/v2': 'v2.90.0', 'github.com/labstack/echo/v4': 'v4.90.0' }
 const info = `app: go1.27.3
@@ -12,6 +13,7 @@ const info = `app: go1.27.3
 \tbuild\t-tags=dev,desktop,webkit2_41,libsqlite3,sqlite_omit_load_extension
 \tbuild\tCGO_ENABLED=1
 \tbuild\tGOOS=linux
+\tbuild\tGOARCH=amd64
 `
 
 test('requires CI Linux and a virtual display before starting the real app', () => {
@@ -19,6 +21,42 @@ test('requires CI Linux and a virtual display before starting the real app', () 
   assert.throws(() => requireCI('darwin', { GITHUB_ACTIONS: 'true' }), /CI Linux/)
   assert.throws(() => requireCI('linux', {}), /must not start locally/)
   assert.throws(() => requireCI('linux', { GITHUB_ACTIONS: 'true' }), /virtual display/)
+})
+
+test('development metadata checks all four Desktop platforms and rejects another CPU', () => {
+  for (const platform of ['linux/amd64', 'darwin/amd64', 'darwin/arm64', 'windows/amd64']) {
+    const [os, arch] = platform.split('/')
+    const metadata = info.replace('GOOS=linux', `GOOS=${os}`).replace('GOARCH=amd64', `GOARCH=${arch}`)
+    verifyDevBuild(metadata, expected, platform)
+    assert.throws(() => verifyDevBuild(metadata.replace(`GOARCH=${arch}`, 'GOARCH=invalid'), expected, platform))
+  }
+})
+
+test('CLI permits absent Echo but rejects stale embedded Echo, Wails and replacements', () => {
+  const cli = info.replace('dep\tgithub.com/wailsapp', 'mod\tgithub.com/wailsapp')
+  verifyCLI(cli, expected)
+  verifyCLI(cli.split('\n').filter(line => !line.includes('echo/v4')).join('\n'), expected)
+  for (const changed of [cli.replace('v4.90.0', 'v4.1.0'), cli.replace('v2.90.0', 'v2.1.0'), cli + '\n => ../local']) {
+    assert.throws(() => verifyCLI(changed, expected))
+  }
+})
+
+test('compatibility evidence rejects omitted scenarios, cleanup failures, browser errors and a different commit', () => {
+  for (const mode of ['assets', 'vite']) {
+    const checks = Object.fromEntries(['http', 'goIPC', 'licenses', 'security', 'gracefulExit', 'browserClosed', 'processStopped', 'listenerClosed', 'isolatedDataRemoved',
+      ...(mode === 'vite' ? ['viteProxy', 'hmr', 'cliBuild', 'viteListenerClosed', 'cliProcessesStopped'] : ['reconnect', 'capabilityRotated'])].map(key => [key, true]))
+    const result = { mode, commit: 'checkout', passed: true, failures: [], checks, binarySHA256: 'a'.repeat(64), websocketFrames: { sent: 1, received: 1 } }
+    verifyEvidence(result, [], mode, 'checkout')
+    for (const key of Object.keys(checks)) {
+      assert.throws(() => verifyEvidence({ ...result, checks: { ...checks, [key]: false } }, [], mode, 'checkout'), key)
+      const missing = { ...checks }; delete missing[key]
+      assert.throws(() => verifyEvidence({ ...result, checks: missing }, [], mode, 'checkout'), key)
+    }
+    assert.throws(() => verifyEvidence(result, [{ message: 'null.nodes' }], mode, 'checkout'))
+    assert.throws(() => verifyEvidence(result, [], mode, 'another-checkout'))
+    assert.throws(() => verifyEvidence({ ...result, passed: false }, [], mode, 'checkout'))
+    assert.throws(() => verifyEvidence({ ...result, websocketFrames: { sent: 0, received: 0 } }, [], mode, 'checkout'))
+  }
 })
 
 test('the command refuses local execution before opening a GUI or listener', () => {
