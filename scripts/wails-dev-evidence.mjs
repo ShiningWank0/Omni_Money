@@ -41,6 +41,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       const result = JSON.parse(readFileSync(join(output, 'result.json'), 'utf8'))
       const errors = JSON.parse(readFileSync(join(output, 'browser-errors.json'), 'utf8'))
       const selected = JSON.parse(readFileSync(join(output, 'selected-build.json'), 'utf8'))
+      console.log(JSON.stringify({ result, browserErrors: errors }, null, 2))
       assert.deepEqual(result.modules, selected.modules)
       assert.equal(result.binarySHA256, selected.binarySHA256)
       verifyEvidence(result, errors, process.argv[3], process.env.GITHUB_SHA)

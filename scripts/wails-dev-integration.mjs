@@ -232,7 +232,7 @@ export async function runIntegration(binaryArgument, mode = 'assets') {
       const cliProject = JSON.parse(readFileSync(join(project, 'wails.json'), 'utf8'))
       assert.equal(cliProject['frontend:dev:serverUrl'], 'auto')
       executable = join(go(['env', 'GOPATH']).trim(), 'bin/wails')
-      args = ['dev', '-s', '-m', '-nosyncgomod', '-nocolor', '-viteservertimeout', '60', '-devserver', `127.0.0.1:${port}`,
+      args = ['dev', '-s', '-m', '-nosyncgomod', '-viteservertimeout', '60', '-devserver', `127.0.0.1:${port}`,
         '-assetdir', assets, '-tags', 'desktop,webkit2_41,libsqlite3,sqlite_omit_load_extension']
       result.frontendWatcher = cliProject['frontend:dev:watcher']
     } else {
