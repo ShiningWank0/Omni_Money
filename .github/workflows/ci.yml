@@ -27,7 +27,7 @@ concurrency:
 jobs:
   oss:
     name: OSS licenses
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       GOPATH: ${{ github.workspace }}/.oss-cache/go
@@ -87,7 +87,7 @@ jobs:
   release-plan:
     name: Plan release builds
     needs: oss
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       desktop: ${{ steps.plan.outputs.desktop }}
@@ -139,7 +139,7 @@ jobs:
     # PR checks require an up-to-date base; retain scheduled/manual scans without
     # repeating the same suite after merging to main.
     if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
@@ -380,7 +380,7 @@ jobs:
   safe-update:
     needs: oss
     name: Safe-update full matrix
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -477,7 +477,7 @@ jobs:
   frontend:
     needs: oss
     name: Frontend build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -552,7 +552,7 @@ jobs:
   docker:
     needs: oss
     name: Docker image build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
@@ -712,7 +712,7 @@ jobs:
   security-automation:
     needs: oss
     name: Security issue reporting tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -731,7 +731,7 @@ jobs:
     needs: oss
     name: Parser fuzz (${{ matrix.target }})
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -779,7 +779,7 @@ jobs:
     needs: oss
     name: Passkey regression tests
     if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       SQLCIPHER_PREFIX: /tmp/omni-passkey-sqlcipher
@@ -823,7 +823,7 @@ jobs:
     name: Go tests
     needs: [oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker, release-plan, release-desktop]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require expected Go result and successful auxiliary checks
@@ -865,7 +865,7 @@ jobs:
     if: >-
       ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
           && github.repository == 'ShiningWank0/Omni_Money' && needs.security-automation.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read

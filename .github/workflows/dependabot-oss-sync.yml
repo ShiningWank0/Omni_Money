@@ -21,7 +21,7 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository &&
       (startsWith(github.event.workflow_run.head_branch, 'dependabot/go_modules/') ||
        startsWith(github.event.workflow_run.head_branch, 'dependabot/npm_and_yarn/frontend/'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
       candidate: ${{ steps.pack.outputs.eligible }}
@@ -104,7 +104,7 @@ jobs:
   publish:
     needs: generate
     if: needs.generate.outputs.candidate == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       OSS_SYNC_CANDIDATE: ${{ github.workspace }}/.oss-sync/candidate.json

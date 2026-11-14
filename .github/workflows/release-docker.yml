@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04
             platform: linux/amd64
           - runner: ubuntu-24.04-arm
             platform: linux/arm64
@@ -50,7 +50,7 @@ jobs:
     if: github.event_name != 'pull_request'
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -133,7 +133,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04
             platform: linux/amd64
             arch: amd64
           - runner: ubuntu-24.04-arm
@@ -219,7 +219,7 @@ jobs:
       attestations: write # records the attestation for gh attestation verify
     env:
       APP_VERSION: ${{ needs.prepare.outputs.version }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
