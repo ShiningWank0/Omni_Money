@@ -817,7 +817,7 @@ jobs:
           original_modcache="$(go env GOMODCACHE)"
           original_goproxy="$(go env GOPROXY)"
           test_modcache="$(mktemp -d "$RUNNER_TEMP/omni-webauthn-tests.XXXXXX")"
-          trap 'rm -rf -- "$test_modcache"' EXIT
+          trap 'GOMODCACHE="$test_modcache" go clean -modcache' EXIT
           export GOPROXY="file://$original_modcache/cache/download,$original_goproxy"
           export GOMODCACHE="$test_modcache"
           go mod download github.com/go-webauthn/webauthn
