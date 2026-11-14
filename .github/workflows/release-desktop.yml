@@ -14,7 +14,7 @@ jobs:
     name: Validate and test release
     permissions:
       contents: read # required to inspect the release-triggering source
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -496,7 +496,7 @@ jobs:
   attest:
     name: Attest desktop artifacts
     needs: [prepare, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     if: >-
       github.event_name == 'push' &&
@@ -528,7 +528,7 @@ jobs:
   release:
     name: Publish GitHub release
     needs: [prepare, build, attest]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     if: >-
       github.event_name == 'push' &&

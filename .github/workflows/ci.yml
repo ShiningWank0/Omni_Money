@@ -27,7 +27,7 @@ concurrency:
 jobs:
   oss:
     name: OSS licenses
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       GOPATH: ${{ github.workspace }}/.oss-cache/go
@@ -87,7 +87,7 @@ jobs:
   release-plan:
     name: Plan release builds
     needs: oss
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       desktop: ${{ steps.plan.outputs.desktop }}
@@ -139,7 +139,7 @@ jobs:
     # PR checks require an up-to-date base; retain scheduled/manual scans without
     # repeating the same suite after merging to main.
     if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
@@ -380,7 +380,7 @@ jobs:
   safe-update:
     needs: oss
     name: Safe-update full matrix
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -477,7 +477,7 @@ jobs:
   frontend:
     needs: oss
     name: Frontend build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -552,7 +552,7 @@ jobs:
   docker:
     needs: oss
     name: Docker image build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
@@ -712,7 +712,7 @@ jobs:
   security-automation:
     needs: oss
     name: Security issue reporting tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -731,7 +731,7 @@ jobs:
     needs: oss
     name: Parser fuzz (${{ matrix.target }})
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -779,7 +779,7 @@ jobs:
     needs: oss
     name: Passkey regression tests
     if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       SQLCIPHER_PREFIX: /tmp/omni-passkey-sqlcipher
@@ -808,11 +808,21 @@ jobs:
         run: |
           go test -mod=readonly -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/serverauth ./backend/control ./backend/keyenvelope ./backend/middleware
           go test -mod=readonly -race -count=1 -tags "libsqlite3 sqlite_omit_load_extension" -run '^TestPasskeyRegression' ./backend/serverauth
-      # Test the installed WebAuthn module from this application's module root.
-      # Its tests use the same dependency graph as the application, including
-      # this PR's CBOR and cryptography versions. No dependency is rewritten.
+      # Keep the application's dependency graph. Correct v0.18.2's generated
+      # P-256 test coordinates only in a disposable module cache, preserving
+      # the original cache and all production source files.
       - name: Test WebAuthn using this PR's dependency graph
-        run: go test -mod=readonly -count=1 github.com/go-webauthn/webauthn/protocol/... github.com/go-webauthn/webauthn/webauthn
+        run: |
+          python3 -m unittest discover -s scripts -p 'pad_webauthn_test_coordinates_test.py'
+          original_modcache="$(go env GOMODCACHE)"
+          original_goproxy="$(go env GOPROXY)"
+          test_modcache="$(mktemp -d "$RUNNER_TEMP/omni-webauthn-tests.XXXXXX")"
+          trap 'GOMODCACHE="$test_modcache" go clean -modcache' EXIT
+          export GOPROXY="file://$original_modcache/cache/download,$original_goproxy"
+          export GOMODCACHE="$test_modcache"
+          go mod download github.com/go-webauthn/webauthn
+          python3 scripts/pad_webauthn_test_coordinates.py "$test_modcache"
+          go test -mod=readonly -count=1 github.com/go-webauthn/webauthn/protocol/... github.com/go-webauthn/webauthn/webauthn
       - name: Verify dependency manifests stayed unchanged
         if: ${{ always() }}
         run: git diff --exit-code -- go.mod go.sum
@@ -823,7 +833,7 @@ jobs:
     name: Go tests
     needs: [oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker, release-plan, release-desktop]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require expected Go result and successful auxiliary checks
@@ -865,7 +875,7 @@ jobs:
     if: >-
       ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
           && github.repository == 'ShiningWank0/Omni_Money' && needs.security-automation.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
