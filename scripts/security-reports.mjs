@@ -4,7 +4,7 @@ import { relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const scans = ['npm', 'gosec-desktop', 'gosec-server', 'govulncheck-desktop', 'govulncheck-server', 'trivy', 'fuzz-csv', 'fuzz-json', 'fuzz-image'];
+export const scans = ['npm', 'gosec-desktop', 'gosec-server', 'govulncheck-desktop', 'govulncheck-server', 'govulncheck-dev', 'trivy', 'fuzz-csv', 'fuzz-json', 'fuzz-image'];
 export const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const requireValue = (condition, message) => { if (!condition) throw new Error(message); };
 const high = value => ['HIGH', 'CRITICAL'].includes(String(value).toUpperCase());
@@ -175,10 +175,11 @@ function run(tool) {
     try { raw = readFileSync('trivy-report.json', 'utf8'); } catch { /* recorded as an error */ }
     return save(normalize('trivy', raw, process.env.TRIVY_OUTCOME === 'success' ? 0 : 1));
   }
-  requireValue(['npm', 'gosec', 'govulncheck'].includes(tool), 'unknown scanner');
+  requireValue(['npm', 'gosec', 'govulncheck', 'govulncheck-dev'].includes(tool), 'unknown scanner');
   let failed = false;
-  for (const scan of scans.filter(name => name === tool || name.startsWith(`${tool}-`))) {
-    const server = scan.endsWith('-server') ? ['-tags', 'server'] : [];
+  for (const scan of scans.filter(name => tool === 'govulncheck-dev' ? name === tool : name !== 'govulncheck-dev' && (name === tool || name.startsWith(`${tool}-`)))) {
+    const server = scan === 'govulncheck-dev' ? ['-tags', 'dev,desktop,webkit2_41,libsqlite3,sqlite_omit_load_extension']
+      : scan.endsWith('-server') ? ['-tags', 'server'] : [];
     const command = tool === 'npm' ? ['npm', 'audit', '--json', '--audit-level=high']
       : tool === 'gosec' ? ['go', 'run', '-mod=readonly', `-modfile=${fileURLToPath(new URL('./gosec.mod', import.meta.url))}`,
         'github.com/securego/gosec/v2/cmd/gosec', '-terse', '-fmt=json', '-severity=medium', ...server, './...']

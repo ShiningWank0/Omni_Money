@@ -66,19 +66,23 @@ Wails本体は公式版のまま、`go.mod`でEchoの修正版を指定する。
 
 2026年11月6日の追加検査では、Goの脆弱性DBはv4.16.3にもGO-2026-6872／GO-2026-6875を報告し、修正版を未登録としている。公式の修正説明と実際の回帰試験の結果を併せて判断し、スキャナーの検出を無視する設定は加えない。
 
-開発ブラウザ経路は、Wailsに同梱された再接続オーバーレイの初期化で`null.nodes`例外が起きるため、通常CIから**暫定的に**外している。[未解決Issue #299](https://github.com/ShiningWank0/Omni_Money/issues/299)で追跡する。配布版の検査成功やPRのマージだけではIssueを閉じない。
+開発ブラウザ経路は、`.github/workflows/wails-dev-integration.yml`を再利用可能なworkflowとして通常CIへ組み込む。PR・定期実行・手動実行と、Desktopリリース対象のmain pushで同じコミットを検査する。既知の再接続オーバーレイの`null.nodes`例外も失敗として扱う。[Issue #299](https://github.com/ShiningWank0/Omni_Money/issues/299)は、検査を追加しただけでは解決にならず、上流修正版を含む実行結果を確認するまで閉じない。
 
-開発ブラウザの再現テストは`.github/workflows/wails-dev-integration.yml`の`workflow_dispatch`から手動実行する。workflowがmainへ反映された後、GitHub Actionsの`Wails development browser integration (manual)`で対象branchを選ぶ。固定SQLCipherと`dev,desktop,webkit2_41`を使ってOmni Money本体をビルドし、Xvfb・D-Bus上で実際のWailsを起動する。`scripts/wails-dev-integration.mjs`はビルド情報から、選択されたWailsとEchoの組み込み版、devタグ、CGOを照合する。productionやbindings用バイナリでは成功しない。ローカル起動を防ぐため、Linux・GitHub Actions・仮想画面を必須にする。
+Ubuntu 24.04、固定SQLCipher、Xvfb・D-Busと実Chromiumを使用し、2経路を独立したmatrixで検証する。`assets`はdevバイナリから実際のfrontend生成物のコピーを配信する。`vite`はプロジェクトが指定する公式Wails CLIの`wails dev`を使い、一時コピー内の実`wails.json`に従ってViteを起動する。Viteのポート指定と検査用Vueマーカーだけを一時コピーへ加え、Echoからのプロキシ配信、Vue変更のHMR反映、ページ再読込なしのGo IPC継続を確認する。リポジトリ本体やWailsのソースは変更しない。
 
-実際のfrontend生成物のコピーをEchoから配信し、テスト固有の確認ファイルで起動したインスタンスを識別する。ChromiumからWailsの実WebSocketを通して`GetDesktopVaultStatus`を呼び、未設定・ロック状態の応答、Desktop初期画面とOSS画面の表示、`runtime.Quit`による正常終了を検証する。通信・Goバインディング・画面をモックしない。HOMEは変更せず、XDGのデータ・設定・キャッシュをCI専用の一時ディレクトリへ向ける。通常終了・失敗時ともプロセス群とブラウザを終了させ、一時データを削除する。応答と終了には期限を設け、失敗をskipや成功に変換しない。
+両経路で実HTTP、実WebSocket経由の`GetDesktopVaultStatus`、Desktop初期画面、OSS画面の開閉、正常終了を検証する。不正Host、不正・欠落Origin、不正・欠落capability cookieの拒否と、正しい条件のWebSocket受理も実通信で確認する。`assets`ではバックエンドを停止・再起動し、同じページで再接続オーバーレイの表示・消失、capability更新、Go IPC復旧を確認する。ブラウザー例外は保存し、ほかの操作が成功しても合格にしない。
 
-`wails-echo-dev-integration` artifactにはビルド情報・アプリログ・通信数と終了／後片付けの判定結果を保存し、保管庫やブラウザプロファイルは含めない。既知のブラウザ例外も引き続き失敗とする。手動への移動は不具合の修正や合格扱いを意味しない。
+`go version -m`からWailsとEchoの選択版、独自置換なし、dev/desktop/WebKit/SQLCipherタグ、CGO、OS/CPUを検証する。Vite経路ではCLI自身と、CLIが実際に生成したdevバイナリも確認する。`govulncheck-dev`は同じdevビルドタグで到達可能な脆弱性を調べ、検出・検査失敗をそのまま失敗とする。定期・手動の既存セキュリティ報告もこの結果を収集する。
 
-自動CIでは代わりに、Desktop releaseの`Verify packaged Linux app`で、実配布アーカイブを展開した**同じproduction実行ファイル**をネイティブWebViewで起動する。`scripts/wails-native-integration.mjs`は公式Wailsの選択版、production/desktop/WebKit/SQLCipherタグ、CGO、OS/CPU、開発用Echoの非混入を照合する。既存の構成別OSS・実バイナリ依存・SQLCipher検査も維持する。再ビルドしたテスト専用アプリやテスト用API、JavaScript注入は使わない。
+Linux・GitHub Actions・仮想画面を必須にし、ローカルでは実アプリを起動しない。HOMEは変更せず、XDGデータとブラウザープロファイルをCIの一時領域へ隔離する。操作・応答・終了に期限を設け、失敗時もプロセス群を終了させ、WailsとViteの待受終了と一時データ削除を確認する。`wails-echo-dev-{assets,vite}-実行回数` artifactへコミット・版・バイナリSHA256・ビルド情報・段階別結果・ブラウザーエラー・アプリログを保存する。証跡が欠けた場合も失敗とし、保管庫とブラウザープロファイルは保存しない。
+
+既存の必須チェック`Go tests`はこのworkflowの成功を要求する。Desktopリリースは同じ結果を必須入力として受け取り、成功以外では署名・公開へ進まない。互換性検査が失敗しても4種のDesktopビルド検証は実行し、各OSでdevタグのコンパイルと実バイナリ内のWails/Echo版の一致を追加確認する。
+
+配布版の検査では、Desktop releaseの`Verify packaged Linux app`で、実配布アーカイブを展開した**同じproduction実行ファイル**をネイティブWebViewで起動する。`scripts/wails-native-integration.mjs`は公式Wailsの選択版、production/desktop/WebKit/SQLCipherタグ、CGO、OS/CPU、開発用Echoの非混入を照合する。既存の構成別OSS・実バイナリ依存・SQLCipher検査も維持する。再ビルドしたテスト専用アプリやテスト用API、JavaScript注入は使わない。
 
 CI専用のXvfb・D-Busとウィンドウマネージャーを使い、`scripts/wails-native-ui.py`がAT-SPIで起動したPIDの画面だけを操作する。初期設定前のOSS表示、実際のGoバインディングによる保管庫作成と回復コード受取確認、通常メニューのOSS表示、ロック画面のOSS表示、ロック解除、正常終了、同じ一時保管庫での再起動・再解除を検証する。パスワードはテストごとに生成し、HOMEは変更せずXDGデータ・設定・キャッシュとD-Bus起動環境を一時領域へ隔離する。期限・失敗時のプロセス終了・一時データ削除を必須とし、画面や保管庫をartifactへ保存しない。`wails-native-linux-integration` artifactには版・バイナリSHA256・固定名の操作結果・終了／後片付け結果とログだけを保存する。
 
-この自動GUI検査はLinux/amd64が対象であり、macOS/WindowsのGUI操作や、ネイティブ配布物に含まれない開発用Echo/WebSocket経路を検証したことにはならない。他の3種のDesktop配布物は既存のビルド・パッケージ・OSS・SQLCipher検査を維持する。Desktop検証が必要と判定されたPRでは、既存の必須チェック`Go tests`もDesktop releaseの成功を要求するため、ネイティブ検査の失敗・キャンセル・想定外のskipでは合格しない。Wailsの不具合とEchoのバージョン／互換性の問題が解消し、手動の開発ブラウザテストが全項目成功したら、Issue #299の条件に従って**開発ブラウザテストを通常の必須自動CIへ戻し、その成功まで確認する**。例外や脆弱性を無視して復帰させない。
+ネイティブGUI操作と開発用ブラウザーの実行検査はLinux/amd64が対象であり、macOS/WindowsのGUI操作まで検証したことにはならない。他の3種のDesktop配布物はビルド・パッケージ・OSS・SQLCipher検査に加えてdevタグのコンパイルと依存版を検証する。Desktop検証が必要と判定されたPRでは、既存の必須チェック`Go tests`もDesktop releaseの成功を要求し、失敗・キャンセル・想定外のskipでは合格しない。
 
 ## パスキーログインの情報漏えい対策と限界
 

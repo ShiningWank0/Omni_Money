@@ -109,10 +109,18 @@ jobs:
           RELEASE_REHEARSAL: ${{ inputs.release_rehearsal || false }}
         run: node scripts/release-plan.mjs
 
+  wails-echo:
+    name: Wails and Echo compatibility
+    needs: [oss, release-plan]
+    if: ${{ github.event_name != 'push' || needs.release-plan.outputs.desktop == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/wails-dev-integration.yml
+
   release-desktop:
     name: Desktop release
-    needs: [oss, release-plan]
-    if: needs.release-plan.outputs.desktop == 'true'
+    needs: [oss, release-plan, wails-echo]
+    if: ${{ !cancelled() && needs.oss.result == 'success' && needs.release-plan.result == 'success' && needs.release-plan.outputs.desktop == 'true' }}
     permissions:
       contents: write
       actions: read
@@ -120,6 +128,8 @@ jobs:
       attestations: write
       artifact-metadata: write
     uses: ./.github/workflows/release-desktop.yml
+    with:
+      wails_echo_result: ${{ needs.wails-echo.result }}
 
   release-docker:
     name: Docker release
@@ -193,9 +203,8 @@ jobs:
           go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/securedb ./backend/database ./backend/control ./backend/vault ./backend/desktopaccount ./backend/api ./backend/serverauth
           go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" -run '^TestEncryptedLedgerMutationsWaitForCompetingWriter$' ./backend/core
 
-      # Temporary replacement for the development-browser integration: the
-      # desktop release job tests the packaged native WebView automatically.
-      # Restore the browser test here after the conditions in Issue #299 pass.
+      # The reusable wails-echo job checks the real development runtime.
+      # Desktop release separately checks the packaged native WebView.
       - name: Cross-build Windows secret boundaries
         env:
           CGO_ENABLED: "0"
@@ -831,13 +840,15 @@ jobs:
   # and update tests in its verdict before GitHub allows the PR to merge.
   go:
     name: Go tests
-    needs: [oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker, release-plan, release-desktop]
+    needs: [oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker, release-plan, release-desktop, wails-echo]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require expected Go result and successful auxiliary checks
         env:
+          WAILS_ECHO_RESULT: ${{ needs.wails-echo.result }}
+          EXPECTED_WAILS_ECHO_RESULT: ${{ (github.event_name != 'push' || needs.release-plan.outputs.desktop == 'true') && 'success' || 'skipped' }}
           OSS_RESULT: ${{ needs.oss.result }}
           GO_RESULT: ${{ needs.go-checks.result }}
           PASSKEY_RESULT: ${{ needs.passkey.result }}
@@ -853,6 +864,7 @@ jobs:
           FUZZ_RESULT: ${{ needs.parser-fuzz.result }}
           EXPECTED_FUZZ_RESULT: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'success' || 'skipped' }}
         run: |
+          test "$WAILS_ECHO_RESULT" = "$EXPECTED_WAILS_ECHO_RESULT"
           test "$OSS_RESULT" = success
           test "$GO_RESULT" = "$EXPECTED_GO_RESULT"
           test "$PASSKEY_RESULT" = "$EXPECTED_GO_RESULT"
@@ -871,7 +883,7 @@ jobs:
 
   security-issues:
     name: Report security findings
-    needs: [go-checks, frontend, docker, security-automation, parser-fuzz]
+    needs: [go-checks, frontend, docker, security-automation, parser-fuzz, wails-echo]
     if: >-
       ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
           && github.repository == 'ShiningWank0/Omni_Money' && needs.security-automation.result == 'success' }}
