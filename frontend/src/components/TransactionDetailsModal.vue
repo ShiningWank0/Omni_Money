@@ -12,6 +12,7 @@
             </svg>
           </button>
           <button type="button" class="details-icon-button" title="閉じる" aria-label="閉じる" @click="$emit('close')">×</button>
+          <button v-if="transaction.type === 'expense' && !transaction.subscription" type="button" class="details-icon-button" aria-label="サブスクとして登録" title="サブスクとして登録" @click="$emit('subscribe')">↻</button>
         </div>
       </header>
 
@@ -28,6 +29,10 @@
           <div><dt>種類</dt><dd>{{ transaction.type === 'income' ? '収入' : '支出' }}</dd></div>
           <div><dt>メモ</dt><dd class="details-memo">{{ transaction.memo || '—' }}</dd></div>
           <div><dt>タグ</dt><dd>{{ transaction.tags?.length ? transaction.tags.map(tag => tag.name).join('、') : 'なし' }}</dd></div>
+          <template v-if="transaction.subscription && transaction.subscription.currency !== 'JPY'">
+            <div><dt>元の金額</dt><dd>{{ transaction.subscription.original_amount }} {{ transaction.subscription.currency }}</dd></div>
+            <div><dt>換算レート</dt><dd>1 {{ transaction.subscription.currency }} = {{ transaction.subscription.rate }} JPY（{{ transaction.subscription.rate_date }} / ECB・Frankfurter）</dd></div>
+          </template>
         </dl>
 
         <section class="details-images" :aria-busy="imagesLoading" aria-label="添付画像">
@@ -92,7 +97,7 @@ import { getTransactionImages } from '../utils/api'
 import { formatExactCurrency } from '../utils/exactAmount'
 
 const props = defineProps({ transaction: { type: Object, required: true } })
-const emit = defineEmits(['edit', 'close', 'remove-image'])
+const emit = defineEmits(['edit', 'close', 'remove-image', 'subscribe'])
 const editButton = ref(null)
 const images = ref([])
 const imagesLoading = ref(false)

@@ -14,7 +14,7 @@ archiveに含まれるもの（`scripts/backup-data-root.sh` がdata root全体�
 | 対象 | path（data root相対） | 内容 |
 | --- | --- | --- |
 | control DB | `control/omni_control.db` | user registry、credential envelope、vault metadata（SQLCipher ciphertext） |
-| 各user vault | `vaults/<vault-id>/ledger.db` | 財務ledger本体とschema 6の保存受付・失敗入力・再送防止記録（各userのDEKで暗号化） |
+| 各user vault | `vaults/<vault-id>/ledger.db` | 財務ledger本体とschema 7の保存受付・失敗入力・再送防止記録・サブスク設定・支払回・外貨換算履歴（各userのDEKで暗号化） |
 | 各vaultのsnapshot | `vaults/<vault-id>/snapshots/*.db` | vault DEKで暗号化された時点復元用ciphertext |
 
 archiveに**含まれない**もの（契約上data root外に置かれる。別途、archiveとは異なる

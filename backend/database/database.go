@@ -31,7 +31,7 @@ import (
 )
 
 const defaultSnapshotMaxTotalBytes int64 = 2 * 1024 * 1024 * 1024
-const ledgerSchemaVersion = 6
+const ledgerSchemaVersion = 7
 
 // application_id is the SQLite file identity for Omni Money ledgers. Zero is
 // accepted only for legacy files that predate the identity marker; another
@@ -729,6 +729,9 @@ func createTablesOnContext(ctx context.Context, target *sql.DB) error {
 	}
 
 	statements = append(statements, TransactionSaveTableSQL, transactionSaveIndexSQL)
+	for _, object := range subscriptionSchema {
+		statements = append(statements, object.ddl)
+	}
 
 	// Version 0 includes both a brand-new database and databases created by
 	// older releases before schema versions were recorded. Reapplying the
@@ -1156,7 +1159,7 @@ func validateLedgerSchemaContextInternal(ctx context.Context, target schemaQuery
 	if err := requireColumnsContext(ctx, target, "transactions", []string{"id", "account", "date", "item", "type", "amount", "balance", "memo"}); err != nil {
 		return fmt.Errorf("ledger minimum schema: %w", err)
 	}
-	if version == ledgerSchemaVersion || version == 5 {
+	if version >= 5 {
 		strict := strictCurrent
 		if strictCurrent && identity == 0 {
 			// application_id=0 is never a compatibility marker. A historical
@@ -1618,6 +1621,13 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 	if queueRequired {
 		allowedTables["transaction_save_requests"] = true
 	}
+	if version >= 7 {
+		for _, object := range subscriptionSchema {
+			if object.kind == "table" {
+				allowedTables[object.name] = true
+			}
+		}
+	}
 	rows, err := target.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND "+sqliteUserTablePredicate)
 	if err != nil {
 		return err
@@ -1672,6 +1682,16 @@ func validateFullLedgerSchemaContext(ctx context.Context, target schemaQueryer, 
 		objects = append(objects, struct{ typ, name string }{"index", "idx_transaction_saves_pending"})
 		if err := validateTransactionSaveSchema(ctx, target); err != nil {
 			return err
+		}
+	}
+	if version >= 7 {
+		if err := validateSubscriptionSchema(ctx, target); err != nil {
+			return err
+		}
+		for _, object := range subscriptionSchema {
+			if object.kind != "table" {
+				objects = append(objects, struct{ typ, name string }{object.kind, object.name})
+			}
 		}
 	}
 	allowedPersistentObjects := make(map[string]struct{}, len(objects))

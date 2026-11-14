@@ -125,6 +125,10 @@ func ledgerContentDigest(ctx context.Context, db digestQueryer) (string, error) 
 		"SELECT key, value FROM settings WHERE key IN ('credit_card_items', 'bank_account_items') ORDER BY key",
 		"SELECT credential_id, idempotency_key_sha256, request_sha256, transaction_id, response_account, response_date, created_at FROM ai_transaction_idempotency ORDER BY credential_id, idempotency_key_sha256",
 		"SELECT credential_id, utc_date, successful_creates FROM ai_daily_transaction_usage ORDER BY credential_id, utc_date",
+		"SELECT id, revision, enabled, next_sequence, next_date, definition FROM subscription_rules ORDER BY id",
+		"SELECT rule_id, tag_id FROM subscription_rule_tags ORDER BY rule_id, tag_id",
+		"SELECT rule_id, sequence, due_date, revision, transaction_id, confirmed, currency, original_amount, rate, rate_date, yen_amount FROM subscription_occurrences ORDER BY rule_id, sequence",
+		"SELECT fingerprint FROM subscription_dismissals ORDER BY fingerprint",
 	}
 	for _, query := range queries {
 		hashLengthPrefixed(digest, query)

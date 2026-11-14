@@ -185,7 +185,17 @@ server環境変数の完全な source of truth は [`.env.example`](.env.example
 
 ## 7. データベース設計（SQLite）
 
-ledger schema versionは6。構造・migration・index/trigger検証は `backend/database/database.go` と `backend/database/transaction_save_schema.go` を正とする。以下は主要なledgerデータで、control DBのuser/token/envelopeや廃止機能の互換テーブルとは区別する。
+ledger schema versionは7。構造・migration・index/trigger検証は `backend/database/database.go`、`backend/database/transaction_save_schema.go`、`backend/database/subscription_schema.go` を正とする。以下は主要なledgerデータで、control DBのuser/token/envelopeや廃止機能の互換テーブルとは区別する。
+
+### サブスクの自動登録
+
+Desktopとserverで本人のvault leaseから同じcore処理を使用する。初期対象は既存の手動支出から作る月額・年額のルール。基準日を保持して短い月を月末に寄せ、ルールのIANA timezoneで当日を判定する。起点取引や生成済みの支払回と同じ月・年へ次回日を戻す変更を拒否する。ルールは256件、補完は1要求24件・15秒以内とし、続きは次回要求で処理する。画面の利用開始、利用中の約60秒ごと、復帰時に補完する。保管庫を開き続けるbackground schedulerは持たない。
+
+`subscription_rules`、`subscription_rule_tags`、`subscription_occurrences`、`subscription_dismissals`はledger内に保持する。支払回のsequenceはルールのrevision・表示日付から独立し、取引削除後も処理記録を保持する。取引・生成元・確認状態・支払回・次回日・残高は同じwriter予約内で確定する。編集成功時は生成元を残して確認状態のみ更新し、serverでは保存受付のcompletedも同じtransactionで確定する。製品画面に確認状態を説明する文字・ラベル・tooltip・専用色を加えず、一覧とカレンダーではopacity .55を使用する。
+
+外貨はJPY・USD・EUR・GBP・AUD・CAD・CHF・CNY・HKD・SGDに対応し、円以外の入力は小数2桁まで。固定HTTPS originのFrankfurter v2 ECB providerから支払日以前7日以内の最新日次参照値を取得する。取得先へ通貨・日付以外の金融情報や認証情報を渡さず、proxy・redirectを使わない。取得はwriter予約の前に行い、応答サイズ・日付・通貨pair・正のdecimalを検証する。浮動小数点を使わず円へ四捨五入し、既存の金額上限を適用する。元金額・通貨・rate・公表日・元の円換算額は支払回に固定する。予定の閲覧は生成もrate取得も行わない。
+
+CSV v3はサブスク拡張を含まないledger転送形式。appendは手動取引を作り、名前や金額から生成元を推定しない。replaceは既存ルールを停止してrevisionを更新し、削除取引の生成元と削除タグのtemplate参照を切り離すが、処理済み支払回を保持する。プレビューdigestはこの変更対象も含む。設定・支払回・外貨換算履歴を含めた復元はschema 7のsnapshotまたはwhole-data-root backupで行う。
 
 ### サーバーの取引保存受付
 
@@ -193,7 +203,7 @@ ledger schema versionは6。構造・migration・index/trigger検証は `backend
 
 ログアウトが待つのは送信・受付確認とsession失効までで、取引反映・画像処理・自動snapshotは待たない。処理中・失敗入力は本人だけが参照し、失敗入力と画像は本人による通知削除まで暗号化して保持する。ID/hashの再送防止記録は残す。再起動後のpendingは次回Vault unlockで再開する。通常HTTP bodyの上限は10 MiB、UIの画像原データは合計7 MiBまで。queue内部は1入力32 MiB、保持入力32件/合計128 MiBの上限を持つが、HTTP上限を緩和しない。
 
-CSV v3はこの受付queueと再送防止記録を含まない。schema 6のsnapshotとwhole-data-root archiveはDB内の記録も保全する。過去のsnapshotへのrestoreは後の受付記録も巻き戻す。ブラウザの未確認入力はメモリのみで、永続offline outboxは提供しない。詳細は [API契約](docs/api-errors.md) と [server安全モデル](docs/server-multi-vault.md) を参照する。
+CSV v3はこの受付queueと再送防止記録を含まない。schema 7のsnapshotとwhole-data-root archiveはDB内の記録も保全する。過去のsnapshotへのrestoreは後の受付記録も巻き戻す。ブラウザの未確認入力はメモリのみで、永続offline outboxは提供しない。詳細は [API契約](docs/api-errors.md) と [server安全モデル](docs/server-multi-vault.md) を参照する。
 
 ### 主要なledgerデータ
 

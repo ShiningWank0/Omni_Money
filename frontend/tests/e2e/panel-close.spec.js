@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { panelApiReply } from './fixtures/panelApiReply.js'
 
 test.skip(!process.env.E2E_BASE_URL, 'Run via tests/e2e/run-server-e2e.sh')
 
@@ -24,12 +25,12 @@ async function mockPanelAPIs(page) {
   }
   await page.route('**/api/**', route => {
     const path = new URL(route.request().url()).pathname
-    if (path === '/api/auth/keepalive' && route.request().method() === 'POST') return route.fulfill({ status: 204 })
-    if (route.request().method() !== 'GET' || !(path in replies)) {
+    const reply = panelApiReply(route.request().method(), path, replies)
+    if (reply === null) {
       unexpected.push(`${route.request().method()} ${path}`)
       return route.fulfill({ status: 503, body: '{}' })
     }
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(replies[path]) })
+    return route.fulfill(reply)
   })
   return unexpected
 }

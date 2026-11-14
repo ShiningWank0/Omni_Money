@@ -287,7 +287,9 @@ jobs:
           export CGO_ENABLED=1
           if [ "$RUNNER_OS" = "Linux" ]; then
             export CGO_CFLAGS="-I${SQLCIPHER_PREFIX}/include"
-            export CGO_LDFLAGS="-L${SQLCIPHER_PREFIX}/lib -lcrypto"
+            # The bindings helper also links this static archive. Its OpenSSL
+            # dependency must follow it so GNU ld --as-needed retains libcrypto.
+            export CGO_LDFLAGS="-L${SQLCIPHER_PREFIX}/lib ${SQLCIPHER_PREFIX}/lib/libsqlite3.a -lcrypto"
             BUILD_TAGS="webkit2_41,libsqlite3,sqlite_omit_load_extension"
           else
             OPENSSL_PREFIX="${{ runner.temp }}/omni-openssl-3.5.8"

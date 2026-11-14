@@ -127,6 +127,10 @@ func (s *Service) GetItems(account string) ([]string, error) {
 
 // GetTransactions は取引履歴を返す
 func (s *Service) GetTransactions(account string, search string) ([]models.TransactionResponse, error) {
+	return s.getTransactions(account, search, "", "", "", 0, 0)
+}
+
+func (s *Service) getTransactions(account, search, ruleID, start, end string, offset, limit int) ([]models.TransactionResponse, error) {
 	db, err := s.database()
 	if err != nil {
 		return nil, err
@@ -143,10 +147,27 @@ func (s *Service) GetTransactions(account string, search string) ([]models.Trans
 		whereClause += " AND (item LIKE ? OR memo LIKE ?)"
 		args = append(args, "%"+search+"%", "%"+search+"%")
 	}
+	if ruleID != "" {
+		whereClause += " AND EXISTS(SELECT 1 FROM subscription_occurrences o WHERE o.transaction_id=transactions.id AND o.rule_id=?)"
+		args = append(args, ruleID)
+	}
+	if start != "" {
+		whereClause += " AND date >= ?"
+		args = append(args, start)
+	}
+	if end != "" {
+		whereClause += " AND date < ?"
+		args = append(args, end)
+	}
 	query := "SELECT id, account, date, item, type, COALESCE((SELECT amount FROM transaction_archive_amounts WHERE transaction_id = transactions.id), amount), balance, memo FROM transactions" + whereClause
 	query += " ORDER BY date, id"
+	queryArgs := append([]interface{}{}, args...)
+	if limit > 0 {
+		query += " LIMIT ? OFFSET ?"
+		queryArgs = append(queryArgs, limit, offset)
+	}
 
-	rows, err := db.Query(query, args...)
+	rows, err := db.Query(query, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("取引履歴取得エラー: %w", err)
 	}
@@ -172,7 +193,12 @@ func (s *Service) GetTransactions(account string, search string) ([]models.Trans
 
 	// 取引ごとのタグを1件ずつ取得すると取引件数に比例してSQLが増えるため、
 	// 同じ取引フィルターを使った1回のJOINでまとめて取得する。
-	tagsByTransaction, err := getTransactionTagsForFilteredTransactions(db, whereClause, args)
+	metadataWhere, metadataArgs := whereClause, args
+	if limit > 0 {
+		metadataWhere += " ORDER BY date, id LIMIT ? OFFSET ?"
+		metadataArgs = queryArgs
+	}
+	tagsByTransaction, err := getTransactionTagsForFilteredTransactions(db, metadataWhere, metadataArgs)
 	if err != nil {
 		return nil, fmt.Errorf("取引タグ一括取得エラー: %w", err)
 	}
@@ -182,6 +208,9 @@ func (s *Service) GetTransactions(account string, search string) ([]models.Trans
 			tags = []models.Tag{}
 		}
 		transactions[i].Tags = tags
+	}
+	if err := attachSubscriptionProvenance(db, transactions, metadataWhere, metadataArgs); err != nil {
+		return nil, err
 	}
 
 	if transactions == nil {
@@ -488,6 +517,13 @@ func updatePreparedTransactionIn(tx *sql.Tx, id int64, req models.TransactionReq
 	}
 	t.Date = parseDate(dateStr)
 	resp := t.ToResponse()
+	if _, err := tx.Exec("UPDATE subscription_occurrences SET confirmed=1 WHERE transaction_id=?", id); err != nil {
+		return nil, err
+	}
+	resp.Subscription, err = subscriptionProvenanceIn(tx, id)
+	if err != nil {
+		return nil, err
+	}
 	return &resp, nil
 }
 

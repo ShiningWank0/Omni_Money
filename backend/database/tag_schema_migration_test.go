@@ -81,6 +81,7 @@ func TestVersionFiveLedgerMigratesSaveQueueWithoutWeakeningValidation(t *testing
 				t.Fatal(err)
 			}
 			defer instance.Close()
+			removeSubscriptionSchemaForTest(t, instance.DB())
 			for _, statement := range []string{"DROP TABLE transaction_save_requests", "PRAGMA user_version = 5", "INSERT INTO transactions(account, date, item, type, amount, balance, memo) VALUES('cash', '2026-10-04 00:00:00', 'existing', 'income', 100, 100, '')"} {
 				if _, err := instance.DB().Exec(statement); err != nil {
 					t.Fatal(err)

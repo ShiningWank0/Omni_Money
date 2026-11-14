@@ -43,6 +43,31 @@ with the control key and control database can recover the DEK of an account with
 a custody envelope. This is not a zero-knowledge mode. Application administrators
 still have no API for selecting or opening another user's financial vault.
 
+## Subscription state and exchange rates
+
+Subscription rules, template tags, immutable payment occurrence records, display
+confirmation and candidate dismissals reside only in each encrypted ledger
+(schema 7). The browser's bounded `POST /api/subscription-sync` uses its own
+request lease, with no server timer retaining keys for locked or logged-out
+users. Each generated transaction, origin, occurrence, next sequence and balance
+commits in one writer reservation. Stop/edit races recheck the current rule after
+rate lookup. A submitted request may finish its current bounded operation; no
+new pass is started after the UI generation is invalidated.
+
+Foreign-currency subscriptions use a fixed HTTPS Frankfurter ECB provider URL.
+Only the currency pair and requested date window leave the process; account,
+item, amount, memo, user identifiers, cookies and credentials are not sent.
+Redirects and environment proxies are disabled, TLS certificates remain
+verified, and requests, response headers/bodies, date range and decimal rates
+are bounded. Rates are fetched outside the ledger writer and retained with the
+original amount inside the vault. Calendar reads never fetch rates or write.
+
+CSV v3 excludes subscription state. Replace pauses retained rules, detaches
+deleted transaction/tag references and preserves processed occurrence records;
+the preview digest covers that state too. Schema-7 encrypted snapshots preserve
+the rules, confirmations and deduplication records consistently. Restore rolls
+them back with the ledger and revokes the existing sessions.
+
 ## Password and recovery derivation
 
 Password derivation uses one fixed, versioned Argon2id profile. Metadata selects

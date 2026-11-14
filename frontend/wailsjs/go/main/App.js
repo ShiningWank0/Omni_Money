@@ -58,6 +58,10 @@ export function DeleteTransactionImage(arg1) {
   return window['go']['main']['App']['DeleteTransactionImage'](arg1);
 }
 
+export function DismissSubscriptionCandidate(arg1) {
+  return window['go']['main']['App']['DismissSubscriptionCandidate'](arg1);
+}
+
 export function GetAccounts() {
   return window['go']['main']['App']['GetAccounts']();
 }
@@ -74,6 +78,10 @@ export function GetBankAccountSettings() {
   return window['go']['main']['App']['GetBankAccountSettings']();
 }
 
+export function GetCardReconciliation(arg1) {
+  return window['go']['main']['App']['GetCardReconciliation'](arg1);
+}
+
 export function GetCreditCardSettings() {
   return window['go']['main']['App']['GetCreditCardSettings']();
 }
@@ -84,6 +92,22 @@ export function GetDesktopVaultStatus() {
 
 export function GetItems(arg1) {
   return window['go']['main']['App']['GetItems'](arg1);
+}
+
+export function GetSubscriptionCalendar(arg1) {
+  return window['go']['main']['App']['GetSubscriptionCalendar'](arg1);
+}
+
+export function GetSubscriptionCandidates() {
+  return window['go']['main']['App']['GetSubscriptionCandidates']();
+}
+
+export function GetSubscriptionTransactions(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['main']['App']['GetSubscriptionTransactions'](arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
+export function GetSubscriptions() {
+  return window['go']['main']['App']['GetSubscriptions']();
 }
 
 export function GetTagDeleteImpact(arg1) {
@@ -108,10 +132,6 @@ export function GetTransactionImagesPage(arg1, arg2, arg3) {
 
 export function GetTransactionLinks(arg1) {
   return window['go']['main']['App']['GetTransactionLinks'](arg1);
-}
-
-export function GetCardReconciliation(arg1) {
-  return window['go']['main']['App']['GetCardReconciliation'](arg1);
 }
 
 export function GetTransactionTags(arg1) {
@@ -170,8 +190,16 @@ export function SaveCreditCardSettings(arg1) {
   return window['go']['main']['App']['SaveCreditCardSettings'](arg1);
 }
 
+export function SaveSubscription(arg1, arg2) {
+  return window['go']['main']['App']['SaveSubscription'](arg1, arg2);
+}
+
 export function SetupDesktopVault(arg1) {
   return window['go']['main']['App']['SetupDesktopVault'](arg1);
+}
+
+export function SyncSubscriptions() {
+  return window['go']['main']['App']['SyncSubscriptions']();
 }
 
 export function UnlockDesktopVault(arg1) {

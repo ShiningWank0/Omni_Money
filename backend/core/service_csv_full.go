@@ -2987,6 +2987,12 @@ func (s *Service) importCSVV3Parsed(ctx context.Context, parsed *csvV3Import, mo
 		}
 	}
 	if mode == "replace" {
+		// CSV v3 carries ledger transactions, not subscription configuration.
+		// Pause retained rules atomically before detaching old provenance. Keep
+		// tombstones so re-enabling cannot resurrect an already processed date.
+		if _, err := tx.ExecContext(ctx, "UPDATE subscription_rules SET enabled=0, revision=revision+1"); err != nil {
+			return 0, err
+		}
 		// Keep this list explicit. In particular, settings outside the two
 		// ledger keys are owned by other features and must survive replace.
 		deletes := []struct {

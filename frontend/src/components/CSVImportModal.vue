@@ -37,6 +37,7 @@
         </div>
 
         <div v-if="csvImportMode === 'replace'" class="replace-warning" role="alert">
+          サブスク設定はCSVに含まれません。置換すると既存のサブスクを停止し、タグ設定と取引の生成元情報を切り離します。処理済みの支払回は保持します。
           <strong>破壊的操作です。</strong>
           置換はCSV v3でのみ利用できます。v1/v2（旧形式）のreplaceは安全のため拒否されます。
           旧形式はappendで追加するか、完全バックアップからCSV v3を使用してください。
