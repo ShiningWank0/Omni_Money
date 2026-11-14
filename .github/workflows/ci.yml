@@ -808,11 +808,21 @@ jobs:
         run: |
           go test -mod=readonly -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/serverauth ./backend/control ./backend/keyenvelope ./backend/middleware
           go test -mod=readonly -race -count=1 -tags "libsqlite3 sqlite_omit_load_extension" -run '^TestPasskeyRegression' ./backend/serverauth
-      # Test the installed WebAuthn module from this application's module root.
-      # Its tests use the same dependency graph as the application, including
-      # this PR's CBOR and cryptography versions. No dependency is rewritten.
+      # Keep the application's dependency graph. Correct v0.18.2's generated
+      # P-256 test coordinates only in a disposable module cache, preserving
+      # the original cache and all production source files.
       - name: Test WebAuthn using this PR's dependency graph
-        run: go test -mod=readonly -count=1 github.com/go-webauthn/webauthn/protocol/... github.com/go-webauthn/webauthn/webauthn
+        run: |
+          python3 -m unittest discover -s scripts -p 'pad_webauthn_test_coordinates_test.py'
+          original_modcache="$(go env GOMODCACHE)"
+          original_goproxy="$(go env GOPROXY)"
+          test_modcache="$(mktemp -d "$RUNNER_TEMP/omni-webauthn-tests.XXXXXX")"
+          trap 'rm -rf -- "$test_modcache"' EXIT
+          export GOPROXY="file://$original_modcache/cache/download,$original_goproxy"
+          export GOMODCACHE="$test_modcache"
+          go mod download github.com/go-webauthn/webauthn
+          python3 scripts/pad_webauthn_test_coordinates.py "$test_modcache"
+          go test -mod=readonly -count=1 github.com/go-webauthn/webauthn/protocol/... github.com/go-webauthn/webauthn/webauthn
       - name: Verify dependency manifests stayed unchanged
         if: ${{ always() }}
         run: git diff --exit-code -- go.mod go.sum
