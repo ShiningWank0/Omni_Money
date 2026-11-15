@@ -74,6 +74,8 @@ func TestDesktopReleaseUsesLeastPrivilegeAndReproducibleTools(t *testing.T) {
 		"artifact-metadata: write",
 		"release:",
 		"needs: [prepare, build, attest]",
+		"node scripts/wails-dev-build.mjs",
+		`go build -mod=readonly -tags "dev,desktop,$BUILD_TAGS"`,
 		"actions: read",
 		"contents: write",
 		`WAILS_VERSION="$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"`,

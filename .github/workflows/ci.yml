@@ -193,9 +193,8 @@ jobs:
           go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/securedb ./backend/database ./backend/control ./backend/vault ./backend/desktopaccount ./backend/api ./backend/serverauth
           go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" -run '^TestEncryptedLedgerMutationsWaitForCompetingWriter$' ./backend/core
 
-      # Temporary replacement for the development-browser integration: the
-      # desktop release job tests the packaged native WebView automatically.
-      # Restore the browser test here after the conditions in Issue #299 pass.
+      # Issue #299 keeps the unresolved development browser diagnostics manual.
+      # Desktop release requires the packaged native WebView and dev build metadata.
       - name: Cross-build Windows secret boundaries
         env:
           CGO_ENABLED: "0"

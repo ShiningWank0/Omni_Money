@@ -100,6 +100,22 @@ test('missing, mismatched and malformed artifacts become individual scan-error e
   assert.ok(result.every(e => e.data.kind === 'scan-error'));
 });
 
+test('normal CI does not require the manual development report, but still rejects a missing production report', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'omni-production-reports-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const production = ['npm', 'gosec-desktop', 'gosec-server', 'govulncheck-desktop', 'govulncheck-server', 'trivy', 'fuzz-csv', 'fuzz-json', 'fuzz-image'];
+  for (const scan of production) writeFileSync(join(directory, `${scan}.json`), JSON.stringify({ schema: 1, scan, status: 'clean', findings: [] }));
+  assert.deepEqual(entries(collect(directory)), []);
+  assert.equal(collect(directory).some(report => report.scan === 'govulncheck-dev'), false);
+  assert.equal(normalize('govulncheck-dev', goInput, 0).status, 'findings');
+  assert.equal(normalize('govulncheck-dev', '{}', 0).status, 'error');
+  rmSync(join(directory, 'govulncheck-desktop.json'));
+  const failures = entries(collect(directory));
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].data.kind, 'scan-error');
+  assert.equal(failures[0].data.tool, 'govulncheck-desktop');
+});
+
 test('duplicates across Go build modes and call traces produce one issue with sorted contexts', () => {
   const desktop = normalize('govulncheck-desktop', goInput, 0);
   const result = entries([report(), desktop, report()]);
@@ -361,6 +377,22 @@ test('CLI enforces failure on govulncheck JSON findings even when tool exits suc
   for (const mode of ['desktop', 'server']) {
     const r = JSON.parse(readFileSync(join(directory, `security-reports/govulncheck-${mode}.json`), 'utf8'));
     assert.equal(r.status, 'findings');
+  }
+});
+
+test('development scanner selects the real dev graph and reports reachable vulnerabilities without suppressing them', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'omni-dev-scanner-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  mkdirSync(join(directory, 'bin'));
+  for (const [output, status] of [[goInput, 'findings'], [stream([goConfig, goSBOM]), 'clean'], ['{}', 'error']]) {
+    writeFileSync(join(directory, 'bin/go'), `#!${process.execPath}\nrequire('node:fs').writeFileSync('scanner-args.json', JSON.stringify(process.argv.slice(2)));\nprocess.stdout.write(${JSON.stringify(output)});\n`, { mode: 0o755 });
+    const child = spawnSync(process.execPath, [resolve('scripts/security-reports.mjs'), 'govulncheck-dev'], {
+      cwd: directory, env: { ...process.env, PATH: `${join(directory, 'bin')}:${process.env.PATH}` }, encoding: 'utf8', timeout: 5000,
+    });
+    assert.equal(child.status, status === 'clean' ? 0 : 1);
+    assert.equal(JSON.parse(readFileSync(join(directory, 'security-reports/govulncheck-dev.json'), 'utf8')).status, status);
+    assert.deepEqual(JSON.parse(readFileSync(join(directory, 'scanner-args.json'), 'utf8')),
+      ['run', 'golang.org/x/vuln/cmd/govulncheck@v1.6.0', '-json', '-tags', 'dev,desktop,webkit2_41,libsqlite3,sqlite_omit_load_extension', './...']);
   }
 });
 

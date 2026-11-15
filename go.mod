@@ -10,7 +10,7 @@ toolchain go1.27.4
 require (
 	github.com/fxamacker/cbor/v2 v2.10.0
 	github.com/go-webauthn/webauthn v0.18.2
-	github.com/labstack/echo/v4 v4.16.3
+	github.com/labstack/echo/v4 v4.16.4
 	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/wailsapp/wails/v2 v2.17.1
 	golang.org/x/crypto v0.58.0
@@ -49,7 +49,7 @@ require (
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )

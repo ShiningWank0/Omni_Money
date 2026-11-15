@@ -4,7 +4,10 @@ import { relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+// Required reports produced by the normal CI workflow. Development runtime
+// diagnostics run manually while Issue #299 waits for the official Wails fix.
 export const scans = ['npm', 'gosec-desktop', 'gosec-server', 'govulncheck-desktop', 'govulncheck-server', 'trivy', 'fuzz-csv', 'fuzz-json', 'fuzz-image'];
+export const developmentScans = ['govulncheck-dev'];
 export const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const requireValue = (condition, message) => { if (!condition) throw new Error(message); };
 const high = value => ['HIGH', 'CRITICAL'].includes(String(value).toUpperCase());
@@ -109,7 +112,7 @@ export function parseReport(scan, input, root = process.cwd()) {
 export function normalize(scan, input, exitCode, root) {
   const report = { schema: 1, scan, status: 'error', findings: [] };
   try {
-    requireValue(scans.includes(scan), 'unknown scanner');
+    requireValue(scans.includes(scan) || developmentScans.includes(scan), 'unknown scanner');
     const findings = parseReport(scan, input, root);
     // JSON govulncheck and the Trivy action use exit 0 even for findings.
     const acceptable = scan.startsWith('govulncheck-') || scan === 'trivy'
@@ -175,10 +178,12 @@ function run(tool) {
     try { raw = readFileSync('trivy-report.json', 'utf8'); } catch { /* recorded as an error */ }
     return save(normalize('trivy', raw, process.env.TRIVY_OUTCOME === 'success' ? 0 : 1));
   }
-  requireValue(['npm', 'gosec', 'govulncheck'].includes(tool), 'unknown scanner');
+  requireValue(['npm', 'gosec', 'govulncheck', 'govulncheck-dev'].includes(tool), 'unknown scanner');
   let failed = false;
-  for (const scan of scans.filter(name => name === tool || name.startsWith(`${tool}-`))) {
-    const server = scan.endsWith('-server') ? ['-tags', 'server'] : [];
+  const selected = tool === 'govulncheck-dev' ? developmentScans : scans.filter(name => name === tool || name.startsWith(`${tool}-`));
+  for (const scan of selected) {
+    const server = scan === 'govulncheck-dev' ? ['-tags', 'dev,desktop,webkit2_41,libsqlite3,sqlite_omit_load_extension']
+      : scan.endsWith('-server') ? ['-tags', 'server'] : [];
     const command = tool === 'npm' ? ['npm', 'audit', '--json', '--audit-level=high']
       : tool === 'gosec' ? ['go', 'run', '-mod=readonly', `-modfile=${fileURLToPath(new URL('./gosec.mod', import.meta.url))}`,
         'github.com/securego/gosec/v2/cmd/gosec', '-terse', '-fmt=json', '-severity=medium', ...server, './...']
