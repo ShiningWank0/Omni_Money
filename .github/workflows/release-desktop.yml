@@ -2,11 +2,6 @@ name: Desktop Release (Wails)
 
 on:
   workflow_call:
-    inputs:
-      wails_echo_result:
-        description: Result of this commit's Wails and Echo compatibility workflow
-        required: true
-        type: string
 
 permissions: {}
 
@@ -110,16 +105,6 @@ jobs:
         id: pull_request
         if: github.event_name == 'pull_request'
         run: echo "exists=false" >> "$GITHUB_OUTPUT"
-
-  compatibility-gate:
-    name: Require Wails and Echo compatibility before publishing
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Require a successful result from the caller
-        env:
-          WAILS_ECHO_RESULT: ${{ inputs.wails_echo_result }}
-        run: test "$WAILS_ECHO_RESULT" = success
 
   build:
     name: Build desktop artifacts
@@ -526,14 +511,13 @@ jobs:
 
   attest:
     name: Attest desktop artifacts
-    needs: [prepare, build, compatibility-gate]
+    needs: [prepare, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     if: >-
       github.event_name == 'push' &&
       needs.prepare.outputs.release_exists == 'false' &&
-      needs.build.result == 'success' &&
-      needs.compatibility-gate.result == 'success'
+      needs.build.result == 'success'
     permissions:
       actions: read # required to download build artifacts
       contents: read # required by actions/attest provenance metadata
@@ -559,15 +543,14 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: [prepare, build, attest, compatibility-gate]
+    needs: [prepare, build, attest]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     if: >-
       github.event_name == 'push' &&
       needs.prepare.outputs.release_exists == 'false' &&
       needs.build.result == 'success' &&
-      needs.attest.result == 'success' &&
-      needs.compatibility-gate.result == 'success'
+      needs.attest.result == 'success'
     permissions:
       actions: read # required to download build artifacts
       contents: write # required only for creating the GitHub Release

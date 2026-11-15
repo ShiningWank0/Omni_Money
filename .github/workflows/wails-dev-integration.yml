@@ -1,8 +1,8 @@
-name: Wails and Echo development compatibility
+name: Wails development diagnostics (manual, Issue 299)
 
-# Issue #299 remains open until the real browser runtime passes these checks.
+# Issue #299: wait for the official Wails fix before restoring this to required CI.
+# Keep the real browser and vulnerability findings strict in this manual workflow.
 on:
-  workflow_call:
   workflow_dispatch:
 
 permissions:

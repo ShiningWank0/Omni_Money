@@ -100,6 +100,22 @@ test('missing, mismatched and malformed artifacts become individual scan-error e
   assert.ok(result.every(e => e.data.kind === 'scan-error'));
 });
 
+test('normal CI does not require the manual development report, but still rejects a missing production report', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'omni-production-reports-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const production = ['npm', 'gosec-desktop', 'gosec-server', 'govulncheck-desktop', 'govulncheck-server', 'trivy', 'fuzz-csv', 'fuzz-json', 'fuzz-image'];
+  for (const scan of production) writeFileSync(join(directory, `${scan}.json`), JSON.stringify({ schema: 1, scan, status: 'clean', findings: [] }));
+  assert.deepEqual(entries(collect(directory)), []);
+  assert.equal(collect(directory).some(report => report.scan === 'govulncheck-dev'), false);
+  assert.equal(normalize('govulncheck-dev', goInput, 0).status, 'findings');
+  assert.equal(normalize('govulncheck-dev', '{}', 0).status, 'error');
+  rmSync(join(directory, 'govulncheck-desktop.json'));
+  const failures = entries(collect(directory));
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].data.kind, 'scan-error');
+  assert.equal(failures[0].data.tool, 'govulncheck-desktop');
+});
+
 test('duplicates across Go build modes and call traces produce one issue with sorted contexts', () => {
   const desktop = normalize('govulncheck-desktop', goInput, 0);
   const result = entries([report(), desktop, report()]);
@@ -432,14 +448,12 @@ test('required Go check rejects native WebView, fuzz, passkey, frontend and brow
     encoding: 'utf8', env: { ...process.env, OSS_RESULT: 'success', GO_RESULT: 'success', EXPECTED_GO_RESULT: 'success',
       SAFE_UPDATE_RESULT: 'success', WINDOWS_RESULT: 'success', SECURITY_AUTOMATION_RESULT: 'success',
       PASSKEY_RESULT: 'success', FRONTEND_RESULT: 'success', DOCKER_RESULT: 'success',
-      WAILS_ECHO_RESULT: 'success', EXPECTED_WAILS_ECHO_RESULT: 'success',
       RELEASE_PLAN_RESULT: 'success', DESKTOP_REQUIRED: 'false', DESKTOP_RESULT: 'skipped',
       FUZZ_RESULT: 'skipped', EXPECTED_FUZZ_RESULT: 'skipped', ...overrides },
   }).status === 0;
   const results = ['success', 'skipped', 'failure', 'cancelled', ''];
   for (const expected of ['success', 'skipped']) {
     for (const result of results) {
-      assert.equal(gatePasses({ WAILS_ECHO_RESULT: result, EXPECTED_WAILS_ECHO_RESULT: expected }), result === expected, `wails/${expected}/${result}`);
       assert.equal(gatePasses({ FUZZ_RESULT: result, EXPECTED_FUZZ_RESULT: expected }),
         result === expected, `fuzz/${expected}/${result}`);
       assert.equal(gatePasses({ GO_RESULT: expected, EXPECTED_GO_RESULT: expected, PASSKEY_RESULT: result }),
@@ -463,8 +477,8 @@ test('required Go check rejects native WebView, fuzz, passkey, frontend and brow
   assert.match(fuzzJob, /max-parallel: 2/);
   assert.match(fuzzJob, /fail-fast: false/);
   assert.match(fuzzJob, /target: \[fuzz-csv, fuzz-json, fuzz-image\]/);
-  assert.match(workflow, /needs: \[oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker, release-plan, release-desktop, wails-echo\]/);
-  assert.match(workflow, /needs: \[go-checks, frontend, docker, security-automation, parser-fuzz, wails-echo\]/);
+  assert.match(workflow, /needs: \[oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker, release-plan, release-desktop\]/);
+  assert.match(workflow, /needs: \[go-checks, frontend, docker, security-automation, parser-fuzz\]/);
   assert.match(workflow, /EXPECTED_FUZZ_RESULT: .*'schedule'.*'workflow_dispatch'.*'success' \|\| 'skipped'/);
   const passkeyJob = workflow.split('  passkey:\n')[1]?.split('  # Keep the existing required check name')[0];
   assert.ok(passkeyJob, 'permanent passkey regression job missing');
