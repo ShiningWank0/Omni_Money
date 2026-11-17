@@ -66,7 +66,10 @@ if [[ "$1" == true ]]; then
     test "$(id -u)" = 0
   fi
   export DOCKER_HOST="unix://$dest/docker.sock"
-  printf 'DOCKER_HOST=%s\n' "$DOCKER_HOST" >> "$GITHUB_ENV"
+  # Do not export DOCKER_HOST through GITHUB_ENV: the Actions runner also
+  # inherits it when using the host daemon to docker-exec subsequent steps.
+  # Persist the application daemon in this job's private Docker config instead.
+  daemon_host="$DOCKER_HOST"
   sudo env "PATH=$PATH" "$dest/bin/dockerd" \
     --host "$DOCKER_HOST" --group "$(id -gn)" \
     --data-root "$dest/data" --exec-root "$dest/exec" \
@@ -78,6 +81,9 @@ if [[ "$1" == true ]]; then
   done
   if [[ "$ready" != true ]]; then cat "$dest/daemon.log" >&2; exit 1; fi
   test "$(docker version --format '{{.Server.Version}}')" = "$engine_version"
+  unset DOCKER_HOST
+  docker context create omni-daemon --docker "host=$daemon_host"
+  docker context use omni-daemon
   docker buildx create --name omni-fixed --driver docker-container \
     --driver-opt "image=$buildkit_image" --use
   docker buildx inspect --bootstrap
