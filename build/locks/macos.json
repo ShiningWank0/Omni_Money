@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "xcode": {
+    "version": "16.4",
+    "build": "16F6",
+    "developerDirectory": "/Applications/Xcode_16.4.app/Contents/Developer",
+    "macosSDK": "15.5"
+  },
+  "tcl": {
+    "version": "9.1.0",
+    "url": "https://downloads.sourceforge.net/project/tcl/Tcl/9.1.0/tcl9.1.0-src.tar.gz",
+    "sha256": "536c45543f64d6eb11832d97ba3494aacff046fbc5040273bd55258d0e448ff1",
+    "archiveRoot": "tcl9.1.0",
+    "shell": "tclsh9.1"
+  }
+}

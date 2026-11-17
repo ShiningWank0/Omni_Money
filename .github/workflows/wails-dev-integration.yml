@@ -7,11 +7,24 @@ on:
 
 permissions:
   contents: read
+  packages: read
+
+env:
+  GOTOOLCHAIN: local
 
 jobs:
   browser:
     name: Development runtime (${{ matrix.mode }})
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init --user 1001:1001
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -27,16 +40,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential curl tcl libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev xvfb xauth dbus-x11
       - name: Build frontend assets
         working-directory: frontend
         run: |
@@ -49,7 +63,7 @@ jobs:
         run: sh scripts/build-sqlcipher-linux.sh
       - name: Install browser
         working-directory: frontend
-        run: npx --no-install playwright install --with-deps chromium
+        run: npx --no-install playwright install chromium
       - name: Install selected Wails CLI
         if: matrix.mode == 'vite'
         run: |

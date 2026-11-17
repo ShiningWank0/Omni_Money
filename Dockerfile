@@ -19,12 +19,19 @@ RUN VITE_APP_VERSION="$VERSION" VITE_OSS_TARGET="server-linux-${TARGETARCH}" npm
 RUN node /app/scripts/oss-notices.mjs package "server-linux-${TARGETARCH}"
 
 # ===== Stage 2: バックエンドのビルド =====
-FROM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS backend-builder
+FROM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS go-toolchain
+FROM ghcr.io/shiningwank0/omni_money-build-alpine-builder@sha256:d377e73c51954b514e3cefa41b688b15f8f753e2a7aea68d85474c90d6828379 AS backend-builder
+
+# Go updates remain independent of the frozen OS/package environment.
+RUN rm -rf /usr/local/go
+COPY --from=go-toolchain /usr/local/go /usr/local/go
+ENV GOTOOLCHAIN=local
 
 ARG VERSION
 
-# SQLCipherは公式v4.18.0 source archiveをchecksum固定でbuildする。
-RUN apk add --no-cache build-base linux-headers curl tcl openssl-dev
+# The saved environment already contains C/Tcl/OpenSSL and their dependency closure.
+RUN test "$(cut -d. -f1,2 /etc/alpine-release)" = 3.24 \
+ && apk info -v libcrypto3 > /opt/omni-environment/libcrypto3.version
 
 COPY scripts/build-sqlcipher-linux.sh /tmp/build-sqlcipher-linux.sh
 RUN SQLCIPHER_PREFIX=/usr/local SQLCIPHER_BUILD_JOBS=2 sh /tmp/build-sqlcipher-linux.sh
@@ -54,7 +61,7 @@ RUN CGO_ENABLED=1 \
     LD_LIBRARY_PATH=/usr/local/lib /omni_money_server 2>&1 | grep -q "CONTROL_DB_PATH is required"
 
 # ===== Stage 3: 軽量ランタイム =====
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM ghcr.io/shiningwank0/omni_money-build-alpine-runtime@sha256:87111362c801d41c984a7658dacc15d34e714a662a199e273c0694564c4d617e
 
 # バージョン情報を実行時環境変数として参照可能にする（§8.3準拠）
 ARG VERSION
@@ -62,9 +69,13 @@ ARG TARGETARCH
 ENV VERSION=${VERSION} \
     LD_LIBRARY_PATH=/usr/local/lib
 
-# タイムゾーンとCA証明書。固定したAlpine系列内で公開済みのセキュリティ修正を適用する。
-RUN apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates tzdata libcrypto3
+# No package resolution during an application build. Require matching libcrypto
+# and Alpine series rather than accepting a different runtime provider silently.
+RUN --mount=type=bind,from=backend-builder,source=/opt/omni-environment/libcrypto3.version,target=/tmp/builder-libcrypto.version,ro \
+    test "$(cut -d. -f1,2 /etc/alpine-release)" = 3.24 \
+ && apk info -v libcrypto3 > /tmp/runtime-libcrypto.version \
+ && cmp /tmp/builder-libcrypto.version /tmp/runtime-libcrypto.version \
+ && rm /tmp/runtime-libcrypto.version
 
 # セキュリティ: 非rootユーザーで実行。UID/GIDを固定し、bind mountの
 # ACLを事前に安全に設定できるようにする。
