@@ -129,6 +129,28 @@ main以外のブランチを選ぶとジョブをスキップする。既存の�
 
 ## マージ前の確認
 
+### ネイティブOpenSSLの固定と更新
+
+macOS/Windowsの静的OpenSSLは、それぞれ`build-openssl-darwin.sh`と
+`build-openssl-windows.sh`の版・SHA-256を固定して公式release sourceからビルドする。
+WindowsはMSYS2の最新OpenSSL packageを配布物へ取り込まない。
+固定は再現性と取得物の整合性のためであり、既知の脆弱性への対応には固定値の更新が必要になる。
+
+固定処理の変更とセキュリティ版への更新は別PRにする。更新PRでは次を同時に確認する。
+
+- [公式配布物](https://openssl-library.org/source/)と[セキュリティ情報](https://openssl-library.org/news/vulnerabilities/)から、サポート中の系列の修正版と公式SHA-256を確認する。
+- 両OSのbuild script、workflowのprefix/版情報、`licenses/native/components.json`、確認済みOSS版と生成一覧を更新する。ライセンス原文・NOTICEも取得元と照合する。
+- Windows SQLCipher回帰テスト、macOS Intel/ARM64・Windowsの本体ビルド、暗号化self-test、配布物のリンクとOSS記録を通常PR CIで確認する。
+
+Dependabotはshell script内のOpenSSL固定値を更新しない。固定後も公式のadvisoryと
+サポート期限を確認し、修正版が公開されたら版とSHA-256を更新する。
+静的リンク済みの配布物へ修正を適用するには、新しい固定版での再ビルドと配布が必要になる。
+
+3.5系は2030年4月8日までのLTSである。4.xなど別系列への移行は、固定・patch更新とは別PRで扱い、
+SQLCipher provider、API/ABI、各OSのリンク、暗号化DBの互換性、OSS記録を確認する。
+サポート中のLTSを使用することと、修正版を適用せず古いpatchへ留めることは区別する。
+[公式サポート方針](https://openssl-library.org/policies/releasestrat/)を参照する。
+
 ### DependabotのOSS情報の自動同期
 
 DependabotはGo/npmの依存指定とlockを更新するが、Omni Money独自のOSS記録は生成しない。

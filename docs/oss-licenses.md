@@ -7,14 +7,14 @@
 - npm: 本番バンドルに残ったモジュールから取得します。`devDependencies` という理由だけでは除外しません。Viteのpreload helperは配布されるため対象に含め、テスト専用のVitest・Playwright・jsdomなどは含めません。
 - Go: Desktop 4構成とserver 2構成について、実際のproduction/desktop/server、SQLCipher、WebKit用タグとCGO設定で `go list -deps` を行います。テスト・CLI・開発サーバーだけの依存を一覧に追加しません。
 - LICENSE等: 使われるパッケージからmodule rootまでの親ディレクトリにあるLICENSE、COPYING、NOTICE、COPYRIGHT、PATENTSを保持します。WebView loaderなどの別ライセンス境界も対象です。
-- ネイティブ: Goランタイム、SQLCipher、SQLite、OpenSSLを含めます。SQLCipher・macOS OpenSSL・Go toolchainの指定版と掲載版を照合します。
+- ネイティブ: Goランタイム、SQLCipher、SQLite、OpenSSLを含めます。SQLCipher・macOS/Windows OpenSSL・Go toolchainの指定版と掲載版を照合します。
 - フォント: 現在のNunitoは本番バンドルに含まれません。使用する変更ではフォントとOFLの掲載・同梱もレビュー対象にしてください。
 
 画面・配布用テキストとも、その配布物のOS・CPUアーキテクチャ・Desktop/Serverに一致するOSSだけを掲載します。
 ビルド時に`licenses/targets.json`の6構成のいずれかへ固定し、閲覧するブラウザのOSやCPU、ログイン状態からは推測しません。
 共通で使うOSSは各構成へ掲載し、DesktopだけのWailsやWindowsだけのWebView、ServerだけのWebAuthnは該当する構成だけに含めます。
 表示用JavaScriptには選択した構成の一覧だけを組み込み、他構成の一覧を隠すだけの実装にはしません。
-OpenSSLはmacOSでは固定版だけを表示し、その他では利用する3.x系列を示します。別OSの版は併記しません。
+OpenSSLはmacOS/Windowsでは固定版だけを表示し、その他では利用する3.x系列を示します。別OSの版は併記しません。
 配布物の`BUILD_DEPENDENCIES.txt`やAlpineパッケージ一覧では、ビルド時に確認した具体的な版も記録します。
 
 DockerはBuildKitの`TARGETARCH`から`server-linux-amd64/arm64`を選択し、Desktop releaseはmatrixで4構成を明示します。

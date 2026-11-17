@@ -20,8 +20,8 @@ for (const target of targets) test(`shows exactly the reviewed dependencies for 
   assert.equal(selected.components.some(component => component.id === 'go:github.com/go-webauthn/webauthn'), target.mode === 'server')
   assert.equal(selected.components.some(component => component.id === 'go:github.com/wailsapp/go-webview2'), target.goos === 'windows')
   const openssl = selected.components.find(component => component.id === 'native:openssl')
-  assert.equal(openssl.version.includes('macOS:'), false)
-  assert.equal(openssl.version, target.goos === 'darwin' ? catalog.components.find(component => component.id === 'native:openssl').version.match(/macOS: ([\d.]+)/)[1] : '3.x')
+  assert.equal(openssl.version.includes('macOS/Windows:'), false)
+  assert.equal(openssl.version, ['darwin', 'windows'].includes(target.goos) ? catalog.components.find(component => component.id === 'native:openssl').version.match(/macOS\/Windows: ([\d.]+)/)[1] : '3.x')
 })
 
 test('CPU-specific components and versions cannot leak between builds of the same mode', () => {
