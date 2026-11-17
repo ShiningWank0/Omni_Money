@@ -51,7 +51,9 @@ test('PR license and orchestration changes validate both product builds', () => 
     assert.deepEqual(releasePlan('pull_request', [path]), { desktop: true, docker: true })
   }
   assert.deepEqual(releasePlan('pull_request', ['docs/how-to-use.md']), { desktop: false, docker: false })
-  assert.deepEqual(releasePlan('pull_request', ['scripts/setup-fixed-docker.sh']), { desktop: false, docker: true })
+  for (const path of ['scripts/setup-fixed-docker.sh', 'scripts/setup-fixed-macos.sh', 'scripts/setup-fixed-trivy.sh']) {
+    assert.deepEqual(releasePlan('pull_request', [path]), { desktop: true, docker: true })
+  }
 })
 test('manual Docker rehearsals are opt-in; scheduled scans never publish', () => {
   assert.deepEqual(releasePlan('workflow_dispatch', [], true), { desktop: false, docker: true })
