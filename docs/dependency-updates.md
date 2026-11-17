@@ -24,7 +24,7 @@ node scripts/runtime-versions.mjs sync
 node scripts/runtime-versions.mjs check
 ```
 
-`sync` はDockerfileを基に `go.mod` のtoolchainと `.node-version` だけを同期する。
+`sync` はDockerfileを基に `go.mod` のtoolchain、`.go-version`、`.node-version`を同期する。
 Go最低対応版、Node対応範囲、API利用コード、ドキュメントの意味を自動変更するものではない。
 最低対応版より古いGoイメージ、digest未固定や曖昧なビルドstageは拒否する。
 CIの整合性チェックとGoテストは、Dockerだけの更新による固定版の不一致を拒否する。
