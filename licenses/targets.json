@@ -48,7 +48,8 @@
       "sqlite_omit_load_extension",
       "desktop",
       "production",
-      "webkit2_41"
+      "webkit2_41",
+      "gtk3"
     ],
     "entry": "."
   },

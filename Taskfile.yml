@@ -1,0 +1,16 @@
+version: '3'
+tasks:
+  build:
+    desc: Build the reviewed native application without resolving new versions
+    cmds:
+      - cmd: node scripts/build-wails-v3.mjs
+        env:
+          EXTRA_TAGS: '{{.EXTRA_TAGS | default ""}}'
+          DEV: '{{.DEV | default "false"}}'
+  frontend:
+    cmds:
+      - cmd: node build/desktop.mjs dev
+        dir: frontend
+  run:
+    cmds:
+      - '{{if eq OS "windows"}}build/bin/omni_money.exe{{else if eq OS "darwin"}}build/bin/Omni Money.app/Contents/MacOS/omni_money{{else}}build/bin/omni_money{{end}}'

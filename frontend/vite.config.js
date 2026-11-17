@@ -19,5 +19,6 @@ export default defineConfig({
   },
   build: {
     target: 'es2019',
+    rollupOptions: { external: ['/wails/runtime.js'] },
   },
 })

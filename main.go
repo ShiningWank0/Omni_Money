@@ -1,8 +1,9 @@
-//go:build !server
+//go:build !server || omni_wails_browser
 
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -11,9 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/wailsapp/wails/v2"
-	"github.com/wailsapp/wails/v2/pkg/options"
-	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 //go:embed all:frontend/dist
@@ -79,43 +78,31 @@ func main() {
 		return
 	}
 
-	var app *App
-	if wailsBindingsMode {
-		// Wails executes the application with the `bindings` build tag while
-		// generating JavaScript bindings. That build-time helper must never
-		// inspect or create the builder's real Omni Money data directory.
-		app = &App{}
-	} else {
-		dataRoot, err := getAppDataRoot()
-		if err != nil {
-			log.Fatalf("アプリケーションデータディレクトリ取得エラー: %v", err)
-		}
-
-		// Coordinator construction reads only public account metadata. The
-		// SQLCipher vault remains closed until the user explicitly unlocks it.
-		app, err = NewApp(dataRoot)
-		if err != nil {
-			log.Fatalf("Desktopアカウント初期化エラー: %v", err)
-		}
-	}
-
-	// Wailsアプリケーションを起動
-	err := wails.Run(&options.App{
-		Title:  "Omni Money",
-		Width:  1280,
-		Height: 800,
-		AssetServer: &assetserver.Options{
-			Assets: assets,
-		},
-		BackgroundColour: &options.RGBA{R: 102, G: 126, B: 234, A: 1},
-		OnStartup:        app.startup,
-		OnShutdown:       app.shutdown,
-		Bind: []interface{}{
-			app,
-		},
-	})
-
+	options, err := desktopApplicationOptions()
 	if err != nil {
+		log.Fatal(err)
+	}
+	dataRoot, err := getAppDataRoot()
+	if err != nil {
+		log.Fatalf("アプリケーションデータディレクトリ取得エラー: %v", err)
+	}
+	service, err := NewApp(dataRoot)
+	if err != nil {
+		log.Fatalf("Desktopアカウント初期化エラー: %v", err)
+	}
+	options.Name = "Omni Money"
+	options.Services = []application.Service{application.NewService(service)}
+	options.Assets.Handler = application.BundledAssetFileServer(assets)
+	options.Mac.ApplicationShouldTerminateAfterLastWindowClosed = true
+	options.OnShutdown = func() { service.shutdown(context.Background()) }
+	app := application.New(options)
+	if !wailsBrowserMode {
+		app.Window.NewWithOptions(application.WebviewWindowOptions{
+			Name: "main", Title: "Omni Money", Width: 1280, Height: 800,
+			URL: "/", BackgroundColour: application.NewRGBA(102, 126, 234, 1),
+		})
+	}
+	if err := app.Run(); err != nil {
 		log.Fatalf("Wails起動エラー: %v", err)
 	}
 }

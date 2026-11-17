@@ -12,7 +12,7 @@ require (
 	github.com/go-webauthn/webauthn v0.18.2
 	github.com/labstack/echo/v4 v4.16.4
 	github.com/mattn/go-sqlite3 v1.14.53
-	github.com/wailsapp/wails/v2 v2.17.1
+	github.com/wailsapp/wails/v3 v3.1.0
 	golang.org/x/crypto v0.59.0
 	golang.org/x/image v0.48.0
 	golang.org/x/sys v0.50.0

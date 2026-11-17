@@ -1,0 +1,79 @@
+name: Generate pinned Wails v3 candidates
+on:
+  push:
+    branches: [feat/update-wails-3.1.0]
+    paths:
+      - go.mod
+      - app.go
+      - main.go
+      - desktop_*.go
+      - wails_browser_*.go
+      - licenses/targets.json
+      - scripts/buildtools/wails/**
+      - scripts/install-wails-v3.mjs
+      - scripts/emit-candidate-files.mjs
+      - .github/workflows/wails-v3-candidates.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+env:
+  GOTOOLCHAIN: local
+  GOFLAGS: -tags=gtk3
+jobs:
+  generate:
+    if: github.repository == 'ShiningWank0/Omni_Money'
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 1001:1001
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Verify frozen OS environment
+        run: bash scripts/verify-linux-environment.sh
+      - name: Resolve only the explicitly requested application and CLI candidates
+        run: |
+          go mod tidy
+          go mod download
+          go -C scripts/buildtools/wails mod tidy
+          go -C scripts/buildtools/wails mod download
+      - name: Build the selected CLI and generate named service bindings
+        run: |
+          node scripts/install-wails-v3.mjs
+          "$(go env GOPATH)/bin/wails3" generate bindings -names -d frontend/bindings .
+      - name: Install locked frontend inputs for notice review
+        working-directory: frontend
+        run: npm ci --ignore-scripts
+      - name: Generate license review candidates without approving them
+        run: node scripts/oss-notices.mjs review
+      - name: Emit reviewable source candidates
+        if: always()
+        run: node scripts/emit-candidate-files.mjs
+      - name: Save candidate inputs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wails-v3-source-candidates
+          path: |
+            go.mod
+            go.sum
+            scripts/buildtools/wails/go.mod
+            scripts/buildtools/wails/go.sum
+            frontend/bindings/
+            licenses/build/review.json
+          if-no-files-found: error
