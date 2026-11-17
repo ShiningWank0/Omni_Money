@@ -18,6 +18,10 @@ on:
 
 permissions:
   contents: read
+  packages: read
+
+env:
+  GOTOOLCHAIN: local
 
 concurrency:
   # Scheduled and manual scans share the Issue reporter; serialize both.
@@ -28,6 +32,15 @@ jobs:
   oss:
     name: OSS licenses
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 1001:1001
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 20
     env:
       GOPATH: ${{ github.workspace }}/.oss-cache/go
@@ -37,6 +50,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -73,7 +91,7 @@ jobs:
         run: npx --no-install vitest run tests/component/Licenses.test.js
       - name: Install browser for public license layout tests
         working-directory: frontend
-        run: npx --no-install playwright install --with-deps chromium
+        run: npx --no-install playwright install chromium
       - name: Verify exact OSS display and mobile layout for all release targets
         run: node scripts/oss-ui-matrix.mjs
       - name: Save failed license layout screenshots
@@ -88,6 +106,15 @@ jobs:
     name: Plan release builds
     needs: oss
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 1001:1001
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 5
     outputs:
       desktop: ${{ steps.plan.outputs.desktop }}
@@ -97,6 +124,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
@@ -115,6 +147,7 @@ jobs:
     if: needs.release-plan.outputs.desktop == 'true'
     permissions:
       contents: write
+      packages: read
       actions: read
       id-token: write
       attestations: write
@@ -140,6 +173,15 @@ jobs:
     # repeating the same suite after merging to main.
     if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 1001:1001
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 45
 
     steps:
@@ -147,6 +189,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -160,11 +207,6 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential curl tcl libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Build frontend assets for Go embed
         id: go-security-setup
@@ -385,6 +427,15 @@ jobs:
     needs: oss
     name: Safe-update full matrix
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 1001:1001
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -397,6 +448,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
 
       - name: Determine full-matrix coverage
         id: coverage
@@ -482,9 +538,16 @@ jobs:
     needs: oss
     name: Frontend build
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 1001:1001
     timeout-minutes: 15
     defaults:
       run:
+        shell: bash
         working-directory: frontend
 
     steps:
@@ -492,6 +555,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -557,6 +625,15 @@ jobs:
     needs: oss
     name: Docker image build
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 1001:1001 --privileged
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 60
 
     steps:
@@ -565,8 +642,20 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
+
       - name: Set up fixed Docker toolchain
         uses: ./.github/actions/setup-fixed-docker
+
+      - name: Login for immutable base images
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build pinned multi-stage image
         id: docker-build
@@ -683,7 +772,7 @@ jobs:
 
       - name: Run server/browser E2E
         working-directory: frontend
-        run: bash tests/e2e/run-server-e2e.sh --with-deps
+        run: bash tests/e2e/run-server-e2e.sh
 
       - name: Scan image for fixable high-severity vulnerabilities
         id: trivy
@@ -720,25 +809,50 @@ jobs:
     needs: oss
     name: Security issue reporting tests
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 1001:1001
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
-      - run: node --test scripts/security-monitoring.test.mjs scripts/runtime-versions.test.mjs scripts/wails-dev-integration.test.mjs scripts/wails-native-integration.test.mjs scripts/dependabot-node-sync.test.mjs scripts/check-node-sync-app.test.mjs scripts/dependabot-oss-sync.test.mjs
+      - run: node --test scripts/security-monitoring.test.mjs scripts/runtime-versions.test.mjs scripts/wails-dev-integration.test.mjs scripts/wails-native-integration.test.mjs scripts/dependabot-node-sync.test.mjs scripts/check-node-sync-app.test.mjs scripts/dependabot-oss-sync.test.mjs scripts/linux-environments.test.mjs
       - name: Validate offline TrueNAS icon metadata
         run: python3 -B -m unittest discover -s scripts -p 'truenas_icon_metadata_test.py'
       - name: Verify coordinated runtime versions
         run: node scripts/runtime-versions.mjs check
+      - name: Verify immutable Linux inputs
+        run: node scripts/linux-environments.mjs
 
   parser-fuzz:
     needs: oss
     name: Parser fuzz (${{ matrix.target }})
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 1001:1001
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -752,6 +866,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -787,6 +906,15 @@ jobs:
     name: Passkey regression tests
     if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 1001:1001
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 20
     env:
       SQLCIPHER_PREFIX: /tmp/omni-passkey-sqlcipher
@@ -800,6 +928,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -807,8 +940,6 @@ jobs:
           cache: true
       - name: Record the dependency versions declared by this PR
         run: go list -mod=readonly -m all
-      - name: Install SQLCipher build dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential curl tcl libssl-dev
       - name: Build checksum-pinned SQLCipher
         run: sh scripts/build-sqlcipher-linux.sh
       - name: Test passkey authentication and encrypted persistence
@@ -841,6 +972,15 @@ jobs:
     needs: [oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker, release-plan, release-desktop]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 1001:1001
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 5
     steps:
       - name: Require expected Go result and successful auxiliary checks
@@ -883,8 +1023,18 @@ jobs:
       ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
           && github.repository == 'ShiningWank0/Omni_Money' && needs.security-automation.result == 'success' }}
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 1001:1001
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     permissions:
+      packages: read
       contents: read
       actions: read
       issues: write
@@ -892,6 +1042,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
