@@ -162,7 +162,7 @@
       "sha256": "038794f79c728cc1b4ff3caf7eec332cd79658f5885d9ef43246ec95606c87dc"
     },
     "native:openssl": {
-      "version": "3.x (macOS: 3.5.8)",
+      "version": "3.x (macOS/Windows: 3.5.9)",
       "license": "Apache-2.0",
       "sha256": "8005250db5e7143cdfb62f8145ec9ccd1ccf1f22e8ec3410268da2e0e03d6189"
     },

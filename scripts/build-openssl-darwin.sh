@@ -3,8 +3,8 @@ set -euo pipefail
 
 IFS=$'\n\t'
 
-readonly OPENSSL_VERSION="3.5.8"
-readonly OPENSSL_SHA256="a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2"
+readonly OPENSSL_VERSION="3.5.9"
+readonly OPENSSL_SHA256="603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a"
 
 fail() {
   printf 'build-openssl-darwin: %s\n' "$*" >&2

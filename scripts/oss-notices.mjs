@@ -171,8 +171,10 @@ export function collect() {
   }
   const goVersion = readFileSync(join(root, 'go.mod'), 'utf8').match(/^toolchain go(.+)$/m)?.[1]
   if (components.find(component => component.id === 'native:go').version !== goVersion) throw new Error('Go runtime license review required for new toolchain')
-  const opensslVersion = readFileSync(join(root, 'scripts/build-openssl-darwin.sh'), 'utf8').match(/OPENSSL_VERSION="([^"]+)"/)?.[1]
-  if (!components.find(component => component.id === 'native:openssl').version.includes(`macOS: ${opensslVersion})`)) throw new Error('OpenSSL notice version differs from macOS build')
+  for (const platform of ['darwin', 'windows']) {
+    const opensslVersion = readFileSync(join(root, `scripts/build-openssl-${platform}.sh`), 'utf8').match(/OPENSSL_VERSION="([^"]+)"/)?.[1]
+    if (!opensslVersion || !components.find(component => component.id === 'native:openssl').version.includes(`macOS/Windows: ${opensslVersion})`)) throw new Error(`OpenSSL notice version differs from ${platform} build`)
+  }
   return { schema: 1, applicationModule: applicationModule(), applicationLicense: readFileSync(join(root, 'LICENSE'), 'utf8'), components }
 }
 

@@ -31,6 +31,15 @@ export function verifyNativeLicense(actual, reviewed) {
   if (normalizeLineEndings(actual).trim() !== normalizeLineEndings(reviewed).trim()) throw new Error('Built SQLCipher license differs from approved text')
 }
 
+export function verifyOpenSSLVersion(version, catalog, target) {
+  const reviewed = catalog.components.find(component => component.id === 'native:openssl')?.version
+  const pinned = /^3\.x \(macOS\/Windows: (\d+\.\d+\.\d+)\)$/.exec(reviewed || '')?.[1]
+  const actual = /^OpenSSL (\d+\.\d+\.\d+)(?:\s|$)/.exec(version || '')?.[1]
+  if (!pinned || !actual || (target.startsWith('desktop-darwin-') || target.startsWith('desktop-windows-') ? actual !== pinned : !actual.startsWith('3.'))) {
+    throw new Error('Built OpenSSL version differs from reviewed native inventory')
+  }
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [target, binary, sqlcipherPrefix, opensslVersion] = process.argv.slice(2)
@@ -38,7 +47,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const result = spawnSync('go', ['version', '-m', binary], { encoding: 'utf8' })
     if (result.status !== 0) throw new Error('Cannot inspect built Go dependency inventory')
     verifyDependencies(result.stdout, catalog, target)
-    if (!/^OpenSSL 3\./.test(opensslVersion || '')) throw new Error('Native OpenSSL license review required for a different release series')
+    verifyOpenSSLVersion(opensslVersion, catalog, target)
     const directory = join(root, 'licenses/build', target)
     mkdirSync(join(directory, 'native'), { recursive: true })
     const sqlcipherLicense = normalizeLineEndings(readFileSync(join(sqlcipherPrefix, 'share/licenses/sqlcipher/LICENSE.md'), 'utf8'))

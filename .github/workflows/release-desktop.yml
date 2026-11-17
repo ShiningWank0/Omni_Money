@@ -179,8 +179,8 @@ jobs:
             base-devel
             curl
             tcl
+            perl
             mingw-w64-ucrt-x86_64-toolchain
-            mingw-w64-ucrt-x86_64-openssl
 
       # Linux: WebKitGTK 依存パッケージ（Ubuntu 24.04+ は 4.1）
       - name: Install Linux dependencies
@@ -247,32 +247,36 @@ jobs:
         shell: bash
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
-          OPENSSL_PREFIX: ${{ runner.temp }}/omni-openssl-3.5.8
+          OPENSSL_PREFIX: ${{ runner.temp }}/omni-openssl-3.5.9
           SQLCIPHER_PREFIX: ${{ runner.temp }}/omni-sqlcipher-4.18.0
         run: |
           bash scripts/build-openssl-darwin.sh
           bash scripts/build-sqlcipher-darwin.sh
 
-      - name: Build pinned static SQLCipher on Windows
+      - name: Build pinned static OpenSSL and SQLCipher on Windows
         if: runner.os == 'Windows'
         shell: msys2 {0}
         env:
+          OPENSSL_PREFIX: /ucrt64/omni-openssl-3.5.9
           SQLCIPHER_PREFIX: /ucrt64/omni-sqlcipher-4.18.0
-        run: sh scripts/build-sqlcipher-windows.sh
+        run: |
+          bash scripts/build-openssl-windows.sh
+          sh scripts/build-sqlcipher-windows.sh
 
       - name: Test Windows SQLCipher snapshot transaction lifecycle
         if: runner.os == 'Windows'
         shell: msys2 {0}
         env:
+          OPENSSL_PREFIX: /ucrt64/omni-openssl-3.5.9
           SQLCIPHER_PREFIX: /ucrt64/omni-sqlcipher-4.18.0
           OMNI_REQUIRE_SQLCIPHER_TESTS: "1"
         run: |
           export CC=gcc
           export CGO_ENABLED=1
           SQLCIPHER_WINDOWS="$(cygpath -m "$SQLCIPHER_PREFIX")"
-          OPENSSL_WINDOWS="$(cygpath -m /ucrt64)"
+          OPENSSL_WINDOWS="$(cygpath -m "$OPENSSL_PREFIX")"
           export CGO_CFLAGS="-I${SQLCIPHER_WINDOWS}/include -I${OPENSSL_WINDOWS}/include"
-          export CGO_LDFLAGS="-L${SQLCIPHER_WINDOWS}/lib ${OPENSSL_WINDOWS}/lib/libcrypto.a -lws2_32 -lcrypt32 -lgdi32"
+          export CGO_LDFLAGS="-L${SQLCIPHER_WINDOWS}/lib ${SQLCIPHER_WINDOWS}/lib/libsqlite3.a ${OPENSSL_WINDOWS}/lib/libcrypto.a -lbcrypt -lws2_32 -lcrypt32 -lgdi32"
           go test -count=1 -tags "libsqlite3 sqlite_omit_load_extension" \
             -run '^(TestEncryptedDatabaseSnapshotAndRestoreLifecycle|TestStartupRecoveryRestoresSoleBackupBeforeFreshCreate|TestStartupRecoveryReplacesCorruptLiveWithValidBackup|TestSnapshotPruneJournalRollsBackPreparedQuarantine|TestCreateSnapshotRecoversPreparedPruneJournalBeforeNewTransaction|TestPublishedPruneFinalizeStateMatrixIsCrashIdempotent|TestListSnapshotsCandidateLifetimeSerializesAcrossProcesses|TestSnapshotTransactionLockSerializesConcurrentOwners|TestListValidationAnchorBlocksWindowsCandidateReplacement|TestSnapshotTransactionLockRejectsUnsafeWindowsRootAndPrivacyDrift|TestSyncOpenRestoreCandidateSupportsWindowsFlush|TestValidateSnapshotDACLAllowsDistinctOwnerPrincipalSets)$' \
             ./backend/database
@@ -290,7 +294,7 @@ jobs:
             export CGO_LDFLAGS="-L${SQLCIPHER_PREFIX}/lib -lcrypto"
             BUILD_TAGS="webkit2_41,libsqlite3,sqlite_omit_load_extension"
           else
-            OPENSSL_PREFIX="${{ runner.temp }}/omni-openssl-3.5.8"
+            OPENSSL_PREFIX="${{ runner.temp }}/omni-openssl-3.5.9"
             export CGO_CFLAGS="-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET} -I${SQLCIPHER_PREFIX}/include -I${OPENSSL_PREFIX}/include"
             export CGO_LDFLAGS="-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET} -L${SQLCIPHER_PREFIX}/lib ${OPENSSL_PREFIX}/lib/libcrypto.a -framework Security -framework CoreFoundation -framework UniformTypeIdentifiers"
             BUILD_TAGS="libsqlite3,sqlite_omit_load_extension"
@@ -306,15 +310,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: msys2 {0}
         env:
+          OPENSSL_PREFIX: /ucrt64/omni-openssl-3.5.9
           SQLCIPHER_PREFIX: /ucrt64/omni-sqlcipher-4.18.0
         run: |
           export CC=gcc
           export CGO_ENABLED=1
           SQLCIPHER_WINDOWS="$(cygpath -m "$SQLCIPHER_PREFIX")"
-          OPENSSL_WINDOWS="$(cygpath -m /ucrt64)"
+          OPENSSL_WINDOWS="$(cygpath -m "$OPENSSL_PREFIX")"
           WAILS_EXE="$(cygpath -u "$(go env GOPATH)")/bin/wails.exe"
           export CGO_CFLAGS="-I${SQLCIPHER_WINDOWS}/include -I${OPENSSL_WINDOWS}/include"
-          export CGO_LDFLAGS="-L${SQLCIPHER_WINDOWS}/lib ${OPENSSL_WINDOWS}/lib/libcrypto.a -lws2_32 -lcrypt32 -lgdi32"
+          export CGO_LDFLAGS="-L${SQLCIPHER_WINDOWS}/lib ${SQLCIPHER_WINDOWS}/lib/libsqlite3.a ${OPENSSL_WINDOWS}/lib/libcrypto.a -lbcrypt -lws2_32 -lcrypt32 -lgdi32"
           "$WAILS_EXE" build -platform "$BUILD_PLATFORM" \
             -tags "libsqlite3,sqlite_omit_load_extension" \
             -ldflags "-X main.version=${APP_VERSION}"
@@ -389,9 +394,9 @@ jobs:
           target="desktop-${BUILD_PLATFORM/\//-}"
           node scripts/oss-notices.mjs package "$target"
           if [ "$RUNNER_OS" = macOS ]; then
-            export OSS_OPENSSL_LICENSE_DIRECTORY="${{ runner.temp }}/omni-openssl-3.5.8/share/licenses/openssl"
+            export OSS_OPENSSL_LICENSE_DIRECTORY="${{ runner.temp }}/omni-openssl-3.5.9/share/licenses/openssl"
             binary='build/bin/Omni Money.app/Contents/MacOS/omni_money'
-            openssl_version='OpenSSL 3.5.8'
+            openssl_version='OpenSSL 3.5.9'
           else
             binary=build/bin/omni_money
             openssl_version="$(openssl version)"
@@ -408,11 +413,13 @@ jobs:
       - name: Prepare and verify Windows license bundle
         if: runner.os == 'Windows'
         shell: msys2 {0}
+        env:
+          OPENSSL_PREFIX: /ucrt64/omni-openssl-3.5.9
         run: |
           set -euo pipefail
           node scripts/oss-notices.mjs package desktop-windows-amd64
-          export OSS_OPENSSL_LICENSE_DIRECTORY="$(cygpath -m /ucrt64/share/licenses/openssl)"
-          node scripts/oss-artifact.mjs desktop-windows-amd64 build/bin/omni_money.exe "$(cygpath -m /ucrt64/omni-sqlcipher-4.18.0)" "$(openssl version)"
+          export OSS_OPENSSL_LICENSE_DIRECTORY="$(cygpath -m "$OPENSSL_PREFIX/share/licenses/openssl")"
+          node scripts/oss-artifact.mjs desktop-windows-amd64 build/bin/omni_money.exe "$(cygpath -m /ucrt64/omni-sqlcipher-4.18.0)" "$(cat "$OPENSSL_PREFIX/BUILD_VERSION.txt")"
           mkdir -p build/bin/licenses
           cp -R licenses/build/desktop-windows-amd64/. build/bin/licenses/
 
