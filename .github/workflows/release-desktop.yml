@@ -123,8 +123,8 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.release_exists == 'false'
     permissions:
-      packages: read
       contents: read
+      packages: read
     env:
       APP_VERSION: ${{ needs.prepare.outputs.version }}
       VITE_APP_VERSION: ${{ needs.prepare.outputs.version }}
