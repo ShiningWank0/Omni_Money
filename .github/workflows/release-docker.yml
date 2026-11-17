@@ -33,7 +33,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001 --privileged
+      options: --init --user 1001:1001 --privileged
     defaults:
       run:
         shell: bash
@@ -60,6 +60,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Allocate OCI output inside the job container
+        id: oci-output
+        run: |
+          set -euo pipefail
+          directory="$(mktemp -d "$RUNNER_TEMP/omni-release-image.XXXXXX")"
+          printf 'path=%s/omni-money.tar\n' "$directory" >> "$GITHUB_OUTPUT"
+
       - name: Build release image without publishing
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -67,7 +74,7 @@ jobs:
           push: false
           platforms: ${{ matrix.platform }}
           build-args: VERSION=pr-validation
-          outputs: type=oci,dest=${{ runner.temp }}/omni-money.tar
+          outputs: type=oci,dest=${{ steps.oci-output.outputs.path }}
           provenance: mode=max
           sbom: generator=${{ steps.docker-tools.outputs.sbom-image }}
           cache-from: type=gha,scope=${{ matrix.platform }}
@@ -85,7 +92,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash
@@ -184,7 +191,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001 --privileged
+      options: --init --user 1001:1001 --privileged
     defaults:
       run:
         shell: bash
@@ -278,7 +285,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash

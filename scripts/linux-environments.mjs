@@ -29,6 +29,11 @@ export function checkLinuxEnvironments(directory = root) {
       assert.equal(reference, references.get(reference.split('@')[0]), `${path}: environment differs from reviewed lock`)
       used.add(reference.split('@')[0])
     }
+    if (path.endsWith('.yml')) {
+      for (const [, options] of text.matchAll(/^\s+options: (.+)$/gm)) {
+        assert.match(options, /(?:^|\s)--init(?:\s|$)/, `${path}: job containers must reap orphaned child processes`)
+      }
+    }
     assert.doesNotMatch(text, /\bapt-get\s+(?:update|install)|\bapk\s+(?:add|upgrade|update)|playwright install --with-deps/,
       `${path}: ordinary builds must not resolve OS packages again`)
   }
