@@ -132,12 +132,12 @@
       "sha256": "4bcacbf3f84cd738cbdfc61080be423083de940b87d3db719b420aea952a2d4c"
     },
     "go:golang.org/x/crypto": {
-      "version": "v0.58.0",
+      "version": "v0.59.0",
       "license": "BSD-3-Clause",
       "sha256": "d4dbf5bb0080d2b598a694bdbd86c016472bcf54934aeddfa43fd1e078bb8564"
     },
     "go:golang.org/x/image": {
-      "version": "v0.47.0",
+      "version": "v0.48.0",
       "license": "BSD-3-Clause",
       "sha256": "d4dbf5bb0080d2b598a694bdbd86c016472bcf54934aeddfa43fd1e078bb8564"
     },
@@ -147,12 +147,12 @@
       "sha256": "d4dbf5bb0080d2b598a694bdbd86c016472bcf54934aeddfa43fd1e078bb8564"
     },
     "go:golang.org/x/sys": {
-      "version": "v0.49.0",
+      "version": "v0.50.0",
       "license": "BSD-3-Clause",
       "sha256": "d4dbf5bb0080d2b598a694bdbd86c016472bcf54934aeddfa43fd1e078bb8564"
     },
     "go:golang.org/x/text": {
-      "version": "v0.43.0",
+      "version": "v0.44.0",
       "license": "BSD-3-Clause",
       "sha256": "d4dbf5bb0080d2b598a694bdbd86c016472bcf54934aeddfa43fd1e078bb8564"
     },
