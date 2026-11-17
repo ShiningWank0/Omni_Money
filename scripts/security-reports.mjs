@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { govulncheckCommand } from './run-govulncheck.mjs';
 
 // Required reports produced by the normal CI workflow. Development runtime
 // diagnostics run manually while Issue #299 waits for the official Wails fix.
@@ -187,7 +188,7 @@ function run(tool) {
     const command = tool === 'npm' ? ['npm', 'audit', '--json', '--audit-level=high']
       : tool === 'gosec' ? ['go', 'run', '-mod=readonly', `-modfile=${fileURLToPath(new URL('./securitytools/gosec/go.mod', import.meta.url))}`,
         'github.com/securego/gosec/v2/cmd/gosec', '-terse', '-fmt=json', '-severity=medium', ...server, './...']
-        : ['go', 'run', 'golang.org/x/vuln/cmd/govulncheck@v1.6.0', '-json', ...server, './...'];
+        : govulncheckCommand('-json', ...server, './...');
     const result = spawnSync(command[0], command.slice(1), {
       cwd: tool === 'npm' ? resolve('frontend') : process.cwd(), encoding: 'utf8',
       timeout: 20 * 60 * 1000, maxBuffer: 32 * 1024 * 1024, shell: false,
