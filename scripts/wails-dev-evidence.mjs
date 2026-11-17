@@ -10,9 +10,8 @@ const output = join(root, '.oss-cache/wails-dev-results')
 
 export function verifyCLI(info, expected) {
   assert.doesNotMatch(info, /^\s*=>/m, 'Replaced CLI modules are forbidden')
-  for (const path of ['github.com/wailsapp/wails/v2', 'github.com/labstack/echo/v4']) {
+  for (const path of ['github.com/wailsapp/wails/v3']) {
     const selected = [...info.matchAll(/^\s*(?:mod|dep)\s+(\S+)\s+(\S+)/gm)].filter(match => match[1] === path)
-    if (path.endsWith('echo/v4') && !selected.length) continue
     assert.equal(selected.length, 1, `Missing or duplicate CLI module: ${path}`)
     assert.equal(selected[0][2], expected[path], `CLI module differs from project: ${path}`)
   }
@@ -27,7 +26,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         return result.stdout
       }
       const expected = Object.fromEntries(go(['list', '-mod=readonly', '-m', '-f', '{{.Path}} {{.Version}}{{if .Replace}} replaced{{end}}',
-        'github.com/wailsapp/wails/v2', 'github.com/labstack/echo/v4']).trim().split('\n').map(line => {
+        'github.com/wailsapp/wails/v3']).trim().split('\n').map(line => {
         const fields = line.trim().split(/\s+/)
         assert.equal(fields.length, 2)
         return fields

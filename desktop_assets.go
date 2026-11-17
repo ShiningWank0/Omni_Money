@@ -58,7 +58,8 @@ func newDesktopAssetMiddleware(browserOrigin string) (func(http.Handler) http.Ha
 					return
 				}
 				protected := strings.HasPrefix(r.URL.Path, "/wails/runtime") && r.URL.Path != "/wails/runtime.js" ||
-					strings.HasPrefix(r.URL.Path, "/wails/events") || strings.HasPrefix(r.URL.Path, "/wails/stream")
+					strings.HasPrefix(r.URL.Path, "/wails/events") || strings.HasPrefix(r.URL.Path, "/wails/stream") ||
+					strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 				if protected {
 					cookie, err := r.Cookie(cookieName)
 					if err != nil || r.Header.Get("Origin") != browserOrigin || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(token)) != 1 {

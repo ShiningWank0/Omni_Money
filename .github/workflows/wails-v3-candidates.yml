@@ -1,18 +1,5 @@
 name: Generate pinned Wails v3 candidates
 on:
-  push:
-    branches: [feat/update-wails-3.1.0]
-    paths:
-      - go.mod
-      - app.go
-      - main.go
-      - desktop_*.go
-      - wails_browser_*.go
-      - licenses/targets.json
-      - scripts/buildtools/wails/**
-      - scripts/install-wails-v3.mjs
-      - scripts/emit-candidate-files.mjs
-      - .github/workflows/wails-v3-candidates.yml
   workflow_dispatch:
 permissions:
   contents: read

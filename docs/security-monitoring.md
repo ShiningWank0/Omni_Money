@@ -68,7 +68,9 @@ Echoは公式v4.16.4、`golang.org/x/net`はv0.62.0を`go.mod`で選択する。
 
 開発ブラウザ経路は、Wailsの公式修正版を待つ間、`.github/workflows/wails-dev-integration.yml`の`workflow_dispatch`から実行する手動診断として維持する。GitHub Actionsの`Wails development diagnostics (manual, Issue 299)`で対象branchを選ぶ。既知の再接続オーバーレイの`null.nodes`例外とdev用スキャナーの指摘は、その診断workflow内で引き続き失敗になる。通常CI・Desktop配布判定の依存先からは外し、公式修正版待ちで既存の検証・配布が連鎖的に失敗しないようにする。[Issue #299](https://github.com/ShiningWank0/Omni_Money/issues/299)は、検査を分離しただけでは解決にならず、実際の修正版で実行結果を確認するまで閉じない。
 
-Ubuntu 24.04、固定SQLCipher、Xvfb・D-Busと実Chromiumを使用し、2経路を独立したmatrixで検証する。`assets`はdevバイナリから実際のfrontend生成物のコピーを配信する。`vite`はプロジェクトが指定する公式Wails CLIの`wails dev`を使い、一時コピー内の実`wails.json`に従ってViteを起動する。Viteのポート指定と検査用Vueマーカーだけを一時コピーへ加え、Echoからのプロキシ配信、Vue変更のHMR反映、ページ再読込なしのGo IPC継続を確認する。リポジトリ本体やWailsのソースは変更しない。
+固定したUbuntu環境とSQLCipher、Xvfb・D-Bus、npm lock対応のChromiumを使用し、2経路を独立したmatrixで検証する。Wails 3のCI専用binding hostは`server,omni_wails_browser`で構築し、製品のserver entrypointとは分離する。`assets`は実frontend生成物のコピーを配信し、backend再起動後の再読込、旧capabilityの拒否と新規発行を確認する。Wails 2の再接続overlayを合格条件として流用しない。`vite`は一時コピー内で公式CLIの`wails3 task ci-browser-build`を実行し、同じ固定Go依存のhostを構築する。実Viteのproxy配信、VueのHMR、ページ再読込なしのGo呼出し継続を確認する。Go IPCはWails 3のHTTP POSTの送受信として記録し、WebSocket frame数へ置き換えない。
+
+CI専用hostの公開listenerはloopbackに限定し、Host、Origin、HttpOnly/SameSite Strictのprocess別capabilityを照合する。events/streamとHMRのWebSocketにも同じ入口検査を適用する。backendへのHTTP直結はprocess別のproxy tokenで拒否する。ログや証跡へpassword・回復code・capability・proxy tokenを記録しない。listener、Vite、子process、private profileの削除も合格条件とする。Issue #299は実動作の証跡なしに解決済みとせず、引き続き手動診断として扱う。
 
 両経路で実HTTP、実WebSocket経由の`GetDesktopVaultStatus`、Desktop初期画面、OSS画面の開閉、正常終了を検証する。不正Host、不正・欠落Origin、不正・欠落capability cookieの拒否と、正しい条件のWebSocket受理も実通信で確認する。`assets`ではバックエンドを停止・再起動し、同じページで再接続オーバーレイの表示・消失、capability更新、Go IPC復旧を確認する。ブラウザー例外は保存し、ほかの操作が成功しても合格にしない。
 

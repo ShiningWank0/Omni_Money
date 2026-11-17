@@ -13,4 +13,8 @@ tasks:
         dir: frontend
   run:
     cmds:
-      - '{{if eq OS "windows"}}build/bin/omni_money.exe{{else if eq OS "darwin"}}build/bin/Omni Money.app/Contents/MacOS/omni_money{{else}}build/bin/omni_money{{end}}'
+      - '{{if eq OS "windows"}}build/bin/omni_money.exe{{else if eq OS "darwin"}}"build/bin/Omni Money.app/Contents/MacOS/omni_money"{{else}}build/bin/omni_money{{end}}'
+  ci-browser-build:
+    desc: Build the CI-only loopback binding host with the locked toolchain
+    cmds:
+      - node scripts/build-wails-browser.mjs

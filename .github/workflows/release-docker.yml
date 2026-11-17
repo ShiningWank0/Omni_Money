@@ -7,6 +7,7 @@ permissions: {}
 
 env:
   GOTOOLCHAIN: local
+  GOFLAGS: -tags=gtk3
 
 concurrency:
   group: docker-release-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
@@ -135,7 +136,7 @@ jobs:
       - name: Setup Go for release quality gate
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
 
       - name: Setup Node.js for release quality gate
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -156,8 +157,8 @@ jobs:
           node scripts/security-reports.mjs gosec
           go test -race ./...
           go test -race -tags server ./...
-          go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
-          go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 -tags server ./...
+          node scripts/run-govulncheck.mjs ./...
+          node scripts/run-govulncheck.mjs -tags server ./...
 
   build:
     name: Build architecture image

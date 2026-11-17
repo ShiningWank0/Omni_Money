@@ -92,9 +92,18 @@ func main() {
 	}
 	options.Name = "Omni Money"
 	options.Services = []application.Service{application.NewService(service)}
-	options.Assets.Handler = application.BundledAssetFileServer(assets)
+	if options.Assets.Handler == nil {
+		options.Assets.Handler = application.BundledAssetFileServer(assets)
+	}
 	options.Mac.ApplicationShouldTerminateAfterLastWindowClosed = true
-	options.OnShutdown = func() { service.shutdown(context.Background()) }
+	options.Linux.ApplicationID = "com.wails.OmniMoney"
+	previousShutdown := options.OnShutdown
+	options.OnShutdown = func() {
+		if previousShutdown != nil {
+			previousShutdown()
+		}
+		service.shutdown(context.Background())
+	}
 	app := application.New(options)
 	if !wailsBrowserMode {
 		app.Window.NewWithOptions(application.WebviewWindowOptions{

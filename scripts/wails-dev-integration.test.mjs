@@ -6,11 +6,10 @@ import { fileURLToPath } from 'node:url'
 import { bounded, browserErrorDetails, privateAppEnvironment, requireCI, stopProcessGroup, verifyDevBuild, verifyEvidence, watchExit } from './wails-dev-integration.mjs'
 import { verifyCLI } from './wails-dev-evidence.mjs'
 
-const expected = { 'github.com/wailsapp/wails/v2': 'v2.90.0', 'github.com/labstack/echo/v4': 'v4.90.0' }
+const expected = { 'github.com/wailsapp/wails/v3': 'v3.90.0' }
 const info = `app: go1.27.3
-\tdep\tgithub.com/wailsapp/wails/v2\tv2.90.0\th1:wails
-\tdep\tgithub.com/labstack/echo/v4\tv4.90.0\th1:echo
-\tbuild\t-tags=dev,desktop,webkit2_41,libsqlite3,sqlite_omit_load_extension
+\tdep\tgithub.com/wailsapp/wails/v3\tv3.90.0\th1:wails
+\tbuild\t-tags=dev,desktop,gtk3,libsqlite3,sqlite_omit_load_extension
 \tbuild\tCGO_ENABLED=1
 \tbuild\tGOOS=linux
 \tbuild\tGOARCH=amd64
@@ -43,11 +42,10 @@ test('platform arguments cannot supply regular expressions or trailing path segm
   }
 })
 
-test('CLI permits absent Echo but rejects stale embedded Echo, Wails and replacements', () => {
+test('CLI rejects stale Wails 3, duplicates and replacements', () => {
   const cli = info.replace('dep\tgithub.com/wailsapp', 'mod\tgithub.com/wailsapp')
   verifyCLI(cli, expected)
-  verifyCLI(cli.split('\n').filter(line => !line.includes('echo/v4')).join('\n'), expected)
-  for (const changed of [cli.replace('v4.90.0', 'v4.1.0'), cli.replace('v2.90.0', 'v2.1.0'), cli + '\n => ../local']) {
+  for (const changed of [cli.replace('v3.90.0', 'v3.0.0'), cli + '\n => ../local', cli + '\n mod github.com/wailsapp/wails/v3 v3.90.0']) {
     assert.throws(() => verifyCLI(changed, expected))
   }
 })
@@ -56,7 +54,7 @@ test('compatibility evidence rejects omitted scenarios, cleanup failures, browse
   for (const mode of ['assets', 'vite']) {
     const checks = Object.fromEntries(['http', 'goIPC', 'licenses', 'security', 'gracefulExit', 'browserClosed', 'processStopped', 'listenerClosed', 'isolatedDataRemoved',
       ...(mode === 'vite' ? ['viteProxy', 'hmr', 'cliBuild', 'viteListenerClosed', 'cliProcessesStopped'] : ['reconnect', 'capabilityRotated'])].map(key => [key, true]))
-    const result = { mode, commit: 'checkout', passed: true, failures: [], checks, binarySHA256: 'a'.repeat(64), websocketFrames: { sent: 1, received: 1 } }
+    const result = { mode, commit: 'checkout', passed: true, failures: [], checks, binarySHA256: 'a'.repeat(64), ipcRequests: { sent: 1, received: 1 } }
     verifyEvidence(result, [], mode, 'checkout')
     for (const key of Object.keys(checks)) {
       assert.throws(() => verifyEvidence({ ...result, checks: { ...checks, [key]: false } }, [], mode, 'checkout'), key)
@@ -66,7 +64,7 @@ test('compatibility evidence rejects omitted scenarios, cleanup failures, browse
     assert.throws(() => verifyEvidence(result, [{ message: 'null.nodes' }], mode, 'checkout'))
     assert.throws(() => verifyEvidence(result, [], mode, 'another-checkout'))
     assert.throws(() => verifyEvidence({ ...result, passed: false }, [], mode, 'checkout'))
-    assert.throws(() => verifyEvidence({ ...result, websocketFrames: { sent: 0, received: 0 } }, [], mode, 'checkout'))
+    assert.throws(() => verifyEvidence({ ...result, ipcRequests: { sent: 0, received: 0 } }, [], mode, 'checkout'))
   }
 })
 
@@ -78,14 +76,17 @@ test('the command refuses local execution before opening a GUI or listener', () 
   assert.match(result.stderr, /CI Linux|must not start locally/)
 })
 
-test('requires the actual selected Echo and Wails in a development binary', () => {
+test('requires the selected Wails 3 and rejects native/headless tag confusion', () => {
   verifyDevBuild(info, expected)
+  const browser = info.replace('dev,desktop', 'dev,desktop,server,omni_wails_browser')
+  verifyDevBuild(browser, expected, 'linux/amd64', true)
+  assert.throws(() => verifyDevBuild(info, expected, 'linux/amd64', true))
   for (const changed of [
-    info.replace('v4.90.0', 'v4.1.0'), info.replace('v2.90.0', 'v2.1.0'),
-    info.split('\n').filter(line => !line.includes('echo/v4')).join('\n'),
-    info + '\tdep\tgithub.com/labstack/echo/v4\tv4.90.0\th1:duplicate\n',
+    info.replace('v3.90.0', 'v3.0.0'),
+    info.split('\n').filter(line => !line.includes('wails/v3')).join('\n'),
+    info + '\tdep\tgithub.com/wailsapp/wails/v3\tv3.90.0\th1:duplicate\n',
     info + '\t=>\t../local-echo\t(devel)\n', info.replace('dev,desktop', 'production,desktop'),
-    info.replace('dev,desktop', 'dev,desktop,bindings'), info.replace('CGO_ENABLED=1', 'CGO_ENABLED=0'),
+    info.replace('dev,desktop', 'dev,desktop,bindings'), info.replace('dev,desktop', 'dev,desktop,purego'), info.replace('dev,desktop', 'dev,desktop,server,omni_wails_browser'), info.replace('CGO_ENABLED=1', 'CGO_ENABLED=0'),
   ]) assert.throws(() => verifyDevBuild(changed, expected))
 })
 

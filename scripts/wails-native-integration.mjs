@@ -7,17 +7,16 @@ import { fileURLToPath } from 'node:url'
 import { bounded, privateAppEnvironment, requireCI, stopProcessGroup, watchExit } from './wails-dev-integration.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const wails = 'github.com/wailsapp/wails/v2'
+const wails = 'github.com/wailsapp/wails/v3'
 
 export function verifyNativeBuild(info, version) {
   assert.doesNotMatch(info, /^\s*=>/m, 'Replaced dependencies are not allowed')
   const dependencies = [...info.matchAll(/^\s*dep\s+(\S+)\s+(\S+)/gm)]
   assert.equal(new Set(dependencies.map(match => match[1])).size, dependencies.length, 'Duplicate dependency')
   assert.equal(dependencies.find(match => match[1] === wails)?.[2], version, 'Packaged Wails differs from the selected version')
-  assert.ok(!dependencies.some(match => match[1] === 'github.com/labstack/echo/v4'), 'The production binary unexpectedly contains development Echo')
   const tags = new Set((info.match(/^\s*build\s+-tags=(.+)$/m)?.[1] || '').replace(/^"|"$/g, '').split(','))
-  for (const tag of ['production', 'desktop', 'webkit2_41', 'libsqlite3', 'sqlite_omit_load_extension']) assert.ok(tags.has(tag), `Missing production build tag: ${tag}`)
-  for (const tag of ['dev', 'bindings', 'server']) assert.ok(!tags.has(tag), `Wrong production build tag: ${tag}`)
+  for (const tag of ['production', 'desktop', 'gtk3', 'libsqlite3', 'sqlite_omit_load_extension']) assert.ok(tags.has(tag), `Missing production build tag: ${tag}`)
+  for (const tag of ['dev', 'bindings', 'server', 'omni_wails_browser', 'purego']) assert.ok(!tags.has(tag), `Wrong production build tag: ${tag}`)
   for (const setting of ['CGO_ENABLED=1', 'GOOS=linux', 'GOARCH=amd64']) assert.ok(info.split('\n').some(line => line.trim() === `build\t${setting}` || line.trim() === `build ${setting}`), `Missing build setting: ${setting}`)
 }
 
@@ -41,7 +40,7 @@ export async function runNativeIntegration(argument) {
   assert.ok(process.env.DBUS_SESSION_BUS_ADDRESS, 'A private CI D-Bus session is required')
   const binary = ownedBinary(argument, process.env.RUNNER_TEMP)
   const selected = command('go', ['list', '-mod=readonly', '-m', '-f', '{{.Version}}{{if .Replace}} replaced{{end}}', wails]).trim()
-  assert.match(selected, /^v2\.\d+\.\d+$/, 'Use the official pinned Wails module')
+  assert.match(selected, /^v3\.\d+\.\d+$/, 'Use the official pinned Wails module')
   const info = command('go', ['version', '-m', binary])
   verifyNativeBuild(info, selected)
   const digest = () => createHash('sha256').update(readFileSync(binary)).digest('hex')

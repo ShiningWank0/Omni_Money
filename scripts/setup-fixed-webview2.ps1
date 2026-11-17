@@ -36,5 +36,5 @@ if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notm
 # Read/execute access required by the WebView2 renderer sandbox. Never grant write access.
 & icacls.exe $exe.DirectoryName '/grant' '*S-1-15-2-1:(OI)(CI)(RX)' '*S-1-15-2-2:(OI)(CI)(RX)' '/T' '/Q'
 if ($LASTEXITCODE -ne 0) { throw 'WebView2 sandbox ACL setup failed' }
-"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=$($exe.DirectoryName)" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+"OMNI_CI_WEBVIEW2_RUNTIME=$($exe.DirectoryName)" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
 Write-Output "Fixed Version WebView2 $($lock.version) at $($exe.DirectoryName)"

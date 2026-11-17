@@ -21,5 +21,7 @@ dev_mode:
         timeout: 60s
         interval: 200ms
     - cmd: wails3 task run
+      env:
+        FRONTEND_DEVSERVER_URL: http://127.0.0.1:5173
       type: primary
       exit_policy: shutdown

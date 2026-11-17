@@ -14,7 +14,7 @@
 data/
 
 # Binaries
-omni_money
+/omni_money
 
 # Frontend
 frontend/node_modules/

@@ -32,6 +32,11 @@ if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $lock.
 New-Item -ItemType Directory $root | Out-Null
 & "$env:SystemRoot/System32/tar.exe" -xzf $archive -C $root
 if ($LASTEXITCODE -ne 0) { throw 'Fixed MSYS2 extraction failed' }
+# Empty transient directories are intentionally absent from the archive.
+# Recreate them before MSYS startup and native source builds.
+@('tmp', 'var/tmp') | ForEach-Object {
+    New-Item -ItemType Directory -Force (Join-Path $root $_) | Out-Null
+}
 $env:MSYSTEM = 'UCRT64'
 $env:MSYS2_PATH_TYPE = 'inherit'
 $env:CHERE_INVOKING = '1'

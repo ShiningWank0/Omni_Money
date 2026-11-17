@@ -7,6 +7,7 @@ permissions: {}
 
 env:
   GOTOOLCHAIN: local
+  GOFLAGS: -tags=gtk3
 
 concurrency:
   group: desktop-release-${{ github.ref }}
@@ -69,7 +70,7 @@ jobs:
         if: github.event_name == 'push'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
 
       - name: Setup Node.js for release quality gate
         if: github.event_name == 'push'
@@ -92,7 +93,7 @@ jobs:
           go vet ./...
           node scripts/security-reports.mjs gosec
           go test -race ./...
-          go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+          node scripts/run-govulncheck.mjs ./...
 
       - name: Check release existence
         id: release
@@ -139,12 +140,12 @@ jobs:
             platform: darwin/amd64
             oss_target: desktop-darwin-amd64
             artifact_name: omni-money-macos-amd64
-            deployment_target: '10.13'
+            deployment_target: '13.0'
           - os: macos-15
             platform: darwin/arm64
             oss_target: desktop-darwin-arm64
             artifact_name: omni-money-macos-arm64
-            deployment_target: '11.0'
+            deployment_target: '13.0'
           - os: windows-2025
             platform: windows/amd64
             oss_target: desktop-windows-amd64
@@ -189,7 +190,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -217,44 +218,7 @@ jobs:
 
       - name: Install Wails CLI
         shell: bash
-        run: |
-          WAILS_VERSION="$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"
-          [[ "$WAILS_VERSION" =~ ^v2\.[0-9]+\.[0-9]+$ ]] || {
-            echo "::error::go.mod must pin a stable Wails v2 release"
-            exit 1
-          }
-          ECHO_VERSION="$(go list -m -f '{{.Version}}' github.com/labstack/echo/v4)"
-          for attempt in 1 2 3; do
-            if go install "github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION"; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "::error::Wails CLI installation failed after 3 attempts"
-              exit 1
-            fi
-            sleep "$((attempt * 5))"
-          done
-          WAILS_BIN="$(go env GOPATH)/bin/wails$(go env GOEXE)"
-          WAILS_BUILD_INFO="$(go version -m "$WAILS_BIN")"
-          if printf '%s\n' "$WAILS_BUILD_INFO" | grep -E '^[[:space:]]*=>[[:space:]]' > /dev/null; then
-            echo "::error::Wails CLI contains a replaced module"
-            exit 1
-          fi
-          verify_tool_module() {
-            local actual
-            actual="$(printf '%s\n' "$WAILS_BUILD_INFO" | awk -v module="$1" '($1 == "mod" || $1 == "dep") && $2 == module { print $3 }')"
-            if [ "$actual" != "$2" ]; then
-              echo "::error::Wails CLI $1 does not match go.mod ($actual != $2)"
-              exit 1
-            fi
-          }
-          verify_tool_module github.com/wailsapp/wails/v2 "$WAILS_VERSION"
-          # The current CLI does not link Echo. If a future CLI does, require
-          # the same patched version selected for the development application.
-          if printf '%s\n' "$WAILS_BUILD_INFO" | grep -E '^[[:space:]]*(mod|dep)[[:space:]]+github.com/labstack/echo/v4[[:space:]]' > /dev/null; then
-            verify_tool_module github.com/labstack/echo/v4 "$ECHO_VERSION"
-          fi
-          printf '%s\n' "$WAILS_BUILD_INFO"
+        run: node scripts/install-wails-v3.mjs
 
       - name: Build pinned static SQLCipher on Linux
         if: runner.os == 'Linux'
@@ -314,16 +278,14 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then
             export CGO_CFLAGS="-I${SQLCIPHER_PREFIX}/include"
             export CGO_LDFLAGS="-L${SQLCIPHER_PREFIX}/lib -lcrypto"
-            BUILD_TAGS="webkit2_41,libsqlite3,sqlite_omit_load_extension"
+            BUILD_TAGS="gtk3,libsqlite3,sqlite_omit_load_extension"
           else
             OPENSSL_PREFIX="${{ runner.temp }}/omni-openssl-3.5.9"
             export CGO_CFLAGS="-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET} -I${SQLCIPHER_PREFIX}/include -I${OPENSSL_PREFIX}/include"
             export CGO_LDFLAGS="-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET} -L${SQLCIPHER_PREFIX}/lib ${OPENSSL_PREFIX}/lib/libcrypto.a -framework Security -framework CoreFoundation -framework UniformTypeIdentifiers"
             BUILD_TAGS="libsqlite3,sqlite_omit_load_extension"
           fi
-          "$(go env GOPATH)/bin/wails" build -platform "$BUILD_PLATFORM" \
-            -tags "$BUILD_TAGS" \
-            -ldflags "-X main.version=${APP_VERSION}"
+          "$(go env GOPATH)/bin/wails3" build --tags "$BUILD_TAGS"
           go build -mod=readonly -tags "dev,desktop,$BUILD_TAGS" -o "$RUNNER_TEMP/omni-wails-dev" .
           node scripts/wails-dev-build.mjs "$RUNNER_TEMP/omni-wails-dev" "$BUILD_PLATFORM" > "$RUNNER_TEMP/wails-dev-build-info.json"
           git diff --exit-code -- go.mod go.sum
@@ -339,12 +301,10 @@ jobs:
           export CGO_ENABLED=1
           SQLCIPHER_WINDOWS="$(cygpath -m "$SQLCIPHER_PREFIX")"
           OPENSSL_WINDOWS="$(cygpath -m "$OPENSSL_PREFIX")"
-          WAILS_EXE="$(cygpath -u "$(go env GOPATH)")/bin/wails.exe"
+          WAILS_EXE="$(cygpath -u "$(go env GOPATH)")/bin/wails3.exe"
           export CGO_CFLAGS="-I${SQLCIPHER_WINDOWS}/include -I${OPENSSL_WINDOWS}/include"
           export CGO_LDFLAGS="-L${SQLCIPHER_WINDOWS}/lib ${SQLCIPHER_WINDOWS}/lib/libsqlite3.a ${OPENSSL_WINDOWS}/lib/libcrypto.a -lbcrypt -lws2_32 -lcrypt32 -lgdi32"
-          "$WAILS_EXE" build -platform "$BUILD_PLATFORM" \
-            -tags "libsqlite3,sqlite_omit_load_extension" \
-            -ldflags "-X main.version=${APP_VERSION}"
+          "$WAILS_EXE" build --tags "libsqlite3,sqlite_omit_load_extension"
           mkdir -p build/bin
           go build -mod=readonly -tags "dev,desktop,libsqlite3,sqlite_omit_load_extension" -o build/bin/omni-wails-dev.exe .
           WAILS_EVIDENCE_DIR="$(cygpath -u "$RUNNER_TEMP")"

@@ -7,10 +7,10 @@ import test from 'node:test'
 import { ownedBinary, verifyNativeBuild } from './wails-native-integration.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
-const version = 'v2.17.0'
+const version = 'v3.1.0'
 const info = `binary: go1.27.3
- dep github.com/wailsapp/wails/v2 ${version} h1:fixture
- build -tags=production,desktop,webkit2_41,libsqlite3,sqlite_omit_load_extension
+ dep github.com/wailsapp/wails/v3 ${version} h1:fixture
+ build -tags=production,desktop,gtk3,libsqlite3,sqlite_omit_load_extension
  build CGO_ENABLED=1
  build GOOS=linux
  build GOARCH=amd64
@@ -19,7 +19,7 @@ const info = `binary: go1.27.3
 test('the native harness requires the actual selected production Wails binary', () => {
   verifyNativeBuild(info, version)
   for (const malformed of [
-    info.replace(version, 'v2.16.0'),
+    info.replace(version, 'v3.0.0'),
     info.replace('production', 'dev'),
     info.replace('desktop,', 'bindings,'),
     info.replace('libsqlite3,', ''),
@@ -27,8 +27,8 @@ test('the native harness requires the actual selected production Wails binary', 
     info.replace('GOOS=linux', 'GOOS=darwin'),
     info.replace('GOARCH=amd64', 'GOARCH=arm64'),
     info + '\t=> replacement v0.0.0\n',
-    info + ' dep github.com/labstack/echo/v4 v4.16.3\n',
-    info + ` dep github.com/wailsapp/wails/v2 ${version}\n`,
+    info.replace('production,desktop', 'production,desktop,purego'),
+    info + ` dep github.com/wailsapp/wails/v3 ${version}\n`,
   ]) assert.throws(() => verifyNativeBuild(malformed, version))
 })
 
