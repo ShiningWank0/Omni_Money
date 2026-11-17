@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gunzipSync } from 'node:zlib'
@@ -293,6 +293,15 @@ export function renderPinned(entry, runURL) {
     body: `${marker}\n${revision}\n\n対象: ${safe(d.component)}\n\n${detail}\n\n${d.kind === 'update' ? `使用版: ${safe(d.installed)}\n候補版: ${safe(d.latest)}\n\n` : ''}[検査ログ・証跡](${runURL})\n\n同じ状態の再通知は行いません。差分をコメントに記録し、自動close・再open・version切替は行いません。` }
 }
 
+export function reportSummary(report) {
+  const rows = report.results.map(result => `| ${safe(result.name)} | ${safe(result.status)} | ${result.findings.length} | ${result.gaps?.length || 0} | ${result.reviews?.length || 0} | ${result.updates?.length || 0} |`)
+  return `## 固定入力の検知結果: ${safe(report.group)}\n\nこれは通知用の収集結果です。job成功は脆弱性なしを意味しません。partialは未照合範囲あり、errorは検査の実行不備です。既存の配布用security gateは別途必須です。\n\n| 対象 | 状態 | 脆弱性候補 | 未照合 | 要確認 | 更新候補 |\n| --- | --- | ---: | ---: | ---: | ---: |\n${rows.join('\n')}\n\n全件は同runのpinned-report / pinned-evidence artifactを参照してください。mainの定期・手動実行でIssueへ通知します。PRでは書込権限を与えず、このsummaryとartifactに記録します。\n`
+}
+
+export function requireCollected(report) {
+  assert.ok(report.results.every(x => x.status !== 'error'), 'Pinned input collection failed; see reports and separate scan-error issues')
+}
+
 export async function publishReports(env = process.env, apiFactory = githubClient, loadInventory = inventory) {
   assert.ok(['schedule', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME) && env.GITHUB_REF === 'refs/heads/main' &&
     env.GITHUB_REPOSITORY === 'ShiningWank0/Omni_Money', 'Issue creation requires scheduled/manual main')
@@ -323,7 +332,7 @@ export async function publishReports(env = process.env, apiFactory = githubClien
   const runURL = `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}/attempts/${env.GITHUB_RUN_ATTEMPT}`
   const result = await publish(apiFactory(env.GITHUB_TOKEN, env.GITHUB_REPOSITORY), reportEntries(reports), runURL, renderPinned, { respectClosed: true })
   console.log(JSON.stringify(result))
-  if (reports.some(x => x.results.some(r => r.status === 'error' || r.status === 'partial'))) throw new Error('Some pinned inputs could not be fully checked; see the separate scan/coverage issues')
+  for (const report of reports) requireCollected(report)
 }
 
 async function scan(group) {
@@ -390,11 +399,13 @@ async function scan(group) {
     if (report) saveJSON(`security-reports/pinned-${group}.json`, report)
     rmSync(work, { recursive: true, force: true })
   }
-  // Findings, missing metadata and scanner failures are all visible failures.
+  // Collection and vulnerability policy are distinct. Keep every candidate and
+  // known coverage gap in the reports; operational errors must still fail.
   for (const result of report.results) console.log(JSON.stringify({ target: result.name, status: result.status,
     findings: result.findings.length, coverageGaps: result.gaps?.length || 0,
     advisoryReviews: result.reviews?.length || 0, updates: result.updates?.length || 0 }))
-  assert.ok(report.results.every(x => x.status === 'clean'), 'Pinned input findings or incomplete checks; see report and automated issues')
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, reportSummary(report))
+  requireCollected(report)
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

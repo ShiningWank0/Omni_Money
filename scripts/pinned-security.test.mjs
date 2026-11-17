@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { groups, inputFiles, inventory, root } from './pinned-security-inventory.mjs'
 import { attempt, expectedNames, get, grypeReport, publishReports, releaseUpdates, renderPinned,
-  reportEntries, scanEnvironment, scanImages, scanTools, trivyReport, validateReport } from './pinned-security.mjs'
+  reportEntries, reportSummary, requireCollected, scanEnvironment, scanImages, scanTools, trivyReport, validateReport } from './pinned-security.mjs'
 import { publish } from './security-issues.mjs'
 
 function fixture(t) {
@@ -134,6 +134,21 @@ test('a clean report cannot omit targets, findings, coverage gaps, reviews or in
   }
 })
 
+test('notification collection preserves vulnerabilities and partial coverage without claiming clean results', () => {
+  const report = { group: 'fixture', results: [{ name: 'tool', status: 'findings', findings: [finding] },
+    { name: 'msys2', status: 'partial', findings: [], gaps: ['unmapped'], reviews: ['CNA range unknown'],
+      updates: [{ name: 'tool', installed: '1', latest: '2', summary: 'new version' }] }] }
+  requireCollected(report)
+  assert.equal(report.results[0].status, 'findings')
+  assert.equal(report.results[1].status, 'partial')
+  assert.deepEqual(reportEntries([report]).map(x => x.data.kind).sort(), ['coverage', 'review', 'update', 'vulnerability'])
+  const summary = reportSummary(report)
+  assert.match(summary, /job成功は脆弱性なしを意味しません/)
+  assert.match(summary, /\| tool \| findings \| 1 \| 0 \| 0 \| 0 \|/)
+  assert.match(summary, /\| msys2 \| partial \| 0 \| 1 \| 1 \| 1 \|/)
+  assert.throws(() => requireCollected({ results: [...report.results, { status: 'error', findings: [] }] }), /collection failed/)
+})
+
 test('vulnerabilities, updates, coverage gaps and scanner errors use distinct stable issue identities', async () => {
   const failed = await attempt('failed', () => { throw new Error('fixture') })
   const reports = [{ group: 'images', results: [failed, { name: 'image', status: 'partial', findings: [finding], gaps: ['unmapped'], reviews: ['unknown CNA range'],
@@ -164,7 +179,7 @@ test('failed artifact download generates separate error issues and fails after r
   const writes = []
   const api = async (method, path, body) => { if (method === 'GET') return []; writes.push({ path, body }); return {} }
   await assert.rejects(publishReports({ GITHUB_EVENT_NAME: 'schedule', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money',
-    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', GITHUB_TOKEN: 'fixture', PINNED_TEST_OUTCOME: 'success', PINNED_REPORT_DOWNLOAD_OUTCOME: 'failure' }, () => api), /could not be fully checked/)
+    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', GITHUB_TOKEN: 'fixture', PINNED_TEST_OUTCOME: 'success', PINNED_REPORT_DOWNLOAD_OUTCOME: 'failure' }, () => api), /collection failed/)
   assert.equal(writes.length, groups.length)
   assert.ok(writes.every(x => x.path === 'issues' && x.body.title.includes('検査エラー')))
 })

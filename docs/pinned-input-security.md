@@ -58,7 +58,9 @@ scanner jobは`contents: read` / `packages: read`だけを持つ。`issues: writ
 | 検査範囲の不足 | 保存packageにCPE/PURL等がない、旧版の対応付けを確実に作れない、OS supportが終了した等 |
 | 検査エラー | DB・feed・保存物の取得失敗、checksum/schema不一致、不完全なmodule graph、artifact欠落等 |
 
-深刻度の低い候補や修正版未提供の候補も通知対象にする。検査が実行できなかった状態を「脆弱性なし」に変換しない。候補・未照合・検査エラーがあればscan jobは失敗する。通知はscanの失敗後も動き、reportの取得失敗自体も検査エラーIssueにする。
+深刻度の低い候補や修正版未提供の候補も通知対象にする。このworkflowは通知用であり、候補・更新情報・既知の識別情報不足だけではjobを失敗させない。reportのfindings/partialをcleanへ書き換えず、全件をartifact、対象別件数をjob summaryへ残す。mainの定期・手動実行ではIssueへ通知し、PRでは書込を行わない。job成功は「脆弱性なし」や「全package照合済み」を意味しない。
+
+取得・解析・checksum/schema検証の失敗、対象やreportの欠落、未登録lock、通知失敗は引き続き失敗する。通知は収集jobの失敗後も動き、reportの取得失敗自体も検査エラーIssueにする。既存のnpm audit・gosec・govulncheck・配布imageのTrivyの必須判定はこの変更の対象外である。
 
 同じ対象・状態のIssueを毎日重複作成しない。open Issueの内容が変化したらコメントする。人がcloseしたIssueも、同じ状態なら再通知しない。advisoryや版などが変化した場合は新しいIssueにし、自動reopen・自動closeは行わない。1回25件の書込上限を超えた場合は実行を失敗させ、次回以降に残件を処理する。
 
