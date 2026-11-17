@@ -847,9 +847,9 @@
     {
       "id": "npm:vite",
       "name": "vite",
-      "version": "8.3.6",
+      "version": "8.3.8",
       "license": "MIT",
-      "url": "https://www.npmjs.com/package/vite/v/8.3.6",
+      "url": "https://www.npmjs.com/package/vite/v/8.3.8",
       "targets": [
         "desktop-darwin-amd64",
         "desktop-darwin-arm64",
