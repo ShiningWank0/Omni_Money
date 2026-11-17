@@ -230,8 +230,33 @@ func TestCIUsesPinnedGoVulnerabilityScanner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const scanner = "golang.org/x/vuln/cmd/govulncheck@v1.6.0"
-	if count := strings.Count(string(reporter), scanner); count != 1 {
-		t.Fatalf("report collector must retain the pinned Go vulnerability scanner, got %d", count)
+	if !strings.Contains(string(reporter), "govulncheckCommand('-json'") {
+		t.Fatal("report collector must use the shared scanner command")
+	}
+	helper, err := os.ReadFile("scripts/run-govulncheck.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"-mod=readonly", "./securitytools/govulncheck/go.mod", "golang.org/x/vuln/cmd/govulncheck"} {
+		if !strings.Contains(string(helper), required) {
+			t.Errorf("shared scanner command is missing %s", required)
+		}
+	}
+	manifest, err := os.ReadFile("scripts/securitytools/govulncheck/go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`(?m)^\s*golang.org/x/vuln v[0-9]+\.[0-9]+\.[0-9]+$`).Match(manifest) {
+		t.Fatal("scanner module must pin an exact stable version")
+	}
+	if strings.Contains(string(manifest), "replace ") {
+		t.Fatal("scanner replacements require review")
+	}
+	release, err := os.ReadFile(".github/workflows/release-desktop.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(release), "node scripts/run-govulncheck.mjs ./...") {
+		t.Fatal("release must use the same scanner module")
 	}
 }
