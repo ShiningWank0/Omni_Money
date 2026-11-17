@@ -74,7 +74,7 @@ export function trivyReport(raw, target, type) {
   assert.equal(raw.SchemaVersion, 2); assert.ok(Array.isArray(raw.Results))
   const catalogs = raw.Results.filter(item => Array.isArray(item.Packages) && item.Packages.length)
   assert.ok(catalogs.length, 'scanner did not inventory packages')
-  if (type === 'fs') assert.ok(catalogs.some(x => x.Type === 'gobinary'), 'Go binary inventory missing')
+  if (type === 'rootfs') assert.ok(catalogs.some(x => x.Type === 'gobinary'), 'Go binary inventory missing')
   if (/^(ubuntu|alpine-)/.test(target.name)) assert.ok(['ubuntu', 'alpine'].includes(raw.Metadata?.OS?.Family), 'OS inventory missing')
   return raw.Results.flatMap(item => (item.Vulnerabilities || []).map(v => cve('pinned-trivy', v.VulnerabilityID,
     `${target.name}/${item.Type}/${v.PkgName}`, v.InstalledVersion, v.FixedVersion, v.Severity,
@@ -213,15 +213,17 @@ async function scanNative(input, execute, work, evidence) {
   return results
 }
 
-async function scanTools(input, execute, work, evidence) {
+export async function scanTools(input, execute, work, evidence, download = payload) {
   const results = []
   for (const target of input.tools) results.push(await attempt(target.name, async () => {
-    const folder = await payload({ ...target, name: 'audit-' + target.name }, work)
+    const folder = await download({ ...target, name: 'audit-' + target.name }, work)
     const output = join(evidence, target.name.replaceAll('/', '-') + '.json')
     try {
-      execute('trivy', ['fs', '--scanners', 'vuln', '--pkg-types', 'library', '--list-all-pkgs', '--ignorefile', '/dev/null',
+      // Filesystem mode disables individual package analyzers, including Go
+      // executables. Rootfs mode inspects the downloaded bytes without running them.
+      execute('trivy', ['rootfs', '--scanners', 'vuln', '--pkg-types', 'library', '--list-all-pkgs', '--ignorefile', '/dev/null',
         '--format', 'json', '--output', output, '--exit-code', '0', folder])
-      return { findings: trivyReport(readJSON(output), target, 'fs'), input: target }
+      return { findings: trivyReport(readJSON(output), target, 'rootfs'), input: target }
     } finally { rmSync(folder, { recursive: true, force: true }) }
   }))
   return results
@@ -389,6 +391,9 @@ async function scan(group) {
     rmSync(work, { recursive: true, force: true })
   }
   // Findings, missing metadata and scanner failures are all visible failures.
+  for (const result of report.results) console.log(JSON.stringify({ target: result.name, status: result.status,
+    findings: result.findings.length, coverageGaps: result.gaps?.length || 0,
+    advisoryReviews: result.reviews?.length || 0, updates: result.updates?.length || 0 }))
   assert.ok(report.results.every(x => x.status === 'clean'), 'Pinned input findings or incomplete checks; see report and automated issues')
 }
 

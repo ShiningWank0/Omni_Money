@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { groups, inputFiles, inventory, root } from './pinned-security-inventory.mjs'
 import { attempt, expectedNames, get, grypeReport, publishReports, releaseUpdates, renderPinned,
-  reportEntries, scanEnvironment, scanImages, trivyReport, validateReport } from './pinned-security.mjs'
+  reportEntries, scanEnvironment, scanImages, scanTools, trivyReport, validateReport } from './pinned-security.mjs'
 import { publish } from './security-issues.mjs'
 
 function fixture(t) {
@@ -71,8 +71,28 @@ test('Trivy retains low severity and unfixed CVEs, and rejects absent binary/OS 
   const values = trivyReport(raw, { name: 'ubuntu/amd64', ref: 'digest' }, 'image')
   assert.equal(values[0].severity, 'LOW'); assert.equal(values[0].fixed, '')
   assert.throws(() => trivyReport({ ...raw, Results: [] }, { name: 'ubuntu/amd64' }, 'image'), /inventory/)
-  assert.throws(() => trivyReport(raw, { name: 'tool' }, 'fs'), /Go binary/)
+  assert.throws(() => trivyReport(raw, { name: 'tool' }, 'rootfs'), /Go binary/)
   assert.throws(() => trivyReport({ ...raw, Metadata: {} }, { name: 'ubuntu/amd64' }, 'image'), /OS inventory/)
+})
+
+test('static tool scans enable binary analysis and fail on missing inventories without executing payloads', async t => {
+  const folder = fixture(t), calls = []
+  const input = { tools: [{ name: 'complete' }, { name: 'empty' }, { name: 'not-go' }] }
+  const result = await scanTools(input, (program, args) => {
+    calls.push({ program, args })
+    const name = args.at(-1).split('/').at(-1)
+    const raw = { SchemaVersion: 2 }
+    if (name !== 'empty') raw.Results = [{ Type: name === 'complete' ? 'gobinary' : 'gomod', Packages: [{}],
+      Vulnerabilities: [{ VulnerabilityID: finding.id, PkgName: 'stdlib', InstalledVersion: '1.0', Severity: 'LOW' }] }]
+    writeFileSync(args[args.indexOf('--output') + 1], JSON.stringify(raw))
+  }, folder, folder, async item => {
+    const path = join(folder, item.name.slice('audit-'.length)); mkdirSync(path); return path
+  })
+  assert.deepEqual(result.map(x => x.status), ['findings', 'error', 'error'])
+  assert.equal(result[0].findings[0].id, finding.id)
+  assert.ok(calls.every(x => x.program === 'trivy' && x.args[0] === 'rootfs'))
+  assert.ok(calls.every(x => x.args.includes('--list-all-pkgs') && x.args.includes('/dev/null')))
+  assert.ok(input.tools.every(x => !existsSync(join(folder, x.name))))
 })
 
 test('Grype matches retain installed package revisions and reject incomplete results', () => {

@@ -16,6 +16,8 @@
 
 Go検査は、過去のgo.sum全行を使用中の依存とみなさず、コピーしたmanifestから`-mod=readonly`で選んだ版を使用する。検査はCI内で行い、アプリのbuildや取得したツールの実行を必要としない。OSVの版照合は、既存govulncheckの「到達可能な脆弱性」検査と区別する。
 
+配布binaryの検査には`trivy rootfs`を使用する。`trivy fs`ではGo binary等のindividual package analyzerが無効になるため、この用途では使用しない。取得済みの実binaryから`gobinary`のpackage一覧を得られなかった場合は検査エラーにする。各対象の合否・指摘数・未照合数・更新候補数もCIログへ出力する。
+
 新しいlock fileやDocker toolを未登録で追加した場合はinventory検証を失敗させる。通常のGo tool moduleとDockerfileのbase imageは追加を自動検出する。新しい独自形式を追加するときは検知方法も登録する。
 
 ## 実行と権限
