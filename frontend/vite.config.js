@@ -5,9 +5,12 @@ import { ossInventoryPlugin } from './build/oss-inventory.mjs'
 import { ossCatalogPlugin } from './build/oss-catalog.mjs'
 
 export default defineConfig({
-  plugins: [vue(), ossCatalogPlugin(), ossInventoryPlugin(), publicAssetsPlugin()],
+  plugins: [{ name: 'wails-bundled-runtime', enforce: 'pre',
+    resolveId(id) { if (id === '/wails/runtime.js') return { id, external: true } },
+  }, vue(), ossCatalogPlugin(), ossInventoryPlugin(), publicAssetsPlugin()],
   server: {
     host: '127.0.0.1',
+    port: Number(process.env.WAILS_VITE_PORT) || 5173,
     strictPort: true,
     fs: {
       strict: true,

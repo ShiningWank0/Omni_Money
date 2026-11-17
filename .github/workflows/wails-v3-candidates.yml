@@ -55,10 +55,12 @@ jobs:
       - name: Build the selected CLI and generate named service bindings
         run: |
           node scripts/install-wails-v3.mjs
-          "$(go env GOPATH)/bin/wails3" generate bindings -names -d frontend/bindings .
+          "$(go env GOPATH)/bin/wails3" generate bindings -b -names -d frontend/bindings .
       - name: Install locked frontend inputs for notice review
         working-directory: frontend
-        run: npm ci --ignore-scripts
+        run: |
+          npm ci --ignore-scripts
+          npm run build
       - name: Generate license review candidates without approving them
         run: node scripts/oss-notices.mjs review
       - name: Emit reviewable source candidates
