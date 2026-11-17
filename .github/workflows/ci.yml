@@ -73,7 +73,7 @@ jobs:
         run: go mod download
       - name: Check OSS coverage and approved notices once for all release targets
         run: |
-          node --test scripts/oss-notices.test.mjs scripts/release-plan.test.mjs scripts/openssl-build.test.mjs
+          node --test scripts/oss-notices.test.mjs scripts/release-plan.test.mjs scripts/openssl-build.test.mjs scripts/macos-build.test.mjs
           node scripts/oss-notices.mjs check
       - name: Generate reviewable release notice inventories
         run: node scripts/oss-notices.mjs package-all
