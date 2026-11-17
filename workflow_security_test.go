@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,6 +21,23 @@ func TestGitHubActionsArePinnedAndCheckoutDropsCredentials(t *testing.T) {
 		t.Fatal("no GitHub Actions workflows found")
 	}
 
+	// Composite actions execute at the checked-out commit too. Their nested
+	// external actions must satisfy the same immutable-SHA rule.
+	err = filepath.WalkDir(filepath.Join(".github", "actions"), func(path string, entry fs.DirEntry, walkErr error) error {
+		if os.IsNotExist(walkErr) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() && (entry.Name() == "action.yml" || entry.Name() == "action.yaml") {
+			workflowPaths = append(workflowPaths, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, workflowPath := range workflowPaths {
 		contents, err := os.ReadFile(workflowPath)
 		if err != nil {
@@ -32,16 +51,16 @@ func TestGitHubActionsArePinnedAndCheckoutDropsCredentials(t *testing.T) {
 				continue
 			}
 			action := strings.TrimSpace(strings.TrimPrefix(trimmed, "uses:"))
-			// Local reusable workflows are bound to this checkout's immutable
-			// commit. Only workflow files inside this repository are allowed.
-			if strings.HasPrefix(action, "./.github/workflows/") && !strings.Contains(action, "..") {
-				if _, err := os.Stat(strings.TrimPrefix(action, "./")); err != nil {
-					t.Errorf("local reusable workflow is missing: %s", action)
-				}
-				continue
-			}
 			if commentIndex := strings.Index(action, " #"); commentIndex >= 0 {
 				action = action[:commentIndex]
+			}
+			// Repository-local workflows/actions inherit the checkout's commit.
+			// Permit only existing definitions within .github; never path traversal.
+			if strings.HasPrefix(action, "./") {
+				if err := validateLocalAction(action); err != nil {
+					t.Errorf("%s:%d: %v", workflowPath, index+1, err)
+				}
+				continue
 			}
 			separator := strings.LastIndex(action, "@")
 			if separator <= 0 || !actionCommitPattern.MatchString(action[separator+1:]) {
@@ -55,6 +74,36 @@ func TestGitHubActionsArePinnedAndCheckoutDropsCredentials(t *testing.T) {
 				t.Errorf("%s:%d checkout must disable persisted credentials", workflowPath, index+1)
 			}
 		}
+	}
+}
+
+func validateLocalAction(action string) error {
+	if strings.Contains(action, "..") || strings.ContainsAny(action, "@\\") {
+		return fmt.Errorf("invalid local action: %s", action)
+	}
+	path := strings.TrimPrefix(action, "./")
+	if strings.HasPrefix(path, ".github/actions/") {
+		for _, name := range []string{"action.yml", "action.yaml"} {
+			if info, err := os.Stat(filepath.Join(path, name)); err == nil && info.Mode().IsRegular() {
+				return nil
+			}
+		}
+	} else if strings.HasPrefix(path, ".github/workflows/") && strings.HasSuffix(path, ".yml") {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			return nil
+		}
+	}
+	return fmt.Errorf("missing or out-of-scope local action: %s", action)
+}
+
+func TestLocalActionDefinitionsStayInsideRepository(t *testing.T) {
+	for _, path := range []string{"./.github/actions/../outside", "./.github/actions/missing", "./scripts", "./.github/workflows/ci.yml@main"} {
+		if validateLocalAction(path) == nil {
+			t.Errorf("accepted invalid local definition %s", path)
+		}
+	}
+	if err := validateLocalAction("./.github/workflows/ci.yml"); err != nil {
+		t.Fatal(err)
 	}
 }
 
