@@ -8,7 +8,7 @@ const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const module = 'github.com/wailsapp/wails/v3'
 export function verifyWailsCLI(info, version, toolchain) {
   assert.doesNotMatch(info, /^\s*=>/m, 'Replaced CLI dependencies are forbidden')
-  assert.ok(info.split('\n')[0].endsWith('go' + toolchain), 'CLI Go toolchain differs from the project')
+  assert.ok(info.split('\n')[0].trimEnd().endsWith('go' + toolchain), 'CLI Go toolchain differs from the project')
   const modules = [...info.matchAll(/^\s*(?:mod|dep)\s+(\S+)\s+(\S+)/gm)]
   for (const [path, expected] of [[module, version], ['golang.org/x/tools', 'v0.52.0'], ['golang.org/x/net', 'v0.62.0']]) {
     const values = modules.filter(match => match[1] === path)
