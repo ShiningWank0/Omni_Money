@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
+import { mkdtempSync, rmSync, statSync } from 'node:fs'
+import { createServer as createTLSServer } from 'node:https'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { bounded, browserErrorDetails, privateAppEnvironment, requireCI, stopProcessGroup, verifyDevBuild, verifyEvidence, watchExit } from './wails-dev-integration.mjs'
+import { bounded, browserErrorDetails, createDiagnosticTLS, probeHTTP, privateAppEnvironment, requireCI, stopProcessGroup, verifyDevBuild, verifyEvidence, watchExit } from './wails-dev-integration.mjs'
 import { verifyCLI } from './wails-dev-evidence.mjs'
 
 const expected = { 'github.com/wailsapp/wails/v3': 'v3.90.0' }
@@ -128,4 +132,34 @@ test('startup failure is observed and cleanup does not target another process', 
   const child = spawn(missing, [], { detached: true, stdio: 'ignore' })
   await assert.rejects(watchExit(child), /ENOENT/)
   await stopProcessGroup(child)
+})
+
+test('diagnostic HTTPS probes trust only the run certificate and verify its hostname', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'omni-tls-fixture-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const tls = createDiagnosticTLS(directory)
+  assert.equal(statSync(join(directory, 'loopback-key.pem')).mode & 0o777, 0o600)
+  const server = createTLSServer({ cert: tls.certificate, key: tls.privateKey, minVersion: 'TLSv1.3' }, (_, response) => response.end('owned fixture'))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const baseURL = `https://127.0.0.1:${server.address().port}`
+  await assert.rejects(probeHTTP(baseURL, '/'), /self.signed certificate/i)
+  const response = await probeHTTP(baseURL, '/', {}, false, 'GET', { ca: tls.certificate })
+  assert.equal(response.status, 200)
+  assert.equal(response.body, 'owned fixture')
+  await assert.rejects(probeHTTP(baseURL, '/', {}, false, 'GET', { ca: tls.certificate, servername: 'other.invalid' }), { code: 'ERR_TLS_CERT_ALTNAME_INVALID' })
+})
+
+test('cleanup stops and reaps descendants after their parent exits', async t => {
+  // The native WebView also creates children that can outlive its main process.
+  // A container needs an init reaper; merely sending SIGKILL leaves zombies.
+  const descendant = "process.stdout.write('ready'); setInterval(() => {}, 1000)"
+  const program = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: ['ignore', 1, 2] }); process.exit(0)`
+  const child = spawn(process.execPath, ['-e', program], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
+  const exit = watchExit(child)
+  t.after(() => stopProcessGroup(child))
+  await bounded(once(child.stdout, 'data'), 5000, 'descendant startup timeout')
+  assert.deepEqual(await bounded(exit, 5000, 'parent exit timeout'), { code: 0, signal: null })
+  await stopProcessGroup(child)
+  assert.throws(() => process.kill(-child.pid, 0), { code: 'ESRCH' })
 })

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { govulncheckCommand } from './run-govulncheck.mjs';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -31,6 +32,18 @@ const trivyInput = { SchemaVersion: 2, ArtifactName: 'omni-money:ci', Results: [
   { VulnerabilityID: 'CVE-2099-0003', PkgName: 'libx', Severity: 'LOW', FixedVersion: '1.1' },
 ] }] };
 const report = () => normalize('govulncheck-server', goInput, 0);
+
+test('release scanner defaults to production GTK3 and preserves explicit server/dev tags', () => {
+  const command = govulncheckCommand('./...')
+  assert.deepEqual(command.slice(-3), ['-tags', 'production,desktop,gtk3,libsqlite3,sqlite_omit_load_extension', './...'])
+  for (const tags of ['server', 'server,omni_wails_browser,dev,desktop,gtk3,libsqlite3,sqlite_omit_load_extension']) {
+    const explicit = govulncheckCommand('-json', '-tags', tags, './...')
+    assert.deepEqual(explicit.slice(-4), ['-json', '-tags', tags, './...'])
+    assert.equal(explicit.filter(value => value === '-tags').length, 1)
+    const equals = govulncheckCommand(`-tags=${tags}`, './...')
+    assert.deepEqual(equals.slice(-2), [`-tags=${tags}`, './...'])
+  }
+})
 const entry = () => entries([report()])[0];
 
 test('govulncheck JSON exit 0 still detects reachable symbols, not module/package-only findings', () => {
@@ -352,7 +365,7 @@ test('gosec CLI uses locked scanner dependencies and rejects incomplete scans in
     const calls = readFileSync(join(directory, 'scanner-args.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
     const command = ['run', '-mod=readonly', `-modfile=${resolve('scripts/securitytools/gosec/go.mod')}`,
       'github.com/securego/gosec/v2/cmd/gosec', '-terse', '-fmt=json', '-severity=medium'];
-    assert.deepEqual(calls, [[...command, './...'], [...command, '-tags', 'server', './...']]);
+    assert.deepEqual(calls, [[...command, '-tags', 'production,desktop,gtk3,libsqlite3,sqlite_omit_load_extension', './...'], [...command, '-tags', 'server', './...']]);
     for (const mode of ['desktop', 'server']) {
       const report = JSON.parse(readFileSync(join(directory, `security-reports/gosec-${mode}.json`), 'utf8'));
       assert.equal(report.status, status);
@@ -371,7 +384,7 @@ test('CLI enforces failure on govulncheck JSON findings even when tool exits suc
   assert.equal(result.status, 1);
   const calls = readFileSync(join(directory, 'scanner-args.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(calls, [
-    ['run', '-mod=readonly', `-modfile=${resolve('scripts/securitytools/govulncheck/go.mod')}`, 'golang.org/x/vuln/cmd/govulncheck', '-json', './...'],
+    ['run', '-mod=readonly', `-modfile=${resolve('scripts/securitytools/govulncheck/go.mod')}`, 'golang.org/x/vuln/cmd/govulncheck', '-json', '-tags', 'production,desktop,gtk3,libsqlite3,sqlite_omit_load_extension', './...'],
     ['run', '-mod=readonly', `-modfile=${resolve('scripts/securitytools/govulncheck/go.mod')}`, 'golang.org/x/vuln/cmd/govulncheck', '-json', '-tags', 'server', './...'],
   ]);
   for (const mode of ['desktop', 'server']) {

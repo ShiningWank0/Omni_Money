@@ -25,7 +25,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash
@@ -86,8 +86,18 @@ jobs:
           npm audit --audit-level=high
           npm run build
 
+      - name: Build fixed SQLCipher for release analysis
+        if: github.event_name == 'push'
+        env:
+          SQLCIPHER_PREFIX: /tmp/omni-sqlcipher
+        run: sh scripts/build-sqlcipher-linux.sh
+
       - name: Run release quality gate
         if: github.event_name == 'push'
+        env:
+          CGO_CFLAGS: -I/tmp/omni-sqlcipher/include
+          CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib
+          LD_LIBRARY_PATH: /tmp/omni-sqlcipher/lib
         run: |
           go test ./...
           go vet ./...
@@ -161,7 +171,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001 --privileged
+      options: --init --user 1001:1001 --privileged
     defaults:
       run:
         shell: bash
@@ -304,8 +314,9 @@ jobs:
           WAILS_EXE="$(cygpath -u "$(go env GOPATH)")/bin/wails3.exe"
           export CGO_CFLAGS="-I${SQLCIPHER_WINDOWS}/include -I${OPENSSL_WINDOWS}/include"
           export CGO_LDFLAGS="-L${SQLCIPHER_WINDOWS}/lib ${SQLCIPHER_WINDOWS}/lib/libsqlite3.a ${OPENSSL_WINDOWS}/lib/libcrypto.a -lbcrypt -lws2_32 -lcrypt32 -lgdi32"
-          go test -mod=readonly -count=1 -tags "libsqlite3,sqlite_omit_load_extension" -run '^TestFixedCIWebview' .
           "$WAILS_EXE" build --tags "libsqlite3,sqlite_omit_load_extension"
+          # The real frontend build must populate main.go's embedded assets first.
+          go test -mod=readonly -count=1 -tags "libsqlite3,sqlite_omit_load_extension" -run '^TestFixedCIWebview' .
           mkdir -p build/bin
           go build -mod=readonly -tags "dev,desktop,libsqlite3,sqlite_omit_load_extension" -o build/bin/omni-wails-dev.exe .
           WAILS_EVIDENCE_DIR="$(cygpath -u "$RUNNER_TEMP")"
@@ -522,7 +533,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash
@@ -564,7 +575,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash

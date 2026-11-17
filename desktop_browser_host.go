@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"net"
@@ -45,7 +46,13 @@ func configureWailsBrowserHost(options *application.Options) error {
 	if publicPort == backendPort {
 		return errors.New("diagnostic listeners must be distinct")
 	}
-	origin := "http://127.0.0.1:" + strconv.Itoa(publicPort)
+	origin := "https://127.0.0.1:" + strconv.Itoa(publicPort)
+	// The CI harness supplies a per-run loopback certificate. Only its public
+	// certificate/key pin is trusted by that run's isolated test clients.
+	certificate, err := tls.X509KeyPair([]byte(os.Getenv("OMNI_WAILS_TLS_CERT")), []byte(os.Getenv("OMNI_WAILS_TLS_KEY")))
+	if err != nil {
+		return errors.New("invalid CI loopback TLS certificate")
+	}
 	backend, err := url.Parse("http://127.0.0.1:" + strconv.Itoa(backendPort))
 	if err != nil {
 		return err
@@ -107,8 +114,9 @@ func configureWailsBrowserHost(options *application.Options) error {
 		return err
 	}
 	server := &http.Server{Handler: middleware(gatewayHandler), ReadHeaderTimeout: 5 * time.Second,
+		TLSConfig:   &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}},
 		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second}
-	go func() { _ = server.Serve(listener) }()
+	go func() { _ = server.ServeTLS(listener, "", "") }()
 	options.Server.Host = "127.0.0.1"
 	options.Server.Port = backendPort
 	options.Server.ShutdownTimeout = 2 * time.Second

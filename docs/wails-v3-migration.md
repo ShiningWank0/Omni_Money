@@ -21,3 +21,7 @@ bindingの互換adapterは、native hostが付けるHTML markerを確認して�
 配布物の検証では、SQLCipherの実行版・暗号化・link、OSS一覧、Windows DLL制限を維持する。LinuxとWindowsのnative UI試験は配布binaryを使う。macOSのUI操作試験は追加しておらず、buildとSQLCipher self-testによる検証に限られる。開発用browser試験は、製品serverとは別のCI専用タグで実行し、詳細は`security-monitoring.md`に記載する。Issue #299を実動作の証跡なしに解決済みとはしない。
 
 参照: [Wails 3.1.0の移行ガイド](https://github.com/wailsapp/wails/blob/v3.1.0/docs/mpress/content/migration/v2-to-v3.md)、[Go 1.27のmacOS要件](https://go.dev/doc/go1.27#darwin)。
+
+CI専用browser hostの公開入口はHTTPSに限定する。各試験の一時証明書をNode clientはCAとして検証し、Chromiumはその公開鍵のSHA256だけを試験用profileで許可する。CookieはSecure/HttpOnly/SameSite Strictを要求し、平文HTTP・異なる証明書・異なるhostnameを拒否する。秘密鍵とprofileはartifactへ保存しない。通常のnative製品とserverの通信設定は変更しない。
+
+配布用のgosec/govulncheckにはproduction/desktop/gtk3/SQLCipherのタグを明示し、同じ固定SQLCipherのheader/libraryを渡す。serverと手動dev診断の検査対象はそれぞれ別タグで維持する。

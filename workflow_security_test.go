@@ -175,7 +175,7 @@ func TestDockerPullRequestsCannotPublishImages(t *testing.T) {
 		t.Error("PR and release must share the fixed Docker setup")
 	}
 	// Authentication may only use this job's read-only token for base pulls.
-	if strings.Count(check, "secrets.") != strings.Count(check, "secrets.GITHUB_TOKEN") {
+	if !dockerPRUsesOnlyDefaultToken(check) {
 		t.Error("Docker PR build uses a non-default secret")
 	}
 	if !strings.Contains(check, "packages: read") {
@@ -194,6 +194,30 @@ func TestDockerPullRequestsCannotPublishImages(t *testing.T) {
 			if pin[1] != pins[0][1] {
 				t.Errorf("%s must use the same pin in PR and release builds", action)
 			}
+		}
+	}
+}
+
+func dockerPRUsesOnlyDefaultToken(job string) bool {
+	// Remove only complete, direct expressions. Prefixes, bracket syntax and
+	// expressions that combine other secrets must never inherit this exception.
+	remaining := regexp.MustCompile(`\$\{\{\s*secrets\.GITHUB_TOKEN\s*\}\}`).ReplaceAllString(job, "")
+	return !regexp.MustCompile(`(?i)\bsecrets\b`).MatchString(remaining)
+}
+
+func TestDockerPRSecretExceptionRequiresExactTokenExpression(t *testing.T) {
+	for _, expression := range []string{"${{ secrets.GITHUB_TOKEN }}", "${{secrets.GITHUB_TOKEN}}"} {
+		if !dockerPRUsesOnlyDefaultToken(expression) {
+			t.Errorf("rejected the default token: %s", expression)
+		}
+	}
+	for _, expression := range []string{
+		"${{ secrets.GITHUB_TOKEN_EXTRA }}", "${{ secrets.OTHER }}",
+		"${{ secrets['OTHER'] }}", "${{ secrets }}",
+		"${{ secrets.GITHUB_TOKEN || secrets.OTHER }}", "${{ toJSON(secrets) }}",
+	} {
+		if dockerPRUsesOnlyDefaultToken(expression) {
+			t.Errorf("accepted a non-default secret: %s", expression)
 		}
 	}
 }

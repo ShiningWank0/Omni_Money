@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
-import { createHash } from 'node:crypto'
+import { request as requestTLS } from 'node:https'
+import { createHash, X509Certificate } from 'node:crypto'
 import { readFileSync, symlinkSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createServer, createConnection } from 'node:net'
@@ -45,7 +46,7 @@ export function privateAppEnvironment(directory, inherited) {
     XDG_CACHE_HOME: join(directory, 'cache'), XDG_RUNTIME_DIR: join(directory, 'runtime'), TMPDIR: join(directory, 'tmp'),
     GDK_BACKEND: 'x11', WEBKIT_DISABLE_COMPOSITING_MODE: '1', LIBGL_ALWAYS_SOFTWARE: '1' }
   // These upstream Wails environment variables take precedence over CLI flags.
-  for (const key of ['devserver', 'assetdir', 'frontenddevserverurl', 'loglevel', 'GITHUB_TOKEN', 'GH_TOKEN', 'WAILS_DEV_ALLOWED_HOSTS', 'FRONTEND_DEVSERVER_URL', 'WAILS_SERVER_HOST', 'WAILS_SERVER_PORT', 'OMNI_WAILS_BROWSER_PORT', 'OMNI_WAILS_VITE_URL', 'OMNI_WAILS_ASSET_DIR']) delete env[key]
+  for (const key of ['devserver', 'assetdir', 'frontenddevserverurl', 'loglevel', 'GITHUB_TOKEN', 'GH_TOKEN', 'WAILS_DEV_ALLOWED_HOSTS', 'FRONTEND_DEVSERVER_URL', 'WAILS_SERVER_HOST', 'WAILS_SERVER_PORT', 'OMNI_WAILS_BROWSER_PORT', 'OMNI_WAILS_VITE_URL', 'OMNI_WAILS_ASSET_DIR', 'OMNI_WAILS_TLS_CERT', 'OMNI_WAILS_TLS_KEY']) delete env[key]
   return env
 }
 
@@ -104,14 +105,14 @@ async function portIsOpen(port) {
   })
 }
 
-async function waitForOwnedServer(url, marker, child, timeout = 45_000) {
+async function waitForOwnedServer(url, marker, child, timeout = 45_000, tlsOptions = {}) {
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) {
     assert.equal(child.exitCode, null, 'Wails exited before serving the application')
     assert.equal(child.signalCode, null, 'Wails was terminated before serving the application')
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(1000) })
-      if (response.status === 200 && await response.text() === marker) return
+      const response = await probeHTTP(url, '', {}, false, 'GET', tlsOptions)
+      if (response.status === 200 && response.body === marker) return
     } catch { /* The owned listener may not be ready yet. */ }
     await delay(200)
   }
@@ -125,18 +126,38 @@ function go(args, cwd = root) {
 }
 
 // A real HTTP upgrade, without a browser's automatically attached cookies.
-export function probeHTTP(baseURL, path, headers = {}, upgrade = false, method = 'GET') {
+export function probeHTTP(baseURL, path, headers = {}, upgrade = false, method = 'GET', tlsOptions = {}) {
   return new Promise((resolve, reject) => {
-    const req = request(new URL(path, baseURL), { method, headers: { ...headers, ...(upgrade ? {
+    const url = new URL(path, baseURL)
+    const req = (url.protocol === 'https:' ? requestTLS : request)(url, { ...tlsOptions, method, headers: { ...headers, ...(upgrade ? {
       Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13',
       'Sec-WebSocket-Key': Buffer.from(randomUUID().replaceAll('-', '').slice(0, 16)).toString('base64'),
     } : {}) } })
     req.setTimeout(5000, () => req.destroy(new Error('HTTP probe timed out')))
     req.once('error', reject)
     req.once('upgrade', (response, socket) => { socket.destroy(); resolve({ status: response.statusCode, headers: response.headers }) })
-    req.once('response', response => { response.resume(); response.once('end', () => resolve({ status: response.statusCode, headers: response.headers })) })
+    req.once('response', response => {
+      let body = ''
+      response.setEncoding('utf8')
+      response.on('data', chunk => { body += chunk; if (body.length > 1 << 20) req.destroy(new Error('HTTP probe response exceeds limit')) })
+      response.once('error', reject)
+      response.once('end', () => resolve({ status: response.statusCode, headers: response.headers, body }))
+    })
     req.end()
   })
+}
+
+export function createDiagnosticTLS(directory) {
+  const cert = join(directory, 'loopback-cert.pem'), key = join(directory, 'loopback-key.pem')
+  // In real CI this is the OpenSSL binary in the verified Linux snapshot.
+  const generated = spawnSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
+    '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'],
+  { encoding: 'utf8', timeout: 10_000 })
+  assert.equal(generated.status, 0, generated.stderr || generated.error?.message)
+  chmodSync(key, 0o600)
+  const certificate = readFileSync(cert, 'utf8'), privateKey = readFileSync(key, 'utf8')
+  const spki = new X509Certificate(certificate).publicKey.export({ type: 'spki', format: 'der' })
+  return { certificate, privateKey, fingerprint: createHash('sha256').update(spki).digest('base64') }
 }
 
 export function verifyEvidence(result, errors, mode, commit) {
@@ -208,7 +229,9 @@ export async function runIntegration(binaryArgument, mode = 'assets') {
     const env = privateAppEnvironment(directory, process.env)
     for (const key of ['XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR', 'TMPDIR']) mkdirSync(env[key], { recursive: true, mode: 0o700 })
     port = await unusedPort()
-    const baseURL = `http://127.0.0.1:${port}`
+    const baseURL = `https://127.0.0.1:${port}`
+    const tls = createDiagnosticTLS(directory), trust = { ca: tls.certificate }
+    const probe = (url, path, headers = {}, upgrade = false, method = 'GET') => probeHTTP(url, path, headers, upgrade, method, trust)
     const marker = randomUUID(), markerName = `integration-${marker}.txt`
     let project = root, assets = join(directory, 'assets'), appSource
     let executable = binary, args = []
@@ -250,7 +273,9 @@ export async function runIntegration(binaryArgument, mode = 'assets') {
     log = openSync(join(output, 'application.log'), 'w', 0o600)
     const start = () => {
       assert.equal(interrupted, false, 'Integration was interrupted')
-      child = spawn(executable, args, { cwd: project, env, detached: true, stdio: ['ignore', log, log] })
+      child = spawn(executable, args, { cwd: project,
+        env: { ...env, OMNI_WAILS_TLS_CERT: tls.certificate, OMNI_WAILS_TLS_KEY: tls.privateKey },
+        detached: true, stdio: ['ignore', log, log] })
       exit = watchExit(child); exit.catch(() => {})
     }
     if (mode === 'vite') {
@@ -260,14 +285,17 @@ export async function runIntegration(binaryArgument, mode = 'assets') {
     }
     start()
     if (mode === 'vite') tracker = setInterval(() => { try { rememberDescendants(child, groups) } catch (error) { result.trackerError = error.message } }, 300)
-    await waitForOwnedServer(`${baseURL}/${markerName}`, marker, child, mode === 'vite' ? 240_000 : 45_000)
+    await waitForOwnedServer(`${baseURL}/${markerName}`, marker, child, mode === 'vite' ? 240_000 : 45_000, trust)
     result.checks.http = true
     if (mode === 'vite') {
       result.checks.viteProxy = true
       for (const manifest of ['go.mod', 'go.sum']) assert.equal(readFileSync(join(project, manifest), 'utf8'), readFileSync(join(root, manifest), 'utf8'), `Wails task changed ${manifest}`)
     }
     const { chromium } = createRequire(join(root, 'frontend/package.json'))('@playwright/test')
-    context = await chromium.launchPersistentContext(join(directory, 'browser-profile'), { headless: true, locale: 'ja-JP', timeout: 30_000, env })
+    const browserEnv = { ...env }
+    delete browserEnv.OMNI_WAILS_TLS_KEY
+    context = await chromium.launchPersistentContext(join(directory, 'browser-profile'), { headless: true, locale: 'ja-JP', timeout: 30_000,
+      env: browserEnv, args: [`--ignore-certificate-errors-spki-list=${tls.fingerprint}`] })
     const page = await context.newPage()
     page.setDefaultTimeout(15_000)
     page.on('pageerror', error => browserErrors.push(browserErrorDetails(error, stage)))
@@ -293,12 +321,12 @@ export async function runIntegration(binaryArgument, mode = 'assets') {
     })
     const getCapability = async () => {
       const cookie = (await context.cookies(baseURL)).find(c => c.name === `wails_ipc_capability_${port}`)
-      assert.ok(cookie?.value && cookie.httpOnly && cookie.sameSite === 'Strict', 'Expected a protected capability cookie')
+      assert.ok(cookie?.value && cookie.secure && cookie.httpOnly && cookie.sameSite === 'Strict', 'Expected a protected capability cookie')
       return cookie
     }
     await check('security', async () => {
       const cookie = await getCapability(), valid = `${cookie.name}=${cookie.value}`
-      const deniedHost = await probeHTTP(baseURL, '/', { Host: `attacker.invalid:${port}` })
+      const deniedHost = await probe(baseURL, '/', { Host: `attacker.invalid:${port}` })
       assert.equal(deniedHost.status, 403)
       assert.equal(deniedHost.headers['set-cookie'], undefined)
       for (const headers of [
@@ -307,12 +335,12 @@ export async function runIntegration(binaryArgument, mode = 'assets') {
         { Origin: 'http://attacker.invalid', Cookie: valid },
         { Cookie: valid }, // missing Origin
         { Host: `attacker.invalid:${port}`, Origin: `http://attacker.invalid:${port}`, Cookie: valid },
-      ]) assert.equal((await probeHTTP(baseURL, '/wails/events', headers, true)).status, 403)
+      ]) assert.equal((await probe(baseURL, '/wails/events', headers, true)).status, 403)
       for (const headers of [{ Origin: baseURL }, { Origin: 'http://attacker.invalid', Cookie: valid }, { Cookie: valid }]) {
-        assert.equal((await probeHTTP(baseURL, '/wails/runtime', headers, false, 'POST')).status, 403)
+        assert.equal((await probe(baseURL, '/wails/runtime', headers, false, 'POST')).status, 403)
       }
-      assert.equal((await probeHTTP(`http://127.0.0.1:${backendPort}`, '/wails/runtime', { Origin: baseURL }, false, 'POST')).status, 403)
-      assert.equal((await probeHTTP(baseURL, '/wails/events', { Origin: baseURL, Cookie: valid }, true)).status, 101)
+      assert.equal((await probe(`http://127.0.0.1:${backendPort}`, '/wails/runtime', { Origin: baseURL }, false, 'POST')).status, 403)
+      assert.equal((await probe(baseURL, '/wails/events', { Origin: baseURL, Cookie: valid }, true)).status, 101)
     })
     if (mode === 'vite') await check('hmr', async () => {
       assert.equal(await page.locator('[data-ci-hmr]').textContent(), marker)
@@ -331,9 +359,9 @@ export async function runIntegration(binaryArgument, mode = 'assets') {
       await stopProcessGroup(child)
       await bounded(exit, 10_000, 'The stopped backend did not exit')
       start()
-      await waitForOwnedServer(`${baseURL}/${markerName}`, marker, child)
+      await waitForOwnedServer(`${baseURL}/${markerName}`, marker, child, 45_000, trust)
       const oldCookie = `wails_ipc_capability_${port}=${previousCapability}`
-      assert.equal((await probeHTTP(baseURL, '/wails/events', { Origin: baseURL, Cookie: oldCookie }, true)).status, 403)
+      assert.equal((await probe(baseURL, '/wails/events', { Origin: baseURL, Cookie: oldCookie }, true)).status, 403)
       await page.reload({ waitUntil: 'domcontentloaded' })
       await page.waitForFunction(() => typeof window.go?.main?.App?.GetDesktopVaultStatus === 'function')
       await callGo()

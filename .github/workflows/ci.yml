@@ -38,7 +38,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash
@@ -112,7 +112,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash
@@ -179,7 +179,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash
@@ -251,6 +251,10 @@ jobs:
 
       - name: Run Go security analyzer
         if: ${{ !cancelled() && steps.go-security-setup.outcome == 'success' }}
+        env:
+          CGO_CFLAGS: -I/tmp/omni-sqlcipher/include
+          CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib
+          LD_LIBRARY_PATH: /tmp/omni-sqlcipher/lib
         run: node scripts/security-reports.mjs gosec
 
       - name: Lint GitHub Actions workflows
@@ -298,6 +302,10 @@ jobs:
 
       - name: Scan reachable Go vulnerabilities
         if: ${{ !cancelled() && steps.go-security-setup.outcome == 'success' }}
+        env:
+          CGO_CFLAGS: -I/tmp/omni-sqlcipher/include
+          CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib
+          LD_LIBRARY_PATH: /tmp/omni-sqlcipher/lib
         run: node scripts/security-reports.mjs govulncheck
 
       - name: Build SQLCipher-linked server entrypoint
@@ -433,7 +441,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash
@@ -544,7 +552,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     timeout-minutes: 15
     defaults:
       run:
@@ -631,7 +639,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001 --privileged
+      options: --init --user 1001:1001 --privileged
     defaults:
       run:
         shell: bash
@@ -815,7 +823,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash
@@ -850,7 +858,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash
@@ -912,7 +920,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash
@@ -978,7 +986,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash
@@ -1029,7 +1037,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1001:1001
+      options: --init --user 1001:1001
     defaults:
       run:
         shell: bash

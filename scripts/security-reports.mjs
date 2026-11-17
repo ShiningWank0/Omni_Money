@@ -184,7 +184,8 @@ function run(tool) {
   const selected = tool === 'govulncheck-dev' ? developmentScans : scans.filter(name => name === tool || name.startsWith(`${tool}-`));
   for (const scan of selected) {
     const server = scan === 'govulncheck-dev' ? ['-tags', 'server,omni_wails_browser,dev,desktop,gtk3,libsqlite3,sqlite_omit_load_extension']
-      : scan.endsWith('-server') ? ['-tags', 'server'] : [];
+      : scan.endsWith('-server') ? ['-tags', 'server']
+        : tool === 'npm' ? [] : ['-tags', 'production,desktop,gtk3,libsqlite3,sqlite_omit_load_extension'];
     const command = tool === 'npm' ? ['npm', 'audit', '--json', '--audit-level=high']
       : tool === 'gosec' ? ['go', 'run', '-mod=readonly', `-modfile=${fileURLToPath(new URL('./securitytools/gosec/go.mod', import.meta.url))}`,
         'github.com/securego/gosec/v2/cmd/gosec', '-terse', '-fmt=json', '-severity=medium', ...server, './...']

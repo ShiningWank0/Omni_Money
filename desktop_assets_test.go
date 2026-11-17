@@ -34,7 +34,7 @@ func TestDesktopIndexMarkerIsLimitedToBindingHostHTML(t *testing.T) {
 }
 
 func TestWailsBrowserDiagnosticRequiresSameOriginAndProcessCapability(t *testing.T) {
-	const origin = "http://127.0.0.1:12345"
+	const origin = "https://127.0.0.1:12345"
 	create := func() http.Handler {
 		middleware, err := newDesktopAssetMiddleware(origin)
 		if err != nil {
@@ -53,7 +53,7 @@ func TestWailsBrowserDiagnosticRequiresSameOriginAndProcessCapability(t *testing
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, origin+"/", nil))
 	cookies := first.Result().Cookies()
-	if len(cookies) != 1 || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
+	if len(cookies) != 1 || !cookies[0].Secure || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
 		t.Fatal("missing protected capability")
 	}
 	for _, path := range []string{"/wails/runtime", "/wails/events", "/wails/stream/ws"} {
@@ -93,5 +93,22 @@ func TestWailsBrowserDiagnosticRequiresSameOriginAndProcessCapability(t *testing
 	create().ServeHTTP(second, httptest.NewRequest(http.MethodGet, origin+"/", nil))
 	if second.Result().Cookies()[0].Value == cookies[0].Value {
 		t.Fatal("a new binding host reused the capability")
+	}
+	plaintext := httptest.NewRecorder()
+	handler.ServeHTTP(plaintext, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:12345/", nil))
+	if plaintext.Code != http.StatusForbidden || len(plaintext.Result().Cookies()) != 0 {
+		t.Fatal("plaintext request received a capability")
+	}
+}
+
+func TestDiagnosticOriginMustBeCanonicalLoopbackHTTPS(t *testing.T) {
+	for _, origin := range []string{
+		"http://127.0.0.1:12345", "https://attacker.invalid:12345",
+		"https://user@127.0.0.1:12345", "https://127.0.0.1:12345/path",
+		"https://127.0.0.1:12345?query", "https://127.0.0.1:12345#fragment",
+	} {
+		if _, err := newDesktopAssetMiddleware(origin); err == nil {
+			t.Errorf("accepted unsafe diagnostic origin %q", origin)
+		}
 	}
 }

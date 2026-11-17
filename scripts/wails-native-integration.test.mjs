@@ -7,6 +7,14 @@ import test from 'node:test'
 import { ownedBinary, verifyNativeBuild } from './wails-native-integration.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
+
+test('Windows WebView option tests run after the real frontend and application build', () => {
+  const workflow = readFileSync(join(root, '.github/workflows/release-desktop.yml'), 'utf8')
+  const windows = workflow.slice(workflow.indexOf('- name: Build application on Windows'))
+  const build = windows.indexOf('"$WAILS_EXE" build')
+  const test = windows.indexOf("-run '^TestFixedCIWebview'")
+  assert.ok(build >= 0 && test > build, 'Go embed tests require the real frontend build first')
+})
 const version = 'v3.1.0'
 const info = `binary: go1.27.3
  dep github.com/wailsapp/wails/v3 ${version} h1:fixture

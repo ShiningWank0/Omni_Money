@@ -39,7 +39,7 @@ func newDesktopAssetMiddleware(browserOrigin string) (func(http.Handler) http.Ha
 	var token, cookieName, host string
 	if browserOrigin != "" {
 		origin, err := url.Parse(browserOrigin)
-		if err != nil || origin.Scheme != "http" || origin.Hostname() != "127.0.0.1" || origin.Port() == "" {
+		if err != nil || origin.Scheme != "https" || origin.Hostname() != "127.0.0.1" || origin.Port() == "" || origin.String() != "https://"+origin.Host {
 			return nil, errors.New("invalid diagnostic origin")
 		}
 		host = origin.Host
@@ -53,7 +53,7 @@ func newDesktopAssetMiddleware(browserOrigin string) (func(http.Handler) http.Ha
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if browserOrigin != "" {
-				if r.Host != host {
+				if r.Host != host || r.TLS == nil {
 					http.Error(w, "Forbidden", http.StatusForbidden)
 					return
 				}
@@ -93,7 +93,7 @@ func newDesktopAssetMiddleware(browserOrigin string) (func(http.Handler) http.Ha
 			w.Header().Del("ETag")
 			w.Header().Set("Cache-Control", "no-store")
 			if token != "" && response.status == http.StatusOK {
-				http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+				http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 			}
 			if response.status == 0 {
 				response.status = http.StatusInternalServerError
