@@ -10,7 +10,7 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \
     build-essential curl ca-certificates git tcl libssl-dev binutils file \
     libgtk-3-dev libwebkit2gtk-4.1-dev xvfb xauth dbus-x11 openbox wmctrl \
     xdotool python3 python3-gi gir1.2-atspi-2.0 at-spi2-core libatk-adaptor \
-    sudo jq unzip xz-utils zip pkg-config libasound2t64 libatk-bridge2.0-0t64 \
+    sudo jq unzip xz-utils zip pkg-config iptables libasound2t64 libatk-bridge2.0-0t64 \
     libatspi2.0-0t64 libcups2t64 libdrm2 libgbm1 libnspr4 libnss3 \
     libwayland-client0 libxcomposite1 libxdamage1 libxfixes3 libxkbcommon0 \
     libxrandr2 fonts-noto-color-emoji fonts-unifont fonts-liberation \

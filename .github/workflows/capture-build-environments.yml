@@ -148,6 +148,50 @@ jobs:
           path: result/lock.json
           if-no-files-found: error
 
+  publish-index:
+    name: Preserve multi-architecture environment indexes
+    needs: publish-linux
+    permissions:
+      packages: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: candidate-lock-*
+          path: candidates
+      - name: Assemble indexes from the saved architecture digests
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          mkdir result
+          for kind in ubuntu alpine-builder alpine-runtime; do
+            image="ghcr.io/${GITHUB_REPOSITORY,,}-build-$kind"
+            tag="$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            sources=()
+            for arch in amd64 arm64; do
+              source="$(jq -er .image "candidates/candidate-lock-$kind-$arch/lock.json")"
+              [[ "$source" =~ ^"$image"@sha256:[a-f0-9]{64}$ ]]
+              sources+=("$source")
+            done
+            docker buildx imagetools create --tag "$image:$tag" "${sources[@]}"
+            digest="sha256:$(docker buildx imagetools inspect --raw "$image:$tag" | sha256sum | cut -d' ' -f1)"
+            jq -n --arg ref "$image@$digest" --arg source "$GITHUB_SHA" --arg env "$kind" \
+              --arg run "$GITHUB_RUN_ID" \
+              '{schema:1,environment:$env,platforms:["linux/amd64","linux/arm64"],image:$ref,sourceCommit:$source,runId:$run}' > "result/$kind.json"
+            echo 'OMNI_ENV_LOCK_BEGIN'
+            cat "result/$kind.json"
+            echo 'OMNI_ENV_LOCK_END'
+            cat "result/$kind.json" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: candidate-lock-linux-indexes
+          path: result/
+          if-no-files-found: error
+
   publish-windows:
     name: Preserve MSYS2 candidate in GHCR
     needs: windows
