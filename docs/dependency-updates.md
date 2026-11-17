@@ -12,7 +12,7 @@ Goの1.x間、WebAuthnの0.x間はSemVerではminorでも、関連設定やAPI�
 
 ## ビルド版の固定元
 
-- Goの最低対応版は `go.mod` の `go`、CI/配布用固定版は `toolchain`。各workflowは `go-version-file: go.mod` を使う。
+- Goの最低対応版は `go.mod` の `go`、CI/配布用固定版は `toolchain`。CIの `.go-version` も同じ版へ同期し、各workflowは `go-version-file: .go-version` を使う。`node scripts/runtime-versions.mjs check`でDocker・toolchain・CIの一致を検証する。
 - NodeのCI/配布用固定版は `.node-version`。`frontend/package.json` の `engines` は対応範囲であり、固定版とは別にレビューする。
 - Wails CLIは `go.mod` のWailsモジュールと同じ固定版を導入する。`latest` は使わない。
 - DockerのGo/Nodeイメージは同じ版の `tag@sha256` を維持する。Alpineの系列変更は別途サポート範囲とSQLCipherの動作をレビューする。
