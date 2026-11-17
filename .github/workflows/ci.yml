@@ -115,6 +115,7 @@ jobs:
     if: needs.release-plan.outputs.desktop == 'true'
     permissions:
       contents: write
+      packages: read
       actions: read
       id-token: write
       attestations: write
