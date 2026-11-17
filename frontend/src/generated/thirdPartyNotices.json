@@ -634,7 +634,7 @@
     {
       "id": "native:openssl",
       "name": "OpenSSL",
-      "version": "3.x (macOS: 3.5.8)",
+      "version": "3.x (macOS/Windows: 3.5.8)",
       "license": "Apache-2.0",
       "url": "https://openssl-library.org/source/license/",
       "targets": [

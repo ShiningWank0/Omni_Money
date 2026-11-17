@@ -34,11 +34,11 @@ export function selectDisplayCatalog(catalog, target) {
   const components = catalog.components.filter(component => component.targets.includes(target)).map(component => {
     const { externalTargets, ...selected } = component
     let version = component.version
-    // The reviewed native entry records the pinned macOS build and the series
+    // The reviewed native entry records the pinned macOS/Windows build and the series
     // used by other platforms. Do not show another OS's version in this build.
     if (component.id === 'native:openssl') {
-      const versions = /^3\.x \(macOS: (\d+\.\d+\.\d+)\)$/.exec(version)
-      if (versions) version = config.goos === 'darwin' ? versions[1] : '3.x'
+      const versions = /^3\.x \(macOS\/Windows: (\d+\.\d+\.\d+)\)$/.exec(version)
+      if (versions) version = ['darwin', 'windows'].includes(config.goos) ? versions[1] : '3.x'
     }
     return { ...selected, version, targets: [target], ...(externalTargets?.includes(target) ? { externalTargets: [target] } : {}) }
   })

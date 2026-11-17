@@ -3,7 +3,7 @@ import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'nod
 import { join } from 'node:path'
 import test from 'node:test'
 import { noticeText, parseObjects, targets, targetConfigs, validateCatalog, verifyBundledPackages, validateTargetCoverage, root } from './oss-notices.mjs'
-import { verifyDependencies, verifyNativeLicense } from './oss-artifact.mjs'
+import { verifyDependencies, verifyNativeLicense, verifyOpenSSLVersion } from './oss-artifact.mjs'
 import { bundledPackages } from '../frontend/build/oss-inventory.mjs'
 
 const catalog = JSON.parse(readFileSync(new URL('../frontend/src/generated/thirdPartyNotices.json', import.meta.url)))
@@ -64,6 +64,18 @@ test('Windows license verification ignores only line endings, retaining copyrigh
   assert.doesNotThrow(() => verifyNativeLicense(reviewed, windows))
   assert.doesNotThrow(() => verifyNativeLicense(windows, reviewed))
   assert.throws(() => verifyNativeLicense(windows.replace('ZETETIC', 'altered copyright'), reviewed), /differs/)
+})
+
+test('native packaging rejects an OpenSSL version different from the pinned desktop build', () => {
+  const version = catalog.components.find(component => component.id === 'native:openssl').version.match(/macOS\/Windows: ([\d.]+)/)[1]
+  for (const target of targets.filter(value => /^desktop-(darwin|windows)-/.test(value))) {
+    assert.doesNotThrow(() => verifyOpenSSLVersion(`OpenSSL ${version} build-date`, catalog, target))
+    for (const actual of ['OpenSSL 4.1.0', 'OpenSSL 3.0.0', `OpenSSL ${version}-beta1`, 'unavailable']) {
+      assert.throws(() => verifyOpenSSLVersion(actual, catalog, target), /differs from reviewed/)
+    }
+  }
+  assert.doesNotThrow(() => verifyOpenSSLVersion('OpenSSL 3.5.9 distribution-build', catalog, 'desktop-linux-amd64'))
+  assert.throws(() => verifyOpenSSLVersion('OpenSSL 4.1.0', catalog, 'desktop-linux-amd64'), /differs from reviewed/)
 })
 test('each frontend build must retain the reviewed package set before packaging', () => {
   const inventory = catalog.components.filter(component => component.id.startsWith('npm:'))
