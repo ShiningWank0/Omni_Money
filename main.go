@@ -100,10 +100,15 @@ func main() {
 	}
 
 	// Wailsアプリケーションを起動
-	err := wails.Run(&options.App{
-		Title:  "Omni Money",
-		Width:  1280,
-		Height: 800,
+	windowsOptions, err := desktopCIWebviewOptions()
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = wails.Run(&options.App{
+		Windows: windowsOptions,
+		Title:   "Omni Money",
+		Width:   1280,
+		Height:  800,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},

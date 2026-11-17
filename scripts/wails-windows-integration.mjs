@@ -10,7 +10,7 @@ import { bounded, watchExit } from './wails-dev-integration.mjs'
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 assert.equal(process.env.GITHUB_ACTIONS, 'true', 'CI only')
 assert.equal(process.platform, 'win32', 'Windows native WebView only')
-const runtime = process.env.WEBVIEW2_BROWSER_EXECUTABLE_FOLDER
+const runtime = process.env.OMNI_CI_WEBVIEW2_RUNTIME
 assert.ok(runtime && resolve(runtime).startsWith(resolve(process.env.RUNNER_TEMP)))
 const lock = JSON.parse(readFileSync(join(root, 'build/locks/webview2.json'), 'utf8'))
 const { chromium } = await import(pathToFileURL(join(root, 'frontend/node_modules/playwright-core/index.mjs')))
@@ -24,7 +24,7 @@ mkdirSync(output, { recursive: true })
 const password = `windows-ci-${randomUUID()}`
 const env = { ...process.env, APPDATA: join(directory, 'roaming'), LOCALAPPDATA: join(directory, 'local'),
   USERPROFILE: directory, HOME: directory, TEMP: join(directory, 'tmp'), TMP: join(directory, 'tmp'),
-  WEBVIEW2_USER_DATA_FOLDER: join(directory, 'webview-profile') }
+  OMNI_CI_WEBVIEW2_PROFILE: join(directory, 'webview-profile') }
 for (const key of ['APPDATA', 'LOCALAPPDATA', 'TEMP']) mkdirSync(env[key], { recursive: true })
 const rounds = []
 let app, browser, failed = false
@@ -34,17 +34,20 @@ try {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
     const port = server.address().port
     await new Promise(resolve => server.close(resolve))
-    app = spawn(binary, [], { cwd: directory, env: { ...env,
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --remote-debugging-address=127.0.0.1` },
-      stdio: 'ignore' })
+    // Wails' Go loader deliberately clears WEBVIEW2_* environment overrides.
+    // The native WebView2 command-line switch survives that boundary.
+    app = spawn(binary, [`--edge-webview-switches=--remote-debugging-port=${port} --remote-debugging-address=127.0.0.1`],
+      { cwd: directory, env, stdio: ['ignore', 'pipe', 'pipe'] })
+    let startupOutput = ''
+    for (const stream of [app.stdout, app.stderr]) stream.on('data', data => { startupOutput = (startupOutput + data).slice(-8192) })
     const exited = watchExit(app)
     exited.catch(() => {})
     browser = await bounded((async () => {
-      while (app.exitCode === null) {
+      while (app.exitCode === null && app.signalCode === null) {
         try { return await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 1000 }) }
         catch { await new Promise(resolve => setTimeout(resolve, 200)) }
       }
-      throw Error('Native app exited before creating its WebView')
+      throw Error('Native app exited before creating its WebView: ' + startupOutput)
     })(), 45_000, 'Native WebView did not become ready')
     const version = await (await browser.newBrowserCDPSession()).send('Browser.getVersion')
     assert.equal(version.product.split('/').at(-1), lock.version, 'Actual WebView version differs from lock')
@@ -52,7 +55,7 @@ try {
       `Get-CimInstance Win32_Process -Filter 'ParentProcessId=${app.pid}' | Where-Object { $_.Name -eq 'msedgewebview2.exe' } | Select-Object -ExpandProperty ExecutablePath | ConvertTo-Json -Compress`], { encoding: 'utf8' })
     assert.equal(processes.status, 0, processes.stderr)
     const paths = [JSON.parse(processes.stdout)].flat()
-    assert.ok(paths.length && paths.every(path => path.toLowerCase().startsWith(resolve(runtime).toLowerCase() + '\\')),
+    assert.ok(paths.length && paths.every(path => path.toLowerCase().startsWith(resolve(runtime).toLowerCase() + String.fromCharCode(92))),
       'Actual WebView process did not load the fixed runtime directory')
     const page = browser.contexts()[0].pages()[0]
     page.setDefaultTimeout(20_000)
