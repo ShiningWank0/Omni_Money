@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "engineVersion": "29.10.0",
+  "buildxVersion": "0.39.0",
+  "composeVersion": "5.7.2",
+  "buildkitImage": "moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb",
+  "sbomImage": "docker/buildkit-syft-scanner:stable-1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315",
+  "platforms": {
+    "x86_64": {
+      "engine": {
+        "url": "https://download.docker.com/linux/static/stable/x86_64/docker-29.10.0.tgz",
+        "sha256": "7c1ebadc65c716cdc6d35fc78759ed0e4317debf43c21dd12f066f2006999def"
+      },
+      "buildx": {
+        "url": "https://github.com/docker/buildx/releases/download/v0.39.0/buildx-v0.39.0.linux-amd64",
+        "sha256": "5fb31a097304fbf6dd4038649a0decf32c2b9510e4047acd7d68b9d700c46194"
+      },
+      "compose": {
+        "url": "https://github.com/docker/compose/releases/download/v5.7.2/docker-compose-linux-x86_64",
+        "sha256": "e14235d9c622c5bd57eb8adeed4a0f7308c7f3862e6812dd843f6fe27f1307cc"
+      }
+    },
+    "aarch64": {
+      "engine": {
+        "url": "https://download.docker.com/linux/static/stable/aarch64/docker-29.10.0.tgz",
+        "sha256": "6e5159e8b5615e0c0c2954a2a1a2a12bc65f5d9b603595dba24a10cb367408cd"
+      },
+      "buildx": {
+        "url": "https://github.com/docker/buildx/releases/download/v0.39.0/buildx-v0.39.0.linux-arm64",
+        "sha256": "722cdcdfdd6f3fb943fa1ba75102d057feb18ba72aab93b1b0a8cf2b2b48a25f"
+      },
+      "compose": {
+        "url": "https://github.com/docker/compose/releases/download/v5.7.2/docker-compose-linux-aarch64",
+        "sha256": "e3afd91588e494ff309fced4ad40c5fa93ababe54c1c2eeffe90865719d8d0db"
+      }
+    }
+  }
+}
