@@ -1,0 +1,2 @@
+# Wails generates LF bytes on every platform; freshness checks compare bytes.
+frontend/bindings/** text eol=lf

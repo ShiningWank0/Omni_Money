@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { setTimeout as delay } from 'node:timers/promises'
 import { bounded, privateAppEnvironment, requireCI, stopProcessGroup, watchExit } from './wails-dev-integration.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -35,7 +36,64 @@ function command(program, args, env = process.env) {
   return result.stdout
 }
 
-export async function runNativeIntegration(argument) {
+export function mountsWithin(mountinfo, directory) {
+  return mountinfo.trim().split('\n').filter(Boolean).map(line => {
+    const fields = line.split(' ')
+    assert.ok(fields.length >= 10 && fields.includes('-'), 'Invalid mount inventory')
+    return fields[4].replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)))
+  }).filter(path => path === directory || path.startsWith(directory + '/'))
+}
+
+export async function removeSessionData(directory, mountinfo = () => readFileSync('/proc/self/mountinfo', 'utf8'), remove = rmSync, timeout = 8000) {
+  // The document portal can mount FUSE under XDG_RUNTIME_DIR. Never recurse
+  // into a live mount; the private bus and its services must have exited first.
+  const deadline = Date.now() + timeout
+  while (mountsWithin(mountinfo(), directory).length) {
+    assert.ok(Date.now() < deadline, 'Private desktop session mounts did not stop')
+    await delay(100)
+  }
+  remove(directory, { recursive: true, force: true })
+  assert.equal(existsSync(directory), false, 'Private desktop session data remains')
+}
+
+export async function runNativeSession(argument) {
+  requireCI(process.platform, process.env)
+  const binary = ownedBinary(argument, process.env.RUNNER_TEMP)
+  const output = join(root, '.oss-cache/wails-native-results')
+  mkdirSync(output, { recursive: true, mode: 0o700 })
+  const directory = mkdtempSync(join(realpathSync(process.env.RUNNER_TEMP), 'omni-wails-native-'))
+  const env = privateAppEnvironment(directory, process.env)
+  for (const key of ['XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR', 'TMPDIR']) mkdirSync(env[key], { recursive: true, mode: 0o700 })
+  // Set isolation before starting D-Bus so activated services share the same
+  // lifecycle as the UI. The supervisor remains outside that private session.
+  delete env.DBUS_SESSION_BUS_ADDRESS
+  delete env.DBUS_SESSION_BUS_PID
+  let session, failure, evidence
+  const interrupt = () => { failure ||= new Error('Integration was interrupted'); void stopProcessGroup(session).catch(() => {}) }
+  process.once('SIGINT', interrupt)
+  process.once('SIGTERM', interrupt)
+  try {
+    rmSync(join(output, 'session.json'), { force: true })
+    session = spawn('dbus-run-session', ['--', process.execPath, fileURLToPath(import.meta.url), '--session', binary, directory],
+      { cwd: root, env, detached: true, stdio: 'inherit' })
+    assert.deepEqual(await bounded(watchExit(session), 270_000, 'Private desktop session timed out'), { code: 0, signal: null }, 'Native UI session failed')
+    evidence = JSON.parse(readFileSync(join(output, 'session.json'), 'utf8'))
+    assert.equal(evidence.passed, true, 'Incomplete native UI evidence')
+    assert.deepEqual(evidence.rounds.map(x => x.scenario), ['setup', 'reopen'])
+  } catch (error) { failure ||= error }
+  finally {
+    try { await stopProcessGroup(session) } catch (error) { failure ||= error }
+    try { await removeSessionData(directory) } catch (error) { failure ||= error }
+    process.removeListener('SIGINT', interrupt)
+    process.removeListener('SIGTERM', interrupt)
+    writeFileSync(join(output, 'result.json'), JSON.stringify({ ...evidence, passed: !failure,
+      isolatedDataRemoved: !existsSync(directory), error: failure?.message || null }, null, 2) + '\n')
+  }
+  if (failure) throw failure
+  console.log('Packaged Wails native WebView passed: setup, OSS UI, lock/unlock, restart, normal exit and cleanup')
+}
+
+export async function runNativeIntegration(argument, directory) {
   requireCI(process.platform, process.env)
   assert.ok(process.env.DBUS_SESSION_BUS_ADDRESS, 'A private CI D-Bus session is required')
   const binary = ownedBinary(argument, process.env.RUNNER_TEMP)
@@ -48,7 +106,8 @@ export async function runNativeIntegration(argument) {
   const output = join(root, '.oss-cache/wails-native-results')
   mkdirSync(output, { recursive: true, mode: 0o700 })
   writeFileSync(join(output, 'build-info.txt'), info)
-  const directory = mkdtempSync(join(realpathSync(process.env.RUNNER_TEMP), 'omni-wails-native-'))
+  assert.ok(isAbsolute(directory) && realpathSync(directory) === directory &&
+    dirname(directory) === realpathSync(process.env.RUNNER_TEMP) && directory.split('/').at(-1).startsWith('omni-wails-native-'), 'Invalid private session directory')
   const env = privateAppEnvironment(directory, process.env)
   delete env.NO_AT_BRIDGE
   env.GTK_MODULES = 'atk-bridge'
@@ -110,17 +169,16 @@ export async function runNativeIntegration(argument) {
       try { await stopProcessGroup(child) } catch (error) { failure ||= error }
     }
     for (const log of logs) closeSync(log)
-    try { rmSync(directory, { recursive: true, force: true }) } catch (error) { failure ||= error }
     process.removeListener('SIGINT', interrupt)
     process.removeListener('SIGTERM', interrupt)
     if (interrupted) failure ||= new Error('Integration was interrupted')
-    writeFileSync(join(output, 'result.json'), JSON.stringify({ passed: !failure, wails: selected, binarySHA256: before,
-      rounds, isolatedDataRemoved: !existsSync(directory), error: failure?.message || null }, null, 2) + '\n')
+    writeFileSync(join(output, 'session.json'), JSON.stringify({ passed: !failure, wails: selected, binarySHA256: before,
+      rounds, error: failure?.message || null }, null, 2) + '\n')
   }
   if (failure) throw failure
-  console.log('Packaged Wails native WebView passed: setup, OSS UI, lock/unlock, restart, normal exit and cleanup')
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  runNativeIntegration(process.argv[2]).catch(error => { console.error(error); process.exitCode = 1 })
+  const task = process.argv[2] === '--session' ? runNativeIntegration(process.argv[3], process.argv[4]) : runNativeSession(process.argv[2])
+  task.catch(error => { console.error(error); process.exitCode = 1 })
 }

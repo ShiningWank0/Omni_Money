@@ -1,4 +1,4 @@
-//go:build !omni_wails_browser
+//go:build !server && !omni_wails_browser
 
 package main
 

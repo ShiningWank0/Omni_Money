@@ -457,7 +457,7 @@ jobs:
           env -u DISPLAY -u WAYLAND_DISPLAY "$destination/omni_money" --self-test-sqlcipher
           # Issue #299: production and development have separate runtime gates.
           # This packaged UI check does not establish development IPC compatibility.
-          timeout --signal=TERM --kill-after=20s 300s xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" dbus-run-session -- node scripts/wails-native-integration.mjs "$destination/omni_money"
+          timeout --signal=TERM --kill-after=20s 300s xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" node scripts/wails-native-integration.mjs "$destination/omni_money"
           git diff --exit-code -- go.mod go.sum
 
       - name: Save native WebView integration evidence

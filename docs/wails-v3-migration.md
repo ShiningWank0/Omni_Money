@@ -25,3 +25,7 @@ bindingの互換adapterは、native hostが付けるHTML markerを確認して�
 CI専用browser hostの公開入口はHTTPSに限定する。各試験の一時証明書をNode clientはCAとして検証し、Chromiumはその公開鍵のSHA256だけを試験用profileで許可する。CookieはSecure/HttpOnly/SameSite Strictを要求し、平文HTTP・異なる証明書・異なるhostnameを拒否する。秘密鍵とprofileはartifactへ保存しない。通常のnative製品とserverの通信設定は変更しない。
 
 配布用のgosec/govulncheckにはproduction/desktop/gtk3/SQLCipherのタグを明示し、同じ固定SQLCipherのheader/libraryを渡す。serverと手動dev診断の検査対象はそれぞれ別タグで維持する。
+
+DesktopのApp serviceとそのvaultテストはnative/CI browserのbuild constraintで選択する。`server`だけのbuildにはWails applicationやGTKを取り込まない。Desktopテストをserver側へ流用せず、native側では引き続き実行する。生成bindingは`.gitattributes`でLFを指定し、Windowsのautocrlf設定にかかわらず生成物とのbyte比較を維持する。
+
+Linux native UIの監督processはprivate D-Bus sessionの外で動く。初めにprivate XDG/TMPDIRを用意し、その環境でD-BusとUI試験を開始する。UI終了後にsessionとそのserviceを終了し、private領域内のmountが消えてからデータを削除する。Documents portalのFUSE mountが残る間は再帰削除しない。mount残存・削除失敗・UI失敗はすべて検証失敗とし、`session.json`と`result.json`へ証跡を残す。
