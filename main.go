@@ -100,7 +100,7 @@ func main() {
 	}
 
 	// Wailsアプリケーションを起動
-	windowsOptions, err := desktopCIWebviewOptions()
+	windowsOptions, err := desktopCIWebviewOptions(wailsBindingsMode)
 	if err != nil {
 		log.Fatal(err)
 	}

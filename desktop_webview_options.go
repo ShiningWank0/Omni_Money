@@ -3,35 +3,22 @@
 package main
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
 	"runtime"
-	"strings"
 
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
 // The Go WebView2 loader clears standard WEBVIEW2_* overrides during init.
 // Select the already verified CI runtime through Wails' explicit option.
-func desktopCIWebviewOptions() (*windows.Options, error) {
-	runtimePath := os.Getenv("OMNI_CI_WEBVIEW2_RUNTIME")
-	if runtimePath == "" || runtime.GOOS != "windows" {
+func desktopCIWebviewOptions(bindingGeneration bool) (*windows.Options, error) {
+	// Wails 2 executes main while generating bindings. It must not inspect
+	// runtime files or require the native UI test's private profile.
+	if bindingGeneration || runtime.GOOS != "windows" {
 		return nil, nil
 	}
-	if os.Getenv("GITHUB_ACTIONS") != "true" {
-		return nil, fmt.Errorf("fixed test WebView2 requires CI")
-	}
-	profile := os.Getenv("OMNI_CI_WEBVIEW2_PROFILE")
-	for _, path := range []string{runtimePath, profile} {
-		base := os.Getenv("RUNNER_TEMP")
-		rel, err := filepath.Rel(base, path)
-		if base == "" || !filepath.IsAbs(path) || err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return nil, fmt.Errorf("test WebView2 paths must be inside RUNNER_TEMP")
-		}
-	}
-	if info, err := os.Stat(filepath.Join(runtimePath, "msedgewebview2.exe")); err != nil || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("fixed WebView2 executable is missing")
+	runtimePath, profile, err := desktopCIWebviewPaths()
+	if err != nil || runtimePath == "" {
+		return nil, err
 	}
 	return &windows.Options{WebviewBrowserPath: runtimePath, WebviewUserDataPath: profile}, nil
 }
