@@ -17,4 +17,7 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \
     fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf fonts-freefont-ttf \
  && dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' > /opt/omni-environment/packages.tsv \
  && cp -a /var/lib/apt/lists /opt/omni-environment/apt-lists \
- && find /opt/omni-environment/debs -type f -name '*.deb' -exec sha256sum {} + > /opt/omni-environment/debs.sha256
+ && find /opt/omni-environment/debs -type f -name '*.deb' -exec sha256sum {} + > /opt/omni-environment/debs.sha256 \
+ && useradd --uid 1001 --create-home --shell /bin/bash omni-runner \
+ && printf 'omni-runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/omni-runner \
+ && chmod 0440 /etc/sudoers.d/omni-runner
