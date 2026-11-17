@@ -64,7 +64,7 @@ jobs:
         if: steps.plan.outputs.eligible == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: oss-sync-source/go.mod
+          go-version-file: oss-sync-source/.go-version
           cache: false
       - name: Revalidate and overlay dependency manifests
         id: prepare
