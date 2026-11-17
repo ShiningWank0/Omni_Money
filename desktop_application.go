@@ -8,7 +8,7 @@ import (
 
 func desktopApplicationOptions() (application.Options, error) {
 	options := application.Options{}
-	windowsOptions, err := desktopCIWebviewOptions()
+	windowsOptions, err := desktopCIWebviewOptions(false)
 	if err != nil {
 		return options, err
 	}

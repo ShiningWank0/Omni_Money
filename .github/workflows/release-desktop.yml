@@ -304,6 +304,7 @@ jobs:
           WAILS_EXE="$(cygpath -u "$(go env GOPATH)")/bin/wails3.exe"
           export CGO_CFLAGS="-I${SQLCIPHER_WINDOWS}/include -I${OPENSSL_WINDOWS}/include"
           export CGO_LDFLAGS="-L${SQLCIPHER_WINDOWS}/lib ${SQLCIPHER_WINDOWS}/lib/libsqlite3.a ${OPENSSL_WINDOWS}/lib/libcrypto.a -lbcrypt -lws2_32 -lcrypt32 -lgdi32"
+          go test -mod=readonly -count=1 -tags "libsqlite3,sqlite_omit_load_extension" -run '^TestFixedCIWebview' .
           "$WAILS_EXE" build --tags "libsqlite3,sqlite_omit_load_extension"
           mkdir -p build/bin
           go build -mod=readonly -tags "dev,desktop,libsqlite3,sqlite_omit_load_extension" -o build/bin/omni-wails-dev.exe .

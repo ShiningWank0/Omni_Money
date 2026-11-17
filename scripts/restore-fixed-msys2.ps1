@@ -40,12 +40,31 @@ if ($LASTEXITCODE -ne 0) { throw 'Fixed MSYS2 extraction failed' }
 $env:MSYSTEM = 'UCRT64'
 $env:MSYS2_PATH_TYPE = 'inherit'
 $env:CHERE_INVOKING = '1'
+# A backslash in CC is consumed by the shell in OpenSSL's generated Makefile.
+# Mixed Windows paths work both in native Go/PowerShell and in MSYS make.
+$compilerRoot = $root.Replace('\', '/')
+$env:CC = "$compilerRoot/ucrt64/bin/gcc.exe"
+$env:CXX = "$compilerRoot/ucrt64/bin/g++.exe"
 $bash = Join-Path $root 'usr/bin/bash.exe'
 & $bash --login -e -o pipefail -c 'sha256sum --check --strict /opt/omni-environment/packages.sha256; diff -u /opt/omni-environment/packages.txt <(pacman -Q); test "$(gcc -dumpmachine)" = x86_64-w64-mingw32; tclsh <<< "puts [info patchlevel]"'
 if ($LASTEXITCODE -ne 0) { throw 'Restored MSYS2 does not match the captured package set' }
+$nativeTarget = & $env:CC -dumpmachine
+if ($LASTEXITCODE -ne 0 -or $nativeTarget -ne 'x86_64-w64-mingw32') { throw 'Fixed compiler cannot be invoked from Windows' }
+$compilerProbe = @'
+make -s --no-print-directory -f - <<'MAKE'
+.PHONY: compiler-probe
+compiler-probe:
+	@$(CC) -dumpmachine
+	@$(CXX) -dumpmachine
+MAKE
+'@
+$makeTargets = @(& $bash --login -e -o pipefail -c $compilerProbe)
+if ($LASTEXITCODE -ne 0 -or $makeTargets.Count -ne 2 -or @($makeTargets | Where-Object { $_ -ne 'x86_64-w64-mingw32' }).Count -ne 0) {
+    throw 'Fixed C/C++ compiler paths are not safe for MSYS make'
+}
 $bin = Join-Path $work 'bin'
 New-Item -ItemType Directory $bin | Out-Null
 Set-Content -Encoding ascii -LiteralPath (Join-Path $bin 'msys2.cmd') -Value "@echo off`r`n`"$bash`" --login -e -o pipefail %*`r`n"
 @((Join-Path $root 'usr/bin'), (Join-Path $root 'ucrt64/bin'), $bin) | Out-File -Encoding utf8 -Append $env:GITHUB_PATH
-@('MSYSTEM=UCRT64', 'MSYS2_PATH_TYPE=inherit', 'CHERE_INVOKING=1', "CC=$root/ucrt64/bin/gcc.exe", "CXX=$root/ucrt64/bin/g++.exe") | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+@('MSYSTEM=UCRT64', 'MSYS2_PATH_TYPE=inherit', 'CHERE_INVOKING=1', "CC=$env:CC", "CXX=$env:CXX") | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
 Write-Output "Restored MSYS2 from $($lock.artifact)"
