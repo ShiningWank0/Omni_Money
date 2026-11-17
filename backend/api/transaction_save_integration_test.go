@@ -121,7 +121,9 @@ func TestServerSaveReceiptSurvivesDisconnectLogoutAndFreshLogin(t *testing.T) {
 		if status.State == "failed" || time.Now().After(deadline) {
 			t.Fatalf("accepted save not completed: %+v", status)
 		}
-		time.Sleep(time.Millisecond)
+		// Stay below the real 120 requests/minute limit while waiting for the
+		// asynchronous SQLCipher commit. The 3-second deadline permits <=31 polls.
+		time.Sleep(100 * time.Millisecond)
 	}
 	if replay := serveServerCSVRequest(t, handler, fresh, http.MethodPost, "/api/transaction-saves", data); replay.Code != http.StatusAccepted {
 		t.Fatalf("receipt replay: %d %s", replay.Code, replay.Body.String())
