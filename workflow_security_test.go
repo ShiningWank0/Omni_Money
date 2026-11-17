@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,6 +21,23 @@ func TestGitHubActionsArePinnedAndCheckoutDropsCredentials(t *testing.T) {
 		t.Fatal("no GitHub Actions workflows found")
 	}
 
+	// Composite actions execute at the checked-out commit too. Their nested
+	// external actions must satisfy the same immutable-SHA rule.
+	err = filepath.WalkDir(filepath.Join(".github", "actions"), func(path string, entry fs.DirEntry, walkErr error) error {
+		if os.IsNotExist(walkErr) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() && (entry.Name() == "action.yml" || entry.Name() == "action.yaml") {
+			workflowPaths = append(workflowPaths, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, workflowPath := range workflowPaths {
 		contents, err := os.ReadFile(workflowPath)
 		if err != nil {
@@ -32,16 +51,16 @@ func TestGitHubActionsArePinnedAndCheckoutDropsCredentials(t *testing.T) {
 				continue
 			}
 			action := strings.TrimSpace(strings.TrimPrefix(trimmed, "uses:"))
-			// Local reusable workflows are bound to this checkout's immutable
-			// commit. Only workflow files inside this repository are allowed.
-			if strings.HasPrefix(action, "./.github/workflows/") && !strings.Contains(action, "..") {
-				if _, err := os.Stat(strings.TrimPrefix(action, "./")); err != nil {
-					t.Errorf("local reusable workflow is missing: %s", action)
-				}
-				continue
-			}
 			if commentIndex := strings.Index(action, " #"); commentIndex >= 0 {
 				action = action[:commentIndex]
+			}
+			// Repository-local workflows/actions inherit the checkout's commit.
+			// Permit only existing definitions within .github; never path traversal.
+			if strings.HasPrefix(action, "./") {
+				if err := validateLocalAction(action); err != nil {
+					t.Errorf("%s:%d: %v", workflowPath, index+1, err)
+				}
+				continue
 			}
 			separator := strings.LastIndex(action, "@")
 			if separator <= 0 || !actionCommitPattern.MatchString(action[separator+1:]) {
@@ -55,6 +74,36 @@ func TestGitHubActionsArePinnedAndCheckoutDropsCredentials(t *testing.T) {
 				t.Errorf("%s:%d checkout must disable persisted credentials", workflowPath, index+1)
 			}
 		}
+	}
+}
+
+func validateLocalAction(action string) error {
+	if strings.Contains(action, "..") || strings.ContainsAny(action, "@\\") {
+		return fmt.Errorf("invalid local action: %s", action)
+	}
+	path := strings.TrimPrefix(action, "./")
+	if strings.HasPrefix(path, ".github/actions/") {
+		for _, name := range []string{"action.yml", "action.yaml"} {
+			if info, err := os.Stat(filepath.Join(path, name)); err == nil && info.Mode().IsRegular() {
+				return nil
+			}
+		}
+	} else if strings.HasPrefix(path, ".github/workflows/") && strings.HasSuffix(path, ".yml") {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			return nil
+		}
+	}
+	return fmt.Errorf("missing or out-of-scope local action: %s", action)
+}
+
+func TestLocalActionDefinitionsStayInsideRepository(t *testing.T) {
+	for _, path := range []string{"./.github/actions/../outside", "./.github/actions/missing", "./scripts", "./.github/workflows/ci.yml@main"} {
+		if validateLocalAction(path) == nil {
+			t.Errorf("accepted invalid local definition %s", path)
+		}
+	}
+	if err := validateLocalAction("./.github/workflows/ci.yml"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -79,7 +128,7 @@ func TestDesktopReleaseUsesLeastPrivilegeAndReproducibleTools(t *testing.T) {
 		"actions: read",
 		"contents: write",
 		`WAILS_VERSION="$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"`,
-		"go-version-file: go.mod",
+		"go-version-file: .go-version",
 		"node-version-file: .node-version",
 		"VITE_APP_VERSION: ${{ needs.prepare.outputs.version }}",
 		"github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION",
@@ -114,21 +163,31 @@ func TestDockerPullRequestsCannotPublishImages(t *testing.T) {
 		t.Fatal("Docker PR build check is missing")
 	}
 	check := workflow[start:end]
-	for _, required := range []string{"if: github.event_name == 'pull_request'", "contents: read", "push: false", "linux/amd64", "linux/arm64", "provenance: mode=max", "sbom: true"} {
+	for _, required := range []string{"if: github.event_name == 'pull_request'", "contents: read", "push: false", "linux/amd64", "linux/arm64", "provenance: mode=max", "sbom: generator=${{ steps.docker-tools.outputs.sbom-image }}"} {
 		if !strings.Contains(check, required) {
 			t.Errorf("Docker PR check is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"push: true", "login-action@", ": write", "secrets.", "attest-build-provenance@"} {
+	for _, forbidden := range []string{"push: true", ": write", "attest-build-provenance@"} {
 		if strings.Contains(check, forbidden) {
 			t.Errorf("Docker PR check must not publish: %q", forbidden)
 		}
+	}
+	if strings.Count(workflow, "uses: ./.github/actions/setup-fixed-docker") < 2 {
+		t.Error("PR and release must share the fixed Docker setup")
+	}
+	// Authentication may only use this job's read-only token for base pulls.
+	if strings.Count(check, "secrets.") != strings.Count(check, "secrets.GITHUB_TOKEN") {
+		t.Error("Docker PR build uses a non-default secret")
+	}
+	if !strings.Contains(check, "packages: read") {
+		t.Error("Docker PR image access must remain read-only")
 	}
 	prepare := workflow[end:strings.Index(workflow, "\n  build:\n")]
 	if !strings.Contains(prepare, "if: github.event_name != 'pull_request'") {
 		t.Error("release prepare must run for release pushes and rehearsals, never for PRs")
 	}
-	for _, action := range []string{"docker/setup-buildx-action", "docker/build-push-action"} {
+	for _, action := range []string{"docker/build-push-action"} {
 		pins := regexp.MustCompile(regexp.QuoteMeta(action)+`@([0-9a-f]{40})`).FindAllStringSubmatch(workflow, -1)
 		if len(pins) < 2 {
 			t.Fatalf("%s must be exercised in PR and release builds", action)

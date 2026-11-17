@@ -24,9 +24,11 @@ export function readRuntimeVersions(root = repositoryRoot) {
   const goMod = readFileSync(join(root, 'go.mod'), 'utf8')
   const dockerfile = readFileSync(join(root, 'Dockerfile'), 'utf8')
   const nodeFile = readFileSync(join(root, '.node-version'), 'utf8')
+  const ciGoFile = readFileSync(join(root, '.go-version'), 'utf8')
   const toolchain = singleMatch(goMod, /^toolchain go(\d+\.\d+\.\d+)$/gm, 'Go toolchain directive')[1]
   const minimum = singleMatch(goMod, /^go (\d+\.\d+(?:\.\d+)?)$/gm, 'minimum Go version')[1]
   const node = singleMatch(nodeFile, new RegExp(`^(${versionPattern})\\r?\\n?$`, 'g'), 'pinned Node version')[1]
+  const ciGo = singleMatch(ciGoFile, new RegExp(`^(${versionPattern})\\r?\\n?$`, 'g'), 'pinned CI Go version')[1]
   const imageVersion = image => singleMatch(dockerfile,
     new RegExp(`^FROM ${image}:(${versionPattern})-alpine@sha256:[a-f0-9]{64} AS [a-z-]+\\r?$`, 'gm'),
     `digest-pinned ${image} builder`)[1]
@@ -36,12 +38,13 @@ export function readRuntimeVersions(root = repositoryRoot) {
   if (compareVersions(dockerGo, minimumGo) < 0) {
     throw new Error(`Docker Go ${dockerGo} is older than go.mod minimum ${minimumGo}`)
   }
-  return { goMod, toolchain, node, dockerGo, dockerNode }
+  return { goMod, toolchain, ciGo, node, dockerGo, dockerNode }
 }
 
 export function checkRuntimeVersions(root = repositoryRoot) {
   const versions = readRuntimeVersions(root)
   const mismatches = []
+  if (versions.toolchain !== versions.ciGo) mismatches.push('Go toolchain / CI version file')
   if (versions.toolchain !== versions.dockerGo) mismatches.push('Go toolchain / Docker')
   if (versions.node !== versions.dockerNode) mismatches.push('Node version file / Docker')
   if (mismatches.length) {
@@ -58,6 +61,7 @@ export function syncRuntimeVersions(root = repositoryRoot) {
     writeFileSync(join(root, 'go.mod'), versions.goMod.replace(
       /^toolchain go\d+\.\d+\.\d+$/m, `toolchain go${versions.dockerGo}`))
   }
+  if (versions.ciGo !== versions.dockerGo) writeFileSync(join(root, '.go-version'), `${versions.dockerGo}\n`)
   if (versions.node !== versions.dockerNode) {
     writeFileSync(join(root, '.node-version'), `${versions.dockerNode}\n`)
   }
