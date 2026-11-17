@@ -24,6 +24,8 @@ Parser fuzzは追加の定期・手動専用matrixで3対象を最大2job並列�
 
 ## 定期・手動検査のIssue報告
 
+Go検査の前提stepでは、frontend依存のinstallとembed用の実buildだけを行う。npm auditは独立したFrontend jobで必須実行し、失敗すれば全体の必須判定も失敗する。npmの指摘を理由にGoの検査まで止めない。embed build自体に失敗した場合は、Go解析を実行できたものとして扱わず、欠落・検査エラーを通知する。
+
 このリポジトリのmainでの定期・手動実行では検査のJSON結果からIssueを自動作成する。GitHubが自動発行する`GITHUB_TOKEN`を使い、Issue報告ジョブだけに`issues: write`を与える。追加Secretは不要。PR・push・fork・main以外のbranchではIssue作成を実行しない。
 
 ### Issue作成のルール
