@@ -58,7 +58,13 @@ test "$(docker compose version --short | sed 's/^v//')" = "$compose_version"
 if [[ "$1" == true ]]; then
   # Use the verified daemon/containerd/runc too, rather than the runner's daemon.
   # Host networking and host paths are retained for the existing bind-mount E2E.
-  sudo systemctl stop docker.service docker.socket containerd.service
+  if [[ ! -e /.dockerenv ]]; then
+    sudo systemctl stop docker.service docker.socket containerd.service
+  else
+    # The frozen Linux job image owns this namespace. Never contact or stop
+    # the host daemon that GitHub uses to start the job container.
+    test "$(id -u)" = 0
+  fi
   export DOCKER_HOST="unix://$dest/docker.sock"
   printf 'DOCKER_HOST=%s\n' "$DOCKER_HOST" >> "$GITHUB_ENV"
   sudo env "PATH=$PATH" "$dest/bin/dockerd" \
