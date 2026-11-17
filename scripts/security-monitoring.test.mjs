@@ -350,7 +350,7 @@ test('gosec CLI uses locked scanner dependencies and rejects incomplete scans in
     });
     assert.equal(result.status, status === 'clean' ? 0 : 1, result.stderr);
     const calls = readFileSync(join(directory, 'scanner-args.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    const command = ['run', '-mod=readonly', `-modfile=${resolve('scripts/gosec.mod')}`,
+    const command = ['run', '-mod=readonly', `-modfile=${resolve('scripts/securitytools/gosec/go.mod')}`,
       'github.com/securego/gosec/v2/cmd/gosec', '-terse', '-fmt=json', '-severity=medium'];
     assert.deepEqual(calls, [[...command, './...'], [...command, '-tags', 'server', './...']]);
     for (const mode of ['desktop', 'server']) {

@@ -28,6 +28,12 @@ updates:
           - "github.com/wailsapp/wails/v2"
           - "github.com/go-webauthn/*"
 
+  - package-ecosystem: gomod
+    directory: /scripts/securitytools/gosec
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+
   - package-ecosystem: npm
     directory: /frontend
     schedule:

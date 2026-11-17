@@ -185,7 +185,7 @@ function run(tool) {
     const server = scan === 'govulncheck-dev' ? ['-tags', 'dev,desktop,webkit2_41,libsqlite3,sqlite_omit_load_extension']
       : scan.endsWith('-server') ? ['-tags', 'server'] : [];
     const command = tool === 'npm' ? ['npm', 'audit', '--json', '--audit-level=high']
-      : tool === 'gosec' ? ['go', 'run', '-mod=readonly', `-modfile=${fileURLToPath(new URL('./gosec.mod', import.meta.url))}`,
+      : tool === 'gosec' ? ['go', 'run', '-mod=readonly', `-modfile=${fileURLToPath(new URL('./securitytools/gosec/go.mod', import.meta.url))}`,
         'github.com/securego/gosec/v2/cmd/gosec', '-terse', '-fmt=json', '-severity=medium', ...server, './...']
         : ['go', 'run', 'golang.org/x/vuln/cmd/govulncheck@v1.6.0', '-json', ...server, './...'];
     const result = spawnSync(command[0], command.slice(1), {
