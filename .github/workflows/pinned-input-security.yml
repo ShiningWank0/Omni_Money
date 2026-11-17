@@ -1,0 +1,127 @@
+name: Pinned input security
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/pinned-input-security.yml
+      - scripts/pinned-security*
+      - scripts/pinned_security_extract_test.py
+      - scripts/security-issues.mjs
+      - build/locks/**
+      - .github/dependabot.yml
+      - Dockerfile
+      - .go-version
+      - .node-version
+      - '**/*.mod'
+      - '**/*.sum'
+  schedule:
+    - cron: '43 18 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pinned-input-security-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    name: Validate pinned input monitoring
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Test detection, incomplete reports and issue publication boundaries
+        run: node --test scripts/pinned-security*.test.mjs scripts/security-monitoring.test.mjs
+      - name: Test safe static archive extraction
+        run: python3 -B -m unittest discover -s scripts -p 'pinned_security_extract_test.py'
+
+  scan:
+    name: Check saved inputs (${{ matrix.group }})
+    needs: tests
+    if: ${{ github.repository == 'ShiningWank0/Omni_Money' && ((github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [images, tools, native, modules]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Select the reviewed Go toolchain for module graph inspection
+        if: matrix.group == 'modules'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .go-version
+      - name: Scan immutable inputs with current vulnerability information
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SCAN_GROUP: ${{ matrix.group }}
+        run: node scripts/pinned-security.mjs "$SCAN_GROUP"
+      - name: Save report even when findings or scan errors fail the job
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pinned-report-${{ matrix.group }}-${{ github.run_attempt }}
+          path: security-reports/pinned-${{ matrix.group }}.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Save database, input and raw-result evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pinned-evidence-${{ matrix.group }}-${{ github.run_attempt }}
+          path: pinned-evidence/
+          if-no-files-found: error
+          retention-days: 7
+
+  notify:
+    name: Report pinned input vulnerabilities and coverage gaps
+    needs: [tests, scan]
+    if: ${{ always() && github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Download reports as data
+        id: reports
+        # Publication turns a failed/missing download into scan-error issues
+        # and exits nonzero. This never changes a failed scan into success.
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: pinned-report-*-${{ github.run_attempt }}
+          path: security-reports
+          merge-multiple: true
+      - name: Create or update issues without executing scanned payloads
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PINNED_TEST_OUTCOME: ${{ needs.tests.result }}
+          PINNED_REPORT_DOWNLOAD_OUTCOME: ${{ steps.reports.outcome }}
+        run: node scripts/pinned-security.mjs publish
