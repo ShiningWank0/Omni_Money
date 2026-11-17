@@ -167,12 +167,12 @@
       "sha256": "8005250db5e7143cdfb62f8145ec9ccd1ccf1f22e8ec3410268da2e0e03d6189"
     },
     "native:sqlcipher": {
-      "version": "4.18.0",
+      "version": "4.20.0",
       "license": "BSD-3-Clause",
       "sha256": "c26bc4d65a2fc00de4a2ff68fd7881d51d6faa6e14232100b4942072e30e85c7"
     },
     "native:sqlite": {
-      "version": "SQLCipher 4.18.0",
+      "version": "SQLCipher 4.20.0",
       "license": "Public-Domain",
       "sha256": "25c118b0af64412afc2c391fbc6e5b597e2d83359eb4eaa38fb3e07af5219c35"
     },

@@ -261,7 +261,7 @@ jobs:
         shell: bash
         env:
           SQLCIPHER_LIBRARY_KIND: static
-          SQLCIPHER_PREFIX: ${{ runner.temp }}/omni-sqlcipher-4.18.0
+          SQLCIPHER_PREFIX: ${{ runner.temp }}/omni-sqlcipher-4.20.0
         run: sh scripts/build-sqlcipher-linux.sh
 
       - name: Build pinned static OpenSSL and SQLCipher on macOS
@@ -270,7 +270,7 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
           OPENSSL_PREFIX: ${{ runner.temp }}/omni-openssl-3.5.9
-          SQLCIPHER_PREFIX: ${{ runner.temp }}/omni-sqlcipher-4.18.0
+          SQLCIPHER_PREFIX: ${{ runner.temp }}/omni-sqlcipher-4.20.0
         run: |
           bash scripts/build-openssl-darwin.sh
           bash scripts/build-sqlcipher-darwin.sh
@@ -280,7 +280,7 @@ jobs:
         shell: msys2 {0}
         env:
           OPENSSL_PREFIX: /ucrt64/omni-openssl-3.5.9
-          SQLCIPHER_PREFIX: /ucrt64/omni-sqlcipher-4.18.0
+          SQLCIPHER_PREFIX: /ucrt64/omni-sqlcipher-4.20.0
         run: |
           bash scripts/build-openssl-windows.sh
           sh scripts/build-sqlcipher-windows.sh
@@ -290,7 +290,7 @@ jobs:
         shell: msys2 {0}
         env:
           OPENSSL_PREFIX: /ucrt64/omni-openssl-3.5.9
-          SQLCIPHER_PREFIX: /ucrt64/omni-sqlcipher-4.18.0
+          SQLCIPHER_PREFIX: /ucrt64/omni-sqlcipher-4.20.0
           OMNI_REQUIRE_SQLCIPHER_TESTS: "1"
         run: |
           export CC=gcc
@@ -307,7 +307,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         env:
-          SQLCIPHER_PREFIX: ${{ runner.temp }}/omni-sqlcipher-4.18.0
+          SQLCIPHER_PREFIX: ${{ runner.temp }}/omni-sqlcipher-4.20.0
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
         run: |
           export CGO_ENABLED=1
@@ -333,7 +333,7 @@ jobs:
         shell: msys2 {0}
         env:
           OPENSSL_PREFIX: /ucrt64/omni-openssl-3.5.9
-          SQLCIPHER_PREFIX: /ucrt64/omni-sqlcipher-4.18.0
+          SQLCIPHER_PREFIX: /ucrt64/omni-sqlcipher-4.20.0
         run: |
           export CC=gcc
           export CGO_ENABLED=1
@@ -410,7 +410,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         env:
-          SQLCIPHER_PREFIX: ${{ runner.temp }}/omni-sqlcipher-4.18.0
+          SQLCIPHER_PREFIX: ${{ runner.temp }}/omni-sqlcipher-4.20.0
         run: |
           set -euo pipefail
           target="desktop-${BUILD_PLATFORM/\//-}"
@@ -441,7 +441,7 @@ jobs:
           set -euo pipefail
           node scripts/oss-notices.mjs package desktop-windows-amd64
           export OSS_OPENSSL_LICENSE_DIRECTORY="$(cygpath -m "$OPENSSL_PREFIX/share/licenses/openssl")"
-          node scripts/oss-artifact.mjs desktop-windows-amd64 build/bin/omni_money.exe "$(cygpath -m /ucrt64/omni-sqlcipher-4.18.0)" "$(cat "$OPENSSL_PREFIX/BUILD_VERSION.txt")"
+          node scripts/oss-artifact.mjs desktop-windows-amd64 build/bin/omni_money.exe "$(cygpath -m /ucrt64/omni-sqlcipher-4.20.0)" "$(cat "$OPENSSL_PREFIX/BUILD_VERSION.txt")"
           mkdir -p build/bin/licenses
           cp -R licenses/build/desktop-windows-amd64/. build/bin/licenses/
 
