@@ -1,0 +1,2 @@
+# Hash-verified third-party sources must retain the reviewed bytes on Windows.
+frontend/vendor/picomatch/** text eol=lf

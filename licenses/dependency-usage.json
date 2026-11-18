@@ -2940,6 +2940,18 @@
       "evidence": "Not present in production frontend bundle module inventory"
     },
     {
+      "id": "npm:fill-range",
+      "name": "fill-range",
+      "version": "7.1.1",
+      "dependencyType": "development",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production frontend bundle module inventory"
+    },
+    {
       "id": "npm:fsevents",
       "name": "fsevents",
       "version": "2.3.3",
@@ -3027,6 +3039,18 @@
       "id": "npm:is-decimal",
       "name": "is-decimal",
       "version": "2.0.1",
+      "dependencyType": "development",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production frontend bundle module inventory"
+    },
+    {
+      "id": "npm:is-number",
+      "name": "is-number",
+      "version": "7.0.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3417,7 +3441,8 @@
       "includedTargets": [],
       "externalTargets": [],
       "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
+      "evidence": "Not present in production frontend bundle module inventory",
+      "sourceDirectory": "vendor/picomatch"
     },
     {
       "id": "npm:pinia",
@@ -3617,6 +3642,18 @@
       "id": "npm:tldts-core",
       "name": "tldts-core",
       "version": "7.4.11",
+      "dependencyType": "development",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production frontend bundle module inventory"
+    },
+    {
+      "id": "npm:to-regex-range",
+      "name": "to-regex-range",
+      "version": "5.0.1",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
