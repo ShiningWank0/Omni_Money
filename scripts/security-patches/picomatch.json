@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "name": "picomatch",
+  "version": "4.0.7",
+  "patchRevision": 2,
+  "advisory": "GHSA-fc5q-39xc-vjpf",
+  "trackingIssue": 348,
+  "upstream": {
+    "version": "4.0.7",
+    "dist": {
+      "shasum": "6313360034ccb36b3dc61ecbdff78121f90fe21f",
+      "tarball": "https://registry.npmjs.org/picomatch/-/picomatch-4.0.7.tgz",
+      "fileCount": 10,
+      "integrity": "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==",
+      "signatures": [
+        {
+          "sig": "MEQCIDeMRsq78AZoXJyPEawvv8JPPk7eIeoZRHU3VVnx4FUFAiAtcTcxKUlp2um5SNhGRRFGN8v1oGVjwBoiQBVBFbkk3A==",
+          "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+        },
+        {
+          "sig": "MEUCIFTk5VYWLeXAIebu2UWpaOQ5z72vxnbIe1t8ICKz/cuAAiEAp9RKfBDmwsNgt/m6Rs5cwKMCDQPoDAQTy408DJpDhVs=",
+          "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+        }
+      ],
+      "unpackedSize": 93759
+    }
+  },
+  "sourceCommit": "6bb40679c218cefba5d4e9662408c5fdf699a8bb",
+  "advisoryIdentitySHA256": "d160335cae0f48da6bbe653db184115263c65baf91d1b262cbd7b25c7954f0d1",
+  "advisoryIdentity": {
+    "id": 1247710,
+    "url": "https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
+    "title": "picomatch vulnerable to ReDoS through single-branch repeated extglobs",
+    "severity": "high",
+    "vulnerable_versions": "<=4.0.7"
+  },
+  "files": {
+    "LICENSE": "d0cd141b0c322fded5dfad1d4645bb2fedfc05b7321fe1009469638190d59ef9",
+    "LOCAL-PATCH.md": "3daa641f49a0bc3dfc7d4faaf1d4387eb1eb17c68c3d81010934ce3a9b2ffe35",
+    "README.md": "a69b87120fe2b9cb8f9057eaef6b9f9887f803e02185ca2f431e8162f6312220",
+    "index.js": "02ae26406508e28f9ba0865be16cf77f0b33de6c4d4d49c212c4176df1d5625a",
+    "lib/constants.js": "c28f952d2758261fe5428a121add485cc25b03e0193633f649de903dc0e5e222",
+    "lib/parse.js": "ca07fdf9c667680b7cbe64f904e5cd8aeff8e504a60fd4af0ba116357e9e462d",
+    "lib/picomatch.js": "fdd249d7ffff853f3bb1c77eafc8baa1a437bea85a94c35877b83c6a40d9ca94",
+    "lib/scan.js": "6457a1764e5c2e543cc3a0c00ce12ebb3764097628868198370b64d4e642aaae",
+    "lib/utils.js": "34a5bc967fb8132cf9a178a0b3318d65d80c2f662cd7f3a0d97c6aad467e0307",
+    "package.json": "d25cc9799fd30c2318101e14a6bd6f82aa6b1b7005a5055288f9958a9e5752cd",
+    "posix.js": "5695ff5dfcd5a338a40630bd506056f2950bcb08fe1cc068519cbbfe60add480"
+  },
+  "advisoryRecordSHA256": "dba16521bab03492a9b87075603ba1772ffa24a3cd88ddf236f8e41cda8a1f9e",
+  "additionalFixes": [
+    {
+      "source": "GitHub Advanced Security",
+      "rule": "js/polynomial-redos",
+      "alert": "https://github.com/ShiningWank0/Omni_Money/security/code-scanning/8",
+      "function": "removeBackslashes"
+    }
+  ],
+  "advisoryReview": {
+    "reviewedOn": "2026-11-19",
+    "status": "withdrawn",
+    "withdrawn": "2026-11-18T15:38:56Z",
+    "upstreamReference": "https://github.com/micromatch/picomatch/pull/235#issuecomment-6315749381",
+    "trackingIssue": 348
+  }
+}
