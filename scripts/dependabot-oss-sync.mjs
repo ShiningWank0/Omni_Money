@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { githubRequest } from './dependabot-node-sync.mjs'
 import { advanceUnchangedApprovals, usageFromInputs, verifyBundledPackages } from './oss-notices.mjs'
+import { npmPackages } from '../frontend/build/npm-lock.mjs'
 
 const repository = 'ShiningWank0/Omni_Money'
 const repositoryID = 1171756271
@@ -69,17 +70,29 @@ export function validateDependencyInputs(before, after) {
     if (JSON.stringify(Object.keys(pkg[field] || {}).sort()) !== JSON.stringify(Object.keys(oldPackage[field] || {}).sort())) {
       throw new Error('Adding or removing direct npm dependencies requires manual review')
     }
-    for (const spec of Object.values(pkg[field] || {})) {
-      if (typeof spec !== 'string' || !versionPattern.test(spec.replace(/^[~^]/, ''))) throw new Error('Only registry version ranges are supported')
+    for (const [name, spec] of Object.entries(pkg[field] || {})) {
+      const unchangedLocal = typeof spec === 'string' && spec.startsWith('file:') && spec === oldPackage[field]?.[name]
+      if (typeof spec !== 'string' || (!versionPattern.test(spec.replace(/^[~^]/, '')) && !unchangedLocal)) throw new Error('Only npm registry updates or unchanged reviewed local dependencies are supported')
     }
   }
   const lock = JSON.parse(after['frontend/package-lock.json'])
+  const beforeLock = JSON.parse(before['frontend/package-lock.json'])
   if (lock.lockfileVersion !== 3 || !lock.packages?.[''] || Object.keys(lock.packages).length > 10_000) throw new Error('Unsupported npm lockfile')
+  const installed = npmPackages(lock)
+  for (const [name, spec] of Object.entries({ ...pkg.dependencies, ...pkg.devDependencies })) if (spec.startsWith('file:')) {
+    const local = installed.find(item => item.directory === `node_modules/${name}`)
+    if (!local?.linked || local.sourceDirectory !== spec.slice('file:'.length)) throw new Error('Local manifest and lock source disagree')
+  }
   for (const field of ['dependencies', 'devDependencies']) {
-    if (stable(lock.packages[''][field]) !== stable(pkg[field])) throw new Error('npm manifest and lockfile disagree')
+    const ordered = value => Object.fromEntries(Object.entries(value || {}).sort(([a], [b]) => a.localeCompare(b, 'en')))
+    if (stable(ordered(lock.packages[''][field])) !== stable(ordered(pkg[field]))) throw new Error('npm manifest and lockfile disagree')
   }
   for (const [path, entry] of Object.entries(lock.packages)) {
     if (!path) continue
+    if (entry.link || !path.startsWith('node_modules/')) {
+      if (!beforeLock.packages?.[path] || stable(entry) !== stable(beforeLock.packages[path])) throw new Error('Local package metadata requires manual review')
+      continue
+    }
     if (!/^node_modules\/(?:[A-Za-z0-9@_.+-]+\/)*[A-Za-z0-9@_.+-]+$/.test(path) ||
         path.split('/').some(part => part === '.' || part === '..') || entry.link ||
         !versionPattern.test(entry.version || '') ||
@@ -87,6 +100,9 @@ export function validateDependencyInputs(before, after) {
         !/^sha(?:256|384|512)-[A-Za-z0-9+/]+=*$/.test(entry.integrity || '')) {
       throw new Error('Only integrity-pinned npm registry packages are supported')
     }
+  }
+  for (const [path, entry] of Object.entries(beforeLock.packages)) if (path && (entry.link || !path.startsWith('node_modules/'))) {
+    if (!lock.packages[path]) throw new Error('Removing local package metadata requires manual review')
   }
 }
 

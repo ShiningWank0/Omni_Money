@@ -112,6 +112,7 @@ jobs:
     if: needs.prepare.outputs.release_exists == 'false'
     permissions:
       contents: read
+      packages: read
     env:
       APP_VERSION: ${{ needs.prepare.outputs.version }}
       VITE_APP_VERSION: ${{ needs.prepare.outputs.version }}
@@ -132,7 +133,7 @@ jobs:
             oss_target: desktop-darwin-arm64
             artifact_name: omni-money-macos-arm64
             deployment_target: '11.0'
-          - os: windows-latest
+          - os: windows-2025
             platform: windows/amd64
             oss_target: desktop-windows-amd64
             artifact_name: omni-money-windows
@@ -168,19 +169,12 @@ jobs:
         with:
           node-version-file: .node-version
 
-      - name: Setup MSYS2 UCRT64
+      - name: Restore checksum-pinned MSYS2 UCRT64
         if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
-        with:
-          msystem: UCRT64
-          update: true
-          path-type: inherit
-          install: >-
-            base-devel
-            curl
-            tcl
-            perl
-            mingw-w64-ucrt-x86_64-toolchain
+        shell: pwsh
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/restore-fixed-msys2.ps1
 
       # Linux: WebKitGTK 依存パッケージ（Ubuntu 24.04+ は 4.1）
       - name: Install Linux dependencies
