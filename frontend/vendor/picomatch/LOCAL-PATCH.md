@@ -25,6 +25,13 @@ the original upstream version is queried separately, and only the exact
 recorded advisory revision is considered remediated by this verified patch.
 New or changed advisories remain findings.
 
+Revision 2 also addresses GitHub Advanced Security's CodeQL alert #8. The
+backslash-removal regexp repeatedly searched unmatched bracket suffixes and
+could take quadratic time. It is replaced by two linear passes that preserve
+the original handling of bracket spans, escaped characters and line endings.
+Exhaustive short-input comparisons and long adversarial-input tests cover the
+replacement. No CodeQL rule or security finding is suppressed.
+
 When an official stable fix is available, adopt it in a new PR, rerun the
 security/compatibility tests, remove this directory, its local dependency and
 override, the patch manifest and temporary verification code. Retain useful

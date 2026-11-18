@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "picomatch",
   "version": "4.0.7",
-  "patchRevision": 1,
+  "patchRevision": 2,
   "advisory": "GHSA-fc5q-39xc-vjpf",
   "trackingIssue": 348,
   "upstream": {
@@ -36,16 +36,24 @@
   },
   "files": {
     "LICENSE": "d0cd141b0c322fded5dfad1d4645bb2fedfc05b7321fe1009469638190d59ef9",
-    "LOCAL-PATCH.md": "2673cc15b6d447a82d5713840f42fdef1cc1d616e523fb2da8b27ecd01bedc91",
+    "LOCAL-PATCH.md": "3daa641f49a0bc3dfc7d4faaf1d4387eb1eb17c68c3d81010934ce3a9b2ffe35",
     "README.md": "a69b87120fe2b9cb8f9057eaef6b9f9887f803e02185ca2f431e8162f6312220",
     "index.js": "02ae26406508e28f9ba0865be16cf77f0b33de6c4d4d49c212c4176df1d5625a",
     "lib/constants.js": "c28f952d2758261fe5428a121add485cc25b03e0193633f649de903dc0e5e222",
     "lib/parse.js": "ca07fdf9c667680b7cbe64f904e5cd8aeff8e504a60fd4af0ba116357e9e462d",
     "lib/picomatch.js": "fdd249d7ffff853f3bb1c77eafc8baa1a437bea85a94c35877b83c6a40d9ca94",
     "lib/scan.js": "6457a1764e5c2e543cc3a0c00ce12ebb3764097628868198370b64d4e642aaae",
-    "lib/utils.js": "f04604f70cd1a3f6ace80b84766468674ff38b4bb83818d2ef1d81fc6355f935",
+    "lib/utils.js": "34a5bc967fb8132cf9a178a0b3318d65d80c2f662cd7f3a0d97c6aad467e0307",
     "package.json": "d25cc9799fd30c2318101e14a6bd6f82aa6b1b7005a5055288f9958a9e5752cd",
     "posix.js": "5695ff5dfcd5a338a40630bd506056f2950bcb08fe1cc068519cbbfe60add480"
   },
-  "advisoryRecordSHA256": "88abf5b2382db287c3b2b22b656720d55bfa75b90ca67ba219242cccbb8dc54f"
+  "advisoryRecordSHA256": "88abf5b2382db287c3b2b22b656720d55bfa75b90ca67ba219242cccbb8dc54f",
+  "additionalFixes": [
+    {
+      "source": "GitHub Advanced Security",
+      "rule": "js/polynomial-redos",
+      "alert": "https://github.com/ShiningWank0/Omni_Money/security/code-scanning/8",
+      "function": "removeBackslashes"
+    }
+  ]
 }

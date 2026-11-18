@@ -77,8 +77,16 @@ jobs:
         run: go mod download
       - name: Check OSS coverage and approved notices once for all release targets
         run: |
-          node --test scripts/oss-notices.test.mjs scripts/release-plan.test.mjs scripts/openssl-build.test.mjs
+          node --test scripts/oss-notices.test.mjs scripts/npm-lock-inventory.test.mjs scripts/dependabot-oss-sync.test.mjs scripts/release-plan.test.mjs scripts/openssl-build.test.mjs
           node scripts/oss-notices.mjs check
+      - name: Save OSS mismatch evidence without accepting the candidate
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: oss-check-mismatch
+          path: licenses/build/oss-check-candidate.json
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Generate reviewable release notice inventories
         run: node scripts/oss-notices.mjs package-all
       - name: Save release notice inventories
