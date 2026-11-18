@@ -4,6 +4,7 @@ import { relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { govulncheckCommand } from './run-govulncheck.mjs';
+import { auditPatchedPicomatch } from './verify-picomatch-patch.mjs';
 
 // Required reports produced by the normal CI workflow. Development runtime
 // diagnostics run manually while Issue #299 waits for the official Wails fix.
@@ -164,7 +165,7 @@ export function fuzzReport(scan, exitCode, output = '') {
     ...(clean ? {} : { error: 'Fuzz試験が失敗、または完了しませんでした。再現corpusと実行ログを確認してください。' }) };
 }
 
-function run(tool) {
+async function run(tool) {
   if (Object.hasOwn(fuzzTargets, tool)) {
     const [pkg, target] = fuzzTargets[tool];
     const result = spawnSync('go', ['test', '-json', '-run=^$', `-fuzz=^${target}$`, '-fuzztime=120s', '-fuzzminimizetime=10s', '-parallel=1', '-timeout=4m', pkg], {
@@ -195,11 +196,30 @@ function run(tool) {
       timeout: 20 * 60 * 1000, maxBuffer: 32 * 1024 * 1024, shell: false,
     });
     if (result.stderr) process.stderr.write(result.stderr);
-    failed = save(normalize(scan, result.stdout || '', result.error ? null : result.status)) || failed;
+    const report = normalize(scan, result.stdout || '', result.error ? null : result.status);
+    if (tool === 'npm') {
+      mkdirSync('security-reports', { recursive: true });
+      writeFileSync('security-reports/npm-audit-raw.json', result.stdout || '');
+      try {
+        const checked = await auditPatchedPicomatch();
+        writeFileSync('security-reports/npm-local-upstream-raw.json', JSON.stringify(checked.upstream, null, 2) + '\n');
+        if (report.status !== 'error') {
+          report.findings = report.findings.filter(f => !(f.component === 'picomatch' && checked.remediations.some(r => r.id === f.id)));
+          report.findings.push(...checked.findings);
+          report.remediations = checked.remediations;
+          report.upstreamCandidates = checked.candidates;
+          report.status = report.findings.length ? 'findings' : 'clean';
+        }
+      } catch {
+        report.status = 'error';
+        report.error = '一時修正版のsource・実依存先・元の版のadvisoryを完全に検証できませんでした。';
+      }
+    }
+    failed = save(report) || failed;
   }
   return failed;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  process.exitCode = run(process.argv[2]) ? 1 : 0;
+  process.exitCode = await run(process.argv[2]) ? 1 : 0;
 }

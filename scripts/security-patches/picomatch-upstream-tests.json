@@ -1,0 +1,154 @@
+{
+  "schema": 1,
+  "sourceCommit": "6bb40679c218cefba5d4e9662408c5fdf699a8bb",
+  "files": [
+    {
+      "path": "test/api.picomatch.js",
+      "sha": "2fe67cffadad7d334fe780ce084e5c418e22005b"
+    },
+    {
+      "path": "test/api.posix.js",
+      "sha": "6ccf38b2b7b5ec0352f1aa755204eb16b7b30a62"
+    },
+    {
+      "path": "test/api.scan.js",
+      "sha": "3257578ba78d4331516ed89d58db25fb1e3a57a9"
+    },
+    {
+      "path": "test/bash.js",
+      "sha": "2ef4bb1a9a0766c952f587c556b6263b3b77239a"
+    },
+    {
+      "path": "test/bash.spec.js",
+      "sha": "7cd276b9d68fa5ae07ef736bd9f68a27f225a49a"
+    },
+    {
+      "path": "test/braces.js",
+      "sha": "a343c316c0d538bc4a834c6edff50c50c9ed0485"
+    },
+    {
+      "path": "test/brackets.js",
+      "sha": "c51062541e73dffb5b13c6ac0819a6a3e52f087b"
+    },
+    {
+      "path": "test/dotfiles.js",
+      "sha": "f90abb88e64ca0a4a25429b4e51372deebf02040"
+    },
+    {
+      "path": "test/dots-invalid.js",
+      "sha": "ff730a897faa80373ecb866023855c8c56ab3c10"
+    },
+    {
+      "path": "test/extglobs-bash.js",
+      "sha": "bea8d1793f41c669e73b39a714e793e0fbe2e670"
+    },
+    {
+      "path": "test/extglobs-minimatch.js",
+      "sha": "4d48080306f71e6edb9065abac0b714f810b7644"
+    },
+    {
+      "path": "test/extglobs-temp.js",
+      "sha": "b62948f21fad16ecd0cfc04c7c123129c8b9e0ec"
+    },
+    {
+      "path": "test/extglobs.js",
+      "sha": "ea436d1ff78628a48f9d817854222ceb08d3322f"
+    },
+    {
+      "path": "test/globstars.js",
+      "sha": "2a7a47888c45d043d9efa77a3d640ab03e426ceb"
+    },
+    {
+      "path": "test/issue-related.js",
+      "sha": "4092e30c902ae7ade5215b9e6fb1d03d5b3f75b0"
+    },
+    {
+      "path": "test/malicious.js",
+      "sha": "541b5c6614aee1de451447d0bdc989e58a608578"
+    },
+    {
+      "path": "test/minimatch.js",
+      "sha": "853e120ab02781bd279b3c2618854902bd237e3c"
+    },
+    {
+      "path": "test/negation.js",
+      "sha": "a3a6a83265ac5ad226bb622f24d71e1cb5c25234"
+    },
+    {
+      "path": "test/non-globs.js",
+      "sha": "030da05cefed0115a3bb22f3c61805355bc1f299"
+    },
+    {
+      "path": "test/options.expandRange.js",
+      "sha": "0eb05fc38db667d41bddadb72dd5c123b78c80e6"
+    },
+    {
+      "path": "test/options.format.js",
+      "sha": "b4f3444dad44e826d3d0c41707482d62e3b0147b"
+    },
+    {
+      "path": "test/options.ignore.js",
+      "sha": "e8cc62858696661590342acc428442015897fc6c"
+    },
+    {
+      "path": "test/options.js",
+      "sha": "7fc8b716d7159a70dd3748ed71608e23d6b43fc2"
+    },
+    {
+      "path": "test/options.maxExtglobRecursion.js",
+      "sha": "9bf2fdb629fea107633e2d0c45722e261b2b9ab1"
+    },
+    {
+      "path": "test/options.noextglob.js",
+      "sha": "3ff6bfa26568760b6b7c60cdde2e25265879d27e"
+    },
+    {
+      "path": "test/options.noglobstar.js",
+      "sha": "9f8757e06f182670c416b62954984ffb8f70970d"
+    },
+    {
+      "path": "test/options.onMatch.js",
+      "sha": "caf23355231503c93155ec1907f845416a91962a"
+    },
+    {
+      "path": "test/parens.js",
+      "sha": "d73bf63d3a62cddddfa8860a85fded87a41aa5db"
+    },
+    {
+      "path": "test/posix-classes.js",
+      "sha": "f3eed9400b5aba5a2c265c98d40a2a8e6653cb03"
+    },
+    {
+      "path": "test/qmarks.js",
+      "sha": "1a2dadf3329745a9850233c08c000479f9477c7c"
+    },
+    {
+      "path": "test/regex-features.js",
+      "sha": "bc84189bb3ecdab22c841606a512689e4a13362a"
+    },
+    {
+      "path": "test/slashes-posix.js",
+      "sha": "cd4d0b9f6857e33491e714616a981ee23f008eba"
+    },
+    {
+      "path": "test/slashes-windows.js",
+      "sha": "1e1099484a07819a1f26cb8271178c44385269db"
+    },
+    {
+      "path": "test/special-characters.js",
+      "sha": "c6958a51cb978903f236e59fb43d9a5c19745786"
+    },
+    {
+      "path": "test/stars.js",
+      "sha": "910b9f24f351f65ea9eebdc88d9f24b2fab7c338"
+    },
+    {
+      "path": "test/support/match.js",
+      "sha": "f932cbd17df899b8e12e82127702e6efe2ad5d9f"
+    },
+    {
+      "path": "test/wildmat.js",
+      "sha": "c61195e52e777b2e159627723a40a2235341e108"
+    }
+  ]
+}

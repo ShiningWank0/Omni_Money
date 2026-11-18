@@ -58,3 +58,9 @@ frontend/oss-display-inventory.json
 # Workspace-local dependency caches and release-specific OSS documents.
 .oss-cache/
 licenses/build/
+
+# Approved temporary picomatch backport; keep other vendored trees ignored.
+!frontend/vendor/
+frontend/vendor/*
+!frontend/vendor/picomatch/
+!frontend/vendor/picomatch/**
