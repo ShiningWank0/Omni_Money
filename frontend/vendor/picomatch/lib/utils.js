@@ -3,7 +3,6 @@
 
 const {
   REGEX_BACKSLASH,
-  REGEX_REMOVE_BACKSLASH,
   REGEX_SPECIAL_CHARS,
   REGEX_SPECIAL_CHARS_GLOBAL
 } = require('./constants');
@@ -28,9 +27,40 @@ exports.isWindows = () => {
 };
 
 exports.removeBackslashes = str => {
-  return str.replace(REGEX_REMOVE_BACKSLASH, match => {
-    return match === '\\' ? '' : match;
-  });
+  if (!str.includes('\\')) return str;
+
+  // Preserve bracket spans exactly as the upstream regexp did, but compute
+  // valid endings once. Repeating a suffix search at every '[' was quadratic.
+  const length = str.length;
+  const closing = new Int32Array(length + 1).fill(-1);
+  const lineBreak = new Int32Array(length + 1).fill(-1);
+  const isLineBreak = char => char === '\n' || char === '\r' || char === '\u2028' || char === '\u2029';
+  let nextClosing = -1;
+  let nextBreak = -1;
+  for (let index = length - 1; index >= 0; index--) {
+    if (str[index] === ']' && index > 0 && str[index - 1] !== '\\') nextClosing = index;
+    if (isLineBreak(str[index])) nextBreak = index;
+    closing[index] = nextClosing;
+    lineBreak[index] = nextBreak;
+  }
+
+  const parts = [];
+  let start = 0;
+  for (let index = 0; index < length; index++) {
+    if (str[index] === '[' && index + 2 < length) {
+      const end = closing[index + 2];
+      const newline = lineBreak[index + 1];
+      // The final non-backslash before ']' may itself be a newline; the
+      // lazy dot preceding it cannot cross an earlier line terminator.
+      if (end !== -1 && (newline === -1 || end <= newline + 1)) { index = end; continue; }
+    }
+    if (str[index] === '\\' && index + 1 < length && !isLineBreak(str[index + 1])) {
+      parts.push(str.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(str.slice(start));
+  return parts.join('');
 };
 
 exports.escapeLast = (input, char, lastIdx) => {

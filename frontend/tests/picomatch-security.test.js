@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import pm from 'picomatch'
+import utils from 'picomatch/lib/utils.js'
 import { verifyPicomatchPatch } from '../../scripts/verify-picomatch-patch.mjs'
 
 test('all declared importers use the exact reviewed security backport', () => {
@@ -36,4 +37,29 @@ test('ordinary globs, positive closure and optional empty closure keep matching 
     assert.equal(pm.isMatch('aaa!', '+(*a)'), false)
   }
   assert.equal(pm.scan('src/**/*.vue').isGlob, true)
+})
+
+test('backslash removal preserves upstream semantics for every short bracket/newline combination', () => {
+  const original = /(?:\[.*?[^\\]\]|\\(?=.))/g
+  const alphabet = ['[', ']', '\\', 'a', '\n', '\r', '\u2028', '\u2029']
+  let values = ['']
+  for (let length = 0; length <= 5; length++) {
+    for (const value of values) assert.equal(utils.removeBackslashes(value), value.replace(original, match => match === '\\' ? '' : match), JSON.stringify(value))
+    if (length < 5) values = values.flatMap(value => alphabet.map(char => value + char))
+  }
+})
+
+test('unterminated brackets with escaped characters are processed within a fixed deadline', () => {
+  const code = `import assert from 'node:assert/strict'; import utils from 'picomatch/lib/utils.js';
+    const size = 300000;
+    assert.equal(utils.removeBackslashes('['.repeat(size) + '\\\\a'), '['.repeat(size) + 'a');
+    assert.equal(utils.removeBackslashes('\\\\['.repeat(size) + '\\\\'), '['.repeat(size) + '\\\\');
+    const bracketed = '[' + '\\\\['.repeat(size) + ']';
+    assert.equal(utils.removeBackslashes(bracketed), bracketed);
+    console.log('linear bracket scan passed');`
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+    cwd: fileURLToPath(new URL('../', import.meta.url)), encoding: 'utf8', timeout: 3000,
+  })
+  assert.equal(result.status, 0, result.error?.message || result.stderr)
+  assert.match(result.stdout, /linear bracket scan passed/)
 })
