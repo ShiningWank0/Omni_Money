@@ -39,7 +39,8 @@ export function inventory(directory = root) {
   const knownLocks = new Set([...inputFiles.filter(x => x.startsWith('build/locks/')).map(x => x.split('/').at(-1)), 'webview2-source.json'])
   for (const name of readdirSync(join(directory, 'build/locks'))) if (name.endsWith('.json')) assert.ok(knownLocks.has(name), `unregistered fixed input: ${name}`)
   const workflowFiles = readdirSync(join(directory, '.github/workflows')).filter(x => /\.ya?ml$/.test(x)).sort().map(x => '.github/workflows/' + x)
-  const paths = [...inputFiles, ...modules.flatMap(x => [x.path, x.sum]), 'scripts/security-reports.mjs', ...workflowFiles]
+  const optionalInputs = ['scripts/security-patches/picomatch.json'].filter(path => existsSync(join(directory, path)))
+  const paths = [...inputFiles, ...modules.flatMap(x => [x.path, x.sum]), 'scripts/security-reports.mjs', ...workflowFiles, ...optionalInputs]
   const content = new Map(paths.map(path => {
     assert.ok(lstatSync(join(directory, path)).isFile(), 'inventory inputs must be regular files')
     return [path, readFileSync(join(directory, path), 'utf8')]
@@ -93,6 +94,13 @@ export function inventory(directory = root) {
     { name: 'webview2', version: exactVersion(json('webview2').version), keyword: 'WebView2', product: 'webview2' },
   ]
   const watch = (name, repo, version, pattern) => sources.push({ name, repo, version: exactVersion(version), pattern })
+  if (content.has('scripts/security-patches/picomatch.json')) {
+    const patch = JSON.parse(content.get('scripts/security-patches/picomatch.json'))
+    assert.equal(patch.schema, 1); assert.equal(patch.name, 'picomatch')
+    assert.ok(Number.isSafeInteger(patch.trackingIssue) && patch.trackingIssue > 0)
+    watch('picomatch', 'micromatch/picomatch', patch.version, '^v?([0-9]+\\.[0-9]+\\.[0-9]+)$')
+    sources.at(-1).trackingIssue = patch.trackingIssue
+  }
   watch('openssl', 'openssl/openssl', openssl, `^openssl-(${openssl.split('.').slice(0, 2).join('\\.')}\\.[0-9]+)$`)
   watch('sqlcipher', 'sqlcipher/sqlcipher', sqlcipher, '^v([0-9]+\\.[0-9]+\\.[0-9]+)$')
   watch('trivy', 'aquasecurity/trivy', trivy.version, '^v([0-9]+\\.[0-9]+\\.[0-9]+)$')

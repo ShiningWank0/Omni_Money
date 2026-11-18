@@ -6,6 +6,10 @@ on:
       - .github/workflows/pinned-input-security.yml
       - scripts/pinned-security*
       - scripts/pinned_security_extract_test.py
+      - scripts/security-patches/**
+      - frontend/vendor/picomatch/**
+      - frontend/package.json
+      - frontend/package-lock.json
       - scripts/security-issues.mjs
       - build/locks/**
       - .github/dependabot.yml

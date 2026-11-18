@@ -47,6 +47,17 @@ test('source version mismatches and newly unregistered locks fail inventory vali
   assert.throws(() => inventory(folder), /unregistered fixed input/)
 })
 
+test('the temporary picomatch patch is watched until an official replacement can be reviewed', t => {
+  const folder = fixture(t), before = inventory(folder).identity
+  mkdirSync(join(folder, 'scripts/security-patches'), { recursive: true })
+  writeFileSync(join(folder, 'scripts/security-patches/picomatch.json'), JSON.stringify({ schema: 1, name: 'picomatch', version: '4.0.7', trackingIssue: 348 }))
+  const input = inventory(folder), source = input.sources.find(x => x.name === 'picomatch')
+  assert.notEqual(input.identity, before)
+  assert.equal(source.trackingIssue, 348)
+  assert.deepEqual(releaseUpdates([{ tag_name: '4.0.7' }], source), [])
+  assert.match(releaseUpdates([{ tag_name: '4.0.8' }], source)[0].summary, /Issue #348/)
+})
+
 test('a newly added tool module is discovered automatically and requires its checksum file', t => {
   const folder = fixture(t), path = 'scripts/securitytools/new/go.mod'
   mkdirSync(dirname(join(folder, path)), { recursive: true })

@@ -159,7 +159,9 @@ export function releaseUpdates(releases, source) {
   const latest = versions.sort(compareVersion).at(-1)
   return compareVersion(latest, source.version) > 0
     ? [{ name: source.name, installed: source.version, latest,
-      summary: '新しいstable版があります。脆弱性の存在を断定する通知ではありません。更新PRで確認してください。' }] : []
+      summary: source.trackingIssue
+        ? `新しいstable版があります。Issue #${source.trackingIssue}の条件を確認し、公式修正版の採用と一時対応の撤去を行うPRを作成してください。修正の有無を版番号だけで断定しません。`
+        : '新しいstable版があります。脆弱性の存在を断定する通知ではありません。更新PRで確認してください。' }] : []
 }
 
 async function scanNative(input, execute, work, evidence) {
