@@ -169,6 +169,13 @@ jobs:
         with:
           node-version-file: .node-version
 
+      - name: Set up checksum-pinned Fixed Version WebView2
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/setup-fixed-webview2.ps1
+
       - name: Restore checksum-pinned MSYS2 UCRT64
         if: runner.os == 'Windows'
         shell: pwsh
@@ -318,6 +325,8 @@ jobs:
           "$WAILS_EXE" build -platform "$BUILD_PLATFORM" \
             -tags "libsqlite3,sqlite_omit_load_extension" \
             -ldflags "-X main.version=${APP_VERSION}"
+          # The real frontend build must populate main.go's embedded assets first.
+          go test -mod=readonly -count=1 -tags "libsqlite3,sqlite_omit_load_extension" -run '^TestFixedCIWebview' .
           mkdir -p build/bin
           go build -mod=readonly -tags "dev,desktop,libsqlite3,sqlite_omit_load_extension" -o build/bin/omni-wails-dev.exe .
           WAILS_EVIDENCE_DIR="$(cygpath -u "$RUNNER_TEMP")"
@@ -471,6 +480,20 @@ jobs:
           retention-days: 7
 
       # Windowsの場合: exeをzip圧縮
+      - name: Verify Windows production WebView with the fixed runtime
+        id: wails-windows-native
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: node scripts/wails-windows-integration.mjs build/bin/omni_money.exe
+
+      - name: Save Windows native WebView evidence
+        if: ${{ always() && runner.os == 'Windows' && steps.wails-windows-native.outcome != '' && steps.wails-windows-native.outcome != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wails-native-windows-integration
+          path: .oss-cache/wails-windows-results/
+          if-no-files-found: error
+
       - name: Package Windows app
         if: runner.os == 'Windows'
         shell: pwsh
