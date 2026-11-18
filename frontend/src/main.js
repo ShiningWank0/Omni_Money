@@ -1,15 +1,18 @@
 import './runtime/compatibility.js'
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import App from './App.vue'
-import LoginView from './views/LoginView.vue'
+import { initializeDesktopBridge } from './runtime/desktop-bridge.js'
 import './assets/style.css'
 import './assets/button-feedback.css'
 
-const isLoginRoute = window.location.pathname === '/login' || window.location.pathname === '/login/'
-const rootComponent = isLoginRoute ? LoginView : App
-const app = createApp(rootComponent)
-const pinia = createPinia()
+async function startApplication() {
+  await initializeDesktopBridge()
+  const isLoginRoute = window.location.pathname === '/login' || window.location.pathname === '/login/'
+  const { default: rootComponent } = await (isLoginRoute ? import('./views/LoginView.vue') : import('./App.vue'))
+  createApp(rootComponent).use(createPinia()).mount('#app')
+}
 
-app.use(pinia)
-app.mount('#app')
+startApplication().catch(error => {
+  console.error(error)
+  document.getElementById('app').textContent = '画面を初期化できませんでした。アプリを再起動してください。'
+})

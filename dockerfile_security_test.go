@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"regexp"
 	"strings"
@@ -51,8 +52,8 @@ func TestDockerBaseImagesUsePinnedSupportedVersions(t *testing.T) {
 		}
 		images = append(images, fields[1])
 	}
-	if len(images) != 3 {
-		t.Fatalf("Dockerfile has %d pinned stages, want 3", len(images))
+	if len(images) != 4 {
+		t.Fatalf("Dockerfile has %d pinned stages, want 4", len(images))
 	}
 	goMod, err := os.ReadFile("go.mod")
 	if err != nil {
@@ -72,8 +73,20 @@ func TestDockerBaseImagesUsePinnedSupportedVersions(t *testing.T) {
 	if !strings.HasPrefix(images[0], "node:"+strings.TrimSpace(string(nodeVersion))+"-alpine@sha256:") {
 		t.Errorf("frontend builder must match .node-version: %s", images[0])
 	}
-	if !strings.HasPrefix(images[2], "alpine:3.24@sha256:") {
-		t.Errorf("runtime must use the reviewed Alpine 3.24 image: %s", images[2])
+	contents, err = os.ReadFile("build/locks/linux-environments.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lock struct {
+		Environments map[string]struct {
+			Image string `json:"image"`
+		} `json:"environments"`
+	}
+	if err := json.Unmarshal(contents, &lock); err != nil {
+		t.Fatal(err)
+	}
+	if images[2] != lock.Environments["alpine-builder"].Image || images[3] != lock.Environments["alpine-runtime"].Image {
+		t.Fatal("builder/runtime stages must match reviewed environment lock digests")
 	}
 }
 

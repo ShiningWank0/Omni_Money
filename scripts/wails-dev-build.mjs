@@ -8,7 +8,7 @@ import { verifyDevBuild } from './wails-dev-integration.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
-export function inspectDevBuild(argument, platform = 'linux/amd64', directory = root) {
+export function inspectDevBuild(argument, platform = 'linux/amd64', directory = root, browser = false) {
   assert.ok(argument && lstatSync(argument).isFile() && !lstatSync(argument).isSymbolicLink(), 'Pass a regular development binary')
   const binary = realpathSync(argument)
   const go = args => {
@@ -17,17 +17,17 @@ export function inspectDevBuild(argument, platform = 'linux/amd64', directory = 
     return result.stdout
   }
   const modules = Object.fromEntries(go(['list', '-mod=readonly', '-m', '-f', '{{.Path}} {{.Version}}{{if .Replace}} replaced{{end}}',
-    'github.com/wailsapp/wails/v2', 'github.com/labstack/echo/v4']).trim().split('\n').map(line => {
+    'github.com/wailsapp/wails/v3']).trim().split('\n').map(line => {
     const fields = line.trim().split(/\s+/)
     assert.equal(fields.length, 2, 'Unpinned or replaced selected module')
     return fields
   }))
   const info = go(['version', '-m', binary])
-  verifyDevBuild(info, modules, platform)
+  verifyDevBuild(info, modules, platform, browser)
   return { platform, modules, binarySHA256: createHash('sha256').update(readFileSync(binary)).digest('hex') }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { console.log(JSON.stringify(inspectDevBuild(process.argv[2], process.argv[3]))) }
+  try { console.log(JSON.stringify(inspectDevBuild(process.argv[2], process.argv[3], root, process.argv[4] === 'browser'))) }
   catch (error) { console.error(error.message); process.exitCode = 1 }
 }
