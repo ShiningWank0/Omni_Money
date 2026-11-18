@@ -37,6 +37,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Checkout immutable upstream compatibility tests for the temporary security patch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: micromatch/picomatch
+          ref: 6bb40679c218cefba5d4e9662408c5fdf699a8bb
+          path: .oss-cache/picomatch-upstream
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -51,12 +59,34 @@ jobs:
           npm run build
           git ls-files --error-unmatch bundled-dependencies.json > /dev/null
           git diff --exit-code -- bundled-dependencies.json
+      - name: Verify the real local patch, attack inputs and unchanged official compatibility tests
+        run: |
+          node --test scripts/picomatch-patch.test.mjs frontend/tests/picomatch-security.test.js
+          node scripts/test-picomatch-compat.mjs .oss-cache/picomatch-upstream
+      - name: Save temporary security patch evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: picomatch-patch-evidence
+          path: |
+            .oss-cache/picomatch-compat-results.txt
+            scripts/security-patches/picomatch.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Resolve pinned Go dependencies
         run: go mod download
       - name: Check OSS coverage and approved notices once for all release targets
         run: |
-          node --test scripts/oss-notices.test.mjs scripts/release-plan.test.mjs scripts/openssl-build.test.mjs
+          node --test scripts/oss-notices.test.mjs scripts/npm-lock-inventory.test.mjs scripts/dependabot-oss-sync.test.mjs scripts/release-plan.test.mjs scripts/openssl-build.test.mjs scripts/macos-build.test.mjs
           node scripts/oss-notices.mjs check
+      - name: Save OSS mismatch evidence without accepting the candidate
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: oss-check-mismatch
+          path: licenses/build/oss-check-candidate.json
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Generate reviewable release notice inventories
         run: node scripts/oss-notices.mjs package-all
       - name: Save release notice inventories
@@ -172,7 +202,6 @@ jobs:
         working-directory: frontend
         run: |
           npm ci --ignore-scripts
-          npm audit --audit-level=high
           npm run build
 
       - name: Run Go tests
@@ -264,6 +293,11 @@ jobs:
           CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib
           LD_LIBRARY_PATH: /tmp/omni-sqlcipher/lib
         run: go build -tags "server libsqlite3 sqlite_omit_load_extension" -o /tmp/omni_money_server ./server.go
+
+      - name: Set up fixed Docker client
+        uses: ./.github/actions/setup-fixed-docker
+        with:
+          daemon: 'false'
 
       - name: Validate Docker Compose configuration
         env:
@@ -513,7 +547,7 @@ jobs:
         run: npm run build
 
       - name: Upload frontend security reports
-        if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: security-frontend-${{ github.run_attempt }}
@@ -561,9 +595,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up fixed Docker toolchain
+        uses: ./.github/actions/setup-fixed-docker
+
       - name: Build pinned multi-stage image
         id: docker-build
-        run: docker build --build-arg VERSION=ci --tag omni-money:ci .
+        run: docker buildx build --load --build-arg VERSION=ci --tag omni-money:ci .
 
       - name: Assert non-root multi-vault runtime
         run: |
@@ -681,7 +718,7 @@ jobs:
       - name: Scan image for fixable high-severity vulnerabilities
         id: trivy
         if: ${{ !cancelled() && steps.docker-build.outcome == 'success' }}
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: ./.github/actions/scan-fixed-trivy
         with:
           image-ref: omni-money:ci
           format: json
@@ -689,10 +726,6 @@ jobs:
           # The following step applies the same failure threshold and records
           # scan errors separately. JSON findings must never make CI green.
           exit-code: '0'
-          scanners: vuln
-          ignore-unfixed: true
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
 
       - name: Record Trivy result and enforce security gate
         if: ${{ always() && steps.trivy.outcome != 'skipped' }}

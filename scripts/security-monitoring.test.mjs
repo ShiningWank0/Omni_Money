@@ -323,6 +323,26 @@ test('workflow coverage runs the full safe-update matrix for scheduled and manua
   }
 });
 
+test('an npm finding cannot prevent independent Go scan prerequisites from completing', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'omni-security-independent-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workflow = readFileSync(resolve('.github/workflows/ci.yml'), 'utf8');
+  const setup = workflow.split('        id: go-security-setup\n')[1]?.split('\n      - name: ')[0];
+  const source = setup?.match(/        run: \|\n((?:          .*\n|\n)+)/)?.[1];
+  assert.ok(source, 'Go frontend prerequisite script missing');
+  const program = source.replace(/^          /gm, '');
+  mkdirSync(join(directory, 'bin'));
+  writeFileSync(join(directory, 'bin/npm'), `#!${process.execPath}\nconst fs = require('node:fs');\nconst args = process.argv.slice(2);\nif (args[0] === 'audit') { console.error('fixture: high severity vulnerability'); process.exit(1); }\nif (args.join(' ') === 'run build') fs.writeFileSync('embedded-frontend', 'real build prerequisite fixture');\nelse if (args.join(' ') !== 'ci --ignore-scripts') process.exit(2);\n`, { mode: 0o755 });
+  const env = { ...process.env, PATH: `${join(directory, 'bin')}:${process.env.PATH}` };
+  assert.equal(spawnSync('npm', ['audit', '--audit-level=high'], { cwd: directory, env }).status, 1);
+  const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', program], { cwd: directory, env, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(directory, 'embedded-frontend'), 'utf8'), 'real build prerequisite fixture');
+  const frontend = workflow.split('  frontend:\n')[1]?.split(/\n  [a-z][a-z-]*:/)[0];
+  assert.match(frontend, /node scripts\/security-reports\.mjs npm/);
+  assert.doesNotMatch(frontend, /continue-on-error: true/);
+});
+
 test('API uses fixed GitHub endpoint, disallows redirects and surfaces 403 without secrets', async () => {
   let request;
   const api = githubClient('secret-value', 'ShiningWank0/Omni_Money', async (url, options) => {

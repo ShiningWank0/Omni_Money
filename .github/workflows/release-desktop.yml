@@ -133,7 +133,7 @@ jobs:
             oss_target: desktop-darwin-arm64
             artifact_name: omni-money-macos-arm64
             deployment_target: '11.0'
-          - os: windows-latest
+          - os: windows-2025
             platform: windows/amd64
             oss_target: desktop-windows-amd64
             artifact_name: omni-money-windows
@@ -176,19 +176,12 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./scripts/setup-fixed-webview2.ps1
 
-      - name: Setup MSYS2 UCRT64
+      - name: Restore checksum-pinned MSYS2 UCRT64
         if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
-        with:
-          msystem: UCRT64
-          update: true
-          path-type: inherit
-          install: >-
-            base-devel
-            curl
-            tcl
-            perl
-            mingw-w64-ucrt-x86_64-toolchain
+        shell: pwsh
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/restore-fixed-msys2.ps1
 
       # Linux: WebKitGTK 依存パッケージ（Ubuntu 24.04+ は 4.1）
       - name: Install Linux dependencies
@@ -197,9 +190,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential curl tcl libssl-dev binutils file libgtk-3-dev libwebkit2gtk-4.1-dev xvfb xauth dbus-x11 openbox wmctrl xdotool python3-gi gir1.2-atspi-2.0 at-spi2-core libatk-adaptor
 
-      - name: Install macOS dependencies
+      - name: Set up fixed Xcode, SDK and Tcl
         if: runner.os == 'macOS'
-        run: brew install tcl-tk
+        shell: bash
+        run: bash scripts/setup-fixed-macos.sh
 
       - name: Install Wails CLI
         shell: bash
