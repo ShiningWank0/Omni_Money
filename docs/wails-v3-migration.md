@@ -29,3 +29,5 @@ CI専用browser hostの公開入口はHTTPSに限定する。各試験の一時�
 DesktopのApp serviceとそのvaultテストはnative/CI browserのbuild constraintで選択する。`server`だけのbuildにはWails applicationやGTKを取り込まない。Desktopテストをserver側へ流用せず、native側では引き続き実行する。生成bindingは`.gitattributes`でLFを指定し、Windowsのautocrlf設定にかかわらず生成物とのbyte比較を維持する。
 
 Linux native UIの監督processはprivate D-Bus sessionの外で動く。初めにprivate XDG/TMPDIRを用意し、その環境でD-BusとUI試験を開始する。UI終了後にsessionとそのserviceを終了し、private領域内のmountが消えてからデータを削除する。Documents portalのFUSE mountが残る間は再帰削除しない。mount残存・削除失敗・UI失敗はすべて検証失敗とし、`session.json`と`result.json`へ証跡を残す。
+
+Windows native UIの終了確認では、`Application.Quit()`がWebViewを破棄してCDP応答より先に接続を閉じる場合もある。終了要求前にアプリとpageが生存していることを確認し、この呼出しに対する既知の接続切断と実際のpage閉鎖が一致する場合だけ、応答の代わりとして扱う。所有するアプリprocessの15秒以内の終了・終了コード0・signalなしは常に必須とし、一般のJavaScript例外や通信異常は失敗にする。setup/reopen各回の終了結果を証跡に記録し、最後にprivate profileの消滅を確認する。

@@ -68,6 +68,25 @@ export async function bounded(promise, milliseconds, message) {
   } finally { clearTimeout(timer) }
 }
 
+export async function quitNativeApplication(page, child, exited, milliseconds = 15_000) {
+  assert.equal(child.exitCode, null, 'Native application exited before the quit request')
+  assert.equal(child.signalCode, null, 'Native application was terminated before the quit request')
+  assert.equal(page.isClosed(), false, 'Native WebView closed before the quit request')
+  const request = page.evaluate(async () => (await import('/wails/runtime.js')).Application.Quit()).then(
+    () => 'returned',
+    error => {
+      // Quit destroys the native WebView, so CDP may close before replying.
+      // Accept only that specific transport closure, and only if the page
+      // actually closed. The owned process must still exit cleanly below.
+      if (error.name !== 'Error' || !error.message.startsWith('page.evaluate: Target page, context or browser has been closed') || !page.isClosed()) throw error
+      return 'webview-closed'
+    },
+  )
+  const [quitResponse, result] = await bounded(Promise.all([request, exited]), milliseconds, 'Native application did not complete shutdown before the deadline')
+  assert.deepEqual(result, { code: 0, signal: null }, 'Native application did not exit cleanly')
+  return { ...result, quitResponse }
+}
+
 function groupExists(pid) {
   try { process.kill(-pid, 0); return true } catch (error) {
     if (error.code === 'ESRCH') return false

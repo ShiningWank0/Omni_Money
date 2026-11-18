@@ -2,10 +2,10 @@ import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { createServer } from 'node:net'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { bounded, watchExit } from './wails-dev-integration.mjs'
+import { bounded, quitNativeApplication, watchExit } from './wails-dev-integration.mjs'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 assert.equal(process.env.GITHUB_ACTIONS, 'true', 'CI only')
@@ -78,12 +78,10 @@ try {
     await page.locator('.desktop-vault-gate').waitFor({ state: 'detached' })
     const status = await page.evaluate(() => window.go.main.App.GetDesktopVaultStatus())
     assert.equal(status.unlocked, true, 'Real native binding did not unlock the SQLCipher vault')
-    await page.evaluate(async () => (await import('/wails/runtime.js')).Application.Quit())
-    const result = await bounded(exited, 15_000, 'Native app did not shut down')
-    assert.equal(result.code, 0)
+    const shutdown = await quitNativeApplication(page, app, exited)
     await browser.close().catch(() => {})
     browser = null; app = null
-    rounds.push({ scenario, runtimeVersion: lock.version, fixedRuntimeProcess: true, vaultUnlocked: true, gracefulExit: true })
+    rounds.push({ scenario, runtimeVersion: lock.version, fixedRuntimeProcess: true, vaultUnlocked: true, gracefulExit: true, shutdown })
   }
   assert.equal(digest(), before, 'Distribution binary changed during the test')
 } catch (error) { failed = true; throw error }
@@ -91,6 +89,7 @@ finally {
   await browser?.close().catch(() => {})
   if (app?.pid && app.exitCode === null) spawnSync('taskkill', ['/PID', String(app.pid), '/T', '/F'])
   rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  assert.equal(existsSync(directory), false, 'Private Windows profile remains after cleanup')
   writeFileSync(join(output, 'result.json'), JSON.stringify({ passed: !failed, binarySHA256: before,
     runtime: lock.version, rounds, privateProfileRemoved: true }, null, 2) + '\n')
 }

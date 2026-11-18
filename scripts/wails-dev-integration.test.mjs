@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { bounded, browserErrorDetails, createDiagnosticTLS, probeHTTP, privateAppEnvironment, requireCI, stopProcessGroup, verifyDevBuild, verifyEvidence, watchExit } from './wails-dev-integration.mjs'
+import { bounded, browserErrorDetails, createDiagnosticTLS, probeHTTP, privateAppEnvironment, quitNativeApplication, requireCI, stopProcessGroup, verifyDevBuild, verifyEvidence, watchExit } from './wails-dev-integration.mjs'
 import { verifyCLI } from './wails-dev-evidence.mjs'
 
 const expected = { 'github.com/wailsapp/wails/v3': 'v3.90.0' }
@@ -105,6 +105,63 @@ test('isolates data and neutralizes Wails environment overrides without changing
 
 test('a missing response fails at its deadline', async () => {
   await assert.rejects(bounded(new Promise(() => {}), 10, 'response deadline'), /response deadline/)
+})
+
+function quitFixture(t, { response = 'closed', code = 0, stalled = false, signal = false } = {}) {
+  // Only a disposable Node process; no native app, GUI or listener is started.
+  const child = spawn(process.execPath, ['-e', `process.stdin.once('data', () => process.exit(${code})); setInterval(() => {}, 1000)`], { stdio: ['pipe', 'ignore', 'ignore'] })
+  const exited = watchExit(child)
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill(); await exited })
+  let closed = false
+  const page = {
+    isClosed: () => closed,
+    evaluate: async () => {
+      if (signal) child.kill()
+      else if (!stalled) child.stdin.write('quit')
+      if (response === 'hung') return new Promise(() => {})
+      if (response === 'returned') return
+      closed = response !== 'open'
+      throw new Error(response === 'error' ? 'Application.Quit failed' : 'page.evaluate: Target page, context or browser has been closed')
+    },
+  }
+  return { page, child, exited }
+}
+
+for (const response of ['returned', 'closed']) test(`native quit requires a real clean process exit when the request is ${response}`, async t => {
+  const { page, child, exited } = quitFixture(t, { response })
+  assert.deepEqual(await quitNativeApplication(page, child, exited, 5000), {
+    code: 0, signal: null, quitResponse: response === 'returned' ? 'returned' : 'webview-closed',
+  })
+})
+
+for (const setting of [{ code: 7 }, { signal: true }]) test(`native quit rejects abnormal process termination ${JSON.stringify(setting)}`, async t => {
+  const { page, child, exited } = quitFixture(t, setting)
+  await assert.rejects(quitNativeApplication(page, child, exited, 5000), /did not exit cleanly/)
+})
+
+for (const response of ['error', 'open']) test(`native quit preserves the request error when the response is ${response}`, async t => {
+  const { page, child, exited } = quitFixture(t, { response })
+  await assert.rejects(quitNativeApplication(page, child, exited, 5000), response === 'error' ? /Application.Quit failed/ : /Target page/)
+})
+
+test('native quit rejects an already exited app or already closed page before sending a request', async () => {
+  const page = { isClosed: () => false, evaluate: () => assert.fail('Quit must not be sent') }
+  await assert.rejects(quitNativeApplication(page, { exitCode: 0, signalCode: null }, Promise.resolve({ code: 0, signal: null })), /exited before/)
+  await assert.rejects(quitNativeApplication(page, { exitCode: null, signalCode: 'SIGTERM' }, Promise.resolve()), /terminated before/)
+  await assert.rejects(quitNativeApplication({ ...page, isClosed: () => true }, { exitCode: null, signalCode: null }, Promise.resolve()), /WebView closed before/)
+})
+
+test('native quit times out if the WebView closes but the owned process remains alive', async t => {
+  const { page, child, exited } = quitFixture(t, { stalled: true })
+  await assert.rejects(quitNativeApplication(page, child, exited, 100), /before the deadline/)
+  assert.equal(child.exitCode, null)
+  assert.equal(child.signalCode, null)
+})
+
+test('native quit times out if the process exits but the request never settles', async t => {
+  const { page, child, exited } = quitFixture(t, { response: 'hung' })
+  await assert.rejects(quitNativeApplication(page, child, exited, 100), /before the deadline/)
+  assert.deepEqual(await bounded(exited, 5000, 'Fixture process did not exit'), { code: 0, signal: null })
 })
 
 test('browser diagnostics preserve the original source stack and stage', () => {
