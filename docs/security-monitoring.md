@@ -22,7 +22,29 @@ Parser fuzzは追加の定期・手動専用matrixで3対象を最大2job並列�
 
 失敗したfuzz入力は`parser-corpus-*` artifact、結果は既存の`security-*` artifactで7日間保存する。再現入力を公開Issue本文に転載せず、実行ログへのリンクのみ通知する。失敗corpusを取得して該当packageの`testdata/fuzz`へ配置した後、そのpackageで`go test -run='Fuzz対象名/ハッシュ'`を実行して再現し、修正時はcorpusを回帰試験として追加する。対象名の誤りで試験が実行されない場合を成功扱いしないよう、GoのJSONイベントで対象の開始・変異実行数・対象とpackage両方の成功を確認する。時間制限内のfuzz成功は、すべての入力について安全であることの証明ではない。
 
+## picomatchの承認済み一時修正
+
+公式4.0.7にGHSA-fc5q-39xc-vjpfのsource修正を加え、`frontend/vendor/picomatch`から使用する。上流のname/versionは維持し、MIT本文と変更説明を同梱する。追跡先はIssue #348。これは公式版の更新ではなく、一時的に本repositoryで保守するsecurity backportである。
+
+local file依存はnpm auditだけでは検査できないため、`security-reports.mjs npm`は元の4.0.7をnpm公式advisory APIでも検査する。全source hash、ファイル集合、実際のimport先、lockのlocal参照を検証し、npmのadvisory identityとOSVの全文が承認時の内容に一致する場合だけ既知の修正を`remediations`へ記録する。新しいadvisory、同じCVEの内容変更、source drift、ネットワーク不備は対応済みと扱わない。npmの生結果とlocal依存向けの生結果もartifactへ保存する。
+
+build/dev/previewとDesktop frontendの入口でもsource検証を必須とする。共通OSS jobでsourceを固定した上流テストを改変せず実行し、実installed dependencyの攻撃入力・source drift・新CVE・advisory変更を検証する。古いコードのReDoS再現は隔離した子processを期限で停止して確認し、通常アプリは起動しない。
+
+公式stable版が公開されたら、修正根拠と回帰試験を確認し、公式版の採用・vendor/override/一時検証の撤去を別PRにする。通常の版更新先は`feat/update-source-version`。再発防止と通常の脆弱性検査は残す。Issue #348は一時修正の導入だけでは閉じない。
+
+revision 2では、GitHub Advanced SecurityのCodeQL alert #8が検出した、backslash除去時の二次時間の正規表現も線形走査へ修正した。元の括弧・escape・改行の扱いは短入力の全列挙で比較し、長い攻撃入力にも期限を設けて検証する。公式版への復帰には、当初のextglob ReDoSとこの問題の両方の回帰試験が成功することを要求する。
+
+## npmのlocal依存とOSS用途一覧
+
+package-lock v3のnode_modulesにあるlinkは、resolved先のmetadataから版・license・dev属性を取得する。source側のrecordを別packageとして数えない。欠落・循環・領域外の参照・矛盾した版はerrorにする。実bundleに残ったlocal sourceも、dev属性にかかわらず配布対象へ含め、通常の承認を要求する。
+
+用途一覧・bundle解析・配布ライセンス収集は共通のlock解釈を使う。Dependabotの自動同期は、trusted baseに存在する変更のないlocal依存だけを保持し、参照先・版・metadataを変更する候補はmanual reviewへ戻す。依存mapはkeyの並び順ではなく内容を比較する。
+
+OSS checkは自動refreshや自動承認を行わない。不一致時には変更file名と`licenses/build/oss-check-candidate.json`を出力し、CIでは失敗を維持したまま診断artifactへ保存する。通常のunit検査でも、現在のlockとcommit済みnpm用途一覧の一致を確認する。
+
 ## 定期・手動検査のIssue報告
+
+Go検査の前提stepでは、frontend依存のinstallとembed用の実buildだけを行う。npm auditは独立したFrontend jobで必須実行し、失敗すれば全体の必須判定も失敗する。npmの指摘を理由にGoの検査まで止めない。embed build自体に失敗した場合は、Go解析を実行できたものとして扱わず、欠落・検査エラーを通知する。
 
 このリポジトリのmainでの定期・手動実行では検査のJSON結果からIssueを自動作成する。GitHubが自動発行する`GITHUB_TOKEN`を使い、Issue報告ジョブだけに`issues: write`を与える。追加Secretは不要。PR・push・fork・main以外のbranchではIssue作成を実行しない。
 

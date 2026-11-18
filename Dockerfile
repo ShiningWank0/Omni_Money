@@ -9,12 +9,15 @@ ARG TARGETARCH
 
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
+COPY frontend/vendor/picomatch/ ./vendor/picomatch/
 RUN npm ci --include=dev --ignore-scripts
 COPY frontend/ ./
 COPY LICENSE /app/LICENSE
 COPY licenses/approved.json /app/licenses/approved.json
 COPY licenses/targets.json /app/licenses/targets.json
 COPY scripts/oss-notices.mjs /app/scripts/oss-notices.mjs
+COPY scripts/verify-picomatch-patch.mjs /app/scripts/verify-picomatch-patch.mjs
+COPY scripts/security-patches/picomatch.json /app/scripts/security-patches/picomatch.json
 RUN VITE_APP_VERSION="$VERSION" VITE_OSS_TARGET="server-linux-${TARGETARCH}" npm run build
 RUN node /app/scripts/oss-notices.mjs package "server-linux-${TARGETARCH}"
 
