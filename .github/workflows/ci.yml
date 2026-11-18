@@ -717,7 +717,7 @@ jobs:
       - name: Scan image for fixable high-severity vulnerabilities
         id: trivy
         if: ${{ !cancelled() && steps.docker-build.outcome == 'success' }}
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: ./.github/actions/scan-fixed-trivy
         with:
           image-ref: omni-money:ci
           format: json
@@ -725,10 +725,6 @@ jobs:
           # The following step applies the same failure threshold and records
           # scan errors separately. JSON findings must never make CI green.
           exit-code: '0'
-          scanners: vuln
-          ignore-unfixed: true
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
 
       - name: Record Trivy result and enforce security gate
         if: ${{ always() && steps.trivy.outcome != 'skipped' }}

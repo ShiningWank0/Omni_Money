@@ -1,0 +1,56 @@
+name: Scan with checksum-pinned Trivy
+description: Pin the scanner binary while fetching current vulnerability data and recording database identity
+inputs:
+  image-ref:
+    description: Exact local image or registry digest to scan
+    required: true
+  format:
+    description: Report format
+    default: table
+  output:
+    description: Report output file
+    default: ''
+  exit-code:
+    description: Exit code on findings
+    default: '1'
+runs:
+  using: composite
+  steps:
+    - name: Verify and install fixed scanner
+      id: setup
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/../../../scripts/setup-fixed-trivy.sh"
+    - name: Scan with fresh database
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        skip-setup-trivy: 'true'
+        cache: 'false'
+        cache-dir: ${{ steps.setup.outputs.cache-path }}
+        image-ref: ${{ inputs.image-ref }}
+        format: ${{ inputs.format }}
+        output: ${{ inputs.output }}
+        exit-code: ${{ inputs.exit-code }}
+        scanners: vuln
+        ignore-unfixed: true
+        vuln-type: os,library
+        severity: CRITICAL,HIGH
+    - name: Record actual database identity
+      if: ${{ always() && steps.setup.outcome == 'success' }}
+      shell: bash
+      env:
+        TRIVY_CACHE_DIR: ${{ steps.setup.outputs.cache-path }}
+        IDENTITY_DIR: ${{ steps.setup.outputs.identity-path }}
+      run: |
+        set -euo pipefail
+        trivy version --format json > "$IDENTITY_DIR/version-and-db.json"
+        test -f "$TRIVY_CACHE_DIR/db/trivy.db"
+        sha256sum "$TRIVY_CACHE_DIR/db/trivy.db" "$TRIVY_CACHE_DIR/db/metadata.json" > "$IDENTITY_DIR/database.sha256"
+        cat "$IDENTITY_DIR/version-and-db.json"
+    - name: Save scan inputs for audit
+      if: ${{ always() && steps.setup.outcome == 'success' }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: trivy-inputs-${{ github.job }}-${{ runner.arch }}-${{ github.run_attempt }}
+        path: ${{ steps.setup.outputs.identity-path }}
+        if-no-files-found: error
+        retention-days: 7
