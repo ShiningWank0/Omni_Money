@@ -1,15 +1,25 @@
-import { readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join, relative } from 'node:path'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join, relative, resolve } from 'node:path'
+import { npmPackages } from './npm-lock.mjs'
 
 // Inventory the code retained by the production bundler. A package's dev flag
 // is deliberately not used: build-time dependencies can contribute runtime code.
 export function bundledPackages(bundle, root) {
   const packages = new Map()
+  const lock = join(root, 'package-lock.json')
+  const links = existsSync(lock) ? npmPackages(JSON.parse(readFileSync(lock, 'utf8'))).filter(pkg => pkg.linked)
+    .map(pkg => ({ ...pkg, source: resolve(root, pkg.sourceDirectory).replace(/\\/g, '/') }))
+    .sort((a, b) => b.source.length - a.source.length) : []
   for (const chunk of Object.values(bundle)) {
     if (chunk.type !== 'chunk') continue
     for (const id of Object.keys(chunk.modules || {})) {
       const clean = id.replace(/\\/g, '/').replace(/\?.*$/, '')
-      if (clean.includes('/node_modules/')) {
+      const linked = links.find(pkg => clean.startsWith(pkg.source + '/'))
+      if (linked) {
+        const info = JSON.parse(readFileSync(join(root, linked.sourceDirectory, 'package.json'), 'utf8'))
+        if (info.name !== linked.name || info.version !== linked.version) throw new Error('Bundled local package differs from npm lock')
+        packages.set(`${info.name}@${info.version}`, { name: info.name, version: info.version, directory: linked.directory })
+      } else if (clean.includes('/node_modules/')) {
         let directory = dirname(clean)
         while (directory.includes('/node_modules/')) {
           try {

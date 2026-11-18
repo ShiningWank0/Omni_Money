@@ -163,7 +163,7 @@ func TestDockerPullRequestsCannotPublishImages(t *testing.T) {
 		t.Fatal("Docker PR build check is missing")
 	}
 	check := workflow[start:end]
-	for _, required := range []string{"if: github.event_name == 'pull_request'", "contents: read", "push: false", "linux/amd64", "linux/arm64", "provenance: mode=max", "sbom: true"} {
+	for _, required := range []string{"if: github.event_name == 'pull_request'", "contents: read", "push: false", "linux/amd64", "linux/arm64", "provenance: mode=max", "sbom: generator=${{ steps.docker-tools.outputs.sbom-image }}"} {
 		if !strings.Contains(check, required) {
 			t.Errorf("Docker PR check is missing %q", required)
 		}
@@ -173,11 +173,14 @@ func TestDockerPullRequestsCannotPublishImages(t *testing.T) {
 			t.Errorf("Docker PR check must not publish: %q", forbidden)
 		}
 	}
+	if strings.Count(workflow, "uses: ./.github/actions/setup-fixed-docker") < 2 {
+		t.Error("PR and release must share the fixed Docker setup")
+	}
 	prepare := workflow[end:strings.Index(workflow, "\n  build:\n")]
 	if !strings.Contains(prepare, "if: github.event_name != 'pull_request'") {
 		t.Error("release prepare must run for release pushes and rehearsals, never for PRs")
 	}
-	for _, action := range []string{"docker/setup-buildx-action", "docker/build-push-action"} {
+	for _, action := range []string{"docker/build-push-action"} {
 		pins := regexp.MustCompile(regexp.QuoteMeta(action)+`@([0-9a-f]{40})`).FindAllStringSubmatch(workflow, -1)
 		if len(pins) < 2 {
 			t.Fatalf("%s must be exercised in PR and release builds", action)
