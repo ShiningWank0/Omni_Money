@@ -47,10 +47,13 @@ test('VERSION releases both products, ordinary main changes publish neither', ()
   assert.deepEqual(releasePlan('push', ['frontend/src/App.vue']), { desktop: false, docker: false })
 })
 test('PR license and orchestration changes validate both product builds', () => {
-  for (const path of ['licenses/approved.json', 'frontend/src/generated/thirdPartyNotices.json', 'scripts/oss-notices.mjs', '.github/workflows/ci.yml']) {
+  for (const path of ['licenses/approved.json', 'frontend/src/generated/thirdPartyNotices.json', 'scripts/oss-notices.mjs', '.github/workflows/ci.yml', 'build/locks/docker.json', '.github/actions/setup-fixed-docker/action.yml']) {
     assert.deepEqual(releasePlan('pull_request', [path]), { desktop: true, docker: true })
   }
   assert.deepEqual(releasePlan('pull_request', ['docs/how-to-use.md']), { desktop: false, docker: false })
+  for (const path of ['scripts/setup-fixed-docker.sh', 'scripts/setup-fixed-macos.sh', 'scripts/setup-fixed-trivy.sh']) {
+    assert.deepEqual(releasePlan('pull_request', [path]), { desktop: true, docker: true })
+  }
 })
 test('manual Docker rehearsals are opt-in; scheduled scans never publish', () => {
   assert.deepEqual(releasePlan('workflow_dispatch', [], true), { desktop: false, docker: true })
@@ -59,7 +62,7 @@ test('manual Docker rehearsals are opt-in; scheduled scans never publish', () =>
   assert.throws(() => releasePlan('release', []), /Unexpected/)
 })
 test('native and development Wails harness changes automatically validate desktop artifacts', () => {
-  for (const path of ['scripts/wails-native-integration.mjs', 'scripts/wails-native-ui.py', 'scripts/wails-native-integration.test.mjs', 'scripts/wails-dev-integration.mjs']) {
+  for (const path of ['scripts/wails-native-integration.mjs', 'scripts/wails-native-ui.py', 'scripts/wails-native-integration.test.mjs', 'scripts/wails-dev-integration.mjs', 'scripts/wails-windows-integration.mjs']) {
     assert.deepEqual(releasePlan('pull_request', [path]), { desktop: true, docker: false })
   }
 })

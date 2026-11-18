@@ -1,0 +1,7 @@
+# Trivyの固定と脆弱性DB
+
+`build/locks/trivy.json`でscannerの版とLinux amd64/arm64の公式archive SHA256を固定する。共通Actionが照合後のbinaryを使うため、`trivy-action`の既定versionやsetup処理には依存しない。
+
+脆弱性DBは検査ごとに新しいcache directoryへ取得する。scannerの固定とDBの更新を分け、新しい脆弱性を検出し続ける。検査後にscanner版、使用DBのmetadata、DBファイルのSHA256、binaryのSHA256とlockを`trivy-inputs-*` artifactに保存する。DBの取得に失敗した検査を正常扱いにしない。
+
+通常CIでは従来どおりJSON reportを正規化して、修正可能なHIGH/CRITICAL findingsと検査エラーを失敗させる。releaseでは同じ条件を通ったarchitecture digestだけをindexへ進める。scanner版の更新はlockだけを変更する別PRとし、検査条件の緩和を同時に行わない。

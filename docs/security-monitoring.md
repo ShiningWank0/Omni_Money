@@ -22,7 +22,29 @@ Parser fuzzは追加の定期・手動専用matrixで3対象を最大2job並列�
 
 失敗したfuzz入力は`parser-corpus-*` artifact、結果は既存の`security-*` artifactで7日間保存する。再現入力を公開Issue本文に転載せず、実行ログへのリンクのみ通知する。失敗corpusを取得して該当packageの`testdata/fuzz`へ配置した後、そのpackageで`go test -run='Fuzz対象名/ハッシュ'`を実行して再現し、修正時はcorpusを回帰試験として追加する。対象名の誤りで試験が実行されない場合を成功扱いしないよう、GoのJSONイベントで対象の開始・変異実行数・対象とpackage両方の成功を確認する。時間制限内のfuzz成功は、すべての入力について安全であることの証明ではない。
 
+## picomatchの承認済み一時修正
+
+公式4.0.7にGHSA-fc5q-39xc-vjpfのsource修正を加え、`frontend/vendor/picomatch`から使用する。上流のname/versionは維持し、MIT本文と変更説明を同梱する。追跡先はIssue #348。これは公式版の更新ではなく、一時的に本repositoryで保守するsecurity backportである。
+
+local file依存はnpm auditだけでは検査できないため、`security-reports.mjs npm`は元の4.0.7をnpm公式advisory APIでも検査する。全source hash、ファイル集合、実際のimport先、lockのlocal参照を検証し、npmのadvisory identityとOSVの全文が承認時の内容に一致する場合だけ既知の修正を`remediations`へ記録する。新しいadvisory、同じCVEの内容変更、source drift、ネットワーク不備は対応済みと扱わない。npmの生結果とlocal依存向けの生結果もartifactへ保存する。
+
+build/dev/previewとDesktop frontendの入口でもsource検証を必須とする。共通OSS jobでsourceを固定した上流テストを改変せず実行し、実installed dependencyの攻撃入力・source drift・新CVE・advisory変更を検証する。古いコードのReDoS再現は隔離した子processを期限で停止して確認し、通常アプリは起動しない。
+
+公式stable版が公開されたら、修正根拠と回帰試験を確認し、公式版の採用・vendor/override/一時検証の撤去を別PRにする。通常の版更新先は`feat/update-source-version`。再発防止と通常の脆弱性検査は残す。Issue #348は一時修正の導入だけでは閉じない。
+
+revision 2では、GitHub Advanced SecurityのCodeQL alert #8が検出した、backslash除去時の二次時間の正規表現も線形走査へ修正した。元の括弧・escape・改行の扱いは短入力の全列挙で比較し、長い攻撃入力にも期限を設けて検証する。公式版への復帰には、当初のextglob ReDoSとこの問題の両方の回帰試験が成功することを要求する。
+
+## npmのlocal依存とOSS用途一覧
+
+package-lock v3のnode_modulesにあるlinkは、resolved先のmetadataから版・license・dev属性を取得する。source側のrecordを別packageとして数えない。欠落・循環・領域外の参照・矛盾した版はerrorにする。実bundleに残ったlocal sourceも、dev属性にかかわらず配布対象へ含め、通常の承認を要求する。
+
+用途一覧・bundle解析・配布ライセンス収集は共通のlock解釈を使う。Dependabotの自動同期は、trusted baseに存在する変更のないlocal依存だけを保持し、参照先・版・metadataを変更する候補はmanual reviewへ戻す。依存mapはkeyの並び順ではなく内容を比較する。
+
+OSS checkは自動refreshや自動承認を行わない。不一致時には変更file名と`licenses/build/oss-check-candidate.json`を出力し、CIでは失敗を維持したまま診断artifactへ保存する。通常のunit検査でも、現在のlockとcommit済みnpm用途一覧の一致を確認する。
+
 ## 定期・手動検査のIssue報告
+
+Go検査の前提stepでは、frontend依存のinstallとembed用の実buildだけを行う。npm auditは独立したFrontend jobで必須実行し、失敗すれば全体の必須判定も失敗する。npmの指摘を理由にGoの検査まで止めない。embed build自体に失敗した場合は、Go解析を実行できたものとして扱わず、欠落・検査エラーを通知する。
 
 このリポジトリのmainでの定期・手動実行では検査のJSON結果からIssueを自動作成する。GitHubが自動発行する`GITHUB_TOKEN`を使い、Issue報告ジョブだけに`issues: write`を与える。追加Secretは不要。PR・push・fork・main以外のbranchではIssue作成を実行しない。
 
@@ -68,7 +90,9 @@ Echoは公式v4.16.4、`golang.org/x/net`はv0.62.0を`go.mod`で選択する。
 
 開発ブラウザ経路は、Wailsの公式修正版を待つ間、`.github/workflows/wails-dev-integration.yml`の`workflow_dispatch`から実行する手動診断として維持する。GitHub Actionsの`Wails development diagnostics (manual, Issue 299)`で対象branchを選ぶ。既知の再接続オーバーレイの`null.nodes`例外とdev用スキャナーの指摘は、その診断workflow内で引き続き失敗になる。通常CI・Desktop配布判定の依存先からは外し、公式修正版待ちで既存の検証・配布が連鎖的に失敗しないようにする。[Issue #299](https://github.com/ShiningWank0/Omni_Money/issues/299)は、検査を分離しただけでは解決にならず、実際の修正版で実行結果を確認するまで閉じない。
 
-Ubuntu 24.04、固定SQLCipher、Xvfb・D-Busと実Chromiumを使用し、2経路を独立したmatrixで検証する。`assets`はdevバイナリから実際のfrontend生成物のコピーを配信する。`vite`はプロジェクトが指定する公式Wails CLIの`wails dev`を使い、一時コピー内の実`wails.json`に従ってViteを起動する。Viteのポート指定と検査用Vueマーカーだけを一時コピーへ加え、Echoからのプロキシ配信、Vue変更のHMR反映、ページ再読込なしのGo IPC継続を確認する。リポジトリ本体やWailsのソースは変更しない。
+固定したUbuntu環境とSQLCipher、Xvfb・D-Bus、npm lock対応のChromiumを使用し、2経路を独立したmatrixで検証する。Wails 3のCI専用binding hostは`server,omni_wails_browser`で構築し、製品のserver entrypointとは分離する。`assets`は実frontend生成物のコピーを配信し、backend再起動後の再読込、旧capabilityの拒否と新規発行を確認する。Wails 2の再接続overlayを合格条件として流用しない。`vite`は一時コピー内で公式CLIの`wails3 task ci-browser-build`を実行し、同じ固定Go依存のhostを構築する。実Viteのproxy配信、VueのHMR、ページ再読込なしのGo呼出し継続を確認する。Go IPCはWails 3のHTTP POSTの送受信として記録し、WebSocket frame数へ置き換えない。
+
+CI専用hostの公開listenerはHTTPSのloopbackに限定し、試験ごとの証明書だけを信頼する。Host、Origin、Secure/HttpOnly/SameSite Strictのprocess別capabilityを照合する。events/streamとHMRのWebSocketにも同じ入口検査を適用する。backendへのHTTP直結はprocess別のproxy tokenで拒否する。ログや証跡へpassword・回復code・capability・proxy tokenを記録しない。listener、Vite、子process、private profileの削除も合格条件とする。Issue #299は実動作の証跡なしに解決済みとせず、引き続き手動診断として扱う。
 
 両経路で実HTTP、実WebSocket経由の`GetDesktopVaultStatus`、Desktop初期画面、OSS画面の開閉、正常終了を検証する。不正Host、不正・欠落Origin、不正・欠落capability cookieの拒否と、正しい条件のWebSocket受理も実通信で確認する。`assets`ではバックエンドを停止・再起動し、同じページで再接続オーバーレイの表示・消失、capability更新、Go IPC復旧を確認する。ブラウザー例外は保存し、ほかの操作が成功しても合格にしない。
 

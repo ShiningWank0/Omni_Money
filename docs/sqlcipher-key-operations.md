@@ -1,6 +1,6 @@
 # SQLCipher鍵の運用
 
-サーバーモードはSQLCipher 4.18.0でcontrol databaseとユーザーごとのvault database、WAL、rollback journalを暗号化します。現在のmulti-user serverは既存の平文・旧単一ユーザーDBを自動では開きません。検証付き移行機能が完成するまで、旧DBを`CONTROL_DB_PATH`として指定しないでください。
+サーバーモードはSQLCipher 4.20.0でcontrol databaseとユーザーごとのvault database、WAL、rollback journalを暗号化します。現在のmulti-user serverは既存の平文・旧単一ユーザーDBを自動では開きません。検証付き移行機能が完成するまで、旧DBを`CONTROL_DB_PATH`として指定しないでください。
 
 この暗号化は、停止中のコンテナ、バックアップ、誤って公開されたデータファイルから内容を読まれることを防ぎます。アプリが解錠済みの間に同じホストのroot権限を奪ったプロセスや、入力監視・プロセスメモリ読取が可能なマルウェアまで防ぐものではありません。ホスト更新、最小権限、暗号化volume、オフホストの暗号化バックアップも継続してください。
 

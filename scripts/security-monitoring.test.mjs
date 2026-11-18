@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { govulncheckCommand } from './run-govulncheck.mjs';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -31,6 +32,18 @@ const trivyInput = { SchemaVersion: 2, ArtifactName: 'omni-money:ci', Results: [
   { VulnerabilityID: 'CVE-2099-0003', PkgName: 'libx', Severity: 'LOW', FixedVersion: '1.1' },
 ] }] };
 const report = () => normalize('govulncheck-server', goInput, 0);
+
+test('release scanner defaults to production GTK3 and preserves explicit server/dev tags', () => {
+  const command = govulncheckCommand('./...')
+  assert.deepEqual(command.slice(-3), ['-tags', 'production,desktop,gtk3,libsqlite3,sqlite_omit_load_extension', './...'])
+  for (const tags of ['server', 'server,omni_wails_browser,dev,desktop,gtk3,libsqlite3,sqlite_omit_load_extension']) {
+    const explicit = govulncheckCommand('-json', '-tags', tags, './...')
+    assert.deepEqual(explicit.slice(-4), ['-json', '-tags', tags, './...'])
+    assert.equal(explicit.filter(value => value === '-tags').length, 1)
+    const equals = govulncheckCommand(`-tags=${tags}`, './...')
+    assert.deepEqual(equals.slice(-2), [`-tags=${tags}`, './...'])
+  }
+})
 const entry = () => entries([report()])[0];
 
 test('govulncheck JSON exit 0 still detects reachable symbols, not module/package-only findings', () => {
@@ -323,6 +336,26 @@ test('workflow coverage runs the full safe-update matrix for scheduled and manua
   }
 });
 
+test('an npm finding cannot prevent independent Go scan prerequisites from completing', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'omni-security-independent-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workflow = readFileSync(resolve('.github/workflows/ci.yml'), 'utf8');
+  const setup = workflow.split('        id: go-security-setup\n')[1]?.split('\n      - name: ')[0];
+  const source = setup?.match(/        run: \|\n((?:          .*\n|\n)+)/)?.[1];
+  assert.ok(source, 'Go frontend prerequisite script missing');
+  const program = source.replace(/^          /gm, '');
+  mkdirSync(join(directory, 'bin'));
+  writeFileSync(join(directory, 'bin/npm'), `#!${process.execPath}\nconst fs = require('node:fs');\nconst args = process.argv.slice(2);\nif (args[0] === 'audit') { console.error('fixture: high severity vulnerability'); process.exit(1); }\nif (args.join(' ') === 'run build') fs.writeFileSync('embedded-frontend', 'real build prerequisite fixture');\nelse if (args.join(' ') !== 'ci --ignore-scripts') process.exit(2);\n`, { mode: 0o755 });
+  const env = { ...process.env, PATH: `${join(directory, 'bin')}:${process.env.PATH}` };
+  assert.equal(spawnSync('npm', ['audit', '--audit-level=high'], { cwd: directory, env }).status, 1);
+  const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', program], { cwd: directory, env, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(directory, 'embedded-frontend'), 'utf8'), 'real build prerequisite fixture');
+  const frontend = workflow.split('  frontend:\n')[1]?.split(/\n  [a-z][a-z-]*:/)[0];
+  assert.match(frontend, /node scripts\/security-reports\.mjs npm/);
+  assert.doesNotMatch(frontend, /continue-on-error: true/);
+});
+
 test('API uses fixed GitHub endpoint, disallows redirects and surfaces 403 without secrets', async () => {
   let request;
   const api = githubClient('secret-value', 'ShiningWank0/Omni_Money', async (url, options) => {
@@ -352,7 +385,7 @@ test('gosec CLI uses locked scanner dependencies and rejects incomplete scans in
     const calls = readFileSync(join(directory, 'scanner-args.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
     const command = ['run', '-mod=readonly', `-modfile=${resolve('scripts/securitytools/gosec/go.mod')}`,
       'github.com/securego/gosec/v2/cmd/gosec', '-terse', '-fmt=json', '-severity=medium'];
-    assert.deepEqual(calls, [[...command, './...'], [...command, '-tags', 'server', './...']]);
+    assert.deepEqual(calls, [[...command, '-tags', 'production,desktop,gtk3,libsqlite3,sqlite_omit_load_extension', './...'], [...command, '-tags', 'server', './...']]);
     for (const mode of ['desktop', 'server']) {
       const report = JSON.parse(readFileSync(join(directory, `security-reports/gosec-${mode}.json`), 'utf8'));
       assert.equal(report.status, status);
@@ -371,8 +404,8 @@ test('CLI enforces failure on govulncheck JSON findings even when tool exits suc
   assert.equal(result.status, 1);
   const calls = readFileSync(join(directory, 'scanner-args.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(calls, [
-    ['run', 'golang.org/x/vuln/cmd/govulncheck@v1.6.0', '-json', './...'],
-    ['run', 'golang.org/x/vuln/cmd/govulncheck@v1.6.0', '-json', '-tags', 'server', './...'],
+    ['run', '-mod=readonly', `-modfile=${resolve('scripts/securitytools/govulncheck/go.mod')}`, 'golang.org/x/vuln/cmd/govulncheck', '-json', '-tags', 'production,desktop,gtk3,libsqlite3,sqlite_omit_load_extension', './...'],
+    ['run', '-mod=readonly', `-modfile=${resolve('scripts/securitytools/govulncheck/go.mod')}`, 'golang.org/x/vuln/cmd/govulncheck', '-json', '-tags', 'server', './...'],
   ]);
   for (const mode of ['desktop', 'server']) {
     const r = JSON.parse(readFileSync(join(directory, `security-reports/govulncheck-${mode}.json`), 'utf8'));
@@ -392,7 +425,7 @@ test('development scanner selects the real dev graph and reports reachable vulne
     assert.equal(child.status, status === 'clean' ? 0 : 1);
     assert.equal(JSON.parse(readFileSync(join(directory, 'security-reports/govulncheck-dev.json'), 'utf8')).status, status);
     assert.deepEqual(JSON.parse(readFileSync(join(directory, 'scanner-args.json'), 'utf8')),
-      ['run', 'golang.org/x/vuln/cmd/govulncheck@v1.6.0', '-json', '-tags', 'dev,desktop,webkit2_41,libsqlite3,sqlite_omit_load_extension', './...']);
+      ['run', '-mod=readonly', `-modfile=${resolve('scripts/securitytools/govulncheck/go.mod')}`, 'golang.org/x/vuln/cmd/govulncheck', '-json', '-tags', 'server,omni_wails_browser,dev,desktop,gtk3,libsqlite3,sqlite_omit_load_extension', './...']);
   }
 });
 

@@ -29,7 +29,7 @@ function fixture(kind = 'go') {
   }))
   const goUpdate = kind !== 'npm'
   if (goUpdate) {
-    const module = kind === 'wails' ? 'github.com/wailsapp/wails/v2' : 'github.com/mattn/go-sqlite3'
+    const module = kind === 'wails' ? 'github.com/wailsapp/wails/v3' : 'github.com/mattn/go-sqlite3'
     const component = catalog.components.find(component => component.id === `go:${module}`)
     const previous = component.version
     const next = nextPatch(previous)
@@ -127,12 +127,12 @@ test('Wails version synchronization preserves every OS/CPU/mode boundary used by
   assert.deepEqual(Object.keys(validateCandidate(state.plan, state.candidate)).sort(), generatedPaths.slice(1).sort())
   const previous = JSON.parse(state.baseline[generatedPaths[2]])
   const next = JSON.parse(state.candidate.files[generatedPaths[2]])
-  const nextWailsVersion = nextPatch(previous.components.find(component => component.id === 'go:github.com/wailsapp/wails/v2').version)
+  const nextWailsVersion = nextPatch(previous.components.find(component => component.id === 'go:github.com/wailsapp/wails/v3').version)
   for (const target of targetConfigs) {
     const before = previous.components.filter(component => component.targets.includes(target.id))
     const after = next.components.filter(component => component.targets.includes(target.id))
     assert.deepEqual(after.map(component => component.id), before.map(component => component.id))
-    const wails = after.find(component => component.id === 'go:github.com/wailsapp/wails/v2')
+    const wails = after.find(component => component.id === 'go:github.com/wailsapp/wails/v3')
     assert.equal(Boolean(wails), target.mode === 'desktop')
     if (wails) assert.equal(wails.version, nextWailsVersion)
   }
@@ -268,6 +268,19 @@ test('existing Go checksums cannot be replaced', () => {
   const state = fixture()
   const modified = state.inputs['go.sum'].replace(/h1:[A-Za-z0-9+/]+=\n/, `h1:${'A'.repeat(43)}=\n`)
   assert.throws(() => validateDependencyInputs(state.before, { ...state.inputs, 'go.sum': modified }), /checksum changed/)
+})
+
+test('dependency map ordering is irrelevant but changed local source metadata requires review', () => {
+  const state = fixture('npm')
+  const lock = JSON.parse(state.inputs['frontend/package-lock.json'])
+  lock.packages[''].devDependencies = Object.fromEntries(Object.entries(lock.packages[''].devDependencies).reverse())
+  const inputs = () => ({ ...state.inputs, 'frontend/package-lock.json': stable(lock) })
+  assert.doesNotThrow(() => validateDependencyInputs(state.before, inputs()))
+  lock.packages['vendor/picomatch'].version = '0.0.0'
+  assert.throws(() => validateDependencyInputs(state.before, inputs()), /manual review/)
+  lock.packages['vendor/picomatch'] = JSON.parse(state.before['frontend/package-lock.json']).packages['vendor/picomatch']
+  lock.packages['node_modules/picomatch'].resolved = '../outside'
+  assert.throws(() => validateDependencyInputs(state.before, inputs()), /source path/)
 })
 
 test('a concurrent head change never forces or retries the ref update', async () => {

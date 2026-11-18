@@ -17,7 +17,7 @@ for (const width of [320, 375, 768, 1280]) test(`license overlay wraps text and 
   await expect(dialog).toHaveAttribute('data-oss-target', target)
   const shown = await dialog.locator('[data-oss-component]').evaluateAll(elements => elements.map(element => ({ id: element.dataset.ossComponent, version: element.dataset.ossVersion })))
   expect(shown).toEqual(expectedCatalog.components.map(({ id, version }) => ({ id, version })))
-  if (target.startsWith('server-')) await expect(dialog).not.toContainText('github.com/wailsapp/wails/v2')
+  if (target.startsWith('server-')) await expect(dialog).not.toContainText('github.com/wailsapp/wails/v3')
   else await expect(dialog).not.toContainText('github.com/go-webauthn/webauthn')
   await dialog.locator('summary').first().click()
   const content = dialog.locator('.license-content')

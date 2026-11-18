@@ -16,7 +16,7 @@ import (
 	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
-const RequiredSQLCipherVersion = "4.18.0 community"
+const RequiredSQLCipherVersion = "4.20.0 community"
 
 var (
 	ErrDestroyed            = errors.New("secure database opener is destroyed")
