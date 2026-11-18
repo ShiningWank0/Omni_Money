@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
+import { mkdtempSync, rmSync, statSync } from 'node:fs'
+import { createServer as createTLSServer } from 'node:https'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { bounded, browserErrorDetails, privateAppEnvironment, requireCI, stopProcessGroup, verifyDevBuild, verifyEvidence, watchExit } from './wails-dev-integration.mjs'
+import { bounded, browserErrorDetails, createDiagnosticTLS, probeHTTP, privateAppEnvironment, quitNativeApplication, requireCI, stopProcessGroup, verifyDevBuild, verifyEvidence, watchExit } from './wails-dev-integration.mjs'
 import { verifyCLI } from './wails-dev-evidence.mjs'
 
-const expected = { 'github.com/wailsapp/wails/v2': 'v2.90.0', 'github.com/labstack/echo/v4': 'v4.90.0' }
+const expected = { 'github.com/wailsapp/wails/v3': 'v3.90.0' }
 const info = `app: go1.27.3
-\tdep\tgithub.com/wailsapp/wails/v2\tv2.90.0\th1:wails
-\tdep\tgithub.com/labstack/echo/v4\tv4.90.0\th1:echo
-\tbuild\t-tags=dev,desktop,webkit2_41,libsqlite3,sqlite_omit_load_extension
+\tdep\tgithub.com/wailsapp/wails/v3\tv3.90.0\th1:wails
+\tbuild\t-tags=dev,desktop,gtk3,libsqlite3,sqlite_omit_load_extension
 \tbuild\tCGO_ENABLED=1
 \tbuild\tGOOS=linux
 \tbuild\tGOARCH=amd64
@@ -43,11 +46,10 @@ test('platform arguments cannot supply regular expressions or trailing path segm
   }
 })
 
-test('CLI permits absent Echo but rejects stale embedded Echo, Wails and replacements', () => {
+test('CLI rejects stale Wails 3, duplicates and replacements', () => {
   const cli = info.replace('dep\tgithub.com/wailsapp', 'mod\tgithub.com/wailsapp')
   verifyCLI(cli, expected)
-  verifyCLI(cli.split('\n').filter(line => !line.includes('echo/v4')).join('\n'), expected)
-  for (const changed of [cli.replace('v4.90.0', 'v4.1.0'), cli.replace('v2.90.0', 'v2.1.0'), cli + '\n => ../local']) {
+  for (const changed of [cli.replace('v3.90.0', 'v3.0.0'), cli + '\n => ../local', cli + '\n mod github.com/wailsapp/wails/v3 v3.90.0']) {
     assert.throws(() => verifyCLI(changed, expected))
   }
 })
@@ -56,7 +58,7 @@ test('compatibility evidence rejects omitted scenarios, cleanup failures, browse
   for (const mode of ['assets', 'vite']) {
     const checks = Object.fromEntries(['http', 'goIPC', 'licenses', 'security', 'gracefulExit', 'browserClosed', 'processStopped', 'listenerClosed', 'isolatedDataRemoved',
       ...(mode === 'vite' ? ['viteProxy', 'hmr', 'cliBuild', 'viteListenerClosed', 'cliProcessesStopped'] : ['reconnect', 'capabilityRotated'])].map(key => [key, true]))
-    const result = { mode, commit: 'checkout', passed: true, failures: [], checks, binarySHA256: 'a'.repeat(64), websocketFrames: { sent: 1, received: 1 } }
+    const result = { mode, commit: 'checkout', passed: true, failures: [], checks, binarySHA256: 'a'.repeat(64), ipcRequests: { sent: 1, received: 1 } }
     verifyEvidence(result, [], mode, 'checkout')
     for (const key of Object.keys(checks)) {
       assert.throws(() => verifyEvidence({ ...result, checks: { ...checks, [key]: false } }, [], mode, 'checkout'), key)
@@ -66,7 +68,7 @@ test('compatibility evidence rejects omitted scenarios, cleanup failures, browse
     assert.throws(() => verifyEvidence(result, [{ message: 'null.nodes' }], mode, 'checkout'))
     assert.throws(() => verifyEvidence(result, [], mode, 'another-checkout'))
     assert.throws(() => verifyEvidence({ ...result, passed: false }, [], mode, 'checkout'))
-    assert.throws(() => verifyEvidence({ ...result, websocketFrames: { sent: 0, received: 0 } }, [], mode, 'checkout'))
+    assert.throws(() => verifyEvidence({ ...result, ipcRequests: { sent: 0, received: 0 } }, [], mode, 'checkout'))
   }
 })
 
@@ -78,14 +80,17 @@ test('the command refuses local execution before opening a GUI or listener', () 
   assert.match(result.stderr, /CI Linux|must not start locally/)
 })
 
-test('requires the actual selected Echo and Wails in a development binary', () => {
+test('requires the selected Wails 3 and rejects native/headless tag confusion', () => {
   verifyDevBuild(info, expected)
+  const browser = info.replace('dev,desktop', 'dev,desktop,server,omni_wails_browser')
+  verifyDevBuild(browser, expected, 'linux/amd64', true)
+  assert.throws(() => verifyDevBuild(info, expected, 'linux/amd64', true))
   for (const changed of [
-    info.replace('v4.90.0', 'v4.1.0'), info.replace('v2.90.0', 'v2.1.0'),
-    info.split('\n').filter(line => !line.includes('echo/v4')).join('\n'),
-    info + '\tdep\tgithub.com/labstack/echo/v4\tv4.90.0\th1:duplicate\n',
+    info.replace('v3.90.0', 'v3.0.0'),
+    info.split('\n').filter(line => !line.includes('wails/v3')).join('\n'),
+    info + '\tdep\tgithub.com/wailsapp/wails/v3\tv3.90.0\th1:duplicate\n',
     info + '\t=>\t../local-echo\t(devel)\n', info.replace('dev,desktop', 'production,desktop'),
-    info.replace('dev,desktop', 'dev,desktop,bindings'), info.replace('CGO_ENABLED=1', 'CGO_ENABLED=0'),
+    info.replace('dev,desktop', 'dev,desktop,bindings'), info.replace('dev,desktop', 'dev,desktop,purego'), info.replace('dev,desktop', 'dev,desktop,server,omni_wails_browser'), info.replace('CGO_ENABLED=1', 'CGO_ENABLED=0'),
   ]) assert.throws(() => verifyDevBuild(changed, expected))
 })
 
@@ -100,6 +105,63 @@ test('isolates data and neutralizes Wails environment overrides without changing
 
 test('a missing response fails at its deadline', async () => {
   await assert.rejects(bounded(new Promise(() => {}), 10, 'response deadline'), /response deadline/)
+})
+
+function quitFixture(t, { response = 'closed', code = 0, stalled = false, signal = false } = {}) {
+  // Only a disposable Node process; no native app, GUI or listener is started.
+  const child = spawn(process.execPath, ['-e', `process.stdin.once('data', () => process.exit(${code})); setInterval(() => {}, 1000)`], { stdio: ['pipe', 'ignore', 'ignore'] })
+  const exited = watchExit(child)
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill(); await exited })
+  let closed = false
+  const page = {
+    isClosed: () => closed,
+    evaluate: async () => {
+      if (signal) child.kill()
+      else if (!stalled) child.stdin.write('quit')
+      if (response === 'hung') return new Promise(() => {})
+      if (response === 'returned') return
+      closed = response !== 'open'
+      throw new Error(response === 'error' ? 'Application.Quit failed' : 'page.evaluate: Target page, context or browser has been closed')
+    },
+  }
+  return { page, child, exited }
+}
+
+for (const response of ['returned', 'closed']) test(`native quit requires a real clean process exit when the request is ${response}`, async t => {
+  const { page, child, exited } = quitFixture(t, { response })
+  assert.deepEqual(await quitNativeApplication(page, child, exited, 5000), {
+    code: 0, signal: null, quitResponse: response === 'returned' ? 'returned' : 'webview-closed',
+  })
+})
+
+for (const setting of [{ code: 7 }, { signal: true }]) test(`native quit rejects abnormal process termination ${JSON.stringify(setting)}`, async t => {
+  const { page, child, exited } = quitFixture(t, setting)
+  await assert.rejects(quitNativeApplication(page, child, exited, 5000), /did not exit cleanly/)
+})
+
+for (const response of ['error', 'open']) test(`native quit preserves the request error when the response is ${response}`, async t => {
+  const { page, child, exited } = quitFixture(t, { response })
+  await assert.rejects(quitNativeApplication(page, child, exited, 5000), response === 'error' ? /Application.Quit failed/ : /Target page/)
+})
+
+test('native quit rejects an already exited app or already closed page before sending a request', async () => {
+  const page = { isClosed: () => false, evaluate: () => assert.fail('Quit must not be sent') }
+  await assert.rejects(quitNativeApplication(page, { exitCode: 0, signalCode: null }, Promise.resolve({ code: 0, signal: null })), /exited before/)
+  await assert.rejects(quitNativeApplication(page, { exitCode: null, signalCode: 'SIGTERM' }, Promise.resolve()), /terminated before/)
+  await assert.rejects(quitNativeApplication({ ...page, isClosed: () => true }, { exitCode: null, signalCode: null }, Promise.resolve()), /WebView closed before/)
+})
+
+test('native quit times out if the WebView closes but the owned process remains alive', async t => {
+  const { page, child, exited } = quitFixture(t, { stalled: true })
+  await assert.rejects(quitNativeApplication(page, child, exited, 100), /before the deadline/)
+  assert.equal(child.exitCode, null)
+  assert.equal(child.signalCode, null)
+})
+
+test('native quit times out if the process exits but the request never settles', async t => {
+  const { page, child, exited } = quitFixture(t, { response: 'hung' })
+  await assert.rejects(quitNativeApplication(page, child, exited, 100), /before the deadline/)
+  assert.deepEqual(await bounded(exited, 5000, 'Fixture process did not exit'), { code: 0, signal: null })
 })
 
 test('browser diagnostics preserve the original source stack and stage', () => {
@@ -127,4 +189,34 @@ test('startup failure is observed and cleanup does not target another process', 
   const child = spawn(missing, [], { detached: true, stdio: 'ignore' })
   await assert.rejects(watchExit(child), /ENOENT/)
   await stopProcessGroup(child)
+})
+
+test('diagnostic HTTPS probes trust only the run certificate and verify its hostname', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'omni-tls-fixture-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const tls = createDiagnosticTLS(directory)
+  assert.equal(statSync(join(directory, 'loopback-key.pem')).mode & 0o777, 0o600)
+  const server = createTLSServer({ cert: tls.certificate, key: tls.privateKey, minVersion: 'TLSv1.3' }, (_, response) => response.end('owned fixture'))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const baseURL = `https://127.0.0.1:${server.address().port}`
+  await assert.rejects(probeHTTP(baseURL, '/'), /self.signed certificate/i)
+  const response = await probeHTTP(baseURL, '/', {}, false, 'GET', { ca: tls.certificate })
+  assert.equal(response.status, 200)
+  assert.equal(response.body, 'owned fixture')
+  await assert.rejects(probeHTTP(baseURL, '/', {}, false, 'GET', { ca: tls.certificate, servername: 'other.invalid' }), { code: 'ERR_TLS_CERT_ALTNAME_INVALID' })
+})
+
+test('cleanup stops and reaps descendants after their parent exits', async t => {
+  // The native WebView also creates children that can outlive its main process.
+  // A container needs an init reaper; merely sending SIGKILL leaves zombies.
+  const descendant = "process.stdout.write('ready'); setInterval(() => {}, 1000)"
+  const program = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: ['ignore', 1, 2] }); process.exit(0)`
+  const child = spawn(process.execPath, ['-e', program], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
+  const exit = watchExit(child)
+  t.after(() => stopProcessGroup(child))
+  await bounded(once(child.stdout, 'data'), 5000, 'descendant startup timeout')
+  assert.deepEqual(await bounded(exit, 5000, 'parent exit timeout'), { code: 0, signal: null })
+  await stopProcessGroup(child)
+  assert.throws(() => process.kill(-child.pid, 0), { code: 'ESRCH' })
 })

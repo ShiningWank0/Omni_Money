@@ -23,7 +23,7 @@ AES-GCM-SIVのAAD/IV処理、CMS_encryptのEC recipient処理、QUICのaddress�
 修正先として記載された3.5.10は、確認時点の[公式配布一覧](https://openssl-library.org/source/)と
 GitHub releasesでは未公開である。存在しないreleaseの版・SHAを設定しない。
 
-本アプリでOpenSSLを使う[SQLCipher 4.18.0のprovider](https://github.com/sqlcipher/sqlcipher/blob/v4.18.0/src/crypto_openssl.c)は、
+本アプリでOpenSSLを使う[SQLCipher 4.20.0のprovider](https://github.com/sqlcipher/sqlcipher/blob/v4.20.0/src/crypto_openssl.c)は、
 AES-256-CBC、HMAC、PBKDF2、RAND_bytesを使用し、上記AES-GCM-SIV/CMS/QUICのAPIを呼び出さない。
 配布用builderは静的libcryptoだけを組み込み、libsslは組み込まない。
 この確認は現在のproviderでの利用範囲に基づく影響評価であり、3.5.9の既知脆弱性がゼロという意味ではない。

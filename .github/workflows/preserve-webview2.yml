@@ -1,0 +1,58 @@
+name: Preserve Fixed Version WebView2
+on:
+  push:
+    branches: [fix/pin-windows-webview2]
+    paths:
+      - .github/workflows/preserve-webview2.yml
+      - build/locks/webview2-source.json
+  workflow_dispatch:
+permissions: {}
+jobs:
+  preserve:
+    if: github.repository == 'ShiningWank0/Omni_Money'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Preserve verified Microsoft CAB without executing it
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir candidate
+          cp build/locks/webview2-source.json candidate/source.json
+          cd candidate
+          url="$(jq -er .url source.json)"
+          checksum="$(jq -er .sha256 source.json)"
+          version="$(jq -er .version source.json)"
+          [[ "$url" == https://msedge.sf.dl.delivery.mp.microsoft.com/* && "$checksum" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          curl --fail --location --retry 3 --proto '=https' "$url" -o runtime.cab
+          printf '%s  runtime.cab\n' "$checksum" | sha256sum --check --strict
+          curl --fail --location --retry 3 --proto '=https' \
+            https://github.com/oras-project/oras/releases/download/v1.3.6/oras_1.3.6_linux_amd64.tar.gz -o oras.tar.gz
+          echo '66fb0ad7206f3f6fa77ed5b552049d364ccf4b50b1684554f731f76302b52ca0  oras.tar.gz' | sha256sum --check --strict
+          tar -xzf oras.tar.gz oras
+          printf '%s' "$REGISTRY_TOKEN" | ./oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-ci-webview2"
+          tag="$version-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          ./oras push --artifact-type application/vnd.omni-money.webview2.v1 \
+            "$image:$tag" runtime.cab:application/vnd.ms-cab-compressed source.json:application/json
+          digest="$(./oras manifest fetch --descriptor "$image:$tag" | jq -er .digest)"
+          jq -n --arg artifact "$image@$digest" --arg version "$version" --arg sha "$checksum" \
+            --arg source "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
+            '{schema:1,version:$version,architecture:"x64",artifact:$artifact,cabSHA256:$sha,sourceCommit:$source,runId:$run}' > lock.json
+          echo 'OMNI_ENV_LOCK_BEGIN'
+          cat lock.json
+          echo 'OMNI_ENV_LOCK_END'
+          cat lock.json >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: candidate-lock-webview2
+          path: candidate/lock.json
+          if-no-files-found: error

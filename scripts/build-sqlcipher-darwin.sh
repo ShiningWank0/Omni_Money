@@ -3,8 +3,8 @@ set -euo pipefail
 
 IFS=$'\n\t'
 
-readonly SQLCIPHER_VERSION="4.18.0"
-readonly SQLCIPHER_SHA256="1df02d1b346fa27feaf2da2cb2c0d8209e788248e461ec288718aa5d3e9643e5"
+readonly SQLCIPHER_VERSION="4.20.0"
+readonly SQLCIPHER_SHA256="38705f51b61ac0636a5fd064f9a77fafabc7227b2aa2513f1b14c8bb1102affc"
 
 fail() {
   printf 'build-sqlcipher-darwin: %s\n' "$*" >&2
@@ -29,6 +29,8 @@ readonly native_arch default_deployment_target
 
 : "${OPENSSL_PREFIX:?OPENSSL_PREFIX must name a native static OpenSSL installation}"
 : "${SQLCIPHER_PREFIX:?SQLCIPHER_PREFIX must name a fresh output directory}"
+: "${TCLSH_CMD:?TCLSH_CMD must name the checksum-pinned Tcl interpreter}"
+[[ "$TCLSH_CMD" == /* && -x "$TCLSH_CMD" ]] || fail "TCLSH_CMD must be an absolute executable path"
 
 [[ "$OPENSSL_PREFIX" == /* ]] || fail "OPENSSL_PREFIX must be an absolute path"
 [[ "$SQLCIPHER_PREFIX" == /* ]] || fail "SQLCIPHER_PREFIX must be an absolute path"
@@ -156,8 +158,8 @@ readonly common_cflags_string
   CFLAGS="$common_cflags_string" \
   CPPFLAGS="-I$openssl_prefix/include" \
   LDFLAGS="$openssl_archive" \
-    "$source_dir/configure" --with-tempstore=yes --disable-tcl
-  make -j"$build_jobs" sqlite3.c
+    "$source_dir/configure" --with-tempstore=yes --disable-tcl --with-tclsh="$TCLSH_CMD"
+  make -j"$build_jobs" "TCLSH_CMD=$TCLSH_CMD" sqlite3.c
 )
 
 [[ -f "$build_dir/sqlite3.c" && ! -L "$build_dir/sqlite3.c" ]] || fail "SQLCipher amalgamation was not generated"

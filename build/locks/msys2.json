@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "environment": "msys2",
+  "arch": "amd64",
+  "artifact": "ghcr.io/shiningwank0/omni_money-build-msys2@sha256:52474333df79ef254fa84d8b610792501405b94743c52497006bb8a9c6911cac",
+  "archiveSHA256": "e4d6bd84417422ed570529362fef03a174d973e1fb3aa9cb4fc4bf6b0b0ac0dd",
+  "sourceCommit": "08598ff8996b480977c496f3ddd2f8bf3816717d",
+  "runId": "44076743431",
+  "oras": {
+    "version": "1.3.6",
+    "url": "https://github.com/oras-project/oras/releases/download/v1.3.6/oras_1.3.6_windows_amd64.zip",
+    "sha256": "ec3d19f386d5d2f0892288772d7b242475a05332aafa64b6773378ca771d76d3"
+  }
+}

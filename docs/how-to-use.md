@@ -10,7 +10,7 @@
 
 開発buildでも通常SQLiteや未固定のDesktop CLIへ切り替えないでください。各OS向けの `scripts/build-sqlcipher-*.sh` でSQLCipherを作成し、release workflowと同じ `libsqlite3,sqlite_omit_load_extension` build tagとCGO設定で起動します。SQLCipherが不足・不正な場合、Desktopは平文DBへfallbackせず起動を拒否します。[SQLCipher鍵の運用](sqlcipher-key-operations.md)も参照してください。
 
-Desktop版はroleを持たない単一local vault運用です。初回起動でpasswordを設定し、1回だけ表示されるrecovery codeをpassword manager等へ保存します。取引データはOS標準のapplication data directory内のランダムなvault ID配下に、SQLCipher 4.18.0で暗号化して保存されます。
+Desktop版はroleを持たない単一local vault運用です。初回起動でpasswordを設定し、1回だけ表示されるrecovery codeをpassword manager等へ保存します。取引データはOS標準のapplication data directory内のランダムなvault ID配下に、SQLCipher 4.20.0で暗号化して保存されます。
 
 - macOS: `~/Library/Application Support/OmniMoney/vaults/<vault-id>/omni_money.db`
 - Windows: `%APPDATA%/OmniMoney/vaults/<vault-id>/omni_money.db`

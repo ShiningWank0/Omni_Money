@@ -6,8 +6,8 @@ set -eu
 # file, or executable. The release build must link libsqlite3.a and the static
 # OpenSSL libcrypto.a from OPENSSL_PREFIX explicitly.
 
-SQLCIPHER_VERSION="4.18.0"
-SQLCIPHER_SHA256="1df02d1b346fa27feaf2da2cb2c0d8209e788248e461ec288718aa5d3e9643e5"
+SQLCIPHER_VERSION="4.20.0"
+SQLCIPHER_SHA256="38705f51b61ac0636a5fd064f9a77fafabc7227b2aa2513f1b14c8bb1102affc"
 : "${OPENSSL_PREFIX:?OPENSSL_PREFIX must name the checksum-pinned OpenSSL build}"
 SQLCIPHER_PREFIX="${SQLCIPHER_PREFIX:-/ucrt64/omni-sqlcipher-${SQLCIPHER_VERSION}}"
 

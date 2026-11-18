@@ -1,0 +1,19 @@
+name: Set up checksum-pinned Docker
+description: Install the same Docker client, daemon, plugins and builder in CI and release jobs
+inputs:
+  daemon:
+    description: Start a dedicated Docker daemon and BuildKit builder
+    default: 'true'
+outputs:
+  sbom-image:
+    description: Digest-pinned SBOM generator
+    value: ${{ steps.setup.outputs.sbom-image }}
+runs:
+  using: composite
+  steps:
+    - name: Install and verify Docker toolchain
+      id: setup
+      shell: bash
+      env:
+        START_DAEMON: ${{ inputs.daemon }}
+      run: bash "$GITHUB_ACTION_PATH/../../../scripts/setup-fixed-docker.sh" "$START_DAEMON"

@@ -11,8 +11,8 @@ const approved = JSON.parse(readFileSync(new URL('../licenses/approved.json', im
 test('reviewed source notices include copyright, nested license boundaries and no test tools', () => {
   validateCatalog(catalog, approved)
   validateTargetCoverage()
-  const webview = catalog.components.find(component => component.id === 'go:github.com/wailsapp/go-webview2')
-  assert.ok(webview.files.some(file => file.path === 'webviewloader/LICENSE'))
+  const webview = catalog.components.find(component => component.id === 'go:github.com/wailsapp/wails/v3')
+  assert.ok(webview.files.some(file => file.path === 'internal/webview2/webviewloader/LICENSE'))
   assert.ok(catalog.components.every(component => !/vitest|playwright|jsdom/.test(component.id)))
   assert.ok(catalog.components.find(component => component.id === 'npm:vite'), 'Vite preload helper code is shipped')
 })
@@ -34,7 +34,7 @@ test('each release target gets the notices for its shipped dependencies', () => 
   for (const target of targets) {
     const text = noticeText(catalog, target)
     assert.match(text, /ZETETIC/)
-    assert.equal(text.includes('github.com/wailsapp/wails/v2'), target.startsWith('desktop-'))
+    assert.equal(text.includes('github.com/wailsapp/wails/v3'), target.startsWith('desktop-'))
     assert.equal(text.includes('github.com/go-webauthn/webauthn'), target.startsWith('server-'))
   }
   assert.throws(() => noticeText(catalog, 'unknown'), /Unknown OSS target/)
@@ -122,7 +122,9 @@ test('release builders pin the displayed OSS to the same mode, OS and CPU as the
   assert.match(docker, /VITE_OSS_TARGET="server-linux-\$\{TARGETARCH\}" npm run build/)
   const ci = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
   assert.match(ci, /run: node scripts\/oss-ui-matrix\.mjs/)
-  const wails = JSON.parse(readFileSync(new URL('../wails.json', import.meta.url)))
-  assert.equal(wails['frontend:build'], 'node build/desktop.mjs build')
-  assert.equal(wails['frontend:dev:watcher'], 'node build/desktop.mjs dev')
+  const recipe = readFileSync(new URL('../scripts/build-wails-v3.mjs', import.meta.url), 'utf8')
+  assert.match(recipe, /build\/desktop\.mjs/)
+  const task = readFileSync(new URL('../Taskfile.yml', import.meta.url), 'utf8')
+  assert.match(task, /node build\/desktop\.mjs dev/)
+
 })
