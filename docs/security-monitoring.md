@@ -34,6 +34,8 @@ build/dev/previewとDesktop frontendの入口でもsource検証を必須とす�
 
 revision 2では、GitHub Advanced SecurityのCodeQL alert #8が検出した、backslash除去時の二次時間の正規表現も線形走査へ修正した。元の括弧・escape・改行の扱いは短入力の全列挙で比較し、長い攻撃入力にも期限を設けて検証する。公式版への復帰には、当初のextglob ReDoSとこの問題の両方の回帰試験が成功することを要求する。
 
+2026年11月19日の再確認で、元のGHSA-fc5q-39xc-vjpfが撤回されたことをGitHub advisory databaseとOSVで確認した。上流メンテナーは、信頼できない利用者にglobを定義させないことを利用前提として説明している。公式latestは引き続き4.0.7であり、撤回を修正版の公開やコードの修正と同一視しない。変更内容を確認してOSV全文のsnapshotとhashを更新し、manifestのadvisoryReviewとIssue #348へ記録した。現在のnpm監査にはこのadvisoryのactive findingもremediationもない。source修正の撤去は同Issueで再評価し、source hash・全import先・将来のadvisory変更・取得不備の必須検査は維持する。
+
 ## npmのlocal依存とOSS用途一覧
 
 package-lock v3のnode_modulesにあるlinkは、resolved先のmetadataから版・license・dev属性を取得する。source側のrecordを別packageとして数えない。欠落・循環・領域外の参照・矛盾した版はerrorにする。実bundleに残ったlocal sourceも、dev属性にかかわらず配布対象へ含め、通常の承認を要求する。
