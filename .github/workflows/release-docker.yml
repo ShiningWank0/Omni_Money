@@ -5,6 +5,9 @@ on:
 
 permissions: {}
 
+env:
+  GOTOOLCHAIN: local
+
 concurrency:
   group: docker-release-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
@@ -14,6 +17,7 @@ jobs:
     name: Verify release build actions
     if: github.event_name == 'pull_request'
     permissions:
+      packages: read
       contents: read
     strategy:
       fail-fast: false
@@ -24,15 +28,45 @@ jobs:
           - runner: ubuntu-24.04-arm
             platform: linux/arm64
     runs-on: ${{ matrix.runner }}
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init --user 1001:1001 --privileged
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
+
       - name: Set up fixed Docker toolchain
         id: docker-tools
         uses: ./.github/actions/setup-fixed-docker
+
+      - name: Login for immutable base images
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Allocate OCI output inside the job container
+        id: oci-output
+        run: |
+          set -euo pipefail
+          directory="$(mktemp -d "$RUNNER_TEMP/omni-release-image.XXXXXX")"
+          printf 'path=%s/omni-money.tar\n' "$directory" >> "$GITHUB_OUTPUT"
+
       - name: Build release image without publishing
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -40,7 +74,7 @@ jobs:
           push: false
           platforms: ${{ matrix.platform }}
           build-args: VERSION=pr-validation
-          outputs: type=oci,dest=${{ runner.temp }}/omni-money.tar
+          outputs: type=oci,dest=${{ steps.oci-output.outputs.path }}
           provenance: mode=max
           sbom: generator=${{ steps.docker-tools.outputs.sbom-image }}
           cache-from: type=gha,scope=${{ matrix.platform }}
@@ -50,8 +84,18 @@ jobs:
     name: Validate and scan release
     if: github.event_name != 'pull_request'
     permissions:
+      packages: read
       contents: read
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init --user 1001:1001
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -61,6 +105,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
 
       - name: Read and validate version
         id: version
@@ -93,17 +142,12 @@ jobs:
       - name: Setup Go for release quality gate
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
 
       - name: Setup Node.js for release quality gate
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
-
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Install and audit frontend dependencies
         working-directory: frontend
@@ -142,6 +186,15 @@ jobs:
             arch: arm64
 
     runs-on: ${{ matrix.runner }}
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init --user 1001:1001 --privileged
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 60
 
     steps:
@@ -149,6 +202,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Verify frozen Linux package inventory
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-linux-environment.sh
 
       - name: Set up fixed Docker toolchain
         id: docker-tools
@@ -219,6 +277,15 @@ jobs:
     env:
       APP_VERSION: ${{ needs.prepare.outputs.version }}
     runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init --user 1001:1001
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 15
 
     steps:
@@ -226,6 +293,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Set up fixed release CLI
+        run: bash scripts/setup-fixed-gh.sh
 
       - name: Set up fixed Docker client
         uses: ./.github/actions/setup-fixed-docker

@@ -63,7 +63,7 @@ if [[ "$1" == true ]]; then
   else
     # The frozen Linux job image owns this namespace. Never contact or stop
     # the host daemon that GitHub uses to start the job container.
-    test "$(id -u)" = 0
+    sudo -n true
   fi
   export DOCKER_HOST="unix://$dest/docker.sock"
   # Do not export DOCKER_HOST through GITHUB_ENV: the Actions runner also

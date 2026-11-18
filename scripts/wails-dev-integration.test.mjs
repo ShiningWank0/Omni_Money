@@ -128,3 +128,17 @@ test('startup failure is observed and cleanup does not target another process', 
   await assert.rejects(watchExit(child), /ENOENT/)
   await stopProcessGroup(child)
 })
+
+test('cleanup stops and reaps descendants after their parent exits', async t => {
+  // The native WebView also creates children that can outlive its main process.
+  // A container needs an init reaper; merely sending SIGKILL leaves zombies.
+  const descendant = "process.stdout.write('ready'); setInterval(() => {}, 1000)"
+  const program = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: ['ignore', 1, 2] }); process.exit(0)`
+  const child = spawn(process.execPath, ['-e', program], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
+  const exit = watchExit(child)
+  t.after(() => stopProcessGroup(child))
+  await bounded(once(child.stdout, 'data'), 5000, 'descendant startup timeout')
+  assert.deepEqual(await bounded(exit, 5000, 'parent exit timeout'), { code: 0, signal: null })
+  await stopProcessGroup(child)
+  assert.throws(() => process.kill(-child.pid, 0), { code: 'ESRCH' })
+})

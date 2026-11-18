@@ -11,6 +11,7 @@ function fixture(t, { go = '1.26.7', node = '24.19.0', digest = 'a'.repeat(64) }
   t.after(() => rmSync(root, { recursive: true, force: true }))
   writeFileSync(join(root, 'go.mod'), 'module example\n\ngo 1.26.6\n\ntoolchain go1.26.7\n')
   writeFileSync(join(root, '.node-version'), '24.19.0\n')
+  writeFileSync(join(root, '.go-version'), '1.26.7\n')
   writeFileSync(join(root, 'Dockerfile'),
     `FROM node:${node}-alpine@sha256:${digest} AS frontend-builder\nFROM golang:${go}-alpine@sha256:${digest} AS backend-builder\n`)
   return root
@@ -30,6 +31,7 @@ test('a Docker-only update fails until both pins are synchronized', t => {
   syncRuntimeVersions(root)
   assert.equal(checkRuntimeVersions(root).toolchain, '1.27.1')
   assert.equal(readFileSync(join(root, '.node-version'), 'utf8'), '26.10.0\n')
+  assert.equal(readFileSync(join(root, '.go-version'), 'utf8'), '1.27.1\n')
   assert.match(readFileSync(join(root, 'go.mod'), 'utf8'), /^go 1\.26\.6$/m)
 })
 
