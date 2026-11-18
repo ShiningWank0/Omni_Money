@@ -37,6 +37,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Checkout immutable upstream compatibility tests for the temporary security patch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: micromatch/picomatch
+          ref: 6bb40679c218cefba5d4e9662408c5fdf699a8bb
+          path: .oss-cache/picomatch-upstream
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -51,6 +59,20 @@ jobs:
           npm run build
           git ls-files --error-unmatch bundled-dependencies.json > /dev/null
           git diff --exit-code -- bundled-dependencies.json
+      - name: Verify the real local patch, attack inputs and unchanged official compatibility tests
+        run: |
+          node --test scripts/picomatch-patch.test.mjs frontend/tests/picomatch-security.test.js
+          node scripts/test-picomatch-compat.mjs .oss-cache/picomatch-upstream
+      - name: Save temporary security patch evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: picomatch-patch-evidence
+          path: |
+            .oss-cache/picomatch-compat-results.txt
+            scripts/security-patches/picomatch.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Resolve pinned Go dependencies
         run: go mod download
       - name: Check OSS coverage and approved notices once for all release targets
@@ -516,7 +538,7 @@ jobs:
         run: npm run build
 
       - name: Upload frontend security reports
-        if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: security-frontend-${{ github.run_attempt }}

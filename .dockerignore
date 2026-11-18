@@ -27,10 +27,27 @@
 !scripts/build-sqlcipher-linux.sh
 !scripts/oss-notices.mjs
 !scripts/record-image-licenses.sh
+!scripts/verify-picomatch-patch.mjs
+!scripts/security-patches/
+!scripts/security-patches/picomatch.json
 
 !frontend/
 !frontend/package.json
 !frontend/package-lock.json
+!frontend/vendor/
+!frontend/vendor/picomatch/
+!frontend/vendor/picomatch/index.js
+!frontend/vendor/picomatch/posix.js
+!frontend/vendor/picomatch/package.json
+!frontend/vendor/picomatch/LICENSE
+!frontend/vendor/picomatch/README.md
+!frontend/vendor/picomatch/LOCAL-PATCH.md
+!frontend/vendor/picomatch/lib/
+!frontend/vendor/picomatch/lib/constants.js
+!frontend/vendor/picomatch/lib/parse.js
+!frontend/vendor/picomatch/lib/picomatch.js
+!frontend/vendor/picomatch/lib/scan.js
+!frontend/vendor/picomatch/lib/utils.js
 !frontend/index.html
 !frontend/vite.config.js
 !frontend/build/
