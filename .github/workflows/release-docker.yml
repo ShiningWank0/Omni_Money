@@ -249,7 +249,7 @@ jobs:
       # (image + attestation manifests) and Trivy otherwise resolves it as
       # linux/amd64, which fails on the arm64 runner.
       - name: Scan pushed architecture digest
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: ./.github/actions/scan-fixed-trivy
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -258,9 +258,6 @@ jobs:
           image-ref: ${{ needs.prepare.outputs.image }}@${{ steps.build.outputs.digest }}
           format: table
           exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
 
       - name: Export scanned digest
         env:
