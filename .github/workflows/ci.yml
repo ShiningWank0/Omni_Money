@@ -77,7 +77,7 @@ jobs:
         run: go mod download
       - name: Check OSS coverage and approved notices once for all release targets
         run: |
-          node --test scripts/oss-notices.test.mjs scripts/npm-lock-inventory.test.mjs scripts/dependabot-oss-sync.test.mjs scripts/release-plan.test.mjs scripts/openssl-build.test.mjs
+          node --test scripts/oss-notices.test.mjs scripts/npm-lock-inventory.test.mjs scripts/dependabot-oss-sync.test.mjs scripts/release-plan.test.mjs scripts/openssl-build.test.mjs scripts/macos-build.test.mjs
           node scripts/oss-notices.mjs check
       - name: Save OSS mismatch evidence without accepting the candidate
         if: ${{ failure() }}
