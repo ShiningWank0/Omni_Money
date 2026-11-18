@@ -53,6 +53,8 @@
 !frontend/build/
 !frontend/build/public-assets.mjs
 !frontend/build/oss-inventory.mjs
+!frontend/build/oss-catalog.mjs
+!frontend/build/npm-lock.mjs
 !frontend/src/
 !frontend/src/**
 

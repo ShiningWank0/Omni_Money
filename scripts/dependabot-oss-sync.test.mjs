@@ -270,6 +270,19 @@ test('existing Go checksums cannot be replaced', () => {
   assert.throws(() => validateDependencyInputs(state.before, { ...state.inputs, 'go.sum': modified }), /checksum changed/)
 })
 
+test('dependency map ordering is irrelevant but changed local source metadata requires review', () => {
+  const state = fixture('npm')
+  const lock = JSON.parse(state.inputs['frontend/package-lock.json'])
+  lock.packages[''].devDependencies = Object.fromEntries(Object.entries(lock.packages[''].devDependencies).reverse())
+  const inputs = () => ({ ...state.inputs, 'frontend/package-lock.json': stable(lock) })
+  assert.doesNotThrow(() => validateDependencyInputs(state.before, inputs()))
+  lock.packages['vendor/picomatch'].version = '0.0.0'
+  assert.throws(() => validateDependencyInputs(state.before, inputs()), /manual review/)
+  lock.packages['vendor/picomatch'] = JSON.parse(state.before['frontend/package-lock.json']).packages['vendor/picomatch']
+  lock.packages['node_modules/picomatch'].resolved = '../outside'
+  assert.throws(() => validateDependencyInputs(state.before, inputs()), /source path/)
+})
+
 test('a concurrent head change never forces or retries the ref update', async () => {
   const state = fixture()
   state.race = true

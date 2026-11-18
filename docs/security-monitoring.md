@@ -32,6 +32,16 @@ build/dev/previewとDesktop frontendの入口でもsource検証を必須とす�
 
 公式stable版が公開されたら、修正根拠と回帰試験を確認し、公式版の採用・vendor/override/一時検証の撤去を別PRにする。通常の版更新先は`feat/update-source-version`。再発防止と通常の脆弱性検査は残す。Issue #348は一時修正の導入だけでは閉じない。
 
+revision 2では、GitHub Advanced SecurityのCodeQL alert #8が検出した、backslash除去時の二次時間の正規表現も線形走査へ修正した。元の括弧・escape・改行の扱いは短入力の全列挙で比較し、長い攻撃入力にも期限を設けて検証する。公式版への復帰には、当初のextglob ReDoSとこの問題の両方の回帰試験が成功することを要求する。
+
+## npmのlocal依存とOSS用途一覧
+
+package-lock v3のnode_modulesにあるlinkは、resolved先のmetadataから版・license・dev属性を取得する。source側のrecordを別packageとして数えない。欠落・循環・領域外の参照・矛盾した版はerrorにする。実bundleに残ったlocal sourceも、dev属性にかかわらず配布対象へ含め、通常の承認を要求する。
+
+用途一覧・bundle解析・配布ライセンス収集は共通のlock解釈を使う。Dependabotの自動同期は、trusted baseに存在する変更のないlocal依存だけを保持し、参照先・版・metadataを変更する候補はmanual reviewへ戻す。依存mapはkeyの並び順ではなく内容を比較する。
+
+OSS checkは自動refreshや自動承認を行わない。不一致時には変更file名と`licenses/build/oss-check-candidate.json`を出力し、CIでは失敗を維持したまま診断artifactへ保存する。通常のunit検査でも、現在のlockとcommit済みnpm用途一覧の一致を確認する。
+
 ## 定期・手動検査のIssue報告
 
 Go検査の前提stepでは、frontend依存のinstallとembed用の実buildだけを行う。npm auditは独立したFrontend jobで必須実行し、失敗すれば全体の必須判定も失敗する。npmの指摘を理由にGoの検査まで止めない。embed build自体に失敗した場合は、Go解析を実行できたものとして扱わず、欠落・検査エラーを通知する。
