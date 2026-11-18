@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "version": "157.0.4341.60",
+  "architecture": "x64",
+  "artifact": "ghcr.io/shiningwank0/omni_money-ci-webview2@sha256:02b5a386b3e5af7032870d4c6d49a47b3b38e18521c7e5b824b39eccd473f89e",
+  "cabSHA256": "1bad3df802a4c21f6b271cf3cd640912056291e3915b86fa7577a18899f761b9",
+  "sourceCommit": "26a359e99f72a637229b780ccb7b3a50748fc71b",
+  "runId": "44079231281"
+}

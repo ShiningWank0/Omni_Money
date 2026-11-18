@@ -127,13 +127,11 @@ func TestDesktopReleaseUsesLeastPrivilegeAndReproducibleTools(t *testing.T) {
 		`go build -mod=readonly -tags "dev,desktop,$BUILD_TAGS"`,
 		"actions: read",
 		"contents: write",
-		`WAILS_VERSION="$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"`,
+		"node scripts/install-wails-v3.mjs",
 		"go-version-file: .go-version",
 		"node-version-file: .node-version",
 		"VITE_APP_VERSION: ${{ needs.prepare.outputs.version }}",
-		"github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION",
-		`go version -m "$WAILS_BIN"`,
-		`verify_tool_module github.com/labstack/echo/v4 "$ECHO_VERSION"`,
+		"bin/wails3",
 		"SHA256SUMS",
 		"actions/attest@",
 	} {
@@ -289,10 +287,16 @@ func TestDesktopReleaseSharesPreparedVersionWithWails(t *testing.T) {
 		t.Fatal("release workflow build job is missing or out of order")
 	}
 	buildJob := workflow[buildStart:attestStart]
+	recipe, err := os.ReadFile("scripts/build-wails-v3.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(recipe), "'-X main.version=' + version") || !strings.Contains(string(recipe), "process.env.APP_VERSION") {
+		t.Fatal("Wails build must embed the prepared application version")
+	}
 	for _, required := range []string{
 		"APP_VERSION: ${{ needs.prepare.outputs.version }}",
 		"VITE_APP_VERSION: ${{ needs.prepare.outputs.version }}",
-		`-ldflags "-X main.version=${APP_VERSION}"`,
 	} {
 		if !strings.Contains(buildJob, required) {
 			t.Errorf("desktop build job is missing shared prepared version wiring %q", required)
@@ -313,8 +317,33 @@ func TestCIUsesPinnedGoVulnerabilityScanner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const scanner = "golang.org/x/vuln/cmd/govulncheck@v1.6.0"
-	if count := strings.Count(string(reporter), scanner); count != 1 {
-		t.Fatalf("report collector must retain the pinned Go vulnerability scanner, got %d", count)
+	if !strings.Contains(string(reporter), "govulncheckCommand('-json'") {
+		t.Fatal("report collector must use the shared scanner command")
+	}
+	helper, err := os.ReadFile("scripts/run-govulncheck.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"-mod=readonly", "./securitytools/govulncheck/go.mod", "golang.org/x/vuln/cmd/govulncheck"} {
+		if !strings.Contains(string(helper), required) {
+			t.Errorf("shared scanner command is missing %s", required)
+		}
+	}
+	manifest, err := os.ReadFile("scripts/securitytools/govulncheck/go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`(?m)^\s*golang.org/x/vuln v[0-9]+\.[0-9]+\.[0-9]+$`).Match(manifest) {
+		t.Fatal("scanner module must pin an exact stable version")
+	}
+	if strings.Contains(string(manifest), "replace ") {
+		t.Fatal("scanner replacements require review")
+	}
+	release, err := os.ReadFile(".github/workflows/release-desktop.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(release), "node scripts/run-govulncheck.mjs ./...") {
+		t.Fatal("release must use the same scanner module")
 	}
 }

@@ -18,7 +18,7 @@ OpenSSLはmacOS/Windowsでは固定版だけを表示し、その他では利用
 配布物の`BUILD_DEPENDENCIES.txt`やAlpineパッケージ一覧では、ビルド時に確認した具体的な版も記録します。
 
 DockerはBuildKitの`TARGETARCH`から`server-linux-amd64/arm64`を選択し、Desktop releaseはmatrixで4構成を明示します。
-通常の`wails build/dev`は専用frontendコマンドでDesktopのホスト構成を選択します。
+通常の`wails3 build/dev`は専用frontendコマンドでDesktopのホスト構成を選択します。
 クロスビルドで直接Wailsを使う場合は、同じ対象を`VITE_OSS_TARGET`にも指定してください。
 例えばdarwin/amd64向けなら、既存の固定版Wails呼出しに`VITE_OSS_TARGET=desktop-darwin-amd64`を渡します。
 サポート外や矛盾した対象はビルドを失敗させます。

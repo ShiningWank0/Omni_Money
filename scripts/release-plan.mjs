@@ -13,7 +13,7 @@ export function releasePlan(event, paths, rehearsal = false) {
   if (event !== 'pull_request') throw new Error(`Unexpected pipeline event ${event}`)
   const shared = path => /^(licenses\/|scripts\/(oss-|setup-fixed-)|frontend\/|build\/locks\/|\.github\/(workflows|actions)\/)/.test(path) || ['go.mod', 'go.sum', '.node-version', '.go-version', 'LICENSE'].includes(path)
   return {
-    desktop: paths.some(path => shared(path) || path.endsWith('.go') || path.startsWith('build/') || /^scripts\/(build-(sqlcipher|openssl)-|wails-(native|dev)-)/.test(path) || path === 'wails.json'),
+    desktop: paths.some(path => shared(path) || path.endsWith('.go') || path.startsWith('build/') || /^scripts\/(build-(sqlcipher|openssl)-|wails-(native|dev|windows)-)/.test(path) || ['Taskfile.yml', 'build/config.yml'].includes(path) || /^scripts\/(install-wails-v3|build-wails-(v3|browser))/.test(path) || path.startsWith('frontend/bindings/')),
     docker: paths.some(path => shared(path) || path.startsWith('backend/') || ['Dockerfile', '.dockerignore', 'server.go', 'scripts/setup-fixed-docker.sh'].includes(path) || path.startsWith('scripts/build-sqlcipher-')),
   }
 }

@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { selectDisplayCatalog, verifyDisplayInventory } from '../frontend/build/oss-catalog.mjs'
+import { npmPackages } from '../frontend/build/npm-lock.mjs'
 
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const targetConfigs = JSON.parse(readFileSync(join(root, 'licenses/targets.json'), 'utf8'))
@@ -95,9 +96,10 @@ function goComponents() {
 
 function npmComponents() {
   const lock = readJSON('frontend/package-lock.json')
+  const installed = new Map(npmPackages(lock).map(pkg => [pkg.directory, pkg]))
   return readJSON('frontend/bundled-dependencies.json').map(pkg => {
-    const locked = lock.packages[pkg.directory]
-    if (!locked || locked.version !== pkg.version) throw new Error(`Unpinned bundled package ${pkg.name}@${pkg.version}`)
+    const locked = installed.get(pkg.directory)
+    if (!locked || locked.name !== pkg.name || locked.version !== pkg.version) throw new Error(`Unpinned bundled package ${pkg.name}@${pkg.version}`)
     const directory = join(root, 'frontend', pkg.directory)
     const files = notices(directory, directory)
     // Only Vite's emitted preload helpers are distributed. Its server-side
@@ -195,9 +197,8 @@ export function usageFromInputs(catalog, lock, modules) {
       evidence: component ? evidence : `Not present in ${evidence}`,
     })
   }
-  for (const [path, pkg] of Object.entries(lock.packages)) {
-    if (!path) continue
-    const name = path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length)
+  for (const pkg of npmPackages(lock)) {
+    const path = pkg.directory, name = pkg.name
     // Keep nested package instances separate, including build-only packages
     // whose names coincide with a different distributed version.
     const id = `npm:${name}`
@@ -205,6 +206,7 @@ export function usageFromInputs(catalog, lock, modules) {
     if (component && component.version !== pkg.version) {
       usage.push({ id: `npm:${path}`, name, version: pkg.version, dependencyType: pkg.dev ? 'development' : 'runtime', distribution: 'excluded', targets: [], includedTargets: [], externalTargets: [], license: null, evidence: 'This package instance is not retained in the production bundle' })
     } else add(id, name, pkg.version, pkg.dev ? 'development' : 'runtime', 'production frontend bundle module inventory')
+    if (pkg.linked) usage.at(-1).sourceDirectory = pkg.sourceDirectory
   }
   for (const module of modules) {
     if (!module.Main) add(`go:${module.Path}`, module.Path, module.Version, module.Indirect ? 'indirect' : 'direct', 'production Go dependency graphs for the configured release targets')
@@ -258,7 +260,17 @@ function main() {
     if (mode === 'refresh') {
       writeFileSync(join(root, catalogPath), stable(catalog))
       writeFileSync(join(root, 'licenses/dependency-usage.json'), stable(usage))
-    } else if (stable(catalog) !== readFileSync(join(root, catalogPath), 'utf8') || stable(usage) !== readFileSync(join(root, 'licenses/dependency-usage.json'), 'utf8')) throw new Error('OSS inventory changed. Review approvals and run node scripts/oss-notices.mjs refresh.')
+    } else {
+      const changed = [
+        stable(catalog) !== readFileSync(join(root, catalogPath), 'utf8') && catalogPath,
+        stable(usage) !== readFileSync(join(root, 'licenses/dependency-usage.json'), 'utf8') && 'licenses/dependency-usage.json',
+      ].filter(Boolean)
+      if (changed.length) {
+        mkdirSync(join(root, 'licenses/build'), { recursive: true })
+        writeFileSync(join(root, 'licenses/build/oss-check-candidate.json'), stable({ catalog, usage }))
+        throw new Error(`OSS inventory changed: ${changed.join(', ')}. Review licenses/build/oss-check-candidate.json; refresh only after review.`)
+      }
+    }
     console.log(`OSS check passed: ${catalog.components.length} components across ${targets.length} targets`)
   } else if (mode === 'package' || mode === 'package-all') {
     const catalog = readJSON(catalogPath)

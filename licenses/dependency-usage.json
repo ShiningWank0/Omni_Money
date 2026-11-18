@@ -50,7 +50,7 @@
         "sqlite_omit_load_extension",
         "desktop",
         "production",
-        "webkit2_41"
+        "gtk3"
       ],
       "entry": "."
     },
@@ -80,6 +80,18 @@
     }
   ],
   "dependencies": [
+    {
+      "id": "go:al.essio.dev/pkg/shellescape",
+      "name": "al.essio.dev/pkg/shellescape",
+      "version": "v1.5.1",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
     {
       "id": "go:atomicgo.dev/cursor",
       "name": "atomicgo.dev/cursor",
@@ -119,7 +131,7 @@
     {
       "id": "go:dario.cat/mergo",
       "name": "dario.cat/mergo",
-      "version": "v1.0.0",
+      "version": "v1.0.2",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -133,22 +145,6 @@
       "name": "git.sr.ht/~jackmordaunt/go-toast/v2",
       "version": "v2.0.3",
       "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-windows-amd64"
-      ],
-      "externalTargets": [],
-      "license": "Unlicense OR MIT",
-      "evidence": "production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/acarl005/stripansi",
-      "name": "github.com/acarl005/stripansi",
-      "version": "v0.0.0-20180116102854-5a71ef0e047d",
-      "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
       "includedTargets": [],
@@ -159,7 +155,43 @@
     {
       "id": "go:github.com/alecthomas/chroma/v2",
       "name": "github.com/alecthomas/chroma/v2",
-      "version": "v2.14.0",
+      "version": "v2.23.1",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/AlekSi/pointer",
+      "name": "github.com/AlekSi/pointer",
+      "version": "v1.2.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/atotto/clipboard",
+      "name": "github.com/atotto/clipboard",
+      "version": "v0.1.4",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/atterpac/refresh",
+      "name": "github.com/atterpac/refresh",
+      "version": "v1.1.4",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -193,25 +225,93 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/bep/debounce",
-      "name": "github.com/bep/debounce",
-      "version": "v1.2.1",
+      "id": "go:github.com/blakesmith/ar",
+      "name": "github.com/blakesmith/ar",
+      "version": "v0.0.0-20190502131153-809d4375e1fb",
       "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-windows-amd64"
-      ],
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
       "externalTargets": [],
-      "license": "MIT",
-      "evidence": "production Go dependency graphs for the configured release targets"
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/bitfield/script",
-      "name": "github.com/bitfield/script",
-      "version": "v0.24.0",
+      "id": "go:github.com/BurntSushi/toml",
+      "name": "github.com/BurntSushi/toml",
+      "version": "v1.6.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/catppuccin/go",
+      "name": "github.com/catppuccin/go",
+      "version": "v0.3.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/cavaliergopher/cpio",
+      "name": "github.com/cavaliergopher/cpio",
+      "version": "v1.0.1",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/chainguard-dev/git-urls",
+      "name": "github.com/chainguard-dev/git-urls",
+      "version": "v1.0.2",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/charmbracelet/bubbles",
+      "name": "github.com/charmbracelet/bubbles",
+      "version": "v0.21.1-0.20250623103423-23b8fd6302d7",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/charmbracelet/bubbletea",
+      "name": "github.com/charmbracelet/bubbletea",
+      "version": "v1.3.10",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/charmbracelet/colorprofile",
+      "name": "github.com/charmbracelet/colorprofile",
+      "version": "v0.4.1",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -223,6 +323,18 @@
     {
       "id": "go:github.com/charmbracelet/glamour",
       "name": "github.com/charmbracelet/glamour",
+      "version": "v0.10.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/charmbracelet/huh",
+      "name": "github.com/charmbracelet/huh",
       "version": "v0.8.0",
       "dependencyType": "indirect",
       "distribution": "excluded",
@@ -235,7 +347,7 @@
     {
       "id": "go:github.com/charmbracelet/lipgloss",
       "name": "github.com/charmbracelet/lipgloss",
-      "version": "v0.12.1",
+      "version": "v1.1.1-0.20250404203927-76690c660834",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -247,7 +359,91 @@
     {
       "id": "go:github.com/charmbracelet/x/ansi",
       "name": "github.com/charmbracelet/x/ansi",
-      "version": "v0.1.4",
+      "version": "v0.11.4",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/charmbracelet/x/cellbuf",
+      "name": "github.com/charmbracelet/x/cellbuf",
+      "version": "v0.0.14",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/charmbracelet/x/exp/slice",
+      "name": "github.com/charmbracelet/x/exp/slice",
+      "version": "v0.0.0-20260122224438-b01af16209d9",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/charmbracelet/x/exp/strings",
+      "name": "github.com/charmbracelet/x/exp/strings",
+      "version": "v0.0.0-20260122224438-b01af16209d9",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/charmbracelet/x/term",
+      "name": "github.com/charmbracelet/x/term",
+      "version": "v0.2.2",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/clipperhouse/displaywidth",
+      "name": "github.com/clipperhouse/displaywidth",
+      "version": "v0.7.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/clipperhouse/stringish",
+      "name": "github.com/clipperhouse/stringish",
+      "version": "v0.1.1",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/clipperhouse/uax29/v2",
+      "name": "github.com/clipperhouse/uax29/v2",
+      "version": "v2.4.0",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -269,9 +465,21 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
+      "id": "go:github.com/coder/websocket",
+      "name": "github.com/coder/websocket",
+      "version": "v1.8.14",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
       "id": "go:github.com/containerd/console",
       "name": "github.com/containerd/console",
-      "version": "v1.0.3",
+      "version": "v1.0.5",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -284,6 +492,18 @@
       "id": "go:github.com/cyphar/filepath-securejoin",
       "name": "github.com/cyphar/filepath-securejoin",
       "version": "v0.6.1",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/danieljoos/wincred",
+      "name": "github.com/danieljoos/wincred",
+      "version": "v1.2.3",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -307,7 +527,43 @@
     {
       "id": "go:github.com/dlclark/regexp2",
       "name": "github.com/dlclark/regexp2",
-      "version": "v1.11.0",
+      "version": "v1.11.5",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/dominikbraun/graph",
+      "name": "github.com/dominikbraun/graph",
+      "version": "v0.23.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/dustin/go-humanize",
+      "name": "github.com/dustin/go-humanize",
+      "version": "v1.0.1",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/ebitengine/purego",
+      "name": "github.com/ebitengine/purego",
+      "version": "v0.11.1",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -329,9 +585,21 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/flytam/filenamify",
-      "name": "github.com/flytam/filenamify",
-      "version": "v1.2.0",
+      "id": "go:github.com/erikgeiser/coninput",
+      "name": "github.com/erikgeiser/coninput",
+      "version": "v0.0.0-20211004153227-1c3628e74d0f",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/fatih/color",
+      "name": "github.com/fatih/color",
+      "version": "v1.18.0",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -365,28 +633,6 @@
       "includedTargets": [
         "server-linux-amd64",
         "server-linux-arm64"
-      ],
-      "externalTargets": [],
-      "license": "MIT",
-      "evidence": "production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/gabriel-vasile/mimetype",
-      "name": "github.com/gabriel-vasile/mimetype",
-      "version": "v1.4.16",
-      "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
       ],
       "externalTargets": [],
       "license": "MIT",
@@ -445,6 +691,30 @@
       "evidence": "production Go dependency graphs for the configured release targets"
     },
     {
+      "id": "go:github.com/go-task/slim-sprig/v3",
+      "name": "github.com/go-task/slim-sprig/v3",
+      "version": "v3.0.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/go-task/template",
+      "name": "github.com/go-task/template",
+      "version": "v0.2.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
       "id": "go:github.com/go-viper/mapstructure/v2",
       "name": "github.com/go-viper/mapstructure/v2",
       "version": "v2.5.0",
@@ -499,9 +769,21 @@
       "evidence": "production Go dependency graphs for the configured release targets"
     },
     {
+      "id": "go:github.com/gobwas/glob",
+      "name": "github.com/gobwas/glob",
+      "version": "v0.2.3",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
       "id": "go:github.com/godbus/dbus/v5",
       "name": "github.com/godbus/dbus/v5",
-      "version": "v5.1.0",
+      "version": "v5.2.2",
       "dependencyType": "indirect",
       "distribution": "included",
       "targets": [
@@ -587,6 +869,30 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
+      "id": "go:github.com/google/jsonschema-go",
+      "name": "github.com/google/jsonschema-go",
+      "version": "v0.4.3",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/google/rpmpack",
+      "name": "github.com/google/rpmpack",
+      "version": "v0.7.1",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
       "id": "go:github.com/google/shlex",
       "name": "github.com/google/shlex",
       "version": "v0.0.0-20191202100458-e7afc7fbc510",
@@ -605,12 +911,10 @@
       "dependencyType": "indirect",
       "distribution": "included",
       "targets": [
-        "desktop-windows-amd64",
         "server-linux-amd64",
         "server-linux-arm64"
       ],
       "includedTargets": [
-        "desktop-windows-amd64",
         "server-linux-amd64",
         "server-linux-arm64"
       ],
@@ -621,7 +925,43 @@
     {
       "id": "go:github.com/gookit/color",
       "name": "github.com/gookit/color",
-      "version": "v1.5.4",
+      "version": "v1.6.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/goreleaser/chglog",
+      "name": "github.com/goreleaser/chglog",
+      "version": "v0.7.4",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/goreleaser/fileglob",
+      "name": "github.com/goreleaser/fileglob",
+      "version": "v1.4.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/goreleaser/nfpm/v2",
+      "name": "github.com/goreleaser/nfpm/v2",
+      "version": "v2.44.1",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -643,69 +983,9 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/gorilla/websocket",
-      "name": "github.com/gorilla/websocket",
-      "version": "v1.5.3",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/itchyny/gojq",
-      "name": "github.com/itchyny/gojq",
-      "version": "v0.12.13",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/itchyny/timefmt-go",
-      "name": "github.com/itchyny/timefmt-go",
-      "version": "v0.1.5",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/jackmordaunt/icns",
-      "name": "github.com/jackmordaunt/icns",
-      "version": "v1.0.0",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/jaypipes/ghw",
-      "name": "github.com/jaypipes/ghw",
-      "version": "v0.21.3",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/jaypipes/pcidb",
-      "name": "github.com/jaypipes/pcidb",
-      "version": "v1.1.1",
+      "id": "go:github.com/huandu/xstrings",
+      "name": "github.com/huandu/xstrings",
+      "version": "v1.5.0",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -727,9 +1007,9 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/jchv/go-winloader",
-      "name": "github.com/jchv/go-winloader",
-      "version": "v0.0.0-20210711035445-715c2860da7e",
+      "id": "go:github.com/joho/godotenv",
+      "name": "github.com/joho/godotenv",
+      "version": "v1.5.1",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -741,7 +1021,19 @@
     {
       "id": "go:github.com/kevinburke/ssh_config",
       "name": "github.com/kevinburke/ssh_config",
-      "version": "v1.2.0",
+      "version": "v1.4.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/klauspost/compress",
+      "name": "github.com/klauspost/compress",
+      "version": "v1.18.7",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -763,9 +1055,9 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/kr/text",
-      "name": "github.com/kr/text",
-      "version": "v0.2.0",
+      "id": "go:github.com/klauspost/pgzip",
+      "name": "github.com/klauspost/pgzip",
+      "version": "v1.2.6",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -799,9 +1091,21 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
+      "id": "go:github.com/Ladicle/tabwriter",
+      "name": "github.com/Ladicle/tabwriter",
+      "version": "v1.0.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
       "id": "go:github.com/leaanthony/clir",
       "name": "github.com/leaanthony/clir",
-      "version": "v1.3.0",
+      "version": "v1.7.0",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -811,99 +1115,9 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/leaanthony/debme",
-      "name": "github.com/leaanthony/debme",
-      "version": "v1.2.1",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/leaanthony/go-ansi-parser",
-      "name": "github.com/leaanthony/go-ansi-parser",
-      "version": "v1.6.1",
-      "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "externalTargets": [],
-      "license": "MIT",
-      "evidence": "production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/leaanthony/gosod",
-      "name": "github.com/leaanthony/gosod",
-      "version": "v1.0.4",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/leaanthony/slicer",
-      "name": "github.com/leaanthony/slicer",
-      "version": "v1.6.0",
-      "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "externalTargets": [],
-      "license": "MIT",
-      "evidence": "production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/leaanthony/u",
-      "name": "github.com/leaanthony/u",
-      "version": "v1.1.1",
-      "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "externalTargets": [],
-      "license": "MIT",
-      "evidence": "production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/leaanthony/winicon",
-      "name": "github.com/leaanthony/winicon",
-      "version": "v1.0.0",
+      "id": "go:github.com/leaanthony/dmg",
+      "name": "github.com/leaanthony/dmg",
+      "version": "v0.0.0-20260731074841-5c28840cf819",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -925,9 +1139,21 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
+      "id": "go:github.com/lmittmann/tint",
+      "name": "github.com/lmittmann/tint",
+      "version": "v1.1.3",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
       "id": "go:github.com/lucasb-eyer/go-colorful",
       "name": "github.com/lucasb-eyer/go-colorful",
-      "version": "v1.2.0",
+      "version": "v1.3.0",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -937,9 +1163,9 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/Masterminds/semver",
-      "name": "github.com/Masterminds/semver",
-      "version": "v1.5.0",
+      "id": "go:github.com/Masterminds/goutils",
+      "name": "github.com/Masterminds/goutils",
+      "version": "v1.1.1",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -949,9 +1175,21 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/matryer/is",
-      "name": "github.com/matryer/is",
-      "version": "v1.4.1",
+      "id": "go:github.com/Masterminds/semver/v3",
+      "name": "github.com/Masterminds/semver/v3",
+      "version": "v3.4.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/Masterminds/sprig/v3",
+      "name": "github.com/Masterminds/sprig/v3",
+      "version": "v3.3.0",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -985,9 +1223,21 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
+      "id": "go:github.com/mattn/go-localereader",
+      "name": "github.com/mattn/go-localereader",
+      "version": "v0.0.1",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
       "id": "go:github.com/mattn/go-runewidth",
       "name": "github.com/mattn/go-runewidth",
-      "version": "v0.0.16",
+      "version": "v0.0.19",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -1023,6 +1273,18 @@
       "evidence": "production Go dependency graphs for the configured release targets"
     },
     {
+      "id": "go:github.com/mattn/go-zglob",
+      "name": "github.com/mattn/go-zglob",
+      "version": "v0.0.6",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
       "id": "go:github.com/microcosm-cc/bluemonday",
       "name": "github.com/microcosm-cc/bluemonday",
       "version": "v1.0.27",
@@ -1047,6 +1309,78 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
+      "id": "go:github.com/mitchellh/copystructure",
+      "name": "github.com/mitchellh/copystructure",
+      "version": "v1.2.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/mitchellh/hashstructure/v2",
+      "name": "github.com/mitchellh/hashstructure/v2",
+      "version": "v2.0.2",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/mitchellh/reflectwalk",
+      "name": "github.com/mitchellh/reflectwalk",
+      "version": "v1.0.2",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/modelcontextprotocol/go-sdk",
+      "name": "github.com/modelcontextprotocol/go-sdk",
+      "version": "v1.6.1",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/muesli/ansi",
+      "name": "github.com/muesli/ansi",
+      "version": "v0.0.0-20230316100256-276c6243b2f6",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/muesli/cancelreader",
+      "name": "github.com/muesli/cancelreader",
+      "version": "v0.2.2",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
       "id": "go:github.com/muesli/reflow",
       "name": "github.com/muesli/reflow",
       "version": "v0.3.0",
@@ -1061,7 +1395,19 @@
     {
       "id": "go:github.com/muesli/termenv",
       "name": "github.com/muesli/termenv",
-      "version": "v0.15.3-0.20240618155329-98d742f6907a",
+      "version": "v0.16.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/ncruces/go-strftime",
+      "name": "github.com/ncruces/go-strftime",
+      "version": "v1.0.0",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -1074,18 +1420,6 @@
       "id": "go:github.com/nfnt/resize",
       "name": "github.com/nfnt/resize",
       "version": "v0.0.0-20180221191011-83c6a9932646",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/niemeyer/pretty",
-      "name": "github.com/niemeyer/pretty",
-      "version": "v0.0.0-20200227124842-a10e7caefd8e",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -1125,50 +1459,6 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/pkg/browser",
-      "name": "github.com/pkg/browser",
-      "version": "v0.0.0-20240102092130-5ac0b6a4141c",
-      "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "externalTargets": [],
-      "license": "BSD-2-Clause",
-      "evidence": "production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/pkg/errors",
-      "name": "github.com/pkg/errors",
-      "version": "v0.9.1",
-      "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "externalTargets": [],
-      "license": "BSD-2-Clause",
-      "evidence": "production Go dependency graphs for the configured release targets"
-    },
-    {
       "id": "go:github.com/pmezard/go-difflib",
       "name": "github.com/pmezard/go-difflib",
       "version": "v1.0.0",
@@ -1183,7 +1473,7 @@
     {
       "id": "go:github.com/ProtonMail/go-crypto",
       "name": "github.com/ProtonMail/go-crypto",
-      "version": "v1.1.6",
+      "version": "v1.3.0",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -1195,7 +1485,31 @@
     {
       "id": "go:github.com/pterm/pterm",
       "name": "github.com/pterm/pterm",
-      "version": "v0.12.80",
+      "version": "v0.12.82",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/radovskyb/watcher",
+      "name": "github.com/radovskyb/watcher",
+      "version": "v1.0.7",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/remyoudompheng/bigfft",
+      "name": "github.com/remyoudompheng/bigfft",
+      "version": "v0.0.0-20230129092748-24d4a6f8daec",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -1209,27 +1523,17 @@
       "name": "github.com/rivo/uniseg",
       "version": "v0.4.7",
       "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
       "externalTargets": [],
-      "license": "MIT",
-      "evidence": "production Go dependency graphs for the configured release targets"
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/sabhiram/go-gitignore",
-      "name": "github.com/sabhiram/go-gitignore",
-      "version": "v0.0.0-20210923224102-525f6e181f06",
+      "id": "go:github.com/rjeczalik/notify",
+      "name": "github.com/rjeczalik/notify",
+      "version": "v0.9.3",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -1239,31 +1543,57 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/samber/lo",
-      "name": "github.com/samber/lo",
-      "version": "v1.49.1",
+      "id": "go:github.com/sajari/fuzzy",
+      "name": "github.com/sajari/fuzzy",
+      "version": "v1.0.0",
       "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
       "externalTargets": [],
-      "license": "MIT",
-      "evidence": "production Go dependency graphs for the configured release targets"
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/segmentio/asm",
+      "name": "github.com/segmentio/asm",
+      "version": "v1.1.3",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/segmentio/encoding",
+      "name": "github.com/segmentio/encoding",
+      "version": "v0.5.4",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
       "id": "go:github.com/sergi/go-diff",
       "name": "github.com/sergi/go-diff",
-      "version": "v1.3.2-0.20230802210424-5b0b94c5c0d3",
+      "version": "v1.4.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/shopspring/decimal",
+      "name": "github.com/shopspring/decimal",
+      "version": "v1.4.0",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -1275,7 +1605,31 @@
     {
       "id": "go:github.com/skeema/knownhosts",
       "name": "github.com/skeema/knownhosts",
-      "version": "v1.3.1",
+      "version": "v1.3.2",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/spf13/cast",
+      "name": "github.com/spf13/cast",
+      "version": "v1.10.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/spf13/pflag",
+      "name": "github.com/spf13/pflag",
+      "version": "v1.0.10",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -1309,54 +1663,6 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/tidwall/gjson",
-      "name": "github.com/tidwall/gjson",
-      "version": "v1.14.2",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/tidwall/match",
-      "name": "github.com/tidwall/match",
-      "version": "v1.1.1",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/tidwall/pretty",
-      "name": "github.com/tidwall/pretty",
-      "version": "v1.2.0",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/tidwall/sjson",
-      "name": "github.com/tidwall/sjson",
-      "version": "v1.2.5",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
       "id": "go:github.com/tinylib/msgp",
       "name": "github.com/tinylib/msgp",
       "version": "v1.6.4",
@@ -1375,26 +1681,16 @@
       "evidence": "production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/tkrajina/go-reflector",
-      "name": "github.com/tkrajina/go-reflector",
-      "version": "v0.5.8",
+      "id": "go:github.com/ulikunitz/xz",
+      "name": "github.com/ulikunitz/xz",
+      "version": "v0.5.15",
       "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
       "externalTargets": [],
-      "license": "Apache-2.0",
-      "evidence": "production Go dependency graphs for the configured release targets"
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
       "id": "go:github.com/valyala/bytebufferpool",
@@ -1421,25 +1717,21 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/wailsapp/go-webview2",
-      "name": "github.com/wailsapp/go-webview2",
-      "version": "v1.0.22",
+      "id": "go:github.com/wailsapp/task/v3",
+      "name": "github.com/wailsapp/task/v3",
+      "version": "v3.40.1-patched3",
       "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-windows-amd64"
-      ],
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
       "externalTargets": [],
-      "license": "MIT AND ISC",
-      "evidence": "production Go dependency graphs for the configured release targets"
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/wailsapp/wails/v2",
-      "name": "github.com/wailsapp/wails/v2",
-      "version": "v2.17.1",
+      "id": "go:github.com/wailsapp/wails/v3",
+      "name": "github.com/wailsapp/wails/v3",
+      "version": "v3.1.0",
       "dependencyType": "direct",
       "distribution": "included",
       "targets": [
@@ -1455,32 +1747,8 @@
         "desktop-windows-amd64"
       ],
       "externalTargets": [],
-      "license": "MIT",
+      "license": "MIT AND ISC",
       "evidence": "production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/wzshiming/ctc",
-      "name": "github.com/wzshiming/ctc",
-      "version": "v1.2.3",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/wzshiming/winseq",
-      "name": "github.com/wzshiming/winseq",
-      "version": "v0.0.0-20200112104235-db357dc107ae",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
       "id": "go:github.com/x448/float16",
@@ -1525,6 +1793,18 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
+      "id": "go:github.com/yosida95/uritemplate/v3",
+      "name": "github.com/yosida95/uritemplate/v3",
+      "version": "v3.0.2",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
       "id": "go:github.com/yuin/goldmark",
       "name": "github.com/yuin/goldmark",
       "version": "v1.7.17",
@@ -1539,7 +1819,7 @@
     {
       "id": "go:github.com/yuin/goldmark-emoji",
       "name": "github.com/yuin/goldmark-emoji",
-      "version": "v1.0.3",
+      "version": "v1.0.6",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -1549,9 +1829,33 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/yusufpapurcu/wmi",
-      "name": "github.com/yusufpapurcu/wmi",
-      "version": "v1.2.4",
+      "id": "go:github.com/zalando/go-keyring",
+      "name": "github.com/zalando/go-keyring",
+      "version": "v0.2.6",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:github.com/zeebo/xxh3",
+      "name": "github.com/zeebo/xxh3",
+      "version": "v1.1.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:gitlab.com/digitalxero/go-conventional-commit",
+      "name": "gitlab.com/digitalxero/go-conventional-commit",
+      "version": "v1.0.7",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -1611,6 +1915,18 @@
       "evidence": "production Go dependency graphs for the configured release targets"
     },
     {
+      "id": "go:golang.org/x/exp",
+      "name": "golang.org/x/exp",
+      "version": "v0.0.0-20260410095643-746e56fc9e2f",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
       "id": "go:golang.org/x/image",
       "name": "golang.org/x/image",
       "version": "v0.48.0",
@@ -1653,22 +1969,24 @@
       "name": "golang.org/x/net",
       "version": "v0.62.0",
       "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
       "externalTargets": [],
-      "license": "BSD-3-Clause",
-      "evidence": "production Go dependency graphs for the configured release targets"
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:golang.org/x/oauth2",
+      "name": "golang.org/x/oauth2",
+      "version": "v0.35.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
       "id": "go:golang.org/x/sync",
@@ -1725,22 +2043,12 @@
       "name": "golang.org/x/text",
       "version": "v0.44.0",
       "dependencyType": "indirect",
-      "distribution": "included",
-      "targets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
-      "includedTargets": [
-        "desktop-darwin-amd64",
-        "desktop-darwin-arm64",
-        "desktop-linux-amd64",
-        "desktop-windows-amd64"
-      ],
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
       "externalTargets": [],
-      "license": "BSD-3-Clause",
-      "evidence": "production Go dependency graphs for the configured release targets"
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
       "id": "go:golang.org/x/time",
@@ -1767,9 +2075,9 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:gopkg.in/check.v1",
-      "name": "gopkg.in/check.v1",
-      "version": "v1.0.0-20200227125254-8fa46927fb4f",
+      "id": "go:gopkg.in/warnings.v0",
+      "name": "gopkg.in/warnings.v0",
+      "version": "v0.1.2",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -1779,9 +2087,9 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:gopkg.in/warnings.v0",
-      "name": "gopkg.in/warnings.v0",
-      "version": "v0.1.2",
+      "id": "go:gopkg.in/yaml.v2",
+      "name": "gopkg.in/yaml.v2",
+      "version": "v2.4.0",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -1815,9 +2123,57 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
+      "id": "go:modernc.org/libc",
+      "name": "modernc.org/libc",
+      "version": "v1.67.6",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:modernc.org/mathutil",
+      "name": "modernc.org/mathutil",
+      "version": "v1.7.1",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:modernc.org/memory",
+      "name": "modernc.org/memory",
+      "version": "v1.11.0",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
+      "id": "go:modernc.org/sqlite",
+      "name": "modernc.org/sqlite",
+      "version": "v1.44.3",
+      "dependencyType": "indirect",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production Go dependency graphs for the configured release targets"
+    },
+    {
       "id": "go:mvdan.cc/sh/v3",
       "name": "mvdan.cc/sh/v3",
-      "version": "v3.7.0",
+      "version": "v3.12.0",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
@@ -2940,6 +3296,18 @@
       "evidence": "Not present in production frontend bundle module inventory"
     },
     {
+      "id": "npm:fill-range",
+      "name": "fill-range",
+      "version": "7.1.1",
+      "dependencyType": "development",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production frontend bundle module inventory"
+    },
+    {
       "id": "npm:fsevents",
       "name": "fsevents",
       "version": "2.3.3",
@@ -3027,6 +3395,18 @@
       "id": "npm:is-decimal",
       "name": "is-decimal",
       "version": "2.0.1",
+      "dependencyType": "development",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production frontend bundle module inventory"
+    },
+    {
+      "id": "npm:is-number",
+      "name": "is-number",
+      "version": "7.0.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3417,7 +3797,8 @@
       "includedTargets": [],
       "externalTargets": [],
       "license": null,
-      "evidence": "Not present in production frontend bundle module inventory"
+      "evidence": "Not present in production frontend bundle module inventory",
+      "sourceDirectory": "vendor/picomatch"
     },
     {
       "id": "npm:pinia",
@@ -3617,6 +3998,18 @@
       "id": "npm:tldts-core",
       "name": "tldts-core",
       "version": "7.4.11",
+      "dependencyType": "development",
+      "distribution": "excluded",
+      "targets": [],
+      "includedTargets": [],
+      "externalTargets": [],
+      "license": null,
+      "evidence": "Not present in production frontend bundle module inventory"
+    },
+    {
+      "id": "npm:to-regex-range",
+      "name": "to-regex-range",
+      "version": "5.0.1",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],

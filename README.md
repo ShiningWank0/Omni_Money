@@ -102,7 +102,7 @@ CSV v3には取引保存の受付ID、処理中・失敗した入力、再送防
 │   ├── vault/            # per-user vault manager、lease、drain、zeroize
 │   ├── middleware/       # session、CSRF、proxy、security boundary
 │   └── models/           # データモデル
-├── frontend/             # Vue フロントエンド（`src/`、`wailsjs/`、`index.html`）
+├── frontend/             # Vue フロントエンド（`src/`、`bindings/`、`index.html`）
 │   └── src/
 │       ├── components/   # 画面部品
 │       ├── store/        # Pinia store
@@ -113,7 +113,8 @@ CSV v3には取引保存の受付ID、処理中・失敗した入力、再送防
 ├── Dockerfile            # サーバーモード用 Docker 定義
 ├── compose.yaml          # Docker Compose / TrueNAS 用構成
 ├── .env.example          # サーバー環境変数の雛形
-├── wails.json            # Wails 設定
+├── Taskfile.yml          # Wails 3 の読み取り専用build手順
+├── build/config.yml      # Wails 3 開発設定
 └── VERSION               # リリースバージョン
 ```
 

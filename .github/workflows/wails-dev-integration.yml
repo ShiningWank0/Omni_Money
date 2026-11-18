@@ -11,6 +11,7 @@ permissions:
 
 env:
   GOTOOLCHAIN: local
+  GOFLAGS: -tags=gtk3
 
 jobs:
   browser:
@@ -67,17 +68,15 @@ jobs:
       - name: Install selected Wails CLI
         if: matrix.mode == 'vite'
         run: |
-          set -euo pipefail
-          WAILS_VERSION="$(go list -mod=readonly -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"
-          [[ "$WAILS_VERSION" =~ ^v2\.[0-9]+\.[0-9]+$ ]]
-          go install "github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION"
-          node scripts/wails-dev-evidence.mjs cli "$(go env GOPATH)/bin/wails"
+          node scripts/install-wails-v3.mjs
+          node scripts/wails-dev-evidence.mjs cli "$(go env GOPATH)/bin/wails3"
+
       - name: Build and inspect development binary
         id: build
         run: |
-          go build -mod=readonly -tags "dev,desktop,webkit2_41,libsqlite3,sqlite_omit_load_extension" -o "$RUNNER_TEMP/omni-wails-dev" .
+          OMNI_CI_BROWSER_BINARY="$RUNNER_TEMP/omni-wails-dev" node scripts/build-wails-browser.mjs
           mkdir -p .oss-cache/wails-dev-results
-          node scripts/wails-dev-build.mjs "$RUNNER_TEMP/omni-wails-dev" > .oss-cache/wails-dev-results/selected-build.json
+          node scripts/wails-dev-build.mjs "$RUNNER_TEMP/omni-wails-dev" linux/amd64 browser > .oss-cache/wails-dev-results/selected-build.json
       - name: Scan development call graph
         if: ${{ !cancelled() && matrix.mode == 'assets' && steps.build.outcome == 'success' }}
         run: node scripts/security-reports.mjs govulncheck-dev

@@ -1,3 +1,5 @@
+//go:build !server || omni_wails_browser
+
 package main
 
 import (
@@ -12,7 +14,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/wailsapp/wails/v3/pkg/application"
 
 	"omni_money/backend/core"
 	"omni_money/backend/desktopaccount"
@@ -73,19 +75,22 @@ func newAppWithCoordinator(coordinator desktopVaultCoordinator) *App {
 	return &App{
 		coordinator: coordinator,
 		chooseCSVDirectory: func(ctx context.Context) (string, error) {
-			return wailsRuntime.OpenDirectoryDialog(ctx, wailsRuntime.OpenDialogOptions{
-				Title:                "CSVの保存先（暗号化されたボリューム）を選択",
-				CanCreateDirectories: true,
-				ResolvesAliases:      true,
-			})
+			return application.Get().Dialog.OpenFile().
+				SetTitle("CSVの保存先（暗号化されたボリューム）を選択").
+				CanChooseFiles(false).CanChooseDirectories(true).
+				CanCreateDirectories(true).ResolvesAliases(true).PromptForSingleSelection()
 		},
 		chooseCSVFile: func(ctx context.Context) (string, error) {
-			return wailsRuntime.OpenFileDialog(ctx, wailsRuntime.OpenDialogOptions{
-				Title:   "CSVバックアップを選択",
-				Filters: []wailsRuntime.FileFilter{{DisplayName: "CSV", Pattern: "*.csv"}},
-			})
+			return application.Get().Dialog.OpenFile().SetTitle("CSVバックアップを選択").
+				CanChooseFiles(true).CanChooseDirectories(false).AddFilter("CSV", "*.csv").PromptForSingleSelection()
 		},
 	}
+}
+
+// ServiceStartup initializes the binding service while leaving its vault locked.
+func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) error {
+	a.startup(ctx)
+	return nil
 }
 
 // startup records the Wails context but deliberately leaves the vault locked.
