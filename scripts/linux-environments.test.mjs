@@ -4,12 +4,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
-import { checkLinuxEnvironments, workflowPaths } from './linux-environments.mjs'
+import { capturePaths, checkLinuxEnvironments, workflowPaths } from './linux-environments.mjs'
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'omni-linux-lock-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
-  for (const path of ['build/locks/linux-environments.json', 'Dockerfile', ...workflowPaths]) {
+  for (const path of ['build/locks/linux-environments.json', 'Dockerfile', ...workflowPaths, ...capturePaths]) {
     mkdirSync(dirname(join(root, path)), { recursive: true })
     writeFileSync(join(root, path), readFileSync(new URL(`../${path}`, import.meta.url)))
   }
@@ -17,6 +17,13 @@ function fixture(t) {
 }
 
 test('all normal Linux CI/release inputs match one immutable lock', () => checkLinuxEnvironments())
+test('major updates cannot delete the capture workflow or its source recipe', t => {
+  for (const path of ['.github/workflows/capture-build-environments.yml', 'build/environments/ubuntu.Dockerfile']) {
+    const root = fixture(t)
+    rmSync(join(root, path))
+    assert.throws(() => checkLinuxEnvironments(root), error => error.code === 'ENOENT' && error.path === join(root, path))
+  }
+})
 test('a workflow-only digest change is rejected instead of silently changing the environment', t => {
   const root = fixture(t), path = join(root, workflowPaths[0])
   writeFileSync(path, readFileSync(path, 'utf8').replace(/sha256:[a-f0-9]{64}/g, `sha256:${'f'.repeat(64)}`))

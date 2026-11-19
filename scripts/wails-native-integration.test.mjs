@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, sy
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
-import { mountsWithin, ownedBinary, removeSessionData, verifyNativeBuild } from './wails-native-integration.mjs'
+import { mountsWithin, ownedBinary, removeSessionData, stopSessionMounts, verifyNativeBuild } from './wails-native-integration.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 
@@ -51,6 +51,56 @@ test('session cleanup waits for portal mounts and propagates removal errors', as
   await assert.rejects(removeSessionData(directory, () => mount(directory + '/runtime/doc'), () => {
     assert.fail('Removal must not traverse a persistent mount')
   }, 0), /mounts did not stop/)
+})
+
+test('an orphaned private document portal is normally unmounted before deleting data', async t => {
+  const directory = mkdtempSync(join(root, '.wails-portal-test-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  mkdirSync(join(directory, 'runtime'))
+  const portal = join(directory, 'runtime/doc')
+  const row = `30 20 0:26 / ${portal} rw,nosuid - fuse.portal portal rw,user_id=1001,group_id=1001\n`
+  let mounted = true
+  const commands = [], evidence = {}
+  await stopSessionMounts(directory, { uid: 1001, graceMs: 0, evidence,
+    inspect: () => mounted ? row : '', run: (program, args) => {
+      commands.push([program, args])
+      assert.equal(existsSync(directory), true, 'Data was removed before the portal unmounted')
+      mounted = false
+    } })
+  assert.deepEqual(commands, [['fusermount3', ['-u', '--', portal]]])
+  assert.deepEqual(evidence.unmounted, [{ id: '30', path: 'runtime/doc', type: 'fuse.portal' }])
+  assert.deepEqual(evidence.remaining, [])
+  await removeSessionData(directory, () => mounted ? row : '')
+  assert.equal(existsSync(directory), false)
+})
+
+test('portal cleanup rejects unknown mounts and propagates permission or busy failures', async t => {
+  const directory = mkdtempSync(join(root, '.wails-portal-test-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  mkdirSync(join(directory, 'runtime'))
+  const row = `30 20 0:26 / ${directory}/runtime/doc rw,nosuid - fuse.portal portal rw,user_id=1001,group_id=1001\n`
+  for (const unexpected of [row.replace('/runtime/doc ', '/runtime/other '), row.replace('fuse.portal', 'ext4'),
+    row.replace('user_id=1001', 'user_id=1002'), row + row]) {
+    await assert.rejects(stopSessionMounts(directory, { uid: 1001, graceMs: 0, inspect: () => unexpected,
+      run: () => assert.fail('An unknown mount must never be touched') }), /unexpected|Unexpected|foreign/)
+  }
+  for (const message of ['EPERM fixture', 'EBUSY fixture']) {
+    await assert.rejects(stopSessionMounts(directory, { uid: 1001, graceMs: 0, inspect: () => row,
+      run: () => { throw new Error(message) } }), new RegExp(message))
+  }
+  await assert.rejects(stopSessionMounts(directory, { uid: 1001, graceMs: 0, inspect: () => row, run: () => {} }), /mounts remain/)
+  assert.equal(existsSync(directory), true, 'Failed unmount must leave data untouched')
+})
+
+test('a portal which unmounts with its private session needs no cleanup command', async t => {
+  const directory = mkdtempSync(join(root, '.wails-portal-test-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const row = `30 20 0:26 / ${directory}/runtime/doc rw - fuse.portal portal rw,user_id=1001\n`
+  let reads = 0
+  const evidence = await stopSessionMounts(directory, { uid: 1001,
+    inspect: () => ++reads === 1 ? row : '', run: () => assert.fail('A disappeared mount must not be unmounted again') })
+  assert.deepEqual(evidence.remaining, [])
+  assert.deepEqual(evidence.unmounted, [])
 })
 
 test('Windows WebView option tests run after the real frontend and application build', () => {
