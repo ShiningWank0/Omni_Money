@@ -46,4 +46,6 @@ DesktopのApp serviceとそのvaultテストはnative/CI browserのbuild constra
 
 Linux native UIの監督processはprivate D-Bus sessionの外で動く。初めにprivate XDG/TMPDIRを用意し、その環境でD-BusとUI試験を開始する。UI終了後にsessionとそのserviceを終了し、private領域内のmountが消えてからデータを削除する。Documents portalのFUSE mountが残る間は再帰削除しない。mount残存・削除失敗・UI失敗はすべて検証失敗とし、`session.json`と`result.json`へ証跡を残す。
 
+private session終了後もkernelのmount namespaceに文書portalのmountが残る場合は、自然な終了を待ったうえで、試験自身の`runtime/doc`・`fuse.portal`・同一UIDに一致する単一mountだけを`fusermount3 -u`で通常unmountする。sudo、lazy/force unmount、他sessionのportal停止は使わない。不明なmount、権限エラー、busy、通常unmount後の残存は失敗とし、データは削除しない。検査結果には処理前後のmountと通常unmountの実施を記録する。
+
 Windows native UIの終了確認では、`Application.Quit()`がWebViewを破棄してCDP応答より先に接続を閉じる場合もある。終了要求前にアプリとpageが生存していることを確認し、この呼出しに対する既知の接続切断と実際のpage閉鎖が一致する場合だけ、応答の代わりとして扱う。所有するアプリprocessの15秒以内の終了・終了コード0・signalなしは常に必須とし、一般のJavaScript例外や通信異常は失敗にする。setup/reopen各回の終了結果を証跡に記録し、最後にprivate profileの消滅を確認する。

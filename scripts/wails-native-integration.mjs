@@ -36,12 +36,50 @@ function command(program, args, env = process.env) {
   return result.stdout
 }
 
-export function mountsWithin(mountinfo, directory) {
+function sessionMountInventory(mountinfo, directory) {
   return mountinfo.trim().split('\n').filter(Boolean).map(line => {
     const fields = line.split(' ')
-    assert.ok(fields.length >= 10 && fields.includes('-'), 'Invalid mount inventory')
-    return fields[4].replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)))
-  }).filter(path => path === directory || path.startsWith(directory + '/'))
+    const separator = fields.indexOf('-')
+    assert.ok(fields.length >= 10 && separator >= 6 && separator + 3 < fields.length, 'Invalid mount inventory')
+    return { id: fields[0], path: fields[4].replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8))),
+      type: fields[separator + 1], source: fields[separator + 2], options: fields[separator + 3].split(',') }
+  }).filter(mount => mount.path === directory || mount.path.startsWith(directory + '/'))
+}
+
+export function mountsWithin(mountinfo, directory) {
+  return sessionMountInventory(mountinfo, directory).map(mount => mount.path)
+}
+
+export async function stopSessionMounts(directory, { inspect = () => readFileSync('/proc/self/mountinfo', 'utf8'),
+  run = command, uid = process.getuid?.(), graceMs = 1000, evidence = {} } = {}) {
+  // A terminated document portal can leave its FUSE mount in the container's
+  // mount namespace after the private D-Bus session has exited. Wait for normal
+  // teardown, then ordinarily unmount only this CI user's exact private portal.
+  const snapshot = () => sessionMountInventory(inspect(), directory)
+  const describe = rows => rows.map(({ id, path, type, source }) => ({ id, path: relative(directory, path), type, source }))
+  let mounts = snapshot()
+  evidence.before = describe(mounts)
+  evidence.unmounted = []
+  const deadline = Date.now() + graceMs
+  while (mounts.length && Date.now() < deadline) {
+    await delay(100)
+    mounts = snapshot()
+  }
+  evidence.remaining = describe(mounts)
+  if (!mounts.length) return evidence
+  assert.ok(Number.isSafeInteger(uid) && uid >= 0, 'The portal mount owner is unknown')
+  assert.equal(realpathSync(directory), directory, 'The private session directory is not canonical')
+  assert.equal(realpathSync(join(directory, 'runtime')), join(directory, 'runtime'), 'The private runtime must not be a symlink')
+  assert.equal(mounts.length, 1, 'Unexpected or stacked private session mounts')
+  const mount = mounts[0]
+  assert.ok(mount.path === join(directory, 'runtime/doc') && mount.type === 'fuse.portal' &&
+    mount.source === 'portal' && mount.options.includes(`user_id=${uid}`), 'Refusing to unmount an unexpected or foreign private mount')
+  // No sudo, lazy/forced unmount, global portal shutdown or ignored errors.
+  run('fusermount3', ['-u', '--', mount.path])
+  evidence.unmounted.push({ id: mount.id, path: 'runtime/doc', type: mount.type })
+  evidence.remaining = describe(snapshot())
+  assert.deepEqual(evidence.remaining, [], 'Private session mounts remain after normal unmount')
+  return evidence
 }
 
 export async function removeSessionData(directory, mountinfo = () => readFileSync('/proc/self/mountinfo', 'utf8'), remove = rmSync, timeout = 8000) {
@@ -69,6 +107,7 @@ export async function runNativeSession(argument) {
   delete env.DBUS_SESSION_BUS_ADDRESS
   delete env.DBUS_SESSION_BUS_PID
   let session, failure, evidence
+  const portalCleanup = {}
   const interrupt = () => { failure ||= new Error('Integration was interrupted'); void stopProcessGroup(session).catch(() => {}) }
   process.once('SIGINT', interrupt)
   process.once('SIGTERM', interrupt)
@@ -83,11 +122,14 @@ export async function runNativeSession(argument) {
   } catch (error) { failure ||= error }
   finally {
     try { await stopProcessGroup(session) } catch (error) { failure ||= error }
-    try { await removeSessionData(directory) } catch (error) { failure ||= error }
+    try {
+      await stopSessionMounts(directory, { evidence: portalCleanup })
+      await removeSessionData(directory)
+    } catch (error) { portalCleanup.error = error.message; failure ||= error }
     process.removeListener('SIGINT', interrupt)
     process.removeListener('SIGTERM', interrupt)
     writeFileSync(join(output, 'result.json'), JSON.stringify({ ...evidence, passed: !failure,
-      isolatedDataRemoved: !existsSync(directory), error: failure?.message || null }, null, 2) + '\n')
+      portalCleanup, isolatedDataRemoved: !existsSync(directory), error: failure?.message || null }, null, 2) + '\n')
   }
   if (failure) throw failure
   console.log('Packaged Wails native WebView passed: setup, OSS UI, lock/unlock, restart, normal exit and cleanup')
