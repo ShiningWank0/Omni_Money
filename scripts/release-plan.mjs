@@ -8,7 +8,7 @@ export function releasePlan(event, paths, rehearsal = false) {
   if (event === 'schedule') return { desktop: false, docker: false }
   if (event === 'push') return {
     desktop: paths.some(path => path === 'VERSION' || path === '.github/workflows/release-desktop.yml'),
-    docker: paths.includes('VERSION'),
+    docker: paths.some(path => path === 'VERSION' || path === '.github/workflows/release-docker.yml'),
   }
   if (event !== 'pull_request') throw new Error(`Unexpected pipeline event ${event}`)
   const shared = path => /^(licenses\/|scripts\/(oss-|setup-fixed-)|frontend\/|build\/locks\/|\.github\/(workflows|actions)\/)/.test(path) || ['go.mod', 'go.sum', '.node-version', '.go-version', 'LICENSE'].includes(path)

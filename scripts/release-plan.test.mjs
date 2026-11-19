@@ -46,6 +46,10 @@ test('VERSION releases both products, ordinary main changes publish neither', ()
   assert.deepEqual(releasePlan('push', ['VERSION', 'frontend/src/App.vue']), { desktop: true, docker: true })
   assert.deepEqual(releasePlan('push', ['frontend/src/App.vue']), { desktop: false, docker: false })
 })
+test('fixing a product release workflow resumes that product at the current VERSION', () => {
+  assert.deepEqual(releasePlan('push', ['.github/workflows/release-docker.yml']), { desktop: false, docker: true })
+  assert.deepEqual(releasePlan('push', ['.github/workflows/release-desktop.yml']), { desktop: true, docker: false })
+})
 test('PR license and orchestration changes validate both product builds', () => {
   for (const path of ['licenses/approved.json', 'frontend/src/generated/thirdPartyNotices.json', 'scripts/oss-notices.mjs', '.github/workflows/ci.yml', 'build/locks/docker.json', '.github/actions/setup-fixed-docker/action.yml']) {
     assert.deepEqual(releasePlan('pull_request', [path]), { desktop: true, docker: true })
