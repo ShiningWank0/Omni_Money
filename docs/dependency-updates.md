@@ -10,6 +10,20 @@ Go・npm・GitHub Actions・Dockerのminor/patch更新をそれぞれまとめ�
 Wails、WebAuthn、DockerのGo/Nodeは通常グループから除外し、個別PRで扱う。
 Goの1.x間、WebAuthnの0.x間はSemVerではminorでも、関連設定やAPI移行が必要になるためである。
 
+## Vue Test Utils 2.6のprops更新
+
+Vue本体は3.5.45を維持し、テスト支援ライブラリを2.6.0へ更新する。
+2.6では通常のオブジェクト・配列propsをテストツールが自動で深くreactiveにしない。
+同じ通常オブジェクトを変更してから`setProps`へ再度渡しても、更新の通知にはならない。
+
+- 親のreactiveな状態を変更する場面では、fixture作成時にVueの`reactive()`を明示する。
+- API応答など通常の値を差し替える場面では、新しいオブジェクト・配列を`await wrapper.setProps(...)`へ渡す。
+- 確認対象はDOMや子コンポーネントへ渡る表示データとし、テストツール内部の再描画だけを成功条件にしない。
+
+残高グラフの入れ子の残高更新、タグの子要素追加、タグ一覧の差し替えをこの2経路で検証する。
+既存の削除・保存失敗時の検査も維持する。
+上流の[2.6.0リリース説明](https://github.com/vuejs/test-utils/releases/tag/v2.6.0)を参照。
+
 ## ビルド版の固定元
 
 - Goの最低対応版は `go.mod` の `go`、CI/配布用固定版は `toolchain`。CIの `.go-version` も同じ版へ同期し、各workflowは `go-version-file: .go-version` を使う。`node scripts/runtime-versions.mjs check`でDocker・toolchain・CIの一致を検証する。

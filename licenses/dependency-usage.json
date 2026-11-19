@@ -2496,7 +2496,7 @@
     {
       "id": "npm:@playwright/test",
       "name": "@playwright/test",
-      "version": "1.65.0",
+      "version": "1.65.1",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -2996,7 +2996,7 @@
     {
       "id": "npm:@vue/test-utils",
       "name": "@vue/test-utils",
-      "version": "2.5.1",
+      "version": "2.6.0",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3829,7 +3829,7 @@
     {
       "id": "npm:playwright",
       "name": "playwright",
-      "version": "1.65.0",
+      "version": "1.65.1",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3841,7 +3841,7 @@
     {
       "id": "npm:playwright-core",
       "name": "playwright-core",
-      "version": "1.65.0",
+      "version": "1.65.1",
       "dependencyType": "development",
       "distribution": "excluded",
       "targets": [],
@@ -3853,7 +3853,7 @@
     {
       "id": "npm:postcss",
       "name": "postcss",
-      "version": "8.5.32",
+      "version": "8.5.33",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],

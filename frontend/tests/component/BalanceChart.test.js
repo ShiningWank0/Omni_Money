@@ -1,4 +1,5 @@
 import { mount } from '@vue/test-utils'
+import { reactive } from 'vue'
 import { afterEach, expect, it, vi } from 'vitest'
 import BalanceChart from '../../src/components/BalanceChart.vue'
 
@@ -68,6 +69,23 @@ function mountChart(history, { width = 375, height = 800 } = {}) {
 function chartWidth(wrapper) {
   return wrapper.get('.graph-track').element.style.width
 }
+
+it('updates balances from an explicitly reactive parent object and a replacement prop', async () => {
+  stubResize()
+  // Vue Test Utils 2.6 preserves parent reactivity instead of adding it to plain props.
+  const history = reactive(historyFor([recentDate(0)]))
+  const { wrapper } = mountChart(history)
+  const amount = () => wrapper.get('.line-chart').attributes('data-first-amount')
+  expect(amount()).toBe('100')
+
+  history.balances.test[0] = 275
+  await wrapper.vm.$nextTick()
+  expect(amount()).toBe('275')
+
+  // API refreshes may replace the object rather than mutate a reactive parent.
+  await wrapper.setProps({ balanceHistory: { ...history, balances: { test: [425] } } })
+  expect(amount()).toBe('425')
+})
 
 it('sizes the chart from distinct transaction dates instead of viewport height', async () => {
   const notifyResize = stubResize()
