@@ -383,6 +383,12 @@ jobs:
 
       # The action records the attestation with the repository and mirrors it
       # into GHCR using the default github.token plus this job's packages:write.
+      - name: Verify shared registry credential location
+        run: |
+          set -euo pipefail
+          test "$DOCKER_CONFIG" = "$HOME/.docker"
+          test -s "$DOCKER_CONFIG/config.json"
+
       - name: Attest staged image provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
