@@ -1,7 +1,37 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
 import test from 'node:test'
-import { hasOwnedWindow, requireMacCI, verifyMacBuild } from './wails-macos-startup.mjs'
+import { hasOwnedWindow, requireMacCI, stopOwnedMacApplication, verifyMacBuild } from './wails-macos-startup.mjs'
+import { bounded, watchExit } from './wails-dev-integration.mjs'
+
+test('macOS cleanup reaps only the owned child and never hides a signal permission error', async t => {
+  const child = spawn(process.execPath, ['-e', 'process.stdout.write("ready");setInterval(()=>{},1000)'], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const exited = watchExit(child)
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    await exited
+  })
+  await bounded(once(child.stdout, 'data'), 5000, 'Owned child did not start')
+  const result = await stopOwnedMacApplication(child, exited)
+  assert.equal(result.signal, 'SIGTERM')
+  child.kill = () => assert.fail('An already reaped PID must not be signalled')
+  assert.deepEqual(await stopOwnedMacApplication(child, exited), result)
+  const permission = Object.assign(new Error('EPERM fixture'), { code: 'EPERM' })
+  await assert.rejects(stopOwnedMacApplication({ pid: 123, exitCode: null, signalCode: null, kill() { throw permission } }, new Promise(() => {})), { code: 'EPERM' })
+})
+
+test('an unresponsive owned Unix child is reaped but still fails cleanup', { skip: process.platform === 'win32' }, async t => {
+  const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{});process.stdout.write("ready");setInterval(()=>{},1000)'], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const exited = watchExit(child)
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    await exited
+  })
+  await bounded(once(child.stdout, 'data'), 5000, 'Owned child did not start')
+  await assert.rejects(stopOwnedMacApplication(child, exited, 50), /did not stop/)
+  assert.equal(child.signalCode, 'SIGKILL')
+})
 
 test('native macOS startup cannot launch on a developer machine or another platform', () => {
   const env = { GITHUB_ACTIONS: 'true', RUNNER_TEMP: '/private/ci', DEVELOPER_DIR: '/fixed/Xcode' }

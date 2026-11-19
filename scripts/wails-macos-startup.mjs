@@ -5,7 +5,7 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, 
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
-import { bounded, privateAppEnvironment, stopProcessGroup, watchExit } from './wails-dev-integration.mjs'
+import { bounded, privateAppEnvironment, watchExit } from './wails-dev-integration.mjs'
 import { ownedBinary } from './wails-native-integration.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -34,6 +34,20 @@ export function verifyMacBuild(info, version, arch) {
   }
 }
 
+export async function stopOwnedMacApplication(child, exited, timeout = 10_000) {
+  if (!child?.pid) return null
+  if (child.exitCode !== null || child.signalCode !== null) return await exited
+  // macOS WebKit may leave system-managed XPC processes in the process group.
+  // Signal only the ChildProcess we launched, and require its actual exit.
+  child.kill('SIGTERM')
+  try { return await bounded(exited, timeout, 'The owned macOS application did not stop') }
+  catch (error) {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    await bounded(exited, 5000, 'The owned macOS application could not be reaped')
+    throw error
+  }
+}
+
 export async function runMacStartup(argument) {
   requireMacCI(process.platform, process.env)
   const binary = ownedBinary(argument, process.env.RUNNER_TEMP)
@@ -54,13 +68,13 @@ export async function runMacStartup(argument) {
   const env = privateAppEnvironment(directory, process.env)
   env.HOME = join(directory, 'home')
   for (const key of ['HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR', 'TMPDIR']) mkdirSync(env[key], { recursive: true, mode: 0o700 })
-  let app, failure, windowCreated = false, stable = false, findingWindow = true
+  let app, exited, failure, termination, windowCreated = false, stable = false, findingWindow = true, ownedWindowRemoved = false
   const log = openSync(join(output, 'startup.log'), 'w', 0o600)
+  const inspector = join(directory, 'inspect-owned-windows')
   try {
-    const inspector = join(directory, 'inspect-owned-windows')
     command('xcrun', ['swiftc', join(root, 'scripts/wails-macos-windows.swift'), '-o', inspector])
     app = spawn(binary, [], { cwd: directory, env, detached: true, stdio: ['ignore', log, log] })
-    const exited = watchExit(app)
+    exited = watchExit(app)
     exited.catch(() => {})
     const stopped = exited.then(result => { throw new Error(`Native app exited during startup: ${JSON.stringify(result)}`) })
     stopped.catch(() => {})
@@ -79,11 +93,22 @@ export async function runMacStartup(argument) {
   } catch (error) { failure = error }
   finally {
     findingWindow = false
-    try { await stopProcessGroup(app) } catch (error) { failure ||= error }
+    try {
+      termination = await stopOwnedMacApplication(app, exited)
+      if (windowCreated) {
+        await bounded((async () => {
+          while (hasOwnedWindow(JSON.parse(command(inspector, [String(app.pid)])), app.pid)) await delay(100)
+        })(), 5000, 'The owned macOS application window remained after process exit')
+        ownedWindowRemoved = true
+      }
+    } catch (error) { failure ||= error }
     closeSync(log)
-    try { rmSync(directory, { recursive: true, force: true }) } catch (error) { failure ||= error }
+    if (!app?.pid || app.exitCode !== null || app.signalCode !== null) {
+      try { rmSync(directory, { recursive: true, force: true }) } catch (error) { failure ||= error }
+    } else failure ||= new Error('The owned application is still alive; its private data cannot be removed safely')
     writeFileSync(join(output, 'result.json'), JSON.stringify({ passed: !failure, wails: version, binarySHA256: before,
-      windowCreated, stableAfterWindowCreation: stable, isolatedDataRemoved: !existsSync(directory),
+      windowCreated, stableAfterWindowCreation: stable, ownedProcessStopped: !!termination, ownedWindowRemoved,
+      termination, isolatedDataRemoved: !existsSync(directory),
       coverage: 'native startup smoke; full macOS UI interaction is not covered', error: failure?.message || null }, null, 2) + '\n')
   }
   if (failure) throw failure
