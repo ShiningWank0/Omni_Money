@@ -6,8 +6,11 @@ import { fileURLToPath } from 'node:url'
 const root = fileURLToPath(new URL('..', import.meta.url))
 export const workflowPaths = ['ci.yml', 'release-desktop.yml', 'release-docker.yml', 'wails-dev-integration.yml']
   .map(name => `.github/workflows/${name}`)
+export const capturePaths = ['.github/workflows/capture-build-environments.yml', 'docs/environment-snapshots.md',
+  ...['ubuntu', 'alpine-builder', 'alpine-runtime'].map(name => `build/environments/${name}.Dockerfile`)]
 
 export function checkLinuxEnvironments(directory = root) {
+  for (const path of capturePaths) assert.ok(readFileSync(join(directory, path), 'utf8').trim(), `${path}: environment capture input is empty`)
   const lock = JSON.parse(readFileSync(join(directory, 'build/locks/linux-environments.json'), 'utf8'))
   assert.equal(lock.schema, 1)
   const references = new Map()
