@@ -110,14 +110,15 @@ async function list(api, path) {
   }
 }
 
-export async function publish(api, findings, runURL) {
+export async function publish(api, findings, runURL, renderEntry = render, options = {}) {
   if (!/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/\d+\/attempts\/\d+$/.test(runURL)) throw new Error('invalid run URL');
-  const issues = (await list(api, 'issues?state=open')).filter(issue => !issue.pull_request && issue.user?.login === 'github-actions[bot]');
+  const issues = (await list(api, `issues?state=${options.respectClosed ? 'all' : 'open'}`)).filter(issue => !issue.pull_request && issue.user?.login === 'github-actions[bot]');
   const result = { created: 0, updated: 0, unchanged: 0 };
   let mutations = 0;
   for (const entry of findings) {
-    const view = render(entry, runURL);
-    const existing = issues.find(issue => issue.body?.includes(view.marker));
+    const view = renderEntry(entry, runURL);
+    const existing = issues.find(issue => issue.state !== 'closed' && issue.body?.includes(view.marker)) ||
+      issues.find(issue => issue.body?.includes(view.marker));
     if (!existing) {
       if (++mutations > 25) throw new Error('Issue update limit reached; remaining findings will be retried on the next scheduled run');
       await api('POST', 'issues', { title: view.title, body: view.body });
@@ -132,6 +133,11 @@ export async function publish(api, findings, runURL) {
     const latest = previous.at(-1)?.body || existing.body;
     if (latest?.includes(view.revision)) { result.unchanged++; continue; }
     if (++mutations > 25) throw new Error('Issue update limit reached; remaining findings will be retried on the next scheduled run');
+    if (existing.state === 'closed') {
+      await api('POST', 'issues', { title: view.title, body: `${view.body}\n\n終了済みIssue #${existing.number} から検査結果が変化しています。` });
+      result.created++;
+      continue;
+    }
     await api('POST', `issues/${existing.number}/comments`, { body: `検査結果に変更があります。\n\n${view.body}` });
     result.updated++;
   }
