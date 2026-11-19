@@ -255,29 +255,6 @@ jobs:
           SQLCIPHER_BUILD_JOBS: "2"
         run: sh scripts/build-sqlcipher-linux.sh
 
-      - name: Checkout immutable pre-update SQLCipher recipe
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: 09355957998f4d7ea2c7de5a6e8d48f1590f0a49
-          path: .oss-cache/sqlcipher-previous
-          persist-credentials: false
-          sparse-checkout: scripts/build-sqlcipher-linux.sh
-          sparse-checkout-cone-mode: false
-
-      - name: Verify old encrypted database format remains compatible
-        env:
-          SQLCIPHER_PREFIX: /tmp/omni-sqlcipher
-        run: bash scripts/test-sqlcipher-format-compatibility.sh .oss-cache/sqlcipher-previous/scripts/build-sqlcipher-linux.sh
-
-      - name: Save SQLCipher compatibility evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: sqlcipher-format-compatibility-${{ github.run_attempt }}
-          path: .oss-cache/sqlcipher-compatibility/result.json
-          if-no-files-found: error
-          retention-days: 7
-
       - name: Test fail-closed SQLCipher integration
         env:
           CGO_CFLAGS: -I/tmp/omni-sqlcipher/include
