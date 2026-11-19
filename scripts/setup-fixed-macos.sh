@@ -35,7 +35,8 @@ cleanup() {
   if [[ "$success" != true ]]; then rm -rf "$prefix"; fi
 }
 trap cleanup EXIT
-curl --fail --location --retry 5 --proto '=https' --tlsv1.2 "$TCL_URL" -o "$work/tcl.tar.gz"
+curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 300 \
+  --connect-timeout 20 --max-time 180 --proto '=https' --tlsv1.2 "$TCL_URL" -o "$work/tcl.tar.gz"
 test "$(shasum -a 256 "$work/tcl.tar.gz" | awk '{print $1}')" = "$TCL_SHA256"
 while IFS= read -r path; do
   case "$path" in "$TCL_ARCHIVE_ROOT"|"$TCL_ARCHIVE_ROOT/"*) ;; *) exit 1 ;; esac
