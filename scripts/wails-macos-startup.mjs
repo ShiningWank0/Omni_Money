@@ -48,6 +48,11 @@ export async function stopOwnedMacApplication(child, exited, timeout = 10_000) {
   }
 }
 
+export function verifyMacTeardown(result) {
+  assert.ok(result && ((result.code === 0 && result.signal === null) ||
+    (result.code === null && result.signal === 'SIGTERM')), 'The native macOS application terminated abnormally')
+}
+
 export async function runMacStartup(argument) {
   requireMacCI(process.platform, process.env)
   const binary = ownedBinary(argument, process.env.RUNNER_TEMP)
@@ -95,6 +100,7 @@ export async function runMacStartup(argument) {
     findingWindow = false
     try {
       termination = await stopOwnedMacApplication(app, exited)
+      if (app?.pid) verifyMacTeardown(termination)
       if (windowCreated) {
         await bounded((async () => {
           while (hasOwnedWindow(JSON.parse(command(inspector, [String(app.pid)])), app.pid)) await delay(100)

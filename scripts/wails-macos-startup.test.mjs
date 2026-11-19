@@ -2,8 +2,17 @@ import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import test from 'node:test'
-import { hasOwnedWindow, requireMacCI, stopOwnedMacApplication, verifyMacBuild } from './wails-macos-startup.mjs'
+import { hasOwnedWindow, requireMacCI, stopOwnedMacApplication, verifyMacBuild, verifyMacTeardown } from './wails-macos-startup.mjs'
 import { bounded, watchExit } from './wails-dev-integration.mjs'
+
+test('a native crash or nonzero exit can never be accepted as macOS teardown', () => {
+  verifyMacTeardown({ code: 0, signal: null })
+  verifyMacTeardown({ code: null, signal: 'SIGTERM' })
+  for (const result of [null, { code: 7, signal: null }, { code: null, signal: 'SIGSEGV' },
+    { code: null, signal: 'SIGABRT' }, { code: null, signal: 'SIGKILL' }, { code: null, signal: null }]) {
+    assert.throws(() => verifyMacTeardown(result))
+  }
+})
 
 test('macOS cleanup reaps only the owned child and never hides a signal permission error', async t => {
   const child = spawn(process.execPath, ['-e', 'process.stdout.write("ready");setInterval(()=>{},1000)'], { stdio: ['ignore', 'pipe', 'pipe'] })
