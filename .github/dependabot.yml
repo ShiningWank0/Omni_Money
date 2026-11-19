@@ -15,7 +15,7 @@ updates:
           - "*"
         update-types: [minor, patch]
         exclude-patterns:
-          - "github.com/wailsapp/wails/v2"
+          - "github.com/wailsapp/wails/v3"
           - "github.com/go-webauthn/*"
       # Minor/patch security fixes arrive immediately when an advisory is
       # published; group them per ecosystem so several advisories open one PR.
@@ -25,8 +25,20 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
         exclude-patterns:
-          - "github.com/wailsapp/wails/v2"
+          - "github.com/wailsapp/wails/v3"
           - "github.com/go-webauthn/*"
+
+  - package-ecosystem: gomod
+    directory: /scripts/securitytools/gosec
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: gomod
+    directory: /scripts/securitytools/govulncheck
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
 
   - package-ecosystem: npm
     directory: /frontend
@@ -78,6 +90,13 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
         exclude-patterns: [golang, node]
+
+  # Keep the CLI's transitive build tools under review as well as app runtime.
+  - package-ecosystem: gomod
+    directory: /scripts/buildtools/wails
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
 
   # Snapshot producer bases must keep receiving digest update proposals too.
   - package-ecosystem: docker

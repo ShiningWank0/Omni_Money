@@ -171,6 +171,9 @@ export function collect() {
     const script = readFileSync(join(root, `scripts/build-sqlcipher-${file}.sh`), 'utf8')
     if (!script.includes(`SQLCIPHER_VERSION="${sqlcipher.version}"`)) throw new Error(`SQLCipher notice version differs from ${file} build`)
   }
+  const requiredSQLCipher = readFileSync(join(root, 'backend/securedb/opener.go'), 'utf8')
+    .match(/const RequiredSQLCipherVersion = "([^"]+) community"/)?.[1]
+  if (requiredSQLCipher !== sqlcipher.version) throw new Error('SQLCipher runtime requirement differs from the reviewed native build')
   const goVersion = readFileSync(join(root, 'go.mod'), 'utf8').match(/^toolchain go(.+)$/m)?.[1]
   if (components.find(component => component.id === 'native:go').version !== goVersion) throw new Error('Go runtime license review required for new toolchain')
   for (const platform of ['darwin', 'windows']) {

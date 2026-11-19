@@ -7,6 +7,7 @@ permissions: {}
 
 env:
   GOTOOLCHAIN: local
+  GOFLAGS: -tags=gtk3
 
 concurrency:
   group: docker-release-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
@@ -156,15 +157,24 @@ jobs:
           npm audit --audit-level=high
           npm run build
 
+      - name: Build fixed SQLCipher for release analysis
+        env:
+          SQLCIPHER_PREFIX: /tmp/omni-sqlcipher
+        run: sh scripts/build-sqlcipher-linux.sh
+
       - name: Run release quality gate
+        env:
+          CGO_CFLAGS: -I/tmp/omni-sqlcipher/include
+          CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib
+          LD_LIBRARY_PATH: /tmp/omni-sqlcipher/lib
         run: |
           go test ./...
           go vet ./...
           node scripts/security-reports.mjs gosec
           go test -race ./...
           go test -race -tags server ./...
-          go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
-          go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 -tags server ./...
+          node scripts/run-govulncheck.mjs ./...
+          node scripts/run-govulncheck.mjs -tags server ./...
 
   build:
     name: Build architecture image

@@ -13,7 +13,7 @@
   {
     "id": "native:sqlcipher",
     "name": "SQLCipher Community Edition",
-    "version": "4.18.0",
+    "version": "4.20.0",
     "license": "BSD-3-Clause",
     "url": "https://www.zetetic.net/sqlcipher/license/",
     "targets": "all",
@@ -24,7 +24,7 @@
   {
     "id": "native:sqlite",
     "name": "SQLite (included in SQLCipher)",
-    "version": "SQLCipher 4.18.0",
+    "version": "SQLCipher 4.20.0",
     "license": "Public-Domain",
     "url": "https://www.sqlite.org/copyright.html",
     "targets": "all",

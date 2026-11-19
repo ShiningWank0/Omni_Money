@@ -102,7 +102,7 @@ CSV v3には取引保存の受付ID、処理中・失敗した入力、再送防
 │   ├── vault/            # per-user vault manager、lease、drain、zeroize
 │   ├── middleware/       # session、CSRF、proxy、security boundary
 │   └── models/           # データモデル
-├── frontend/             # Vue フロントエンド（`src/`、`wailsjs/`、`index.html`）
+├── frontend/             # Vue フロントエンド（`src/`、`bindings/`、`index.html`）
 │   └── src/
 │       ├── components/   # 画面部品
 │       ├── store/        # Pinia store
@@ -113,7 +113,8 @@ CSV v3には取引保存の受付ID、処理中・失敗した入力、再送防
 ├── Dockerfile            # サーバーモード用 Docker 定義
 ├── compose.yaml          # Docker Compose / TrueNAS 用構成
 ├── .env.example          # サーバー環境変数の雛形
-├── wails.json            # Wails 設定
+├── Taskfile.yml          # Wails 3 の読み取り専用build手順
+├── build/config.yml      # Wails 3 開発設定
 └── VERSION               # リリースバージョン
 ```
 
@@ -143,7 +144,7 @@ cd ..
 
 デスクトップモードでは、SQLite データベースは OS 標準のアプリケーションデータディレクトリに保存されます。
 
-DesktopとserverのDB、WAL、snapshotはSQLCipher 4.18.0で暗号化し、所有者だけが読み書きできる権限で作成します。SQLCipherが不足・不正な場合は平文DBへfallbackせず、DBを開く前に起動を拒否します。DesktopのCSV exportは平文のため、暗号化済みvolumeへ保存してください。server modeはさらに外部暗号化volumeのattestationと保存先・権限も検証します。鍵の作成と復旧は[SQLCipher鍵の運用](docs/sqlcipher-key-operations.md)、volumeの設定と復旧試験は[保存時暗号化volumeの運用contract](docs/at-rest-encryption.md)を参照してください。FileVault、BitLocker、LUKSもdefense in depthとして有効にしてください。
+DesktopとserverのDB、WAL、snapshotはSQLCipher 4.20.0で暗号化し、所有者だけが読み書きできる権限で作成します。SQLCipherが不足・不正な場合は平文DBへfallbackせず、DBを開く前に起動を拒否します。DesktopのCSV exportは平文のため、暗号化済みvolumeへ保存してください。server modeはさらに外部暗号化volumeのattestationと保存先・権限も検証します。鍵の作成と復旧は[SQLCipher鍵の運用](docs/sqlcipher-key-operations.md)、volumeの設定と復旧試験は[保存時暗号化volumeの運用contract](docs/at-rest-encryption.md)を参照してください。FileVault、BitLocker、LUKSもdefense in depthとして有効にしてください。
 
 - macOS: `~/Library/Application Support/OmniMoney/vaults/<vault-id>/omni_money.db`
 - Windows: `%APPDATA%/OmniMoney/vaults/<vault-id>/omni_money.db`

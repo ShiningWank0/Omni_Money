@@ -1,2 +1,5 @@
+# Wails generates LF bytes on every platform; freshness checks compare bytes.
+frontend/bindings/** text eol=lf
+
 # Hash-verified third-party sources must retain the reviewed bytes on Windows.
 frontend/vendor/picomatch/** text eol=lf
