@@ -7,8 +7,11 @@ set -euo pipefail
 [[ "${1:-}" == true || "${1:-}" == false ]] || exit 2
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dest="$RUNNER_TEMP/omni-docker"
+docker_config="$HOME/.docker"
 mkdir "$dest"
-mkdir -p "$dest/bin" "$dest/config/cli-plugins"
+# The disposable job HOME is the common credential location for Docker,
+# @sigstore/oci (which reads only os.homedir()) and gh. Keep one config file.
+mkdir -p "$dest/bin" "$docker_config/cli-plugins"
 
 python3 - "$root/build/locks/docker.json" "$(uname -m)" > "$dest/inputs.tsv" <<'PY'
 import json,re,sys
@@ -43,10 +46,10 @@ while IFS=$'\t' read -r name value checksum; do
   esac
 done < "$dest/inputs.tsv"
 tar -xzf "$dest/engine.download" -C "$dest/bin" --strip-components=1
-install -m 755 "$dest/buildx.download" "$dest/config/cli-plugins/docker-buildx"
-install -m 755 "$dest/compose.download" "$dest/config/cli-plugins/docker-compose"
+install -m 755 "$dest/buildx.download" "$docker_config/cli-plugins/docker-buildx"
+install -m 755 "$dest/compose.download" "$docker_config/cli-plugins/docker-compose"
 rm "$dest/"*.download
-export PATH="$dest/bin:$PATH" DOCKER_CONFIG="$dest/config"
+export PATH="$dest/bin:$PATH" DOCKER_CONFIG="$docker_config"
 unset DOCKER_CONTEXT DOCKER_API_VERSION
 printf '%s\n' "$dest/bin" >> "$GITHUB_PATH"
 printf 'DOCKER_CONFIG=%s\nDOCKER_CONTEXT=\nDOCKER_API_VERSION=\n' "$DOCKER_CONFIG" >> "$GITHUB_ENV"

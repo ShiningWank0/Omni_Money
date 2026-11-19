@@ -110,3 +110,36 @@ test('scanned digests cross container jobs through their allocated paths, never 
   assert.equal([...workflow.matchAll(/DIGEST_DIRECTORY: \$\{\{ steps\.digest-input\.outputs\.path \}\}/g)].length, 2)
   assert.doesNotMatch(workflow, /\$\{\{\s*runner\.temp\s*\}\}/, 'The host runner path must not enter a container job')
 })
+
+test('Docker and the OCI attestation reader share one job-local credential file', t => {
+  const root = fixture(t), home = join(root, 'job-home'), temp = join(root, 'job-temp')
+  mkdirSync(home); mkdirSync(temp)
+  const setup = readFileSync(new URL('../scripts/setup-fixed-docker.sh', import.meta.url), 'utf8')
+  const allocation = setup.slice(setup.indexOf('dest='), setup.indexOf('\npython3 -'))
+  const exported = setup.match(/^export PATH=.* DOCKER_CONFIG=.*$/m)?.[0]
+  assert.ok(allocation && exported, 'Missing fixed Docker configuration setup')
+  const env = { ...process.env, HOME: home, RUNNER_TEMP: temp, DOCKER_CONFIG: join(root, 'inherited-foreign-config') }
+  const configured = spawnSync('bash', ['-c', allocation + '\n' + exported + '\nprintf \'%s\' "$DOCKER_CONFIG"'], { env, encoding: 'utf8' })
+  assert.equal(configured.status, 0, configured.stderr)
+  assert.equal(configured.stdout, join(home, '.docker'))
+  const config = join(configured.stdout, 'config.json')
+  writeFileSync(config, JSON.stringify({ auths: { 'ghcr.io': { auth: Buffer.from('fixture:fake-token').toString('base64') } } }), { mode: 0o600 })
+  // This is the upstream @sigstore/oci contract: os.homedir()/.docker/config.json.
+  // The inherited DOCKER_CONFIG points elsewhere to reproduce the old mismatch.
+  const consumer = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import assert from 'node:assert/strict'; import { readFileSync, realpathSync } from 'node:fs';
+    import { homedir } from 'node:os'; import { join } from 'node:path';
+    const defaults = join(homedir(), '.docker/config.json');
+    assert.equal(realpathSync(defaults), realpathSync(join(process.env.DOCKER_CONFIG, 'config.json')));
+    assert.equal(JSON.parse(readFileSync(defaults)).auths['ghcr.io'].auth, Buffer.from('fixture:fake-token').toString('base64'));
+  `], { env: { ...env, DOCKER_CONFIG: configured.stdout }, encoding: 'utf8' })
+  assert.equal(consumer.status, 0, consumer.stderr)
+  const workflow = readFileSync(join(root, '.github/workflows/release-docker.yml'), 'utf8')
+  const guard = workflow.split('      - name: Verify shared registry credential location\n')[1]?.split('\n      - name: ')[0]?.split('        run: |\n')[1]
+  assert.ok(guard, 'The publication job must verify the shared credential location')
+  const run = overrides => spawnSync('bash', ['-c', guard], { env: { ...env, DOCKER_CONFIG: configured.stdout, ...overrides }, encoding: 'utf8' })
+  assert.equal(run({}).status, 0)
+  assert.notEqual(run({ DOCKER_CONFIG: join(root, 'foreign') }).status, 0, 'Different credential locations must fail')
+  rmSync(config)
+  assert.notEqual(run({}).status, 0, 'Missing credentials must fail before signing or publishing')
+})
