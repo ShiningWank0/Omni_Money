@@ -653,8 +653,14 @@ jobs:
             RELEASE_FLAGS+=(--prerelease)
           fi
 
+          RELEASE_IMAGE="ghcr.io/$(printf '%s' "$RELEASE_REPOSITORY" | tr '[:upper:]' '[:lower:]'):${APP_VERSION}"
           cat > /tmp/release-notes.md << NOTES_EOF
           ## Omni Money v${APP_VERSION}
+
+          NOTES_EOF
+          test -s "docs/releases/${APP_VERSION}.md"
+          cat "docs/releases/${APP_VERSION}.md" >> /tmp/release-notes.md
+          cat >> /tmp/release-notes.md << NOTES_EOF
 
           ### ダウンロード
           - **macOS (Apple Silicon)**: \`omni-money-macos-arm64-v${APP_VERSION}.zip\`
@@ -668,7 +674,7 @@ jobs:
 
           ### Docker
           \`\`\`bash
-          docker pull ghcr.io/${RELEASE_REPOSITORY}:${APP_VERSION}
+          docker pull ${RELEASE_IMAGE}
           \`\`\`
           NOTES_EOF
 
