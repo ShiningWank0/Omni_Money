@@ -1,6 +1,9 @@
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { resolveDisplayTarget } from './oss-catalog.mjs'
+import { verifyPicomatchPatch } from '../../scripts/verify-picomatch-patch.mjs'
+
+verifyPicomatchPatch()
 
 const command = process.argv[2]
 if (!['build', 'dev'].includes(command)) throw new Error('Expected desktop frontend build or dev')
