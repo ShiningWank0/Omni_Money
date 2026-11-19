@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "grype": {
+    "version": "0.122.0",
+    "url": "https://github.com/anchore/grype/releases/download/v0.122.0/grype_0.122.0_linux_amd64.tar.gz",
+    "sha256": "e697e6f7224637df87e267e4318cc027feae99a8e1b80280241d32b9ee5d4920"
+  },
+  "oras": {
+    "version": "1.3.6",
+    "url": "https://github.com/oras-project/oras/releases/download/v1.3.6/oras_1.3.6_linux_amd64.tar.gz",
+    "sha256": "66fb0ad7206f3f6fa77ed5b552049d364ccf4b50b1684554f731f76302b52ca0"
+  }
+}

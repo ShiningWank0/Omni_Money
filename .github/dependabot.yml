@@ -78,3 +78,11 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
         exclude-patterns: [golang, node]
+
+  # Snapshot producer bases must keep receiving digest update proposals too.
+  - package-ecosystem: docker
+    directory: /build/environments
+    target-branch: feat/update-source-version
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
