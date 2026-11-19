@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { bounded, quitNativeApplication, watchExit } from './wails-dev-integration.mjs'
+import { nativeLedgerRound } from './wails-ledger-integration.mjs'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 assert.equal(process.env.GITHUB_ACTIONS, 'true', 'CI only')
@@ -58,6 +59,9 @@ try {
     assert.ok(paths.length && paths.every(path => path.toLowerCase().startsWith(resolve(runtime).toLowerCase() + String.fromCharCode(92))),
       'Actual WebView process did not load the fixed runtime directory')
     const page = browser.contexts()[0].pages()[0]
+    const pageErrors = []
+    page.on('pageerror', () => pageErrors.push('pageerror'))
+    page.on('crash', () => pageErrors.push('crash'))
     page.setDefaultTimeout(20_000)
     await page.locator('.desktop-vault-gate').waitFor({ state: 'visible' })
     await page.getByRole('button', { name: 'オープンソースライセンス', exact: true }).click()
@@ -78,10 +82,12 @@ try {
     await page.locator('.desktop-vault-gate').waitFor({ state: 'detached' })
     const status = await page.evaluate(() => window.go.main.App.GetDesktopVaultStatus())
     assert.equal(status.unlocked, true, 'Real native binding did not unlock the SQLCipher vault')
+    const ledger = await nativeLedgerRound(page, scenario, password)
+    assert.deepEqual(pageErrors, [], 'Native WebView raised an exception or crashed')
     const shutdown = await quitNativeApplication(page, app, exited)
     await browser.close().catch(() => {})
     browser = null; app = null
-    rounds.push({ scenario, runtimeVersion: lock.version, fixedRuntimeProcess: true, vaultUnlocked: true, gracefulExit: true, shutdown })
+    rounds.push({ scenario, runtimeVersion: lock.version, fixedRuntimeProcess: true, vaultUnlocked: true, ledger, noBrowserErrors: true, gracefulExit: true, shutdown })
   }
   assert.equal(digest(), before, 'Distribution binary changed during the test')
 } catch (error) { failed = true; throw error }

@@ -18,7 +18,21 @@ bindingの互換adapterは、native hostが付けるHTML markerを確認して�
 
 候補の再生成は`.github/workflows/wails-v3-candidates.yml`の手動実行で行う。依存の解決、binding生成、OSS候補の収集はCI内で完結する。このworkflowは承認一覧を自動変更しない。新しいnoticeと配布対象を確認してから、Goのmanifest、binding、OSS表示・承認・usageを同じ更新PRへ反映する。
 
-配布物の検証では、SQLCipherの実行版・暗号化・link、OSS一覧、Windows DLL制限を維持する。LinuxとWindowsのnative UI試験は配布binaryを使う。macOSのUI操作試験は追加しておらず、buildとSQLCipher self-testによる検証に限られる。開発用browser試験は、製品serverとは別のCI専用タグで実行し、詳細は`security-monitoring.md`に記載する。Issue #299を実動作の証跡なしに解決済みとはしない。
+配布物の検証では、SQLCipherの実行版・暗号化・link、OSS一覧、Windows DLL制限を維持する。native検査の対象と限界を以下に示す。
+
+| 対象 | 実際に起動するもの | 検証する動作 |
+| --- | --- | --- |
+| Linux | 配布archiveから展開した未変更binary | AT-SPIによる保管庫作成、OSS表示、実台帳の描画、再起動後の解錠、windowを閉じた正常終了 |
+| Windows | 配布用binaryと固定WebView2 | 保管庫作成・再解錠、OSS表示、実Go IPCでの取引作成・更新・正確な残高・再起動後の保持・削除、ロック中の読取拒否、正常終了、browser例外なし |
+| macOS Intel / arm64 | 署名を検証した配布ZIPから展開したapp | SQLCipher自己診断、実processが所有する通常windowの生成、生成後5秒間の生存とpanic/起動時例外なし、private profileの後片付け |
+
+macOSのwindow検査は固定XcodeのSwiftでCoreGraphicsの所有PID・layer・寸法を確認する。別processのwindowやmenuだけでは合格にしない。CI以外では起動せず、HOMEもprivate領域へ切り替える。macOSの検査は起動smokeであり、保管庫などの全UI操作や正常quitを確認したとは扱わない。停止は試験の後片付けとして行う。
+
+Windowsの取引検査は生成済みproduction bindingを介して実SQLCipher DBを操作する。mock APIやHTTP専用test endpointへ置き換えない。開発用browser試験は、製品serverとは別のCI専用タグで実行し、詳細は`security-monitoring.md`に記載する。Issue #299を実動作の証跡なしに解決済みとはしない。
+
+SQLCipherの版をまたぐ形式互換性は別の必須CIで検査する。更新前のmain commit `0935595` に固定した4.18.0のchecksum検証付きrecipeで旧ライブラリを構築し、private領域へ暗号化DBを作る。そのDBを実4.20.0で読み書きし、4.18.0でも更新結果を再読込する。両probeは`PRAGMA cipher_version`で実リンク先を確認し、平文SQLiteでは合格にしない。fixture DBと既知の試験用鍵は配布せず、成功メタデータだけをartifactに保存する。アプリのschema移行・鍵操作は既存のGo/SQLCipher統合試験とnative保管庫検査でも確認する。
+
+旧版形式の検査は今回の移行に限る一時CIであり、新バージョンの公開完了後に専用検査だけを別PRで撤去する。実施結果を残す条件と撤去対象は[Issue #356](https://github.com/ShiningWank0/Omni_Money/issues/356)で追跡する。実起動・実取引・通常のSQLCipher統合検査とVue再描画の回帰検査は維持する。
 
 参照: [Wails 3.1.0の移行ガイド](https://github.com/wailsapp/wails/blob/v3.1.0/docs/mpress/content/migration/v2-to-v3.md)、[Go 1.27のmacOS要件](https://go.dev/doc/go1.27#darwin)。
 
