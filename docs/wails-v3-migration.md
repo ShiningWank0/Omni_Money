@@ -32,9 +32,9 @@ macOSの後片付けでは起動したChildProcessのPIDだけへ停止を要求
 
 Windowsの取引検査は生成済みproduction bindingを介して実SQLCipher DBを操作する。mock APIやHTTP専用test endpointへ置き換えない。開発用browser試験は、製品serverとは別のCI専用タグで実行し、詳細は`security-monitoring.md`に記載する。Issue #299を実動作の証跡なしに解決済みとはしない。
 
-SQLCipherの版をまたぐ形式互換性は別の必須CIで検査する。更新前のmain commit `0935595` に固定した4.18.0のchecksum検証付きrecipeで旧ライブラリを構築し、private領域へ暗号化DBを作る。そのDBを実4.20.0で読み書きし、4.18.0でも更新結果を再読込する。両probeは`PRAGMA cipher_version`で実リンク先を確認し、平文SQLiteでは合格にしない。fixture DBと既知の試験用鍵は配布せず、成功メタデータだけをartifactに保存する。アプリのschema移行・鍵操作は既存のGo/SQLCipher統合試験とnative保管庫検査でも確認する。
+2.6.0への移行では、SQLCipherの版をまたぐ形式互換性を専用CIで検査した。更新前のmain commit `0935595` に固定した4.18.0のchecksum検証付きrecipeで旧ライブラリを構築し、private領域へ暗号化DBを作成した。そのDBを実4.20.0で読み書きし、4.18.0でも更新結果を再読込した。両probeは`PRAGMA cipher_version`で実リンク先を確認し、平文SQLiteでは合格にしなかった。fixture DBと既知の試験用鍵は配布せず、結果JSON・source hash・artifact digestを[Issue #356の検証記録](https://github.com/ShiningWank0/Omni_Money/issues/356#issuecomment-7001794974)へ保存した。
 
-旧版形式の検査は今回の移行に限る一時CIであり、新バージョンの公開完了後に専用検査だけを別PRで撤去する。実施結果を残す条件と撤去対象は[Issue #356](https://github.com/ShiningWank0/Omni_Money/issues/356)で追跡する。実起動・実取引・通常のSQLCipher統合検査とVue再描画の回帰検査は維持する。
+この旧版形式の一時CIは、[2.6.0の公開](https://github.com/ShiningWank0/Omni_Money/releases/tag/v2.6.0)とDesktop成果物・checksum・attestation・同版GHCRの公開確認後、専用の2ファイルと3ステップだけを撤去した。公開確認と撤去PRは[Issue #356](https://github.com/ShiningWank0/Omni_Money/issues/356)で追跡する。アプリのschema移行・鍵操作を確認する通常のGo/SQLCipher統合検査、Linuxの実native UI、Windowsの実取引・再起動保持、macOS両CPUの起動smoke、クラッシュ/後片付け検査、Vue再描画の回帰検査は維持する。
 
 参照: [Wails 3.1.0の移行ガイド](https://github.com/wailsapp/wails/blob/v3.1.0/docs/mpress/content/migration/v2-to-v3.md)、[Go 1.27のmacOS要件](https://go.dev/doc/go1.27#darwin)。
 
