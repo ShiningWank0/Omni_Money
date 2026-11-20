@@ -186,11 +186,12 @@ test('publisher cannot write from PRs, a fork, a feature branch or an unapproved
   }
 })
 
-test('failed artifact download generates separate error issues and fails after reporting', async () => {
+test('failed artifact download completes monitoring after separate error issues are delivered', async () => {
   const writes = []
   const api = async (method, path, body) => { if (method === 'GET') return []; writes.push({ path, body }); return {} }
-  await assert.rejects(publishReports({ GITHUB_EVENT_NAME: 'schedule', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money',
-    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', GITHUB_TOKEN: 'fixture', PINNED_TEST_OUTCOME: 'success', PINNED_REPORT_DOWNLOAD_OUTCOME: 'failure' }, () => api), /collection failed/)
+  const result = await publishReports({ GITHUB_EVENT_NAME: 'schedule', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money',
+    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', GITHUB_TOKEN: 'fixture', PINNED_TEST_OUTCOME: 'success', PINNED_REPORT_DOWNLOAD_OUTCOME: 'failure' }, () => api)
+  assert.equal(result.deferred, 0)
   assert.equal(writes.length, groups.length)
   assert.ok(writes.every(x => x.path === 'issues' && x.body.title.includes('検査エラー')))
 })
@@ -234,17 +235,54 @@ test('GHCR credentials are private and never supplied globally to other registri
 test('inventory failures themselves create an issue instead of preventing notification', async () => {
   const writes = []
   const api = async (method, path, body) => { if (method === 'GET') return []; writes.push({ path, body }); return {} }
-  await assert.rejects(publishReports({ GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money',
-    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', GITHUB_TOKEN: 'fixture', PINNED_TEST_OUTCOME: 'success' }, () => api, () => { throw new Error('unregistered input') }), /inventory cannot/)
+  await publishReports({ GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money',
+    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', GITHUB_TOKEN: 'fixture', PINNED_TEST_OUTCOME: 'success' }, () => api, () => { throw new Error('unregistered input') })
   assert.equal(writes.length, 1); assert.ok(writes[0].body.title.includes('inventory/configuration'))
 })
 
 test('failed validation does not silence notification of an unexecuted security scan', async () => {
   const writes = []
   const api = async (method, path, body) => { if (method === 'GET') return []; writes.push({ path, body }); return {} }
-  await assert.rejects(publishReports({ GITHUB_EVENT_NAME: 'schedule', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money',
-    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', GITHUB_TOKEN: 'fixture', PINNED_TEST_OUTCOME: 'failure' }, () => api), /validation job did not succeed/)
+  await publishReports({ GITHUB_EVENT_NAME: 'schedule', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money',
+    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', GITHUB_TOKEN: 'fixture', PINNED_TEST_OUTCOME: 'failure' }, () => api)
   assert.equal(writes.length, 1); assert.ok(writes[0].body.title.includes('workflow/validation'))
+})
+
+test('failed validation also reports raw test failures and skipped matrices', async () => {
+  const writes = []
+  const api = async (method, path, body) => {
+    if (method === 'GET' && path.startsWith('actions/')) return { total_count: 1, jobs: [{ id: 1,
+      name: 'Validate pinned input monitoring', status: 'completed', conclusion: 'success', steps: [
+        { name: 'Test detection, incomplete reports and issue publication boundaries', number: 4, conclusion: 'failure' },
+      ] }] }
+    if (method === 'GET') return []
+    writes.push({ path, body }); return {}
+  }
+  const result = await publishReports({ GITHUB_EVENT_NAME: 'schedule', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money',
+    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', GITHUB_TOKEN: 'fixture', PINNED_TEST_OUTCOME: 'failure', PINNED_REPORT_DOWNLOAD_OUTCOME: 'success',
+    CI_MONITOR_REPORT_JOB: 'notify', CI_MONITOR_NEEDS_JSON: JSON.stringify({ tests: { result: 'success' }, scan: { result: 'skipped' } }) }, () => api)
+  assert.equal(result.created, 6)
+  assert.ok(writes.some(write => write.body.body.includes('incomplete reports and issue publication boundaries')))
+  for (const group of groups) assert.ok(writes.some(write => write.body.body.includes(`Collect saved input advisories (${group})`)))
+  assert.ok(writes.every(write => write.body.title.startsWith('[Bot]')))
+})
+
+test('job API collection failures are reported and publication failures remain fatal', async () => {
+  const writes = [], env = { GITHUB_EVENT_NAME: 'schedule', GITHUB_REF: 'refs/heads/main', GITHUB_REPOSITORY: 'ShiningWank0/Omni_Money',
+    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', GITHUB_TOKEN: 'fixture', PINNED_TEST_OUTCOME: 'failure',
+    CI_MONITOR_REPORT_JOB: 'notify', CI_MONITOR_NEEDS_JSON: '{}' }
+  const api = async (method, path, body) => {
+    if (path.startsWith('actions/')) throw new Error('job API unavailable')
+    if (method === 'GET') return []
+    writes.push({ path, body }); return {}
+  }
+  await publishReports(env, () => api)
+  assert.equal(writes.length, 2)
+  assert.ok(writes.some(write => write.body.title.includes('結果取得エラー')))
+  await assert.rejects(publishReports(env, () => async (method, path, body) => {
+    if (method === 'POST') throw new Error('publication unavailable')
+    return api(method, path, body)
+  }), /publication unavailable/)
 })
 
 test('notification job owns write permission; scanning never executes archived programs with that token', () => {
@@ -258,3 +296,4 @@ test('notification job owns write permission; scanning never executes archived p
   assert.ok(notify.includes('node scripts/pinned-security.mjs publish'))
   assert.equal((workflow.match(/ref: \$\{\{ github.sha \}\}/g) || []).length, 3)
 })
+

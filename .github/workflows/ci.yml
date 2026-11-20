@@ -23,6 +23,9 @@ permissions:
 env:
   GOTOOLCHAIN: local
   GOFLAGS: -tags=gtk3
+  # A scheduled/manual diagnostic succeeds when its results have been reported.
+  # PR checks and release rehearsals retain their existing failure gates.
+  CI_MONITORING: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
 
 concurrency:
   # Scheduled and manual scans share the Issue reporter; serialize both.
@@ -32,6 +35,7 @@ concurrency:
 jobs:
   oss:
     name: OSS licenses
+    continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
@@ -49,15 +53,18 @@ jobs:
       GOCACHE: ${{ github.workspace }}/.oss-cache/go-build
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: actions-checkout
         with:
           persist-credentials: false
 
       - name: Verify frozen Linux package inventory
+        id: verify-frozen-linux-package-inventory
         shell: bash
         working-directory: ${{ github.workspace }}
         run: bash scripts/verify-linux-environment.sh
 
       - name: Checkout immutable upstream compatibility tests for the temporary security patch
+        id: checkout-immutable-upstream-compatibility-tests-for-the-temporary-security-patch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -65,13 +72,17 @@ jobs:
           ref: 6bb40679c218cefba5d4e9662408c5fdf699a8bb
           path: .oss-cache/picomatch-upstream
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: actions-setup-go
         with:
           go-version-file: .go-version
           cache: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        id: actions-setup-node
         with:
           node-version-file: .node-version
       - name: Build production frontend inventory
+        id: build-production-frontend-inventory
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         working-directory: frontend
         run: |
           npm ci --ignore-scripts
@@ -79,10 +90,16 @@ jobs:
           git ls-files --error-unmatch bundled-dependencies.json > /dev/null
           git diff --exit-code -- bundled-dependencies.json
       - name: Verify the real local patch, attack inputs and unchanged official compatibility tests
+        id: verify-the-real-local-patch-attack-inputs-and-unchanged-official-compatibility-t
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: |
           node --test scripts/picomatch-patch.test.mjs frontend/tests/picomatch-security.test.js
-          node scripts/test-picomatch-compat.mjs .oss-cache/picomatch-upstream
+      - name: Test official picomatch compatibility
+        id: test-official-picomatch-compatibility
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        run: node scripts/test-picomatch-compat.mjs .oss-cache/picomatch-upstream
       - name: Save temporary security patch evidence
+        id: save-temporary-security-patch-evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -93,13 +110,19 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: Resolve pinned Go dependencies
+        id: resolve-pinned-go-dependencies
         run: go mod download
+      - name: Test OSS coverage and inventory generation
+        id: test-oss-coverage-and-inventory-generation
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        run: node --test scripts/oss-notices.test.mjs scripts/npm-lock-inventory.test.mjs scripts/dependabot-oss-sync.test.mjs scripts/release-plan.test.mjs scripts/openssl-build.test.mjs scripts/macos-build.test.mjs
       - name: Check OSS coverage and approved notices once for all release targets
-        run: |
-          node --test scripts/oss-notices.test.mjs scripts/npm-lock-inventory.test.mjs scripts/dependabot-oss-sync.test.mjs scripts/release-plan.test.mjs scripts/openssl-build.test.mjs scripts/macos-build.test.mjs
-          node scripts/oss-notices.mjs check
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        id: oss-check
+        run: node scripts/oss-notices.mjs check
       - name: Save OSS mismatch evidence without accepting the candidate
-        if: ${{ failure() }}
+        id: save-oss-mismatch-evidence-without-accepting-the-candidate
+        if: ${{ !cancelled() && steps.oss-check.outcome == 'failure' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: oss-check-mismatch
@@ -107,8 +130,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Generate reviewable release notice inventories
+        id: generate-reviewable-release-notice-inventories
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: node scripts/oss-notices.mjs package-all
       - name: Save release notice inventories
+        id: save-release-notice-inventories
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: oss-license-inventories
@@ -118,24 +144,55 @@ jobs:
             licenses/build/
           if-no-files-found: error
       - name: Test public and locked license screens
+        id: test-public-and-locked-license-screens
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         working-directory: frontend
         run: npx --no-install vitest run tests/component/Licenses.test.js
       - name: Install browser for public license layout tests
+        id: install-browser-for-public-license-layout-tests
         working-directory: frontend
         run: npx --no-install playwright install chromium
       - name: Verify exact OSS display and mobile layout for all release targets
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        id: oss-layout
         run: node scripts/oss-ui-matrix.mjs
       - name: Save failed license layout screenshots
-        if: failure()
+        id: save-failed-license-layout-screenshots
+        if: ${{ !cancelled() && steps.oss-layout.outcome == 'failure' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: oss-license-layout-failure
           path: .oss-cache/browser-tests/
           if-no-files-found: ignore
+      - name: Setup Node for monitoring evidence
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Record actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_MONITOR_JOB: ${{ github.job }}
+          CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
+          CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
+          CI_MONITOR_STEP_NAMES: >-
+            {"actions-checkout": "actions/checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "checkout-immutable-upstream-compatibility-tests-for-the-temporary-security-patch": "Checkout immutable upstream compatibility tests for the temporary security patch", "actions-setup-go": "actions/setup-go", "actions-setup-node": "actions/setup-node", "build-production-frontend-inventory": "Build production frontend inventory", "verify-the-real-local-patch-attack-inputs-and-unchanged-official-compatibility-t": "Verify the real local patch, attack inputs and unchanged official compatibility tests", "test-official-picomatch-compatibility": "Test official picomatch compatibility", "save-temporary-security-patch-evidence": "Save temporary security patch evidence", "resolve-pinned-go-dependencies": "Resolve pinned Go dependencies", "test-oss-coverage-and-inventory-generation": "Test OSS coverage and inventory generation", "oss-check": "Check OSS coverage and approved notices once for all release targets", "save-oss-mismatch-evidence-without-accepting-the-candidate": "Save OSS mismatch evidence without accepting the candidate", "generate-reviewable-release-notice-inventories": "Generate reviewable release notice inventories", "save-release-notice-inventories": "Save release notice inventories", "test-public-and-locked-license-screens": "Test public and locked license screens", "install-browser-for-public-license-layout-tests": "Install browser for public license layout tests", "oss-layout": "Verify exact OSS display and mobile layout for all release targets", "save-failed-license-layout-screenshots": "Save failed license layout screenshots"}
+        run: node scripts/ci-monitor-record.mjs
+      - name: Save actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-ci-steps-oss-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/security-reports/ci-steps-*.json
+          if-no-files-found: error
+          retention-days: 90
 
   release-plan:
     name: Plan release builds
     needs: oss
+    if: ${{ !cancelled() && !(github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal))) && needs.oss.result == 'success' }}
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
@@ -202,7 +259,8 @@ jobs:
     name: Go checks
     # PR checks require an up-to-date base; retain scheduled/manual scans without
     # repeating the same suite after merging to main.
-    if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+    if: ${{ !cancelled() && ((github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal))) || (needs.oss.result == 'success' && (github.event_name != 'push' || github.ref != 'refs/heads/main'))) }}
+    continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
@@ -217,22 +275,26 @@ jobs:
 
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Verify frozen Linux package inventory
+        id: verify-frozen-linux-package-inventory
         shell: bash
         working-directory: ${{ github.workspace }}
         run: bash scripts/verify-linux-environment.sh
 
       - name: Setup Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: .go-version
           cache: true
 
       - name: Setup Node.js
+        id: setup-node-js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
@@ -247,15 +309,20 @@ jobs:
           npm run build
 
       - name: Run Go tests
+        id: run-go-tests
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: go test ./...
 
       - name: Build checksum-pinned SQLCipher
+        id: build-checksum-pinned-sqlcipher
         env:
           SQLCIPHER_PREFIX: /tmp/omni-sqlcipher
           SQLCIPHER_BUILD_JOBS: "2"
         run: sh scripts/build-sqlcipher-linux.sh
 
       - name: Test fail-closed SQLCipher integration
+        id: test-fail-closed-sqlcipher-integration
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         env:
           CGO_CFLAGS: -I/tmp/omni-sqlcipher/include
           CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib
@@ -268,6 +335,8 @@ jobs:
       # Issue #299 keeps the unresolved development browser diagnostics manual.
       # Desktop release requires the packaged native WebView and dev build metadata.
       - name: Cross-build Windows secret boundaries
+        id: cross-build-windows-secret-boundaries
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         env:
           CGO_ENABLED: "0"
         run: |
@@ -276,9 +345,13 @@ jobs:
           GOOS=windows GOARCH=amd64 go test -c ./backend/fileprivacy -o /tmp/fileprivacy-windows.test.exe
 
       - name: Run Go vet
+        id: run-go-vet
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: go vet ./...
 
       - name: Run Go security analyzer
+        id: run-go-security-analyzer
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         if: ${{ !cancelled() && steps.go-security-setup.outcome == 'success' }}
         env:
           CGO_CFLAGS: -I/tmp/omni-sqlcipher/include
@@ -287,9 +360,13 @@ jobs:
         run: node scripts/security-reports.mjs gosec
 
       - name: Lint GitHub Actions workflows
+        id: lint-github-actions-workflows
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -no-color
 
       - name: Assert documentation contracts
+        id: assert-documentation-contracts
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: |
           set -euo pipefail
           test -f Agent.md
@@ -325,11 +402,18 @@ jobs:
           fi
 
       - name: Run Go race tests
-        run: |
-          go test -race ./...
-          go test -race -tags server ./...
+        id: run-go-race-tests
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        run: go test -race ./...
+
+      - name: Run server Go race tests
+        id: run-server-go-race-tests
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        run: go test -race -tags server ./...
 
       - name: Scan reachable Go vulnerabilities
+        id: scan-reachable-go-vulnerabilities
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         if: ${{ !cancelled() && steps.go-security-setup.outcome == 'success' }}
         env:
           CGO_CFLAGS: -I/tmp/omni-sqlcipher/include
@@ -338,6 +422,8 @@ jobs:
         run: node scripts/security-reports.mjs govulncheck
 
       - name: Build SQLCipher-linked server entrypoint
+        id: build-sqlcipher-linked-server-entrypoint
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         env:
           CGO_CFLAGS: -I/tmp/omni-sqlcipher/include
           CGO_LDFLAGS: -L/tmp/omni-sqlcipher/lib
@@ -345,11 +431,14 @@ jobs:
         run: go build -tags "server libsqlite3 sqlite_omit_load_extension" -o /tmp/omni_money_server ./server.go
 
       - name: Set up fixed Docker client
+        id: set-up-fixed-docker-client
         uses: ./.github/actions/setup-fixed-docker
         with:
           daemon: 'false'
 
       - name: Validate Docker Compose configuration
+        id: validate-docker-compose-configuration
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         env:
           ALLOWED_HOSTS: 'money.example.com'
           PASSKEY_RP_ID: 'money.example.com'
@@ -381,6 +470,8 @@ jobs:
           scripts/backup-data-root_test.sh
 
       - name: Assert Pangolin network isolation
+        id: assert-pangolin-network-isolation
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         env:
           ALLOWED_HOSTS: 'money.example.com'
           PASSKEY_RP_ID: 'money.example.com'
@@ -453,6 +544,7 @@ jobs:
           ' "$bootstrap_config"
 
       - name: Upload Go security reports
+        id: upload-go-security-reports
         if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -460,10 +552,36 @@ jobs:
           path: security-reports/*.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Setup Node for monitoring evidence
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Record actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_MONITOR_JOB: ${{ github.job }}
+          CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
+          CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
+          CI_MONITOR_STEP_NAMES: >-
+            {"checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "setup-go": "Setup Go", "setup-node-js": "Setup Node.js", "go-security-setup": "Build frontend assets for Go embed", "run-go-tests": "Run Go tests", "build-checksum-pinned-sqlcipher": "Build checksum-pinned SQLCipher", "test-fail-closed-sqlcipher-integration": "Test fail-closed SQLCipher integration", "cross-build-windows-secret-boundaries": "Cross-build Windows secret boundaries", "run-go-vet": "Run Go vet", "run-go-security-analyzer": "Run Go security analyzer", "lint-github-actions-workflows": "Lint GitHub Actions workflows", "assert-documentation-contracts": "Assert documentation contracts", "run-go-race-tests": "Run Go race tests", "run-server-go-race-tests": "Run server Go race tests", "scan-reachable-go-vulnerabilities": "Scan reachable Go vulnerabilities", "build-sqlcipher-linked-server-entrypoint": "Build SQLCipher-linked server entrypoint", "set-up-fixed-docker-client": "Set up fixed Docker client", "validate-docker-compose-configuration": "Validate Docker Compose configuration", "assert-pangolin-network-isolation": "Assert Pangolin network isolation", "upload-go-security-reports": "Upload Go security reports"}
+        run: node scripts/ci-monitor-record.mjs
+      - name: Save actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-ci-steps-go-checks-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/security-reports/ci-steps-*.json
+          if-no-files-found: error
+          retention-days: 90
 
   safe-update:
     needs: oss
+    if: ${{ !cancelled() && ((github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal))) || needs.oss.result == 'success') }}
     name: Safe-update full matrix
+    continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
@@ -482,12 +600,14 @@ jobs:
 
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Verify frozen Linux package inventory
+        id: verify-frozen-linux-package-inventory
         shell: bash
         working-directory: ${{ github.workspace }}
         run: bash scripts/verify-linux-environment.sh
@@ -563,18 +683,47 @@ jobs:
           echo "coverage decision: $run_full ($reason)"
 
       - name: Run safe-update full matrix
+        id: run-safe-update-full-matrix
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         if: steps.coverage.outputs.run_full == 'true'
         env:
           SHARD_INDEX: ${{ matrix.shard }}
         run: sudo env "PATH=$PATH" "SAFE_UPDATE_SHARD_INDEX=$SHARD_INDEX" SAFE_UPDATE_SHARD_COUNT=4 scripts/safe-update_test.sh
 
       - name: Skip safe-update full matrix
+        id: skip-safe-update-full-matrix
         if: steps.coverage.outputs.run_full != 'true'
         run: echo "safe-update full matrix is not required for this event"
+      - name: Setup Node for monitoring evidence
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Record actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_MONITOR_JOB: ${{ github.job }}
+          CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
+          CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
+          CI_MONITOR_STEP_NAMES: >-
+            {"checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "coverage": "Determine full-matrix coverage", "run-safe-update-full-matrix": "Run safe-update full matrix", "skip-safe-update-full-matrix": "Skip safe-update full matrix"}
+        run: node scripts/ci-monitor-record.mjs
+      - name: Save actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-ci-steps-safe-update-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/security-reports/ci-steps-*.json
+          if-no-files-found: error
+          retention-days: 90
 
   frontend:
     needs: oss
+    if: ${{ !cancelled() && ((github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal))) || needs.oss.result == 'success') }}
     name: Frontend build
+    continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
@@ -590,16 +739,19 @@ jobs:
 
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Verify frozen Linux package inventory
+        id: verify-frozen-linux-package-inventory
         shell: bash
         working-directory: ${{ github.workspace }}
         run: bash scripts/verify-linux-environment.sh
 
       - name: Setup Node.js
+        id: setup-node-js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
@@ -607,22 +759,33 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
+        id: install-dependencies
         run: npm ci --ignore-scripts
 
       - name: Audit dependencies
+        id: audit-dependencies
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         working-directory: .
         run: node scripts/security-reports.mjs npm
 
       - name: Test frontend security boundaries
+        id: test-frontend-security-boundaries
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         # License component tests already ran in the common OSS prerequisite.
-        run: |
-          npm run test:unit
-          npx --no-install vitest run --exclude tests/component/Licenses.test.js
+        run: npm run test:unit
+
+      - name: Test frontend components
+        id: test-frontend-components
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        run: npx --no-install vitest run --exclude tests/component/Licenses.test.js
 
       - name: Build frontend
+        id: build-frontend
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: npm run build
 
       - name: Upload frontend security reports
+        id: upload-frontend-security-reports
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -630,38 +793,117 @@ jobs:
           path: security-reports/*.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Setup Node for monitoring evidence
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Record actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_MONITOR_JOB: ${{ github.job }}
+          CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
+          CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
+          CI_MONITOR_STEP_NAMES: >-
+            {"checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "setup-node-js": "Setup Node.js", "install-dependencies": "Install dependencies", "audit-dependencies": "Audit dependencies", "test-frontend-security-boundaries": "Test frontend security boundaries", "test-frontend-components": "Test frontend components", "build-frontend": "Build frontend", "upload-frontend-security-reports": "Upload frontend security reports"}
+        run: node scripts/ci-monitor-record.mjs
+      - name: Save actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-ci-steps-frontend-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/security-reports/ci-steps-*.json
+          if-no-files-found: error
+          retention-days: 90
 
   windows-security:
     needs: oss
+    if: ${{ !cancelled() && ((github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal))) || needs.oss.result == 'success') }}
     name: Windows security boundaries
+    continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: windows-latest
     timeout-minutes: 15
 
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Setup Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: .go-version
           cache: true
 
       - name: Verify Windows owner-only storage boundaries
+        id: verify-windows-owner-only-storage-boundaries
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         env:
           CGO_ENABLED: "0"
-        run: |
-          go test -count=1 ./backend/fileprivacy
-          go test -count=1 ./backend/publicassets
-          go test -count=1 -run '^TestWindows' ./backend/desktopaccount/platform_shared.go ./backend/desktopaccount/platform_windows.go ./backend/desktopaccount/platform_windows_test.go
-          go test -count=1 -run '^TestWindowsPreparePrivateDatabaseFileSetsCurrentOwner$' ./backend/database/private_database_file.go ./backend/database/private_file_windows.go ./backend/database/private_database_file_windows_test.go
-          go test -count=1 -run '^TestPrepareDesktopSQLCipherSelfTestStorageIsPrivateBeforeOpen$' ./desktop_sqlcipher_storage.go ./desktop_sqlcipher_selftest_test.go
+        run: go test -count=1 ./backend/fileprivacy
+
+      - name: Test Windows public asset storage
+        id: test-windows-public-asset-storage
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 ./backend/publicassets
+
+      - name: Test Windows desktop account storage
+        id: test-windows-desktop-account-storage
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 -run '^TestWindows' ./backend/desktopaccount/platform_shared.go ./backend/desktopaccount/platform_windows.go ./backend/desktopaccount/platform_windows_test.go
+
+      - name: Test Windows encrypted database owner
+        id: test-windows-encrypted-database-owner
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 -run '^TestWindowsPreparePrivateDatabaseFileSetsCurrentOwner$' ./backend/database/private_database_file.go ./backend/database/private_file_windows.go ./backend/database/private_database_file_windows_test.go
+
+      - name: Test Windows desktop encryption self-test storage
+        id: test-windows-desktop-encryption-self-test-storage
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 -run '^TestPrepareDesktopSQLCipherSelfTestStorageIsPrivateBeforeOpen$' ./desktop_sqlcipher_storage.go ./desktop_sqlcipher_selftest_test.go
+      - name: Setup Node for monitoring evidence
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Record actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_MONITOR_JOB: ${{ github.job }}
+          CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
+          CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
+          CI_MONITOR_STEP_NAMES: >-
+            {"checkout": "Checkout", "setup-go": "Setup Go", "verify-windows-owner-only-storage-boundaries": "Verify Windows owner-only storage boundaries", "test-windows-public-asset-storage": "Test Windows public asset storage", "test-windows-desktop-account-storage": "Test Windows desktop account storage", "test-windows-encrypted-database-owner": "Test Windows encrypted database owner", "test-windows-desktop-encryption-self-test-storage": "Test Windows desktop encryption self-test storage"}
+        run: node scripts/ci-monitor-record.mjs
+      - name: Save actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-ci-steps-windows-security-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/security-reports/ci-steps-*.json
+          if-no-files-found: error
+          retention-days: 90
 
   docker:
     needs: oss
+    if: ${{ !cancelled() && ((github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal))) || needs.oss.result == 'success') }}
     name: Docker image build
+    continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
@@ -676,19 +918,23 @@ jobs:
 
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Verify frozen Linux package inventory
+        id: verify-frozen-linux-package-inventory
         shell: bash
         working-directory: ${{ github.workspace }}
         run: bash scripts/verify-linux-environment.sh
 
       - name: Set up fixed Docker toolchain
+        id: set-up-fixed-docker-toolchain
         uses: ./.github/actions/setup-fixed-docker
 
       - name: Login for immutable base images
+        id: login-for-immutable-base-images
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
           registry: ghcr.io
@@ -696,10 +942,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build pinned multi-stage image
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         id: docker-build
         run: docker buildx build --load --build-arg VERSION=ci --tag omni-money:ci .
 
       - name: Assert non-root multi-vault runtime
+        id: assert-non-root-multi-vault-runtime
+        if: ${{ !cancelled() && steps.docker-build.outcome == 'success' }}
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: |
           set -euo pipefail
           docker run --rm --entrypoint /bin/sh omni-money:ci -c '
@@ -714,6 +964,9 @@ jobs:
           '
 
       - name: Smoke test hardened runtime
+        id: smoke-test-hardened-runtime
+        if: ${{ !cancelled() && steps.docker-build.outcome == 'success' }}
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: |
           set -euo pipefail
           runtime_data="$(mktemp -d)"
@@ -797,6 +1050,7 @@ jobs:
           exit 1
 
       - name: Setup Node for server E2E
+        id: setup-node-for-server-e2e
         if: ${{ !cancelled() && steps.docker-build.outcome == 'success' }}
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -805,10 +1059,15 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies for server E2E
+        id: install-frontend-dependencies-for-server-e2e
+        if: ${{ !cancelled() && steps.docker-build.outcome == 'success' }}
         working-directory: frontend
         run: npm ci --ignore-scripts
 
       - name: Run server/browser E2E
+        id: run-server-browser-e2e
+        if: ${{ !cancelled() && steps.docker-build.outcome == 'success' }}
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         working-directory: frontend
         run: bash tests/e2e/run-server-e2e.sh
 
@@ -821,16 +1080,19 @@ jobs:
           format: json
           output: trivy-report.json
           # The following step applies the same failure threshold and records
-          # scan errors separately. JSON findings must never make CI green.
+          # scan errors separately. PR/release gates still reject findings.
           exit-code: '0'
 
       - name: Record Trivy result and enforce security gate
+        id: record-trivy-result-and-enforce-security-gate
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         if: ${{ always() && steps.trivy.outcome != 'skipped' }}
         env:
           TRIVY_OUTCOME: ${{ steps.trivy.outcome }}
         run: node scripts/security-reports.mjs trivy
 
       - name: Upload image security report
+        id: upload-image-security-report
         if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -838,10 +1100,36 @@ jobs:
           path: security-reports/*.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: Setup Node for monitoring evidence
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Record actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_MONITOR_JOB: ${{ github.job }}
+          CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
+          CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
+          CI_MONITOR_STEP_NAMES: >-
+            {"checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "set-up-fixed-docker-toolchain": "Set up fixed Docker toolchain", "login-for-immutable-base-images": "Login for immutable base images", "docker-build": "Build pinned multi-stage image", "assert-non-root-multi-vault-runtime": "Assert non-root multi-vault runtime", "smoke-test-hardened-runtime": "Smoke test hardened runtime", "setup-node-for-server-e2e": "Setup Node for server E2E", "install-frontend-dependencies-for-server-e2e": "Install frontend dependencies for server E2E", "run-server-browser-e2e": "Run server/browser E2E", "trivy": "Scan image for fixable high-severity vulnerabilities", "record-trivy-result-and-enforce-security-gate": "Record Trivy result and enforce security gate", "upload-image-security-report": "Upload image security report"}
+        run: node scripts/ci-monitor-record.mjs
+      - name: Save actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-ci-steps-docker-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/security-reports/ci-steps-*.json
+          if-no-files-found: error
+          retention-days: 90
 
   security-automation:
     needs: oss
+    if: ${{ !cancelled() && ((github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal))) || needs.oss.result == 'success') }}
     name: Security issue reporting tests
+    continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
@@ -855,28 +1143,65 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: actions-checkout
         with:
           persist-credentials: false
 
       - name: Verify frozen Linux package inventory
+        id: verify-frozen-linux-package-inventory
         shell: bash
         working-directory: ${{ github.workspace }}
         run: bash scripts/verify-linux-environment.sh
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        id: actions-setup-node
         with:
           node-version-file: .node-version
-      - run: node --test scripts/security-monitoring.test.mjs scripts/runtime-versions.test.mjs scripts/wails-dev-integration.test.mjs scripts/wails-native-integration.test.mjs scripts/wails-macos-startup.test.mjs scripts/dependabot-node-sync.test.mjs scripts/check-node-sync-app.test.mjs scripts/dependabot-oss-sync.test.mjs scripts/linux-environments.test.mjs
+      - name: Test monitoring and dependency synchronization
+        id: test-monitoring-and-dependency-synchronization
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        run: node --test scripts/ci-monitor.test.mjs scripts/ci-monitoring-workflow.test.mjs scripts/issue-reporting.test.mjs scripts/security-monitoring.test.mjs scripts/runtime-versions.test.mjs scripts/wails-dev-integration.test.mjs scripts/wails-native-integration.test.mjs scripts/wails-macos-startup.test.mjs scripts/dependabot-node-sync.test.mjs scripts/check-node-sync-app.test.mjs scripts/dependabot-oss-sync.test.mjs scripts/linux-environments.test.mjs
       - name: Validate offline TrueNAS icon metadata
+        id: validate-offline-truenas-icon-metadata
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: python3 -B -m unittest discover -s scripts -p 'truenas_icon_metadata_test.py'
       - name: Verify coordinated runtime versions
+        id: verify-coordinated-runtime-versions
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: node scripts/runtime-versions.mjs check
       - name: Verify immutable Linux inputs
+        id: verify-immutable-linux-inputs
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: node scripts/linux-environments.mjs
+      - name: Setup Node for monitoring evidence
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Record actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_MONITOR_JOB: ${{ github.job }}
+          CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
+          CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
+          CI_MONITOR_STEP_NAMES: >-
+            {"actions-checkout": "actions/checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "actions-setup-node": "actions/setup-node", "test-monitoring-and-dependency-synchronization": "Test monitoring and dependency synchronization", "validate-offline-truenas-icon-metadata": "Validate offline TrueNAS icon metadata", "verify-coordinated-runtime-versions": "Verify coordinated runtime versions", "verify-immutable-linux-inputs": "Verify immutable Linux inputs"}
+        run: node scripts/ci-monitor-record.mjs
+      - name: Save actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-ci-steps-security-automation-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/security-reports/ci-steps-*.json
+          if-no-files-found: error
+          retention-days: 90
 
   parser-fuzz:
     needs: oss
     name: Parser fuzz (${{ matrix.target }})
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && ((github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal))) || needs.oss.result == 'success') }}
+    continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
@@ -897,28 +1222,35 @@ jobs:
       GOMAXPROCS: "2"
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Verify frozen Linux package inventory
+        id: verify-frozen-linux-package-inventory
         shell: bash
         working-directory: ${{ github.workspace }}
         run: bash scripts/verify-linux-environment.sh
       - name: Setup Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: .go-version
           cache: true
       - name: Setup Node.js
+        id: setup-node-js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
       - name: Fuzz bounded security parsers
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        id: fuzz
         env:
           FUZZ_TARGET: ${{ matrix.target }}
         run: node scripts/security-reports.mjs "$FUZZ_TARGET"
       - name: Upload fuzz security report
+        id: upload-fuzz-security-report
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -927,18 +1259,44 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload failing fuzz corpus
-        if: ${{ failure() }}
+        id: upload-failing-fuzz-corpus
+        if: ${{ !cancelled() && steps.fuzz.outcome == 'failure' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: parser-corpus-${{ matrix.target }}-${{ github.run_attempt }}
           path: backend/**/testdata/fuzz/**
           if-no-files-found: ignore
           retention-days: 7
+      - name: Setup Node for monitoring evidence
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Record actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_MONITOR_JOB: ${{ github.job }}
+          CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
+          CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
+          CI_MONITOR_STEP_NAMES: >-
+            {"checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "setup-go": "Setup Go", "setup-node-js": "Setup Node.js", "fuzz": "Fuzz bounded security parsers", "upload-fuzz-security-report": "Upload fuzz security report", "upload-failing-fuzz-corpus": "Upload failing fuzz corpus"}
+        run: node scripts/ci-monitor-record.mjs
+      - name: Save actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-ci-steps-parser-fuzz-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/security-reports/ci-steps-*.json
+          if-no-files-found: error
+          retention-days: 90
 
   passkey:
     needs: oss
     name: Passkey regression tests
-    if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+    if: ${{ !cancelled() && ((github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal))) || (needs.oss.result == 'success' && (github.event_name != 'push' || github.ref != 'refs/heads/main'))) }}
+    continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
@@ -959,31 +1317,44 @@ jobs:
       OMNI_REQUIRE_SQLCIPHER_TESTS: "1"
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Verify frozen Linux package inventory
+        id: verify-frozen-linux-package-inventory
         shell: bash
         working-directory: ${{ github.workspace }}
         run: bash scripts/verify-linux-environment.sh
       - name: Setup Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: .go-version
           cache: true
       - name: Record the dependency versions declared by this PR
+        id: record-the-dependency-versions-declared-by-this-pr
         run: go list -mod=readonly -m all
       - name: Build checksum-pinned SQLCipher
+        id: build-checksum-pinned-sqlcipher
         run: sh scripts/build-sqlcipher-linux.sh
       - name: Test passkey authentication and encrypted persistence
+        id: test-passkey-authentication-and-encrypted-persistence
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: |
           go test -mod=readonly -count=1 -tags "libsqlite3 sqlite_omit_load_extension" ./backend/serverauth ./backend/control ./backend/keyenvelope ./backend/middleware
-          go test -mod=readonly -race -count=1 -tags "libsqlite3 sqlite_omit_load_extension" -run '^TestPasskeyRegression' ./backend/serverauth
+
+      - name: Test passkey authentication under the race detector
+        id: test-passkey-authentication-under-the-race-detector
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        run: go test -mod=readonly -race -count=1 -tags "libsqlite3 sqlite_omit_load_extension" -run '^TestPasskeyRegression' ./backend/serverauth
       # Keep the application's dependency graph. Correct v0.18.2's generated
       # P-256 test coordinates only in a disposable module cache, preserving
       # the original cache and all production source files.
       - name: Test WebAuthn using this PR's dependency graph
+        id: test-webauthn-using-this-pr-s-dependency-graph
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: |
           python3 -m unittest discover -s scripts -p 'pad_webauthn_test_coordinates_test.py'
           original_modcache="$(go env GOMODCACHE)"
@@ -996,15 +1367,41 @@ jobs:
           python3 scripts/pad_webauthn_test_coordinates.py "$test_modcache"
           go test -mod=readonly -count=1 github.com/go-webauthn/webauthn/protocol/... github.com/go-webauthn/webauthn/webauthn
       - name: Verify dependency manifests stayed unchanged
+        id: verify-dependency-manifests-stayed-unchanged
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         if: ${{ always() }}
         run: git diff --exit-code -- go.mod go.sum
+      - name: Setup Node for monitoring evidence
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Record actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_MONITOR_JOB: ${{ github.job }}
+          CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
+          CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
+          CI_MONITOR_STEP_NAMES: >-
+            {"checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "setup-go": "Setup Go", "record-the-dependency-versions-declared-by-this-pr": "Record the dependency versions declared by this PR", "build-checksum-pinned-sqlcipher": "Build checksum-pinned SQLCipher", "test-passkey-authentication-and-encrypted-persistence": "Test passkey authentication and encrypted persistence", "test-passkey-authentication-under-the-race-detector": "Test passkey authentication under the race detector", "test-webauthn-using-this-pr-s-dependency-graph": "Test WebAuthn using this PR's dependency graph", "verify-dependency-manifests-stayed-unchanged": "Verify dependency manifests stayed unchanged"}
+        run: node scripts/ci-monitor-record.mjs
+      - name: Save actual diagnostic step outcomes
+        if: ${{ always() && env.CI_MONITORING == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-ci-steps-passkey-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/security-reports/ci-steps-*.json
+          if-no-files-found: error
+          retention-days: 90
 
   # Keep the existing required check name, and include the auxiliary security
   # and update tests in its verdict before GitHub allows the PR to merge.
   go:
     name: Go tests
     needs: [oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker, release-plan, release-desktop]
-    if: ${{ always() }}
+    if: ${{ always() && !(github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal))) }}
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
@@ -1051,49 +1448,46 @@ jobs:
           test "$FUZZ_RESULT" = "$EXPECTED_FUZZ_RESULT"
 
   security-issues:
-    name: Report security findings
-    needs: [go-checks, frontend, docker, security-automation, parser-fuzz]
+    name: Report CI findings as Bot
+    needs: [oss, go-checks, frontend, safe-update, windows-security, docker, security-automation, parser-fuzz, passkey]
     if: >-
-      ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
-          && github.repository == 'ShiningWank0/Omni_Money' && needs.security-automation.result == 'success' }}
+      ${{ always() && github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal))
+          && github.repository == 'ShiningWank0/Omni_Money' }}
+    # Reporting must still work if the frozen build image or its checks fail.
     runs-on: ubuntu-24.04
-    container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:bfe276190335fd0b989048b45722ab16147730ffc7df86c8ed636b15d9f6c419
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      options: --init --user 1001:1001
-    defaults:
-      run:
-        shell: bash
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
-      packages: read
       contents: read
       actions: read
       issues: write
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Verify frozen Linux package inventory
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: bash scripts/verify-linux-environment.sh
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
       - name: Download reports from this run only
         id: reports
-        continue-on-error: true # Missing artifacts become scan-error issues.
+        continue-on-error: true # Missing artifacts become reported coverage gaps.
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: security-*-${{ github.run_attempt }}
           path: security-reports
           merge-multiple: true
-      - name: Create or update security issues
+      - name: Report every diagnostic outcome and security finding
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECURITY_REPORT_DOWNLOAD_OUTCOME: ${{ steps.reports.outcome }}
-        run: node scripts/security-issues.mjs
+          CI_MONITOR_NEEDS_JSON: ${{ toJSON(needs) }}
+          CI_MONITOR_REPORT_JOB: security-issues
+        run: node scripts/ci-monitor.mjs
+      - name: Save the complete monitoring outcome
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-monitor-${{ github.run_attempt }}
+          path: security-reports/ci-monitor.json
+          if-no-files-found: error
+          retention-days: 90

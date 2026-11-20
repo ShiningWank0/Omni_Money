@@ -307,20 +307,49 @@ export function requireCollected(report) {
 export async function publishReports(env = process.env, apiFactory = githubClient, loadInventory = inventory) {
   assert.ok(['schedule', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME) && env.GITHUB_REF === 'refs/heads/main' &&
     env.GITHUB_REPOSITORY === 'ShiningWank0/Omni_Money', 'Issue creation requires scheduled/manual main')
+  const api = apiFactory(env.GITHUB_TOKEN, env.GITHUB_REPOSITORY)
+  const runURL = `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}/attempts/${env.GITHUB_RUN_ATTEMPT}`
+  const options = { respectClosed: true, deferOverflow: true, scope: 'pinned-inputs' }
+  const monitor = env.CI_MONITOR_NEEDS_JSON ? await import('./ci-monitor.mjs') : null
+  let jobEntries = []
+  if (monitor) {
+    try { jobEntries = await monitor.monitorJobs(api, env) }
+    catch { jobEntries = [monitor.collectionErrorEntry(env)] }
+  }
+  const renderer = (entry, url) => entry.data.kind.startsWith('ci-') ? monitor.renderMonitor(entry, url) : renderPinned(entry, url)
+  const deliver = async findings => {
+    let pullRequests
+    const items = [...findings, ...jobEntries]
+    if (monitor) {
+      try { pullRequests = await monitor.dependabotTargets(api, items) }
+      catch {
+        const issue = monitor.collectionErrorEntry(env)
+        issue.data.component = 'Pinned input security/dependabot-prs'
+        issue.data.detail = '既存のDependabot更新PRを確認できませんでした。検出した問題はIssueへ報告します。'
+        issue.key = sha256(JSON.stringify(['ci-monitor', issue.data.component]))
+        issue.digest = sha256(JSON.stringify(issue.data))
+        items.push(issue)
+      }
+    }
+    const result = await publish(api, items, runURL, renderer, { ...options, pullRequests })
+    if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY,
+      `## Botによる固定入力監視の報告\n\n検出結果・検査不能を報告しました。監視成功は問題なしの判定ではありません。\n\n| 項目 | 件数 |\n| --- | ---: |\n| 報告対象 | ${items.length} |\n| Issue作成（集約を含む） | ${result.created} |\n| Issue・既存Dependabot PRへの更新 | ${result.updated} |\n| 集約Issueに保存した個別報告待ち | ${result.deferred} |\n`)
+    return result
+  }
   if (env.PINNED_TEST_OUTCOME !== 'success') {
     const failed = reportEntries([{ group: 'workflow', results: [{ name: 'validation', status: 'error', findings: [],
       error: '検査処理の回帰テストが失敗・中断・未実行です。脆弱性検査が完了していないため、先行jobを確認してください。' }] }])
-    const runURL = `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}/attempts/${env.GITHUB_RUN_ATTEMPT}`
-    await publish(apiFactory(env.GITHUB_TOKEN, env.GITHUB_REPOSITORY), failed, runURL, renderPinned, { respectClosed: true })
-    throw new Error('Pinned input validation job did not succeed')
+    const result = await deliver(failed)
+    console.log(JSON.stringify(result))
+    return result
   }
   let input
   try { input = loadInventory() } catch {
     const failed = reportEntries([{ group: 'inventory', results: [{ name: 'configuration', status: 'error', findings: [],
       error: '固定入力・lock・moduleの構成を検証できません。新しい固定入力が検査対象に登録されていない可能性も含め、ログを確認してください。' }] }])
-    const runURL = `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}/attempts/${env.GITHUB_RUN_ATTEMPT}`
-    await publish(apiFactory(env.GITHUB_TOKEN, env.GITHUB_REPOSITORY), failed, runURL, renderPinned, { respectClosed: true })
-    throw new Error('Pinned input inventory cannot be validated')
+    const result = await deliver(failed)
+    console.log(JSON.stringify(result))
+    return result
   }
   const reports = []
   for (const group of groups) {
@@ -331,10 +360,11 @@ export async function publishReports(env = process.env, apiFactory = githubClien
       reports.push({ group, results: [{ name: 'report', status: 'error', findings: [], error: '検査reportが欠落・不正、またはartifact取得に失敗しています。' }] })
     }
   }
-  const runURL = `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}/attempts/${env.GITHUB_RUN_ATTEMPT}`
-  const result = await publish(apiFactory(env.GITHUB_TOKEN, env.GITHUB_REPOSITORY), reportEntries(reports), runURL, renderPinned, { respectClosed: true })
+  const result = await deliver(reportEntries(reports))
   console.log(JSON.stringify(result))
-  for (const report of reports) requireCollected(report)
+  // Reported inspection failures are a completed monitoring run. Scanner CLI
+  // and PR/release enforcement continue to use requireCollected separately.
+  return result
 }
 
 async function scan(group) {
@@ -414,3 +444,4 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const task = process.argv[2] === 'publish' ? publishReports() : scan(process.argv[2])
   task.catch(error => { console.error(error.message); process.exitCode = 1 })
 }
+
