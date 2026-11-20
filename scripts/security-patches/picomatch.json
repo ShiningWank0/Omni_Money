@@ -47,7 +47,7 @@
     "package.json": "d25cc9799fd30c2318101e14a6bd6f82aa6b1b7005a5055288f9958a9e5752cd",
     "posix.js": "5695ff5dfcd5a338a40630bd506056f2950bcb08fe1cc068519cbbfe60add480"
   },
-  "advisoryRecordSHA256": "dba16521bab03492a9b87075603ba1772ffa24a3cd88ddf236f8e41cda8a1f9e",
+  "advisoryRecordSHA256": "256d69a1ebdc0346f66a72ccc975adca0dde1d98605de583028d1aa1d8ab437e",
   "additionalFixes": [
     {
       "source": "GitHub Advanced Security",
@@ -57,10 +57,17 @@
     }
   ],
   "advisoryReview": {
-    "reviewedOn": "2026-11-19",
+    "reviewedOn": "2026-11-20",
     "status": "withdrawn",
     "withdrawn": "2026-11-18T15:38:56Z",
     "upstreamReference": "https://github.com/micromatch/picomatch/pull/235#issuecomment-6315749381",
-    "trackingIssue": 348
+    "trackingIssue": 348,
+    "recordModified": "2026-11-19T16:15:03.414400251Z",
+    "previousRecordSHA256": "dba16521bab03492a9b87075603ba1772ffa24a3cd88ddf236f8e41cda8a1f9e",
+    "changes": [
+      "Corrected the withdrawal explanation from is a security issue to is not a security issue.",
+      "Restored the existing CVE-2026-112366 alias; this does not introduce a new advisory.",
+      "Updated the OSV modified timestamp; affected ranges, severity and withdrawal date are unchanged."
+    ]
   }
 }
