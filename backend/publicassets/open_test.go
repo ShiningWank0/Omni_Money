@@ -1,11 +1,13 @@
 package publicassets
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func writeFixture(t *testing.T, filename, body string) {
@@ -71,35 +73,56 @@ func TestOpenDoesNotReadPrivateTargetDuringReplacement(t *testing.T) {
 	asset := filepath.Join(root, "assets", "current.svg")
 	writeFixture(t, asset, "public")
 	writeFixture(t, filepath.Join(root, ".env"), "private-marker")
-	// The final component is atomically replaced. No pre-open pathname check
-	// can establish the safety of a subsequent ordinary open.
-	var writer sync.WaitGroup
-	writer.Add(1)
+	// Replace the final component while reads continue. Unix rename is atomic;
+	// Windows may temporarily deny replacement while a reader holds a handle.
+	// Neither behavior makes a pathname check before an ordinary open safe.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	writerDone := make(chan struct{})
 	writerErrors := make(chan error, 1)
+	var replacements atomic.Int32
 	go func() {
-		defer writer.Done()
+		defer close(writerDone)
 		for i := 0; i < 300; i++ {
+			if err := ctx.Err(); err != nil {
+				writerErrors <- err
+				return
+			}
 			next := filepath.Join(root, "assets", "next")
 			if err := os.Symlink("../.env", next); err != nil {
 				writerErrors <- err
 				return
 			}
-			if err := os.Rename(next, asset); err != nil {
+			if err := renameAssetForTest(ctx, next, asset); err != nil {
 				writerErrors <- err
 				return
 			}
+			replacements.Add(1)
 			if err := os.WriteFile(next, []byte("public"), 0o600); err != nil {
 				writerErrors <- err
 				return
 			}
-			if err := os.Rename(next, asset); err != nil {
+			if err := renameAssetForTest(ctx, next, asset); err != nil {
 				writerErrors <- err
 				return
 			}
+			replacements.Add(1)
 		}
 	}()
-	defer writer.Wait()
-	for i := 0; i < 1000; i++ {
+	defer func() {
+		cancel()
+		<-writerDone
+	}()
+reads:
+	for i := 0; ; i++ {
+		select {
+		case <-ctx.Done():
+			t.Fatal("file replacement did not finish while concurrent reads were active")
+		case <-writerDone:
+			if i >= 1000 {
+				break reads
+			}
+		default:
+		}
 		file, err := Open(root, "assets/current.svg")
 		if err != nil {
 			continue
@@ -110,10 +133,23 @@ func TestOpenDoesNotReadPrivateTargetDuringReplacement(t *testing.T) {
 			t.Fatalf("unexpected opened content: %q, %v", body, readErr)
 		}
 	}
-	writer.Wait()
 	select {
 	case err := <-writerErrors:
 		t.Fatal(err)
 	default:
+	}
+	if got := replacements.Load(); got != 600 {
+		t.Fatalf("completed %d replacements, want all 600", got)
+	}
+	// A permanently failing Open must not satisfy the security assertion merely
+	// because every attempted read was rejected during the replacement loop.
+	file, err := Open(root, "assets/current.svg")
+	if err != nil {
+		t.Fatalf("open final public file: %v", err)
+	}
+	body, readErr := io.ReadAll(file)
+	_ = file.Close()
+	if readErr != nil || string(body) != "public" {
+		t.Fatalf("final public content: %q, %v", body, readErr)
 	}
 }
