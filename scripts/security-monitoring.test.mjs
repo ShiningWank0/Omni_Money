@@ -546,4 +546,3 @@ test('zero exit without a completed matching fuzz engine never becomes a clean r
       ['test', '-json', '-run=^$', '-fuzz=^FuzzStrictServerJSONKeys$', '-fuzztime=120s', '-fuzzminimizetime=10s', '-parallel=1', '-timeout=4m', './backend/api']);
   }
 });
-

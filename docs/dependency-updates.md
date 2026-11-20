@@ -267,5 +267,3 @@ Release経路の変更は、まず`workflow_dispatch`のリハーサル（releas
 
 Dependabot PRに移行コードを追加した後は自動rebaseが停止するため、最新mainの取り込みは明示的に行う。
 グループPRを分割するときは代替PRを用意し、更新を取りこぼさないよう元PRから追跡できる状態にして閉じる。
-
-

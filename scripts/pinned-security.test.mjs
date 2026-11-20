@@ -296,4 +296,3 @@ test('notification job owns write permission; scanning never executes archived p
   assert.ok(notify.includes('node scripts/pinned-security.mjs publish'))
   assert.equal((workflow.match(/ref: \$\{\{ github.sha \}\}/g) || []).length, 3)
 })
-

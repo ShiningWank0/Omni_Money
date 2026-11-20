@@ -280,4 +280,3 @@ export async function main(env = process.env) {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });
 }
-
