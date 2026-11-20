@@ -28,6 +28,30 @@ test('network failure, changed full advisory content and malformed data fail the
   await assert.rejects(auditPatchedPicomatch(projectRoot, async () => ({ ok: true, text: async () => '{}' })), /recorded advisory|undefined|equal/i)
 })
 
+test('reviewed withdrawn revision is clean without advisory waivers and the prior revision still requires review', async () => {
+  const fetcher = data => async url => ({ ok: true, text: async () => JSON.stringify(url.includes('osv.dev') ? data : {}) })
+  assert.equal(record.withdrawn, manifest.advisoryReview.withdrawn)
+  assert.deepEqual(record.aliases, ['CVE-2026-112366'])
+  assert.match(record.details, /withdrawn because it is not a security issue/)
+  assert.deepEqual(await auditPatchedPicomatch(projectRoot, fetcher(record)), {
+    findings: [], remediations: [], candidates: [], upstream: {},
+  })
+  const previous = { ...record, modified: '2026-11-18T15:56:12.177093406Z',
+    details: record.details.replace('because it is not a security issue.', 'because it is a security issue.') }
+  delete previous.aliases
+  await assert.rejects(auditPatchedPicomatch(projectRoot, fetcher(previous)), /advisory changed/)
+})
+
+test('a renewed advisory or changed affected range still requires review', async () => {
+  const fetcher = data => async url => ({ ok: true, text: async () => JSON.stringify(url.includes('osv.dev') ? data : {}) })
+  const renewed = structuredClone(record)
+  delete renewed.withdrawn
+  await assert.rejects(auditPatchedPicomatch(projectRoot, fetcher(renewed)), /advisory changed/)
+  const expanded = structuredClone(record)
+  expanded.affected[0].ranges[0].events.at(-1).last_affected = '4.0.8'
+  await assert.rejects(auditPatchedPicomatch(projectRoot, fetcher(expanded)), /advisory changed/)
+})
+
 test('source drift and nested unpatched packages fail before an advisory can be treated as remediated', t => {
   const root = mkdtempSync(join(tmpdir(), 'omni-picomatch-integrity-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
