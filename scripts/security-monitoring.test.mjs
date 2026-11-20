@@ -506,12 +506,12 @@ test('required Go check rejects native WebView, fuzz, passkey, frontend and brow
   }
   assert.equal(gatePasses({ DESKTOP_REQUIRED: '' }), false, 'missing release plan output must fail closed');
   const fuzzJob = workflow.split('  parser-fuzz:\n')[1]?.split('  # Keep the existing required check name')[0];
-  assert.match(fuzzJob, /if: \$\{\{ github.event_name == 'schedule' \|\| github.event_name == 'workflow_dispatch' \}\}/);
+  assert.match(fuzzJob, /if: .*github.event_name == 'schedule' \|\| github.event_name == 'workflow_dispatch'/);
   assert.match(fuzzJob, /max-parallel: 2/);
   assert.match(fuzzJob, /fail-fast: false/);
   assert.match(fuzzJob, /target: \[fuzz-csv, fuzz-json, fuzz-image\]/);
   assert.match(workflow, /needs: \[oss, go-checks, frontend, safe-update, windows-security, security-automation, parser-fuzz, passkey, docker, release-plan, release-desktop\]/);
-  assert.match(workflow, /needs: \[go-checks, frontend, docker, security-automation, parser-fuzz\]/);
+  assert.match(workflow, /needs: \[oss, go-checks, frontend, safe-update, windows-security, docker, security-automation, parser-fuzz, passkey\]/);
   assert.match(workflow, /EXPECTED_FUZZ_RESULT: .*'schedule'.*'workflow_dispatch'.*'success' \|\| 'skipped'/);
   const passkeyJob = workflow.split('  passkey:\n')[1]?.split('  # Keep the existing required check name')[0];
   assert.ok(passkeyJob, 'permanent passkey regression job missing');
