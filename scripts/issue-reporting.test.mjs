@@ -131,3 +131,27 @@ test('a matching Dependabot PR receives one Bot comment and no duplicate Issue',
   await assert.rejects(publish(api, [item], runURL, render, { ...options,
     pullRequests: new Map([[item.key, { ...pull, user: { login: 'someone' } }]]) }), /Invalid Dependabot/);
 });
+
+test('backlogs remove only the owned header and preserve escaped nested-comment evidence', async () => {
+  const findings = Array.from({ length: 26 }, (_, number) => entry(number));
+  const item = findings.at(-1);
+  item.data.summary = ['<<!-- nested -->!-- payload --> <SCRIPT> @everyone'];
+  item.digest = hash(item.data);
+  const view = render(item, runURL), header = `${view.marker}\n${view.revision}\n`;
+  const { api, state } = mockAPI();
+  await publish(api, findings, runURL, render, options);
+  const saved = backlog(state)[0].body;
+  assert.ok(saved.includes(view.body.slice(header.length).trim()), 'escaped evidence must remain byte-for-byte intact');
+  assert.ok(!saved.includes(view.marker));
+  assert.ok(!saved.includes('<!-- nested'));
+  assert.ok(!saved.toLowerCase().includes('<script>'));
+  assert.ok(!saved.includes('@everyone'));
+});
+
+test('an unexpected marker header is rejected before any report is posted', async () => {
+  const { api, state } = mockAPI();
+  const shifted = (item, url) => ({ ...render(item, url), body: `unexpected prefix\n${render(item, url).body}` });
+  await assert.rejects(publish(api, Array.from({ length: 26 }, (_, number) => entry(number)), runURL, shifted, options),
+    /Invalid report marker header/);
+  assert.equal(state.writes.length, 0);
+});

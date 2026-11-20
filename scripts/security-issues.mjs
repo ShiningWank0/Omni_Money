@@ -125,12 +125,20 @@ async function latestReport(api, issue, marker) {
     c.body.includes(`<!-- ${prefix}:revision:`)).at(-1)?.body || issue.body;
 }
 
+function reportDetails(view) {
+  // The renderer owns these exact leading lines. Remove only that prefix;
+  // never rewrite arbitrary HTML comments in the already escaped report body.
+  const header = `${view.marker}\n${view.revision}\n`;
+  if (!view.body.startsWith(header)) throw new Error('Invalid report marker header');
+  return view.body.slice(header.length).trim();
+}
+
 function backlogView(scope, page, pending, runURL) {
   const marker = `<!-- ${prefix}:backlog:${scope}:${page} -->`;
   const state = pending.map(item => [item.entry.key, item.entry.digest]);
   const revision = `<!-- ${prefix}:revision:${hash(state)} -->`;
   const savedKeys = Buffer.from(JSON.stringify(state)).toString('base64');
-  const details = pending.map((item, index) => `### ${index + 1}. ${clean(item.view.title)}\n\n${item.view.body.replace(/<!--[\s\S]*?-->/g, '').trim()}`).join('\n\n---\n\n');
+  const details = pending.map((item, index) => `### ${index + 1}. ${clean(item.view.title)}\n\n${reportDetails(item.view)}`).join('\n\n---\n\n');
   return { marker, revision,
     title: `[Bot][Security: 報告待ち] ${scope} / ${page}`,
     body: `${marker}\n${revision}\n<!-- ${prefix}:pending:${savedKeys} -->\n\nGitHub Actions（github-actions[bot]）が自動作成した集約報告です。\n\n${pending.length ? `個別Issue化を待つ${pending.length}件を、本文に全件保存しています。次回の監視ではこの報告待ちを優先します。` : 'このページの個別報告待ちは解消しました。過去の検出内容はこのIssueの履歴に残っています。'}\n\n[検査ログ](${runURL})\n\n${details}`,

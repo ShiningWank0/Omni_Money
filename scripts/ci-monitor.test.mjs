@@ -144,12 +144,15 @@ test('latest-attempt job collection paginates and rejects incomplete or ambiguou
 
 test('issue identity ignores run IDs and renders API-provided names as text', async () => {
   const jobs = fixtures();
-  jobs[0].steps[0] = { number: 1, name: '@everyone <script> [click](https://evil.test) <!-- marker -->', conclusion: 'failure' };
+  jobs[0].steps[0] = { number: 1, name: '@everyone <script> <SCRIPT> <ScRiPt> [click](https://evil.test) <!-- marker -->', conclusion: 'failure' };
   const [entry] = await monitorJobs(apiFixture(jobs).api, environment, { stepReports: recorded(jobs) });
   const first = renderMonitor(entry, runURL);
   const second = renderMonitor(entry, runURL.replace('/123/', '/124/'));
   assert.equal(first.revision, second.revision);
-  assert.doesNotMatch(first.body, /@everyone|<script>|\[click\]|<!-- marker -->/);
+  const lowerCaseBody = first.body.toLowerCase();
+  for (const payload of ['@everyone', '<script>', '[click]', '<!-- marker -->']) {
+    assert.ok(!lowerCaseBody.includes(payload), `Unsafe report content: ${payload}`);
+  }
   assert.throws(() => renderMonitor(entry, 'https://evil.test/actions/runs/123/attempts/2'), /match/);
 });
 
