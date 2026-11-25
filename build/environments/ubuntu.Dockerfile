@@ -14,7 +14,8 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \
     libatspi2.0-0t64 libcups2t64 libdrm2 libgbm1 libnspr4 libnss3 \
     libwayland-client0 libxcomposite1 libxdamage1 libxfixes3 libxkbcommon0 \
     libxrandr2 fonts-noto-color-emoji fonts-unifont fonts-liberation \
-    fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf fonts-freefont-ttf \
+    fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf fonts-freefont-ttf gnupg-utils- \
+ && ! command -v gpgtar >/dev/null 2>&1 \
  && dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' > /opt/omni-environment/packages.tsv \
  && cp -a /var/lib/apt/lists /opt/omni-environment/apt-lists \
  && find /opt/omni-environment/debs -type f -name '*.deb' -exec sha256sum {} + > /opt/omni-environment/debs.sha256 \
