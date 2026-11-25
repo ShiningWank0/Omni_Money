@@ -2,7 +2,7 @@
 
 `build/locks/macos.json`にXcode version/build、macOS SDK version、Tcl source URL/SHA256を記録する。`setup-fixed-macos.sh`はGitHub ActionsのmacOSでのみ実行し、別Xcode・SDKへのfallbackやHomebrewによる取得を行わない。
 
-現行runner標準のXcode 16.4（16F6）とSDK 15.5を固定する。Intel/Apple Siliconはそれぞれnative runnerで同じXcodeを使う。macOS framework、WKWebView、kernelを含むホストOS全体はGitHub-hosted runnerに依存し、この固定の範囲外である。
+現行runnerの両CPUで利用できるXcode 26.3（17C529）とSDK 26.2を固定する。Intel/Apple Siliconはそれぞれnative runnerで同じXcodeを使う。macOS framework、WKWebView、kernelを含むホストOS全体はGitHub-hosted runnerに依存し、この固定の範囲外である。
 
 SQLCipherのコード生成に必要なのはTcl interpreterであるため、Tcl 9.1.0のcoreだけを、同梱libtommathを使って構築する。TkやHomebrewの追加extensionは導入しない。Tclはbuild時だけ使用し、配布appへのruntime依存は追加しない。OpenSSL、SQLCipher、GoのCGO、Wailsにも同じ`DEVELOPER_DIR`とSDKを使用する。
 

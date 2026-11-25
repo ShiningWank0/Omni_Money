@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "xcode": {
-    "version": "16.4",
-    "build": "16F6",
-    "developerDirectory": "/Applications/Xcode_16.4.app/Contents/Developer",
-    "macosSDK": "15.5"
+    "version": "26.3",
+    "build": "17C529",
+    "developerDirectory": "/Applications/Xcode_26.3.app/Contents/Developer",
+    "macosSDK": "26.2"
   },
   "tcl": {
     "version": "9.1.0",
