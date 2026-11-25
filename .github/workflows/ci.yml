@@ -349,6 +349,15 @@ jobs:
         continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: go vet ./...
 
+      - name: Verify Go security tool locks
+        id: verify-go-security-tool-locks
+        continue-on-error: ${{ env.CI_MONITORING == 'true' }}
+        run: |
+          for tool in gosec govulncheck; do
+            go -C "scripts/securitytools/$tool" mod tidy -diff
+            go -C "scripts/securitytools/$tool" tool -n "$tool"
+          done
+
       - name: Run Go security analyzer
         id: run-go-security-analyzer
         continue-on-error: ${{ env.CI_MONITORING == 'true' }}
@@ -566,7 +575,7 @@ jobs:
           CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
           CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
           CI_MONITOR_STEP_NAMES: >-
-            {"checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "setup-go": "Setup Go", "setup-node-js": "Setup Node.js", "go-security-setup": "Build frontend assets for Go embed", "run-go-tests": "Run Go tests", "build-checksum-pinned-sqlcipher": "Build checksum-pinned SQLCipher", "test-fail-closed-sqlcipher-integration": "Test fail-closed SQLCipher integration", "cross-build-windows-secret-boundaries": "Cross-build Windows secret boundaries", "run-go-vet": "Run Go vet", "run-go-security-analyzer": "Run Go security analyzer", "lint-github-actions-workflows": "Lint GitHub Actions workflows", "assert-documentation-contracts": "Assert documentation contracts", "run-go-race-tests": "Run Go race tests", "run-server-go-race-tests": "Run server Go race tests", "scan-reachable-go-vulnerabilities": "Scan reachable Go vulnerabilities", "build-sqlcipher-linked-server-entrypoint": "Build SQLCipher-linked server entrypoint", "set-up-fixed-docker-client": "Set up fixed Docker client", "validate-docker-compose-configuration": "Validate Docker Compose configuration", "assert-pangolin-network-isolation": "Assert Pangolin network isolation", "upload-go-security-reports": "Upload Go security reports"}
+            {"checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "setup-go": "Setup Go", "setup-node-js": "Setup Node.js", "go-security-setup": "Build frontend assets for Go embed", "run-go-tests": "Run Go tests", "build-checksum-pinned-sqlcipher": "Build checksum-pinned SQLCipher", "test-fail-closed-sqlcipher-integration": "Test fail-closed SQLCipher integration", "cross-build-windows-secret-boundaries": "Cross-build Windows secret boundaries", "run-go-vet": "Run Go vet", "verify-go-security-tool-locks": "Verify Go security tool locks", "run-go-security-analyzer": "Run Go security analyzer", "lint-github-actions-workflows": "Lint GitHub Actions workflows", "assert-documentation-contracts": "Assert documentation contracts", "run-go-race-tests": "Run Go race tests", "run-server-go-race-tests": "Run server Go race tests", "scan-reachable-go-vulnerabilities": "Scan reachable Go vulnerabilities", "build-sqlcipher-linked-server-entrypoint": "Build SQLCipher-linked server entrypoint", "set-up-fixed-docker-client": "Set up fixed Docker client", "validate-docker-compose-configuration": "Validate Docker Compose configuration", "assert-pangolin-network-isolation": "Assert Pangolin network isolation", "upload-go-security-reports": "Upload Go security reports"}
         run: node scripts/ci-monitor-record.mjs
       - name: Save actual diagnostic step outcomes
         if: ${{ always() && env.CI_MONITORING == 'true' }}
