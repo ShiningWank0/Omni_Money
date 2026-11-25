@@ -5,9 +5,9 @@ import { chmodSync, closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtemp
 import { request } from 'node:http'
 import { request as requestTLS } from 'node:https'
 import { createHash, X509Certificate } from 'node:crypto'
-import { readFileSync, symlinkSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { createServer, createConnection } from 'node:net'
+import { createServer, createConnection, isIP } from 'node:net'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
@@ -148,7 +148,11 @@ function go(args, cwd = root) {
 export function probeHTTP(baseURL, path, headers = {}, upgrade = false, method = 'GET', tlsOptions = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(path, baseURL)
-    const req = (url.protocol === 'https:' ? requestTLS : request)(url, { ...tlsOptions, method, headers: { ...headers, ...(upgrade ? {
+    const https = url.protocol === 'https:'
+    // Authenticate the URL host even when the probe sets a different HTTP Host.
+    const servername = isIP(url.hostname) ? '' : url.hostname
+    const transport = https ? { servername, ...tlsOptions } : {}
+    const req = (https ? requestTLS : request)(url, { ...transport, method, headers: { ...headers, ...(upgrade ? {
       Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13',
       'Sec-WebSocket-Key': Buffer.from(randomUUID().replaceAll('-', '').slice(0, 16)).toString('base64'),
     } : {}) } })
@@ -263,7 +267,8 @@ export async function runIntegration(binaryArgument, mode = 'assets') {
         return !parts.some(part => ['.git', '.oss-cache', 'node_modules', '.codex', '.agents', '.aws'].includes(part) || part.startsWith('.env')) &&
           !relative(root, source).startsWith('build/bin')
       } })
-      symlinkSync(join(root, 'frontend/node_modules'), join(project, 'frontend/node_modules'), 'dir')
+      // Keep relative file: dependency links inside the private checkout.
+      cpSync(join(root, 'frontend/node_modules'), join(project, 'frontend/node_modules'), { recursive: true, verbatimSymlinks: true })
       do { vitePort = await unusedPort() } while ([port, backendPort].includes(vitePort))
       appSource = join(project, 'frontend/src/App.vue')
       const vue = readFileSync(appSource, 'utf8')
