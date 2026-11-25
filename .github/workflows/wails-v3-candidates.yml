@@ -12,7 +12,7 @@ jobs:
     if: github.repository == 'ShiningWank0/Omni_Money'
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:0106d5f00c0ffa9c983b0d554371c23488f5af0c9b235d65f04bef1e6bcfe621
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:c52b50efd06f32017f821411f9e9ae040d1016574182b066fd88f71c41b93caa
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

@@ -103,7 +103,7 @@ func configureWailsBrowserHost(options *application.Options) error {
 		if base == "" || !filepath.IsAbs(directory) || err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return errors.New("diagnostic assets must be inside RUNNER_TEMP")
 		}
-		options.Assets.Handler = http.FileServer(os.DirFS(directory))
+		options.Assets.Handler = http.FileServerFS(os.DirFS(directory))
 	}
 	middleware, err := newDesktopAssetMiddleware(origin)
 	if err != nil {
