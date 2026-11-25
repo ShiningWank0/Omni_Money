@@ -7,6 +7,14 @@ FROM node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43dd
 ARG VERSION
 ARG TARGETARCH
 
+# Temporary until the pinned Node image ships the fixed npm bundle (Issues #399, #441).
+ADD --checksum=sha256:fa0711dd513fa1386bbad3962a292cb813461cb57dedf07d6eb7efe76dffe897 https://registry.npmjs.org/npm/-/npm-12.2.3.tgz /tmp/omni-npm.tgz
+RUN rm -rf /usr/local/lib/node_modules/npm \
+ && mkdir /usr/local/lib/node_modules/npm \
+ && tar -xzf /tmp/omni-npm.tgz --strip-components=1 -C /usr/local/lib/node_modules/npm \
+ && rm /tmp/omni-npm.tgz \
+ && test "$(npm --version)" = 12.2.3
+
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
 COPY frontend/vendor/picomatch/ ./vendor/picomatch/

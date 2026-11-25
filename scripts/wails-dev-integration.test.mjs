@@ -196,7 +196,10 @@ test('diagnostic HTTPS probes trust only the run certificate and verify its host
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   const tls = createDiagnosticTLS(directory)
   assert.equal(statSync(join(directory, 'loopback-key.pem')).mode & 0o777, 0o600)
-  const server = createTLSServer({ cert: tls.certificate, key: tls.privateKey, minVersion: 'TLSv1.3' }, (_, response) => response.end('owned fixture'))
+  const server = createTLSServer({ cert: tls.certificate, key: tls.privateKey, minVersion: 'TLSv1.3' }, (request, response) => {
+    response.setHeader('x-observed-host', request.headers.host)
+    response.end('owned fixture')
+  })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(() => new Promise(resolve => server.close(resolve)))
   const baseURL = `https://127.0.0.1:${server.address().port}`
@@ -204,6 +207,8 @@ test('diagnostic HTTPS probes trust only the run certificate and verify its host
   const response = await probeHTTP(baseURL, '/', {}, false, 'GET', { ca: tls.certificate })
   assert.equal(response.status, 200)
   assert.equal(response.body, 'owned fixture')
+  const forgedHost = await probeHTTP(baseURL, '/', { Host: 'other.invalid' }, false, 'GET', { ca: tls.certificate })
+  assert.equal(forgedHost.headers['x-observed-host'], 'other.invalid')
   await assert.rejects(probeHTTP(baseURL, '/', {}, false, 'GET', { ca: tls.certificate, servername: 'other.invalid' }), { code: 'ERR_TLS_CERT_ALTNAME_INVALID' })
 })
 
