@@ -19,9 +19,9 @@
         "linux/amd64",
         "linux/arm64"
       ],
-      "image": "ghcr.io/shiningwank0/omni_money-build-alpine-builder@sha256:d377e73c51954b514e3cefa41b688b15f8f753e2a7aea68d85474c90d6828379",
-      "sourceCommit": "12e47ce2bd8ea87edd193a1af12dd6ed069d7414",
-      "runId": "44080314331"
+      "image": "ghcr.io/shiningwank0/omni_money-build-alpine-builder@sha256:70276ebfaf61eddb9ee26087c6ac63854018b9ae81c8ce325dae9dee3672b3ea",
+      "sourceCommit": "8becd4cae1867bfbd0956d0e6ffcb20679f5ad18",
+      "runId": "45693100329"
     },
     "alpine-runtime": {
       "schema": 1,
@@ -30,9 +30,9 @@
         "linux/amd64",
         "linux/arm64"
       ],
-      "image": "ghcr.io/shiningwank0/omni_money-build-alpine-runtime@sha256:87111362c801d41c984a7658dacc15d34e714a662a199e273c0694564c4d617e",
-      "sourceCommit": "12e47ce2bd8ea87edd193a1af12dd6ed069d7414",
-      "runId": "44080314331"
+      "image": "ghcr.io/shiningwank0/omni_money-build-alpine-runtime@sha256:c45578f9b9545479fd61458c3c888ec34b57f39aa777d86c2ba7189f44af2bd4",
+      "sourceCommit": "8becd4cae1867bfbd0956d0e6ffcb20679f5ad18",
+      "runId": "45693100329"
     }
   }
 }
