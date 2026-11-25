@@ -3,6 +3,8 @@ name: Wails development diagnostics (manual, Issue 299)
 # Issue #299: wait for the official Wails fix before restoring this to required CI.
 # Keep the real browser and vulnerability findings strict in this manual workflow.
 on:
+  push:
+    branches: [test/wails-v3-browser-diagnostics]
   workflow_dispatch:
 
 permissions:
