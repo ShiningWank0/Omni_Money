@@ -333,7 +333,7 @@ func TestCIUsesPinnedGoVulnerabilityScanner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !regexp.MustCompile(`(?m)^\s*golang.org/x/vuln v[0-9]+\.[0-9]+\.[0-9]+$`).Match(manifest) {
+	if !regexp.MustCompile(`(?m)^[ \t]*(?:require[ \t]+)?golang\.org/x/vuln[ \t]+v[0-9]+\.[0-9]+\.[0-9]+(?:[ \t]+// indirect)?[ \t]*$`).Match(manifest) {
 		t.Fatal("scanner module must pin an exact stable version")
 	}
 	if strings.Contains(string(manifest), "replace ") {

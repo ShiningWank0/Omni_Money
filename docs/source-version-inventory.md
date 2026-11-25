@@ -24,9 +24,9 @@
 | UbuntuのC・GTK・WebKitGTK・Python・Perl・Tcl・Playwright OS依存 | amd64/arm64の全体image、package一覧、取得deb・hash・repository metadata | aptを実行せず保存digestを使用 | [生成 #329](https://github.com/ShiningWank0/Omni_Money/pull/329)、[使用 #334](https://github.com/ShiningWank0/Omni_Money/pull/334) |
 | Docker内のAlpine packageと推移的依存 | builder/runtimeそれぞれの全体image、apk・hash・metadata | apkによる解決・upgradeを通常buildから除く | #329、#334 |
 | WindowsのMSYS2全体 | UCRT64 root archiveのOCI digestとSHA256、全package cache・一覧 | pacmanによるupdate/installを行わず全体復元 | #329、[使用 #332](https://github.com/ShiningWank0/Omni_Money/pull/332) |
-| Xcode / SDK / macOS Tcl | 16.4 build 16F6 / SDK 15.5 / Tcl 9.1.0 source SHA256 | 別XcodeへのfallbackとHomebrew解決を行わない | [#330](https://github.com/ShiningWank0/Omni_Money/pull/330) |
+| Xcode / SDK / macOS Tcl | 26.3 build 17C529 / SDK 26.2 / Tcl 9.1.0 source SHA256 | 別XcodeへのfallbackとHomebrew解決を行わない | [#330](https://github.com/ShiningWank0/Omni_Money/pull/330) |
 | Windows CIのWebView2 | Fixed Version 157.0.4341.60 x64、CAB hash・OCI digest・Microsoft署名 | Wailsの明示optionで選び、実processの版とpathも照合 | [#333](https://github.com/ShiningWank0/Omni_Money/pull/333) |
-| ORAS / 既存release操作のGitHub CLI | 1.3.6 / 2.104.0、公式binary SHA256 | runner同梱版やlatestを選ばない | #332、#334 |
+| ORAS / 既存release操作のGitHub CLI | 1.3.6 / 2.105.0、公式binary SHA256 | runner同梱版やlatestを選ばない | #332、#334 |
 
 これらの固定PRはmain向けである。OS環境の生成はCI内で行い、取得後はGHCRに保存する。期限付きActions artifactやcacheだけを保存先にしない。通常buildは固定済みの実体を使う。
 
