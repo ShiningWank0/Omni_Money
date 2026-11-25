@@ -22,7 +22,7 @@ RUN VITE_APP_VERSION="$VERSION" VITE_OSS_TARGET="server-linux-${TARGETARCH}" npm
 RUN node /app/scripts/oss-notices.mjs package "server-linux-${TARGETARCH}"
 
 # ===== Stage 2: バックエンドのビルド =====
-FROM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS go-toolchain
+FROM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS go-toolchain
 FROM ghcr.io/shiningwank0/omni_money-build-alpine-builder@sha256:d377e73c51954b514e3cefa41b688b15f8f753e2a7aea68d85474c90d6828379 AS backend-builder
 
 # Go updates remain independent of the frozen OS/package environment.
