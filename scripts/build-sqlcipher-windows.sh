@@ -30,6 +30,18 @@ if [ "$(uname -m)" != "x86_64" ]; then
   fail "only native Windows amd64 builds are supported"
 fi
 
+# The restore step exports a drive path for native Go. MSYS Tcl's configure
+# searches PATH and treats that drive path as relative. Select the same
+# executable by basename with its pinned directory first for this build.
+case "$CC" in
+  [A-Za-z]:/*)
+    compiler_dir="$(cygpath -u "${CC%/*}")"
+    PATH="$compiler_dir:$PATH"
+    CC="${CC##*/}"
+    export PATH CC
+    ;;
+esac
+
 for tool in curl sha256sum tar mktemp "$CC" "$AR" "$RANLIB" "$NM" "$OBJDUMP" "$MAKE"; do
   command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"
 done
