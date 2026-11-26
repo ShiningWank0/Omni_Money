@@ -19,7 +19,7 @@
     "chart.js": "^4.6.1",
     "pinia": "^4.1.0",
     "vue": "^3.5.45",
-    "vue-chartjs": "^5.3.4"
+    "vue-chartjs": "^5.3.7"
   },
   "devDependencies": {
     "@playwright/test": "1.65.1",
