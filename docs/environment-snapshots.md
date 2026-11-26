@@ -36,3 +36,5 @@ TIFF は修正済みの Ubuntu ソース 4.7.2 を Noble でビルドする。da
 Noble の binutils 2.42 では DWARF リーダーに上流の4件の修正を適用する。採取時に通常の C ソースを DWARF 4/5 それぞれの形式でコンパイルし、readelf と objdump が型情報を読めることを検証する。
 
 Git にはリモート側の sideband 出力を表示用に変換する上流修正を適用し、通常の push でサーバーフックの進捗を確認する。GLib ではローカルファイル置換のフォールバックに排他的な新規作成を要求し、通常の作成・上書きを GIO で検証する。
+
+GdkPixbuf に ICO のパレット境界、ICNS の入力境界、JPEG の ICC バッファ解放処理の修正を適用する。libsndfile では MPEG、IMA ADPCM、IRCAM、MAT4 の処理を更新する。採取時に ICO・JPEG の保存と読み込み、および通常の PCM WAV のフレーム読み込みを確認する。

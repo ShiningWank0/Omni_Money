@@ -148,3 +148,43 @@ with TemporaryDirectory() as temp:
         ok, _ = dest.replace_contents(content, None, False, Gio.FileCreateFlags.REPLACE_DESTINATION, None)
         assert ok and path.read_bytes() == content
 PY
+python3 - <<'PY'
+import ctypes as C
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import wave
+import gi
+
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import GdkPixbuf
+
+class SoundInfo(C.Structure):
+    _fields_ = [("frames", C.c_int64)] + [(key, C.c_int) for key in
+                ("samplerate", "channels", "format", "sections", "seekable")]
+
+with TemporaryDirectory() as temp:
+    root = Path(temp)
+    pixels = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 24, 24)
+    pixels.fill(0x3266aaff)
+    for fmt in ("ico", "jpeg"):
+        name = str(root / ("icon." + fmt))
+        pixels.savev(name, fmt, [], [])
+        decoded = GdkPixbuf.Pixbuf.new_from_file(name)
+        assert (decoded.get_width(), decoded.get_height()) == (24, 24)
+
+    wav = root / "audio.wav"
+    with wave.open(str(wav), "wb") as out:
+        out.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
+        out.writeframes(bytes(160))
+    lib = C.CDLL("libsndfile.so.1")
+    lib.sf_open.argtypes = [C.c_char_p, C.c_int, C.POINTER(SoundInfo)]
+    lib.sf_open.restype = C.c_void_p
+    lib.sf_readf_short.argtypes = [C.c_void_p, C.POINTER(C.c_short), C.c_int64]
+    lib.sf_readf_short.restype = C.c_int64
+    lib.sf_close.argtypes = [C.c_void_p]
+    meta = SoundInfo()
+    handle = lib.sf_open(bytes(wav), 0x10, C.byref(meta))
+    assert handle and (meta.frames, meta.samplerate, meta.channels) == (80, 8000, 1)
+    assert lib.sf_readf_short(handle, (C.c_short * 80)(), 80) == 80
+    assert lib.sf_close(handle) == 0
+PY

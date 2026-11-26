@@ -20,3 +20,5 @@
 !build/environments/noble-backports/binutils-dwarf.patch
 !build/environments/noble-backports/git-sideband.patch
 !build/environments/noble-backports/glib-exclusive-replace.patch
+!build/environments/noble-backports/gdk-pixbuf-image-bounds.patch
+!build/environments/noble-backports/libsndfile-format-validation.patch
