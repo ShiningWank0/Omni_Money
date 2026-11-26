@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/pinned-input-security.yml
-      - scripts/fetch-trivy-archive.py
+      - scripts/fetch-fixed-tool-archive.py
       - scripts/pinned-security*
       - scripts/pinned_security_extract_test.py
       - scripts/security-patches/**

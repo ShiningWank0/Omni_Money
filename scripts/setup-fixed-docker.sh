@@ -34,7 +34,11 @@ PY
 while IFS=$'\t' read -r name value checksum; do
   case "$name" in
     engine|buildx|compose)
-      curl --fail --location --retry 3 --proto '=https' --tlsv1.2 "$value" -o "$dest/$name.download"
+      if [[ "$name" == engine && "$value" == https://ghcr.io/* ]]; then
+        python3 "$root/scripts/fetch-fixed-tool-archive.py" engine "$value" "$checksum" "$dest/$name.download"
+      else
+        curl --fail --location --retry 3 --proto '=https' --tlsv1.2 "$value" -o "$dest/$name.download"
+      fi
       printf '%s  %s\n' "$checksum" "$dest/$name.download" | sha256sum --check --strict
       ;;
     engineVersion) engine_version="$value" ;;

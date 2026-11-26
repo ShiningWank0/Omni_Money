@@ -96,8 +96,9 @@ test('static tool scans enable binary analysis and fail on missing inventories w
     if (name !== 'empty') raw.Results = [{ Type: name === 'complete' ? 'gobinary' : 'gomod', Packages: [{}],
       Vulnerabilities: [{ VulnerabilityID: finding.id, PkgName: 'stdlib', InstalledVersion: '1.0', Severity: 'LOW' }] }]
     writeFileSync(args[args.indexOf('--output') + 1], JSON.stringify(raw))
-  }, folder, folder, async item => {
-    const path = join(folder, item.name.slice('audit-'.length)); mkdirSync(path); return path
+  }, folder, folder, async (item, work, folderName) => {
+    assert.equal(folderName, 'audit-' + item.name)
+    const path = join(work, item.name); mkdirSync(path); return path
   })
   assert.deepEqual(result.map(x => x.status), ['findings', 'error', 'error'])
   assert.equal(result[0].findings[0].id, finding.id)

@@ -1,4 +1,4 @@
-"""Fetch the repository's fixed Trivy archive without sharing registry credentials with redirects."""
+"""Fetch the repository's fixed build-tool archives without sharing registry credentials with redirects."""
 import hashlib
 import json
 import os
@@ -9,12 +9,13 @@ import sys
 from tempfile import NamedTemporaryFile
 from urllib.request import urlopen
 
-repository = "shiningwank0/omni_money-ci-trivy"
+repositories = {name: "shiningwank0/omni_money-ci-" + name for name in ("trivy", "engine")}
 
 
-def fetch(url, checksum, destination):
+def fetch(tool, url, checksum, destination):
+    repository = repositories[tool]
     if not re.fullmatch("[0-9a-f]{64}", checksum) or url != f"https://ghcr.io/v2/{repository}/blobs/sha256:{checksum}":
-        raise ValueError("Invalid fixed Trivy archive")
+        raise ValueError("Invalid fixed tool archive")
     token_url = f"https://ghcr.io/token?service=ghcr.io&scope=repository:{repository}:pull"
     # The published package is public. Request an anonymous, repository-scoped pull token.
     with urlopen(token_url, timeout=30) as response:
@@ -33,9 +34,9 @@ def fetch(url, checksum, destination):
         for block in iter(lambda: tmp.read(1024 * 1024), b""):
             digest.update(block)
         if digest.hexdigest() != checksum:
-            raise ValueError("Trivy archive checksum mismatch")
+            raise ValueError("Tool archive checksum mismatch")
         os.link(tmp.name, destination)
 
 
 if __name__ == "__main__":
-    fetch(sys.argv[1], sys.argv[2], Path(sys.argv[3]))
+    fetch(sys.argv[1], sys.argv[2], sys.argv[3], Path(sys.argv[4]))

@@ -51,11 +51,11 @@ function command(program, args, options = {}) {
   return result.stdout
 }
 
-async function payload(item, work) {
-  const folder = join(work, item.name.replaceAll('/', '-'))
+async function payload(item, work, folderName) {
+  const folder = join(work, folderName.replaceAll('/', '-'))
   const archive = folder + '.tar.gz'
   if (item.url.startsWith('https://ghcr.io/')) {
-    command('python3', [join(root, 'scripts/fetch-trivy-archive.py'), item.url, item.sha256, archive])
+    command('python3', [join(root, 'scripts/fetch-fixed-tool-archive.py'), item.name.split('/')[0], item.url, item.sha256, archive])
   } else {
     const data = await get(item.url)
     assert.equal(sha256(data), item.sha256, 'download checksum mismatch')
@@ -227,7 +227,7 @@ async function scanNative(input, execute, work, evidence) {
 export async function scanTools(input, execute, work, evidence, download = payload) {
   const results = []
   for (const target of input.tools) results.push(await attempt(target.name, async () => {
-    const folder = await download({ ...target, name: 'audit-' + target.name }, work)
+    const folder = await download(target, work, 'audit-' + target.name)
     const output = join(evidence, target.name.replaceAll('/', '-') + '.json')
     try {
       // Filesystem mode disables individual package analyzers, including Go
@@ -386,7 +386,7 @@ async function scan(group) {
     const tools = group === 'modules' ? {} : group === 'native' ? { grype: input.monitor.grype, oras: input.monitor.oras }
       : { trivy: { ...input.trivy.platforms.x86_64, version: input.trivy.version } }
     for (const [name, item] of Object.entries(tools)) {
-      const installed = await payload({ ...item, name: 'installer-' + name }, work)
+      const installed = await payload({ ...item, name }, work, 'installer-' + name)
       const binary = join(installed, name); assert.ok(existsSync(binary)); chmodSync(binary, 0o700)
       const link = join(bin, name)
       writeFileSync(link, readFileSync(binary), { mode: 0o700 })
