@@ -8,9 +8,9 @@
         "linux/amd64",
         "linux/arm64"
       ],
-      "image": "ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:05060aa50bc5b788f881cfbb69dd30120932829e959b043de5e9b7cebc3c8b07",
-      "sourceCommit": "737929643d5fff509f59f8d8b4846f5ed392905c",
-      "runId": "45771733721"
+      "image": "ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:ef9ab5c0436c8f4edd2784f2146d8919d9368269d2faf94ffc3532a4c8793191",
+      "sourceCommit": "2822e7453a3c0fe8de1408d933516608ae0fb858",
+      "runId": "45774253770"
     },
     "alpine-builder": {
       "schema": 1,
