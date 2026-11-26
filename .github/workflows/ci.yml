@@ -80,6 +80,11 @@ jobs:
         id: actions-setup-node
         with:
           node-version-file: .node-version
+      - name: Install reviewed npm for frontend builds
+        id: reviewed-npm
+        working-directory: ${{ github.workspace }}
+        run: node scripts/setup-ci-npm.mjs
+
       - name: Build production frontend inventory
         id: build-production-frontend-inventory
         continue-on-error: ${{ env.CI_MONITORING == 'true' }}
@@ -178,7 +183,7 @@ jobs:
           CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
           CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
           CI_MONITOR_STEP_NAMES: >-
-            {"actions-checkout": "actions/checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "checkout-immutable-upstream-compatibility-tests-for-the-temporary-security-patch": "Checkout immutable upstream compatibility tests for the temporary security patch", "actions-setup-go": "actions/setup-go", "actions-setup-node": "actions/setup-node", "build-production-frontend-inventory": "Build production frontend inventory", "verify-the-real-local-patch-attack-inputs-and-unchanged-official-compatibility-t": "Verify the real local patch, attack inputs and unchanged official compatibility tests", "test-official-picomatch-compatibility": "Test official picomatch compatibility", "save-temporary-security-patch-evidence": "Save temporary security patch evidence", "resolve-pinned-go-dependencies": "Resolve pinned Go dependencies", "test-oss-coverage-and-inventory-generation": "Test OSS coverage and inventory generation", "oss-check": "Check OSS coverage and approved notices once for all release targets", "save-oss-mismatch-evidence-without-accepting-the-candidate": "Save OSS mismatch evidence without accepting the candidate", "generate-reviewable-release-notice-inventories": "Generate reviewable release notice inventories", "save-release-notice-inventories": "Save release notice inventories", "test-public-and-locked-license-screens": "Test public and locked license screens", "install-browser-for-public-license-layout-tests": "Install browser for public license layout tests", "oss-layout": "Verify exact OSS display and mobile layout for all release targets", "save-failed-license-layout-screenshots": "Save failed license layout screenshots"}
+            {"reviewed-npm": "Install reviewed npm for frontend builds", "actions-checkout": "actions/checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "checkout-immutable-upstream-compatibility-tests-for-the-temporary-security-patch": "Checkout immutable upstream compatibility tests for the temporary security patch", "actions-setup-go": "actions/setup-go", "actions-setup-node": "actions/setup-node", "build-production-frontend-inventory": "Build production frontend inventory", "verify-the-real-local-patch-attack-inputs-and-unchanged-official-compatibility-t": "Verify the real local patch, attack inputs and unchanged official compatibility tests", "test-official-picomatch-compatibility": "Test official picomatch compatibility", "save-temporary-security-patch-evidence": "Save temporary security patch evidence", "resolve-pinned-go-dependencies": "Resolve pinned Go dependencies", "test-oss-coverage-and-inventory-generation": "Test OSS coverage and inventory generation", "oss-check": "Check OSS coverage and approved notices once for all release targets", "save-oss-mismatch-evidence-without-accepting-the-candidate": "Save OSS mismatch evidence without accepting the candidate", "generate-reviewable-release-notice-inventories": "Generate reviewable release notice inventories", "save-release-notice-inventories": "Save release notice inventories", "test-public-and-locked-license-screens": "Test public and locked license screens", "install-browser-for-public-license-layout-tests": "Install browser for public license layout tests", "oss-layout": "Verify exact OSS display and mobile layout for all release targets", "save-failed-license-layout-screenshots": "Save failed license layout screenshots"}
         run: node scripts/ci-monitor-record.mjs
       - name: Save actual diagnostic step outcomes
         if: ${{ always() && env.CI_MONITORING == 'true' }}
@@ -300,6 +305,11 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+
+      - name: Install reviewed npm for frontend builds
+        id: reviewed-npm
+        working-directory: ${{ github.workspace }}
+        run: node scripts/setup-ci-npm.mjs
 
       - name: Build frontend assets for Go embed
         id: go-security-setup
@@ -575,7 +585,7 @@ jobs:
           CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
           CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
           CI_MONITOR_STEP_NAMES: >-
-            {"checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "setup-go": "Setup Go", "setup-node-js": "Setup Node.js", "go-security-setup": "Build frontend assets for Go embed", "run-go-tests": "Run Go tests", "build-checksum-pinned-sqlcipher": "Build checksum-pinned SQLCipher", "test-fail-closed-sqlcipher-integration": "Test fail-closed SQLCipher integration", "cross-build-windows-secret-boundaries": "Cross-build Windows secret boundaries", "run-go-vet": "Run Go vet", "verify-go-security-tool-locks": "Verify Go security tool locks", "run-go-security-analyzer": "Run Go security analyzer", "lint-github-actions-workflows": "Lint GitHub Actions workflows", "assert-documentation-contracts": "Assert documentation contracts", "run-go-race-tests": "Run Go race tests", "run-server-go-race-tests": "Run server Go race tests", "scan-reachable-go-vulnerabilities": "Scan reachable Go vulnerabilities", "build-sqlcipher-linked-server-entrypoint": "Build SQLCipher-linked server entrypoint", "set-up-fixed-docker-client": "Set up fixed Docker client", "validate-docker-compose-configuration": "Validate Docker Compose configuration", "assert-pangolin-network-isolation": "Assert Pangolin network isolation", "upload-go-security-reports": "Upload Go security reports"}
+            {"reviewed-npm": "Install reviewed npm for frontend builds", "checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "setup-go": "Setup Go", "setup-node-js": "Setup Node.js", "go-security-setup": "Build frontend assets for Go embed", "run-go-tests": "Run Go tests", "build-checksum-pinned-sqlcipher": "Build checksum-pinned SQLCipher", "test-fail-closed-sqlcipher-integration": "Test fail-closed SQLCipher integration", "cross-build-windows-secret-boundaries": "Cross-build Windows secret boundaries", "run-go-vet": "Run Go vet", "verify-go-security-tool-locks": "Verify Go security tool locks", "run-go-security-analyzer": "Run Go security analyzer", "lint-github-actions-workflows": "Lint GitHub Actions workflows", "assert-documentation-contracts": "Assert documentation contracts", "run-go-race-tests": "Run Go race tests", "run-server-go-race-tests": "Run server Go race tests", "scan-reachable-go-vulnerabilities": "Scan reachable Go vulnerabilities", "build-sqlcipher-linked-server-entrypoint": "Build SQLCipher-linked server entrypoint", "set-up-fixed-docker-client": "Set up fixed Docker client", "validate-docker-compose-configuration": "Validate Docker Compose configuration", "assert-pangolin-network-isolation": "Assert Pangolin network isolation", "upload-go-security-reports": "Upload Go security reports"}
         run: node scripts/ci-monitor-record.mjs
       - name: Save actual diagnostic step outcomes
         if: ${{ always() && env.CI_MONITORING == 'true' }}
@@ -767,6 +777,11 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      - name: Install reviewed npm for frontend builds
+        id: reviewed-npm
+        working-directory: ${{ github.workspace }}
+        run: node scripts/setup-ci-npm.mjs
+
       - name: Install dependencies
         id: install-dependencies
         run: npm ci --ignore-scripts
@@ -816,7 +831,7 @@ jobs:
           CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
           CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
           CI_MONITOR_STEP_NAMES: >-
-            {"checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "setup-node-js": "Setup Node.js", "install-dependencies": "Install dependencies", "audit-dependencies": "Audit dependencies", "test-frontend-security-boundaries": "Test frontend security boundaries", "test-frontend-components": "Test frontend components", "build-frontend": "Build frontend", "upload-frontend-security-reports": "Upload frontend security reports"}
+            {"reviewed-npm": "Install reviewed npm for frontend builds", "checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "setup-node-js": "Setup Node.js", "install-dependencies": "Install dependencies", "audit-dependencies": "Audit dependencies", "test-frontend-security-boundaries": "Test frontend security boundaries", "test-frontend-components": "Test frontend components", "build-frontend": "Build frontend", "upload-frontend-security-reports": "Upload frontend security reports"}
         run: node scripts/ci-monitor-record.mjs
       - name: Save actual diagnostic step outcomes
         if: ${{ always() && env.CI_MONITORING == 'true' }}
@@ -1067,15 +1082,21 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      - name: Install reviewed npm for frontend builds
+        id: reviewed-npm
+        if: ${{ !cancelled() && steps.setup-node-for-server-e2e.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}
+        run: node scripts/setup-ci-npm.mjs
+
       - name: Install frontend dependencies for server E2E
         id: install-frontend-dependencies-for-server-e2e
-        if: ${{ !cancelled() && steps.docker-build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.docker-build.outcome == 'success' && steps.reviewed-npm.outcome == 'success' }}
         working-directory: frontend
         run: npm ci --ignore-scripts
 
       - name: Run server/browser E2E
         id: run-server-browser-e2e
-        if: ${{ !cancelled() && steps.docker-build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.docker-build.outcome == 'success' && steps.reviewed-npm.outcome == 'success' }}
         continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         working-directory: frontend
         run: bash tests/e2e/run-server-e2e.sh
@@ -1123,7 +1144,7 @@ jobs:
           CI_MONITOR_MATRIX: ${{ toJSON(matrix) }}
           CI_MONITOR_STEP_RESULTS: ${{ toJSON(steps) }}
           CI_MONITOR_STEP_NAMES: >-
-            {"checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "set-up-fixed-docker-toolchain": "Set up fixed Docker toolchain", "login-for-immutable-base-images": "Login for immutable base images", "docker-build": "Build pinned multi-stage image", "assert-non-root-multi-vault-runtime": "Assert non-root multi-vault runtime", "smoke-test-hardened-runtime": "Smoke test hardened runtime", "setup-node-for-server-e2e": "Setup Node for server E2E", "install-frontend-dependencies-for-server-e2e": "Install frontend dependencies for server E2E", "run-server-browser-e2e": "Run server/browser E2E", "trivy": "Scan image for fixable high-severity vulnerabilities", "record-trivy-result-and-enforce-security-gate": "Record Trivy result and enforce security gate", "upload-image-security-report": "Upload image security report"}
+            {"reviewed-npm": "Install reviewed npm for frontend builds", "checkout": "Checkout", "verify-frozen-linux-package-inventory": "Verify frozen Linux package inventory", "set-up-fixed-docker-toolchain": "Set up fixed Docker toolchain", "login-for-immutable-base-images": "Login for immutable base images", "docker-build": "Build pinned multi-stage image", "assert-non-root-multi-vault-runtime": "Assert non-root multi-vault runtime", "smoke-test-hardened-runtime": "Smoke test hardened runtime", "setup-node-for-server-e2e": "Setup Node for server E2E", "install-frontend-dependencies-for-server-e2e": "Install frontend dependencies for server E2E", "run-server-browser-e2e": "Run server/browser E2E", "trivy": "Scan image for fixable high-severity vulnerabilities", "record-trivy-result-and-enforce-security-gate": "Record Trivy result and enforce security gate", "upload-image-security-report": "Upload image security report"}
         run: node scripts/ci-monitor-record.mjs
       - name: Save actual diagnostic step outcomes
         if: ${{ always() && env.CI_MONITORING == 'true' }}
