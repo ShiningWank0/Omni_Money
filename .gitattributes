@@ -3,3 +3,6 @@ frontend/bindings/** text eol=lf
 
 # Hash-verified third-party sources must retain the reviewed bytes on Windows.
 frontend/vendor/picomatch/** text eol=lf
+
+# Unified diffs preserve the whitespace and line endings of upstream source.
+build/environments/noble-backports/*.patch text eol=lf whitespace=-trailing-space,-space-before-tab
