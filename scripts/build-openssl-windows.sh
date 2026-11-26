@@ -47,7 +47,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 archive="$temporary_root/openssl.tar.gz"
-curl --fail --location --silent --show-error --retry 5 \
+curl --disable --proto '=https' --proto-redir '=https' --fail --location --silent --show-error --retry 5 \
   "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
   --output "$archive"
 printf '%s  %s\n' "$OPENSSL_SHA256" "$archive" | sha256sum -c -
@@ -66,7 +66,7 @@ source_dir="$temporary_root/$archive_root"
 (
   cd "$source_dir"
   CC="$CC" AR="$AR" RANLIB="$RANLIB" \
-    perl ./Configure mingw64 no-shared no-tests no-apps no-docs no-module no-legacy \
+    perl ./Configure mingw64 no-shared no-tests no-apps no-docs no-module no-legacy no-cms no-siv no-quic \
       --prefix="$(cygpath -m "$destination_path")" \
       --openssldir="$(cygpath -m "$destination_path/ssl")"
   make -s -j"$build_jobs" build_libs
@@ -80,6 +80,10 @@ archive_path="$source_dir/libcrypto.a"
 grep -q 'file format pe-x86-64' "$temporary_root/archive-format" || fail "libcrypto.a is not a Windows amd64 archive"
 "$NM" -g "$archive_path" > "$temporary_root/archive-symbols"
 grep -Eq '[[:space:]]T[[:space:]]+EVP_aes_256_cbc$' "$temporary_root/archive-symbols" || fail "libcrypto.a lacks the required AES provider"
+
+if grep -Eq '[[:space:]]_?(CMS_encrypt(_ex)?|ossl_aes(128|192|256)gcm_siv_functions)$' "$temporary_root/archive-symbols"; then
+  fail "libcrypto.a contains an excluded CMS or AES-GCM-SIV entry point"
+fi
 
 mkdir -p "$staging_prefix/include" "$staging_prefix/lib" "$staging_prefix/share/licenses/openssl"
 cp -R "$source_dir/include/openssl" "$staging_prefix/include/openssl"
