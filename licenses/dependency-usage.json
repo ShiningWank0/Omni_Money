@@ -225,18 +225,6 @@
       "evidence": "Not present in production Go dependency graphs for the configured release targets"
     },
     {
-      "id": "go:github.com/blakesmith/ar",
-      "name": "github.com/blakesmith/ar",
-      "version": "v0.0.0-20190502131153-809d4375e1fb",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
       "id": "go:github.com/BurntSushi/toml",
       "name": "github.com/BurntSushi/toml",
       "version": "v1.6.0",
@@ -1022,18 +1010,6 @@
       "id": "go:github.com/kevinburke/ssh_config",
       "name": "github.com/kevinburke/ssh_config",
       "version": "v1.4.0",
-      "dependencyType": "indirect",
-      "distribution": "excluded",
-      "targets": [],
-      "includedTargets": [],
-      "externalTargets": [],
-      "license": null,
-      "evidence": "Not present in production Go dependency graphs for the configured release targets"
-    },
-    {
-      "id": "go:github.com/klauspost/compress",
-      "name": "github.com/klauspost/compress",
-      "version": "v1.18.7",
       "dependencyType": "indirect",
       "distribution": "excluded",
       "targets": [],
