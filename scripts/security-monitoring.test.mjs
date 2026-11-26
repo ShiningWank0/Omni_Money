@@ -116,7 +116,7 @@ test('missing, mismatched and malformed artifacts become individual scan-error e
 test('normal CI does not require the manual development report, but still rejects a missing production report', t => {
   const directory = mkdtempSync(join(tmpdir(), 'omni-production-reports-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const production = ['npm', 'gosec-desktop', 'gosec-server', 'govulncheck-desktop', 'govulncheck-server', 'trivy', 'fuzz-csv', 'fuzz-json', 'fuzz-image'];
+  const production = ['npm', 'gosec-desktop', 'gosec-server', 'govulncheck-desktop', 'govulncheck-server', 'trivy', 'fuzz-csv', 'fuzz-json', 'fuzz-image', 'formal-ledger'];
   for (const scan of production) writeFileSync(join(directory, `${scan}.json`), JSON.stringify({ schema: 1, scan, status: 'clean', findings: [] }));
   assert.deepEqual(entries(collect(directory)), []);
   assert.equal(collect(directory).some(report => report.scan === 'govulncheck-dev'), false);
@@ -545,4 +545,20 @@ test('zero exit without a completed matching fuzz engine never becomes a clean r
     assert.deepEqual(JSON.parse(readFileSync(join(directory, 'fuzz-args.json'), 'utf8')),
       ['test', '-json', '-run=^$', '-fuzz=^FuzzStrictServerJSONKeys$', '-fuzztime=120s', '-fuzzminimizetime=10s', '-parallel=1', '-timeout=4m', './backend/api']);
   }
+});
+
+
+test('formal contract violations are separate static-analysis issues for each function', () => {
+  const findings = ['CheckedAddInt64', 'CheckedSubInt64'].map(id => ({
+    tool: 'formal', id, component: 'backend/validation/amount.go', severity: 'UNKNOWN',
+    installed: '', fixed: '', summary: '金額の計算が仕様と一致しません。', context: 'ledger',
+  }));
+  const violations = entries([{ schema: 1, scan: 'formal-ledger', status: 'findings', findings }]);
+  assert.equal(violations.length, 2);
+  assert.ok(violations.every(v => v.data.kind === 'static-analysis'));
+  const incomplete = entries([{ schema: 1, scan: 'formal-ledger', status: 'error', findings: [] }]);
+  assert.equal(incomplete[0].data.kind, 'scan-error');
+  const mixed = entries([{ schema: 1, scan: 'formal-ledger', status: 'error', findings }]);
+  assert.deepEqual(mixed.filter(e => e.data.kind === 'static-analysis'), violations);
+  assert.deepEqual(mixed.filter(e => e.data.kind === 'scan-error'), incomplete);
 });
