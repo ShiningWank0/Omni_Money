@@ -38,6 +38,15 @@ for deb in "${target_debs[@]}"; do
 done
 cp -r /backports/sources "$inventory/backport-sources"
 cp "$inputs/"{*.patch,sources.tsv} "$inventory/backport-sources/"
+# Use the official Noble security update for every installed binutils binary package.
+binutils_packages=$(awk '$1 == "installed" && $2 == "binutils" {print $3, $4}' /tmp/noble-installed.tsv)
+[[ -n "$binutils_packages" ]] || { echo "No installed Noble binutils packages" >&2; exit 1; }
+while read -r package version; do
+    dpkg --compare-versions "$version" ge '2.42-4ubuntu2.11' || {
+        echo "Official Noble binutils fix is missing from $package ($version)" >&2
+        exit 1
+    }
+done <<< "$binutils_packages"
 rm /tmp/noble-installed.tsv
 pkg-config --modversion xi xtst harfbuzz sqlite3 > "$inventory/backport-sources/pkg-config-versions.txt"
 python3 - <<'PY'

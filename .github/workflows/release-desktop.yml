@@ -21,7 +21,7 @@ jobs:
       contents: read # required to inspect the release-triggering source
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:c5cc269d8a8c44832c022bce56258e9434a49665246ec2b467753c7205bec752
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -172,7 +172,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     container:
-      image: ${{ matrix.os == 'ubuntu-24.04' && 'ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b' || '' }}
+      image: ${{ matrix.os == 'ubuntu-24.04' && 'ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:c5cc269d8a8c44832c022bce56258e9434a49665246ec2b467753c7205bec752' || '' }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -563,7 +563,7 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:c5cc269d8a8c44832c022bce56258e9434a49665246ec2b467753c7205bec752
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -605,7 +605,7 @@ jobs:
     needs: [prepare, build, attest]
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:c5cc269d8a8c44832c022bce56258e9434a49665246ec2b467753c7205bec752
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
