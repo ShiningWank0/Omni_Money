@@ -116,3 +116,13 @@ tiff = ctypes.CDLL("libtiff.so.6")
 tiff.TIFFGetVersion.restype = ctypes.c_char_p
 assert b"4.7.2" in tiff.TIFFGetVersion()
 PY
+# Check both DWARF section layouts with ordinary compiler-generated debug info.
+probe_dir=$(mktemp -d)
+printf '%s\n' 'struct item { long value; };' 'long value(struct item v) { return v.value; }' > "$probe_dir/item.c"
+for dwarf in 4 5; do
+    cc -O2 "-gdwarf-$dwarf" -fdebug-types-section -c "$probe_dir/item.c" -o "$probe_dir/item.o"
+    readelf --debug-dump=info "$probe_dir/item.o" > "$inventory/backport-sources/dwarf$dwarf.txt"
+    grep -q 'DW_TAG_structure_type' "$inventory/backport-sources/dwarf$dwarf.txt"
+    objdump --dwarf=info "$probe_dir/item.o" > /dev/null
+done
+rm -rf "$probe_dir"
