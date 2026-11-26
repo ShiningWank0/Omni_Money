@@ -58,3 +58,8 @@ PY
 dbus-run-session -- dbus-send --session --print-reply --dest=org.freedesktop.DBus \
     /org/freedesktop/DBus org.freedesktop.DBus.ListNames > "$inventory/backport-sources/dbus-session.txt"
 findmnt --list --noheadings --target / > "$inventory/backport-sources/root-mount.txt"
+
+# Noble's official TIFF update includes both CVE-2026-12912 and CVE-2026-4775.
+for package in libtiff6 libtiff-dev; do
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' "$package")" ge '4.5.1+git230720-4ubuntu2.6'
+done

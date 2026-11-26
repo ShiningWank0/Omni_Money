@@ -3,8 +3,7 @@ FROM ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1
 FROM noble AS backports
 ENV DEBIAN_FRONTEND=noninteractive
 COPY build/environments/noble-backports /usr/local/share/omni-backports
-RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
- && apt-get update \
+RUN apt-get -o Acquire::Retries=4 update \
  && apt-get -y --no-install-recommends install build-essential dpkg-dev fakeroot python3-debian ca-certificates quilt \
  && python3 /usr/local/share/omni-backports/build.py
 
@@ -22,7 +21,7 @@ RUN --mount=type=bind,from=backports,source=/out,target=/backports rm -f /etc/ap
     'path-exclude=/usr/bin/genrb' \
     'path-exclude=/usr/lib/*/gstreamer-1.0/libgstrtp.so' \
     'path-exclude=/usr/lib/*/gstreamer-1.0/libgstisomp4.so' > /etc/dpkg/dpkg.cfg.d/95-omni-ci-security \
- && apt-get update \
+ && apt-get -o Acquire::Retries=4 update \
  && apt-get -y --no-install-recommends -o Dir::Cache::archives=/opt/omni-environment/debs install \
     build-essential curl ca-certificates git tcl libssl-dev binutils file \
     libgtk-3-dev libwebkit2gtk-4.1-dev xvfb xauth dbus-x11 openbox wmctrl \
