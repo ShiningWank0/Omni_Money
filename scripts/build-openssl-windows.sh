@@ -47,7 +47,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 archive="$temporary_root/openssl.tar.gz"
-curl --fail --location --silent --show-error --retry 5 \
+curl --disable --proto '=https' --proto-redir '=https' --fail --location --silent --show-error --retry 5 \
   "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
   --output "$archive"
 printf '%s  %s\n' "$OPENSSL_SHA256" "$archive" | sha256sum -c -
