@@ -114,8 +114,12 @@ slang.SLtt_tgoto.restype = ctypes.c_char_p
 assert slang.SLtt_tgoto(b"cursor", 4, 2) == b"cursor"
 tiff = ctypes.CDLL("libtiff.so.6")
 tiff.TIFFGetVersion.restype = ctypes.c_char_p
-assert b"4.7.2" in tiff.TIFFGetVersion()
+assert tiff.TIFFGetVersion().startswith(b"LIBTIFF, Version ")
 PY
+# Noble's official TIFF update includes both CVE-2026-12912 and CVE-2026-4775.
+for package in libtiff6 libtiff-dev; do
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' "$package")" ge '4.5.1+git230720-4ubuntu2.6'
+done
 # Check both DWARF section layouts with ordinary compiler-generated debug info.
 probe_dir=$(mktemp -d)
 printf '%s\n' 'struct item { long value; };' 'long value(struct item v) { return v.value; }' > "$probe_dir/item.c"
