@@ -50,6 +50,17 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
 
+  - package-ecosystem: gomod
+    directory: /scripts/securitytools/actionlint
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      actionlint-tools:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+
   - package-ecosystem: npm
     directory: /frontend
     schedule:

@@ -41,3 +41,9 @@ require (
 	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )
+
+// Wails packaging libraries are unused by the application.
+exclude (
+	github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb
+	github.com/klauspost/compress v1.18.7
+)
