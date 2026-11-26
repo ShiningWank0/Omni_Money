@@ -1045,7 +1045,7 @@
     {
       "id": "go:github.com/labstack/echo/v4",
       "name": "github.com/labstack/echo/v4",
-      "version": "v4.16.5",
+      "version": "v4.16.6",
       "dependencyType": "direct",
       "distribution": "excluded",
       "targets": [],
