@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "version": "29.10.1",
+  "upstreamArchives": {
+    "x86_64": {
+      "url": "https://download.docker.com/linux/static/stable/x86_64/docker-29.10.1.tgz",
+      "sha256": "061642059fa7f2ed9b2f04a327a951cff4249585cf04b2661c2a6539197c9962"
+    },
+    "aarch64": {
+      "url": "https://download.docker.com/linux/static/stable/aarch64/docker-29.10.1.tgz",
+      "sha256": "a38c8a9ef6d17bce07499bfd3a3688542274769dc3b4f75c06ea2705fe65053e"
+    }
+  },
+  "containerd": {
+    "version": "2.4.2",
+    "revision": "b7a25261e029d68978bbf290df0a62fc819b3c51",
+    "url": "https://codeload.github.com/containerd/containerd/tar.gz/b7a25261e029d68978bbf290df0a62fc819b3c51",
+    "sha256": "e38df0eeb40d2304f3450edb148aee838cb0a57f3976a47c78870f92c80f1796"
+  },
+  "runc": {
+    "version": "1.5.3",
+    "revision": "46365c62967c76a765a5e347f48f0c7b3b571fe9",
+    "url": "https://codeload.github.com/opencontainers/runc/tar.gz/46365c62967c76a765a5e347f48f0c7b3b571fe9",
+    "sha256": "ce378072179f55547e944e4c54fb7f6085ec496b23a76882aeaed105a37095a3"
+  },
+  "libseccomp": {
+    "version": "2.6.0",
+    "url": "https://github.com/seccomp/libseccomp/releases/download/v2.6.0/libseccomp-2.6.0.tar.gz",
+    "sha256": "83b6085232d1588c379dc9b9cae47bb37407cf262e6e74993c61ba72d2a784dc"
+  },
+  "gperf": {
+    "version": "3.1",
+    "url": "https://ftp.gnu.org/gnu/gperf/gperf-3.1.tar.gz",
+    "sha256": "588546b945bba4b70b6a3a616e80b4ab466e3f33024a352fc2198112cdbb3ae2"
+  }
+}
