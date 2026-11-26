@@ -1,0 +1,62 @@
+Description: Sanitize remote sideband text, including fatal errors and leading whitespace.
+Origin: https://github.com/git/git/commit/04949538203ba7aeb298a607280715d4f26dbe0a
+--- a/sideband.c
++++ b/sideband.c
+@@ -64,6 +64,19 @@
+ 		list_config_item(list, prefix, keywords[i].keyword);
+ }
+ 
++static void strbuf_add_sanitized(struct strbuf *dest, const char *src, int n)
++{
++	strbuf_grow(dest, n);
++	for (; n && *src; src++, n--) {
++		if (!iscntrl(*src) || *src == '\t' || *src == '\n') {
++			strbuf_addch(dest, *src);
++		} else {
++			strbuf_addch(dest, '^');
++			strbuf_addch(dest, *src == 0x7f ? '?' : 0x40 + *src);
++		}
++	}
++}
++
+ /*
+  * Optionally highlight one keyword in remote output if it appears at the start
+  * of the line. This should be called for a single line only, which is
+@@ -76,12 +89,12 @@
+ 	int i;
+ 
+ 	if (!want_color_stderr(use_sideband_colors())) {
+-		strbuf_add(dest, src, n);
++		strbuf_add_sanitized(dest, src, n);
+ 		return;
+ 	}
+ 
+ 	while (0 < n && isspace(*src)) {
+-		strbuf_addch(dest, *src);
++		strbuf_add_sanitized(dest, src, 1);
+ 		src++;
+ 		n--;
+ 	}
+@@ -109,7 +122,7 @@
+ 		}
+ 	}
+ 
+-	strbuf_add(dest, src, n);
++	strbuf_add_sanitized(dest, src, n);
+ }
+ 
+ 
+@@ -164,8 +177,11 @@
+ 	len--;
+ 	switch (band) {
+ 	case 3:
+-		if (die_on_error)
+-			die(_("remote error: %s"), buf + 1);
++		if (die_on_error) {
++			struct strbuf message = STRBUF_INIT;
++			strbuf_add_sanitized(&message, buf + 1, len);
++			die(_("remote error: %s"), message.buf);
++		}
+ 		strbuf_addf(scratch, "%s%s", scratch->len ? "\n" : "",
+ 			    DISPLAY_PREFIX);
+ 		maybe_colorize_sideband(scratch, buf + 1, len);

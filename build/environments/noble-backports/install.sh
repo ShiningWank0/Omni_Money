@@ -63,3 +63,24 @@ findmnt --list --noheadings --target / > "$inventory/backport-sources/root-mount
 for package in libtiff6 libtiff-dev; do
     dpkg --compare-versions "$(dpkg-query -W -f='${Version}' "$package")" ge '4.5.1+git230720-4ubuntu2.6'
 done
+
+# Check both DWARF section layouts with ordinary compiler-generated debug info.
+probe_dir=$(mktemp -d)
+printf '%s\n' 'struct item { long value; };' 'long value(struct item v) { return v.value; }' > "$probe_dir/item.c"
+for dwarf in 4 5; do
+    cc -O2 "-gdwarf-$dwarf" -fdebug-types-section -c "$probe_dir/item.c" -o "$probe_dir/item.o"
+    readelf --debug-dump=info "$probe_dir/item.o" > "$inventory/backport-sources/dwarf$dwarf.txt"
+    grep -q 'DW_TAG_structure_type' "$inventory/backport-sources/dwarf$dwarf.txt"
+    objdump --dwarf=info "$probe_dir/item.o" > /dev/null
+done
+rm -rf "$probe_dir"
+# A normal local push should retain the server hook's readable progress text.
+git_probe=$(mktemp -d)
+git init --bare -q "$git_probe/server"
+git init -q -b main "$git_probe/client"
+printf '%s\n' '#!/bin/sh' 'echo "reference accepted"' > "$git_probe/server/hooks/post-receive"
+chmod +x "$git_probe/server/hooks/post-receive"
+git -C "$git_probe/client" -c user.name=probe -c user.email=probe@example.invalid commit -qm initial --allow-empty
+git -C "$git_probe/client" push "$git_probe/server" HEAD:refs/heads/main 2>"$git_probe/stderr"
+grep -F 'remote: reference accepted' "$git_probe/stderr" > "$inventory/backport-sources/git-sideband.txt"
+rm -rf "$git_probe"
