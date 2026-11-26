@@ -77,8 +77,10 @@ findmnt --list --noheadings --target / > "$inventory/backport-sources/root-mount
 # These Noble updates provide the companion fixes for libxslt and pyexpat.
 dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libxml2)" ge '2.9.14+dfsg-1.3ubuntu3.6'
 dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libexpat1)" ge '2.6.1-2ubuntu0.5'
-pyexpat=$(python3.12 -c 'import pyexpat; print(pyexpat.__file__)')
+# Noble embeds pyexpat in python3.12. Shared-extension builds expose __file__.
+pyexpat=$(python3.12 -c 'import pyexpat, sys; print(getattr(pyexpat, "__file__", sys.executable))')
 readelf --wide --dyn-syms "$pyexpat" > /tmp/pyexpat-symbols
+grep -Eq '[[:space:]][[:digit:]]+[[:space:]]+PyInit_pyexpat$' /tmp/pyexpat-symbols
 grep -E 'UND +XML_SetHashSalt16Bytes(@|$)' /tmp/pyexpat-symbols > "$inventory/backport-sources/pyexpat-salt-symbol.txt"
 rm /tmp/pyexpat-symbols
 python3.12 - <<'PY'
