@@ -30,7 +30,7 @@ jobs:
             platform: linux/arm64
     runs-on: ${{ matrix.runner }}
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:4374ad48c53c5f30e6f35644ca999ab7caf0a343fa5c54e09479d2421bf8fbfc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:c2bdd64ca494a130d74527443104a9003dc9215ac510191ae4c4f270293e1151
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -89,7 +89,7 @@ jobs:
       contents: read
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:4374ad48c53c5f30e6f35644ca999ab7caf0a343fa5c54e09479d2421bf8fbfc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:c2bdd64ca494a130d74527443104a9003dc9215ac510191ae4c4f270293e1151
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -197,7 +197,7 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:4374ad48c53c5f30e6f35644ca999ab7caf0a343fa5c54e09479d2421bf8fbfc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:c2bdd64ca494a130d74527443104a9003dc9215ac510191ae4c4f270293e1151
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -290,7 +290,7 @@ jobs:
       APP_VERSION: ${{ needs.prepare.outputs.version }}
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:4374ad48c53c5f30e6f35644ca999ab7caf0a343fa5c54e09479d2421bf8fbfc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:c2bdd64ca494a130d74527443104a9003dc9215ac510191ae4c4f270293e1151
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
