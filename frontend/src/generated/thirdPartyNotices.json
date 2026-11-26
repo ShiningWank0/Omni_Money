@@ -594,9 +594,9 @@
     {
       "id": "npm:vue-chartjs",
       "name": "vue-chartjs",
-      "version": "5.3.4",
+      "version": "5.3.7",
       "license": "MIT",
-      "url": "https://www.npmjs.com/package/vue-chartjs/v/5.3.4",
+      "url": "https://www.npmjs.com/package/vue-chartjs/v/5.3.7",
       "targets": [
         "desktop-darwin-amd64",
         "desktop-darwin-arm64",

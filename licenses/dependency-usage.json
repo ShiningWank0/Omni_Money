@@ -4095,7 +4095,7 @@
     {
       "id": "npm:vue-chartjs",
       "name": "vue-chartjs",
-      "version": "5.3.4",
+      "version": "5.3.7",
       "dependencyType": "runtime",
       "distribution": "included",
       "targets": [
