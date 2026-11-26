@@ -7,12 +7,35 @@ FROM node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43dd
 ARG VERSION
 ARG TARGETARCH
 
+# Temporary until the pinned Node image ships fixed Alpine packages (Issues #384, #407).
+RUN --network=none --mount=type=bind,from=ghcr.io/shiningwank0/omni_money-build-alpine-runtime@sha256:c45578f9b9545479fd61458c3c888ec34b57f39aa777d86c2ba7189f44af2bd4,source=/opt/omni-environment/apks,target=/run/omni-apks,ro \
+    set -- /run/omni-apks/libcrypto3-3.5.9-r1.*.apk \
+           /run/omni-apks/libssl3-3.5.9-r1.*.apk \
+           /run/omni-apks/zlib-1.4-r0.*.apk \
+ && test "$#" -eq 3 \
+ && apk verify "$@" \
+ && apk add --no-network --no-cache --repositories-file /dev/null "$@" \
+ && installed_apks="$(apk info --no-network --repositories-file /dev/null -v)" \
+ && printf '%s\n' "$installed_apks" | grep -Fxq libcrypto3-3.5.9-r1 \
+ && printf '%s\n' "$installed_apks" | grep -Fxq libssl3-3.5.9-r1 \
+ && printf '%s\n' "$installed_apks" | grep -Fxq zlib-1.4-r0
+
 # Temporary until the pinned Node image ships the fixed npm bundle (Issues #399, #441).
 ADD --checksum=sha256:fa0711dd513fa1386bbad3962a292cb813461cb57dedf07d6eb7efe76dffe897 https://registry.npmjs.org/npm/-/npm-12.2.3.tgz /tmp/omni-npm.tgz
+# npm 12.2.3 still bundles minimatch 10.2.5. Install the fixed matcher and
+# its additional dependency before invoking npm on either architecture.
+ADD --checksum=sha256:fc8a4ba8a9ad37a4c8163fc170336bb22514597d247663d148d5435dda60c661 https://registry.npmjs.org/minimatch/-/minimatch-11.0.9.tgz /tmp/omni-minimatch.tgz
+ADD --checksum=sha256:d8eab172188bcaa83b950160fcd7c0b9dc68f44f7c470660e5d7f4c8a437d658 https://registry.npmjs.org/@isaacs/nonrecursive-glob-match/-/nonrecursive-glob-match-1.1.0.tgz /tmp/omni-nonrecursive-glob-match.tgz
 RUN rm -rf /usr/local/lib/node_modules/npm \
  && mkdir /usr/local/lib/node_modules/npm \
  && tar -xzf /tmp/omni-npm.tgz --strip-components=1 -C /usr/local/lib/node_modules/npm \
- && rm /tmp/omni-npm.tgz \
+ && cd /usr/local/lib/node_modules/npm/node_modules \
+ && rm -rf minimatch \
+ && mkdir -p minimatch @isaacs/nonrecursive-glob-match \
+ && tar -xzf /tmp/omni-minimatch.tgz --strip-components=1 -C minimatch \
+ && tar -xzf /tmp/omni-nonrecursive-glob-match.tgz --strip-components=1 -C @isaacs/nonrecursive-glob-match \
+ && rm /tmp/omni-npm.tgz /tmp/omni-minimatch.tgz /tmp/omni-nonrecursive-glob-match.tgz \
+ && node -e "const a=require('node:assert/strict'); a.equal(require('minimatch/package.json').version,'11.0.9'); a.ok(require('minimatch').minimatch('src/app.js','src/*.js'))" \
  && test "$(npm --version)" = 12.2.3
 
 WORKDIR /app/frontend
