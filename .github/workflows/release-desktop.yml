@@ -146,12 +146,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15-intel
+          - os: macos-26-intel
             platform: darwin/amd64
             oss_target: desktop-darwin-amd64
             artifact_name: omni-money-macos-amd64
             deployment_target: '13.0'
-          - os: macos-15
+          - os: macos-26
             platform: darwin/arm64
             oss_target: desktop-darwin-arm64
             artifact_name: omni-money-macos-arm64
