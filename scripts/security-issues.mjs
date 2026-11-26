@@ -30,19 +30,24 @@ export function collect(directory, downloadSucceeded = true) {
   });
 }
 
+// Each ledger contract is solved independently. Confirmed violations in one
+// contract remain valid if another contract could not be checked.
+export function confirmedFindings(report) {
+  return report.status === 'error' && report.scan !== 'formal-ledger' ? [] : report.findings;
+}
+
 export function entries(reports) {
   const grouped = new Map();
   for (const report of reports) {
     if (report.status === 'error') {
       const data = { kind: 'scan-error', tool: report.scan };
       grouped.set(hash(data), [data]);
-      continue;
     }
-    for (const f of report.findings) {
+    for (const f of confirmedFindings(report)) {
       // Vulnerabilities group per scanner and package so every advisory for
       // the same dependency shares one issue. Static analysis stays per rule
       // and location because the rule identifies the defect.
-      const key = f.tool === 'gosec' ? hash([f.tool, f.id, f.component]) : hash([f.tool, f.component]);
+      const key = ['gosec', 'formal'].includes(f.tool) ? hash([f.tool, f.id, f.component]) : hash([f.tool, f.component]);
       grouped.set(key, [...(grouped.get(key) || []), f]);
     }
   }
@@ -51,7 +56,7 @@ export function entries(reports) {
     if (findings[0].kind === 'scan-error') data = findings[0];
     else {
       const first = findings[0];
-      data = { kind: first.tool === 'gosec' ? 'static-analysis' : 'vulnerability',
+      data = { kind: ['gosec', 'formal'].includes(first.tool) ? 'static-analysis' : 'vulnerability',
         tool: first.tool, component: first.component, id: unique(findings.map(f => f.id)) };
       for (const field of ['severity', 'installed', 'fixed', 'summary', 'context']) {
         data[field] = unique(findings.map(f => f[field]).filter(Boolean));

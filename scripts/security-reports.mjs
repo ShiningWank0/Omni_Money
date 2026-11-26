@@ -8,7 +8,7 @@ import { auditPatchedPicomatch } from './verify-picomatch-patch.mjs';
 
 // Required reports produced by the normal CI workflow. Development runtime
 // diagnostics run manually while Issue #299 waits for the official Wails fix.
-export const scans = ['npm', 'gosec-desktop', 'gosec-server', 'govulncheck-desktop', 'govulncheck-server', 'trivy', 'fuzz-csv', 'fuzz-json', 'fuzz-image'];
+export const scans = ['npm', 'gosec-desktop', 'gosec-server', 'govulncheck-desktop', 'govulncheck-server', 'trivy', 'fuzz-csv', 'fuzz-json', 'fuzz-image', 'formal-ledger'];
 export const developmentScans = ['govulncheck-dev'];
 export const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const requireValue = (condition, message) => { if (!condition) throw new Error(message); };

@@ -168,12 +168,16 @@ test('a scheduled scan with findings, incomplete reports and test failures compl
     { tool: 'gosec', id: 'G401', component: 'backend/example.go:4', severity: 'MEDIUM',
       installed: '', fixed: '', summary: 'Fixture', context: 'gosec-desktop' },
   ] };
+  const partial = reports.find(report => report.scan === 'formal-ledger');
+  partial.status = 'error';
+  partial.findings.push({ tool: 'formal', id: 'CheckedAddInt64', component: 'backend/validation/amount.go',
+    severity: 'UNKNOWN', installed: '', fixed: '', summary: 'Fixture', context: 'CheckedAddInt64' });
   const summary = await main(environment, { directory, apiFactory: () => api, collectReports: () => reports, stepReports: recorded(jobs) });
   assert.equal(summary.status, 'reported');
-  assert.equal(summary.scansWithFindings, 1);
-  assert.equal(summary.incompleteScans, 1);
+  assert.equal(summary.scansWithFindings, 2);
+  assert.equal(summary.incompleteScans, 2);
   assert.equal(summary.diagnosticProblems, 1);
-  assert.equal(state.writes.length, 3);
+  assert.equal(state.writes.length, 5);
   assert.ok(state.writes.every(write => write.body.title.startsWith('[Bot]')));
   assert.equal(JSON.parse(readFileSync(join(directory, 'ci-monitor.json'), 'utf8')).diagnostics.length, 1);
 });

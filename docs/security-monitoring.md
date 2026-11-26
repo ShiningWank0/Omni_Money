@@ -125,3 +125,21 @@ CI専用のXvfb・D-Busとウィンドウマネージャーを使い、`scripts/
 この変更はHTTP成否・候補数・架空値の使い回し方からの直接的な判別を抑える。既存の非discoverableパスキーとの互換性のため、実credential IDとその長さ、PRF saltをブラウザーへ渡す方式は維持する。既知IDとの照合、認証器固有の形式・長さの統計的推測、登録変更前後やcontrol DB鍵のローテーション前後の比較、負荷時の時間差まで隠すものではない。この限界はメール指定の互換APIに対するもので、現行Frontendのdiscoverable開始応答にはuser別のallowCredentialsを含めない。
 
 [WebAuthnのUsername Enumeration / Privacy leak via credential IDs](https://www.w3.org/TR/webauthn/#sctn-username-enumeration) に沿った互換性を維持する緩和策として扱う。
+
+## 台帳の金額に対する形式検証
+
+Go checks は `backend/validation/amount.go` の実装を Go の構文木と型情報から読み、Z3 で次の条件を検証する。
+
+- 取引金額は 1 円から 10 億円までのときに限り受理する。
+- 符号付き64ビット整数の加算・減算は、数学的な結果が64ビットに収まるときに限り成功し、成功時に正確な値を返す。
+
+実装の演算は64ビット、仕様の加減算は符号拡張した65ビットで表現する。定義域のどこかで両者が異なるかを SMT ソルバーに問い合わせ、矛盾が証明された場合（`unsat`）にその関数を合格とする。`sat` は違反した関数を報告して CI を失敗させる。解析対象外の Go 構文、ソルバー異常、時間切れも失敗として扱う。証明範囲はこの3関数の入力と戻り値であり、呼び出し元が検証を行うことやデータベースへの保存処理は別途検査する。
+
+定期 CI の `formal-ledger.json` には関数ごとの結果と再実行用の SMT-LIB 式を保存する。既存のセキュリティ集計で、証明が反証された関数を静的解析の Issue として記録する。ある関数の解析やソルバーが失敗した場合は検査エラーを通知し、同じ実行で別の関数に見つかった違反も報告する。
+
+CI は Z3 5.3.3 の Linux amd64 公式アーカイブを SHA-256 で検証して使う。同じ検査はリポジトリのルートで `bash scripts/formal-security/check.sh` を実行する。別の OS では Z3 を用意して `go run ./scripts/formal-security -z3 /path/to/z3` で実装の証明を実行できる。[Z3 の公式配布](https://github.com/Z3Prover/z3/releases/tag/z3-5.3.3)
+
+
+## Unix シークレットの権限検査
+
+Go テストは通常ファイルの Unix 権限512通りについて、所有者・グループ・その他の利用者に許す読み書きの仕様と、本番の `validateFileInfo` の結果を全数比較する。整合性保護ファイル、ホストの機密ファイル、Compose の `/run/secrets` 直下、同ディレクトリの下位パスの4条件で計2,048ケースを検査する。対象は1バイトの通常ファイルのメタデータ判定で、ファイルの所有権、実際のオープン操作、Windows ACL は範囲に含めない。`go test ./backend/secretfile -run TestAllUnixSecretPermissionModes` で再実行できる。
