@@ -138,3 +138,8 @@ Go checks は `backend/validation/amount.go` の実装を Go の構文木と型�
 定期 CI の `formal-ledger.json` には関数ごとの結果と再実行用の SMT-LIB 式を保存する。既存のセキュリティ集計で、証明が反証された関数を静的解析の Issue として記録する。解析やソルバーが失敗した場合は検査エラーとして通知する。
 
 CI は Z3 5.3.3 の Linux amd64 公式アーカイブを SHA-256 で検証して使う。同じ検査はリポジトリのルートで `bash scripts/formal-security/check.sh` を実行する。別の OS では Z3 を用意して `go run ./scripts/formal-security -z3 /path/to/z3` で実装の証明を実行できる。[Z3 の公式配布](https://github.com/Z3Prover/z3/releases/tag/z3-5.3.3)
+
+
+## Unix シークレットの権限検査
+
+Go テストは通常ファイルの Unix 権限512通りについて、所有者・グループ・その他の利用者に許す読み書きの仕様と、本番の `validateFileInfo` の結果を全数比較する。整合性保護ファイル、ホストの機密ファイル、Compose の `/run/secrets` 直下、同ディレクトリの下位パスの4条件で計2,048ケースを検査する。対象は1バイトの通常ファイルのメタデータ判定で、ファイルの所有権、実際のオープン操作、Windows ACL は範囲に含めない。`go test ./backend/secretfile -run TestAllUnixSecretPermissionModes` で再実行できる。
