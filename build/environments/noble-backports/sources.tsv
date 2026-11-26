@@ -1,4 +1,4 @@
-# source  Noble-installed-version  source-version  Ubuntu-main-pool-directory  dsc-sha256  local-patch
+# source  Noble-installed-version  source-version  Ubuntu-main-pool-directory  dsc-sha256  local-patch  [omni-revision; default 1]
 libxi	2:1.8.1-1build1	2:1.8.4-1	libx/libxi	82025749283a2231866439499d86655c82f8154ae26d8b20ce1c18fe034f596f	-
 libxtst	2:1.2.3-1.1ubuntu0.1	2:1.2.6-1	libx/libxtst	b64d8bf301c32091c8a34ef2d8c6c42b133948d892efa66567d66003ca6da807	-
 sqlite3	3.45.1-1ubuntu2.11	3.45.1-1ubuntu2.11	s/sqlite3	84ec6e5cddabfe82bc8bb7d7014162a3c604669cf45105fd2846d22279f31bfe	CVE-2026-119373.patch
@@ -13,7 +13,7 @@ python3.12	3.12.3-1ubuntu0.17	3.12.3-1ubuntu0.17	p/python3.12	941700b999737d869b
 dash	0.5.12-6ubuntu5	0.5.12-6ubuntu5	d/dash	be4a5ba81756b24d0d22f30cd9e609f5b84f8a8d685cb9825e9eae6201c52cf9	dash-fnmatch.patch
 duktape	2.7.0+tests-0ubuntu3	2.7.0+tests-0ubuntu3	d/duktape	cb5f1815b6d8ff6dd80200fc86998dbb833183ac46dff23ec7f2a829e180a397	duktape-source-only.patch
 slang2	2.3.3-3build2	2.3.3-3build2	s/slang2	eeb26a45369be6c791af065ef27998045d9f56a749f6d6f0dd2a1e4edffb296e	slang-terminfo.patch
-binutils	2.42-4ubuntu2.10	2.42-4ubuntu2.10	b/binutils	a14a8e2efdb3566955476bccd2248cebed5cf2a2f5d28e223d08200ec1a18d75	binutils-dwarf.patch
+binutils	2.42-4ubuntu2.10	2.42-4ubuntu2.10	b/binutils	a14a8e2efdb3566955476bccd2248cebed5cf2a2f5d28e223d08200ec1a18d75	binutils-ci.patch	2
 git	1:2.43.0-1ubuntu7.4	1:2.43.0-1ubuntu7.4	g/git	b00b55dcce31a063b783cd0e34fce02c24167fc9f32e2eb7bb2ff4a31652f7a5	git-sideband.patch
 glib2.0	2.80.0-6ubuntu3.10	2.80.0-6ubuntu3.10	g/glib2.0	0ee18e055f5fba9a33763f94823b44ab38e4f677f625ba7540486fe03b436136	glib-exclusive-replace.patch
 gdk-pixbuf	2.42.10+dfsg-3ubuntu3.3	2.42.10+dfsg-3ubuntu3.3	g/gdk-pixbuf	b86025ff9d9ff4e39ec4b1773f23648f18556d154867e28b2f8fc1e589be80d0	gdk-pixbuf-image-bounds.patch

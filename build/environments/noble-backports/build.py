@@ -29,7 +29,7 @@ def fetch(pool, name, expected):
     return dest
 
 
-def build(source, version, pool, digest, patch):
+def build(source, version, pool, digest, patch, revision="1"):
     filename = f"{source}_{version.split(':')[-1]}.dsc"
     dsc = fetch(pool, filename, digest)
     with dsc.open("rb") as file:
@@ -49,7 +49,7 @@ def build(source, version, pool, digest, patch):
                        env={**os.environ, "QUILT_PATCHES": "debian/patches"})
     changelog = Path("src/debian/changelog")
     changelog.write_text(
-        f"{source} ({version}+omni1) noble; urgency=medium\n\n"
+        f"{source} ({version}+omni{revision}) noble; urgency=medium\n\n"
         "  * Rebuild reviewed security fixes for the Omni Money CI image.\n\n"
         " -- Omni Money maintainers <noreply@users.noreply.github.com>  "
         "Thu, 26 Nov 2026 00:00:00 +0000\n\n" + changelog.read_text()
@@ -64,8 +64,8 @@ def build(source, version, pool, digest, patch):
 
 for line in (inputs / "sources.tsv").read_text().splitlines():
     if line and not line.startswith("#"):
-        source, baseline, version, pool, digest, patch = line.split()
+        source, baseline, version, pool, digest, patch, *revision = line.split()
         with tempfile.TemporaryDirectory(dir="/tmp") as temp:
             os.chdir(temp)
-            build(source, version, pool, digest, patch)
+            build(source, version, pool, digest, patch, *revision)
             os.chdir("/")

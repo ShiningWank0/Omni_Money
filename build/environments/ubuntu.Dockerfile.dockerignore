@@ -17,7 +17,7 @@
 !build/environments/noble-backports/dash-fnmatch.patch
 !build/environments/noble-backports/duktape-source-only.patch
 !build/environments/noble-backports/slang-terminfo.patch
-!build/environments/noble-backports/binutils-dwarf.patch
+!build/environments/noble-backports/binutils-ci.patch
 !build/environments/noble-backports/git-sideband.patch
 !build/environments/noble-backports/glib-exclusive-replace.patch
 !build/environments/noble-backports/gdk-pixbuf-image-bounds.patch

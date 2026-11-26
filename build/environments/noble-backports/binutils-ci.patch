@@ -1,5 +1,6 @@
-Description: Apply four upstream DWARF reader fixes to Noble binutils 2.42.
+Description: Apply the upstream DWARF fixes and build Noble binutils without Gprofng.
  The Noble source stores the section type in do_types, before the do_flags refactor.
+ The CI toolchain does not use the optional profiler or its runtime library.
 Origin: CVE-2025-69644 https://sourceware.org/git/?p=binutils-gdb.git;a=commit;h=455446bbdc8675f34808187de2bbad4682016ff7
 Origin: CVE-2025-69645 https://sourceware.org/git/?p=binutils-gdb.git;a=commit;h=cdb728d4da6184631989b192f1022c219dea7677
 Origin: CVE-2025-69646 https://sourceware.org/git/?p=binutils-gdb.git;a=commit;h=598704a00cbac5e85c2bedd363357b5bf6fcee33
@@ -301,3 +302,19 @@ Origin: CVE-2025-69652 https://sourceware.org/git/?p=binutils-gdb.git;a=commit;h
    putchar ('\n');
  
    free (range_entries);
+--- a/debian/rules.defs
++++ b/debian/rules.defs
+@@ -15,10 +15,9 @@
+ _gnu_type  = $(call vafilt,$(run_dpkg_arch),DEB_HOST_GNU_TYPE)
+ _multiarch = $(call vafilt,$(run_dpkg_arch),DEB_HOST_MULTIARCH)
+ 
+-ifneq (,$(filter $(DEB_HOST_ARCH),amd64 i386 arm64 x32))
+-  with_gprofng = yes
+-  CONF_GPROFNG = --enable-gprofng
+-endif
++# The Omni Money CI environment only needs the compiler and binary tools.
++with_gprofng = no
++CONF_GPROFNG = --disable-gprofng
+ 
+ gold_targets = \
+ 	amd64 arm64 armel armhf i386 \

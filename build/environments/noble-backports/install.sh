@@ -6,11 +6,14 @@ inventory=/opt/omni-environment
 target_debs=()
 arch=$(dpkg --print-architecture)
 dpkg-query -W -f='${db:Status-Status}\t${source:Package}\t${Package}\t${Version}\t${source:Version}\n' > /tmp/noble-installed.tsv
-while read -r source baseline version pool digest patch; do
+while read -r source baseline version pool digest patch revision; do
     [[ -n "$source" && "$source" != \#* ]] || continue
     found=false
     while read -r name current source_version; do
         [[ "$source_version" == "$baseline" && "$current" == *"$baseline" ]] || { echo "Review updated Noble package $name $current" >&2; exit 1; }
+        if [[ "$source" == binutils && "$name" == libgprofng0 ]]; then
+            continue
+        fi
         # bsdutils adds its own epoch to the util-linux source version.
         binary_prefix=${current%"$baseline"}
         [[ -z "$binary_prefix" || "$binary_prefix" =~ ^[0-9]+:$ ]]
@@ -18,7 +21,7 @@ while read -r source baseline version pool digest patch; do
         [[ ${#matches[@]} == 1 && -f "${matches[0]}" ]]
         deb=${matches[0]}
         [[ "$(dpkg-deb -f "$deb" Package)" == "$name" ]]
-        [[ "$(dpkg-deb -f "$deb" Version)" == "${binary_prefix}${version}+omni1" ]]
+        [[ "$(dpkg-deb -f "$deb" Version)" == "${binary_prefix}${version}+omni${revision:-1}" ]]
         deb_arch=$(dpkg-deb -f "$deb" Architecture)
         [[ "$deb_arch" == "$arch" || "$deb_arch" == all ]]
         rm -f "$inventory/debs/${name}_"*.deb
@@ -30,8 +33,18 @@ while read -r source baseline version pool digest patch; do
 done < "$inputs/sources.tsv"
 # Resolve versioned Breaks (ICU) and the rebuilt Python extension dependencies
 # together, preserving newly required Noble archives alongside the local debs.
-apt-get -y --no-remove --no-install-recommends -o Dir::Cache::archives="$inventory/debs" \
-    install "${target_debs[@]}"
+# Gprofng is the only package that can be removed from the initial Noble set.
+# Check the resolver's complete plan before replacing its versioned dependencies.
+apt_args=(--purge --no-install-recommends -o "Dir::Cache::archives=$inventory/debs"
+          install "${target_debs[@]}" libgprofng0-)
+LC_ALL=C apt-get --simulate "${apt_args[@]}" > /tmp/noble-install-plan
+removals=$(awk '$1 == "Remv" || $1 == "Purg" {print $2}' /tmp/noble-install-plan)
+[[ "$removals" == libgprofng0 || "$removals" == "libgprofng0:$arch" ]]
+apt-get -y "${apt_args[@]}"
+rm -f "$inventory/debs"/libgprofng0_*.deb /tmp/noble-install-plan
+test -z "$(find /backports -maxdepth 1 -name 'libgprofng0_*.deb' -print -quit)"
+[[ "$(dpkg-query -W -f='${db:Status-Status}' libgprofng0 2>/dev/null || true)" != installed ]]
+test -z "$(find /usr/bin /usr/lib -name '*gprofng*' -o -name 'libgp-*.so*' -o -name '*gp-display-*')"
 apt-get check
 audit=$(dpkg --audit)
 [[ -z "$audit" ]] || { echo "$audit" >&2; exit 1; }
@@ -129,6 +142,11 @@ for dwarf in 4 5; do
     grep -q 'DW_TAG_structure_type' "$inventory/backport-sources/dwarf$dwarf.txt"
     objdump --dwarf=info "$probe_dir/item.o" > /dev/null
 done
+printf '%s\n' 'int main(void) { return 0; }' > "$probe_dir/main.c"
+cc -g "$probe_dir/main.c" -o "$probe_dir/main"
+"$probe_dir/main"
+nm "$probe_dir/main" | grep -w main > "$inventory/backport-sources/linked-main.txt"
+gprof --version > "$inventory/backport-sources/gprof-version.txt"
 rm -rf "$probe_dir"
 # A normal local push should retain the server hook's readable progress text.
 git_probe=$(mktemp -d)
