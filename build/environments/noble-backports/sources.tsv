@@ -1,0 +1,5 @@
+# source  Noble-installed-version  source-version  Ubuntu-main-pool-directory  dsc-sha256  local-patch
+libxi	2:1.8.1-1build1	2:1.8.4-1	libx/libxi	82025749283a2231866439499d86655c82f8154ae26d8b20ce1c18fe034f596f	-
+libxtst	2:1.2.3-1.1ubuntu0.1	2:1.2.6-1	libx/libxtst	b64d8bf301c32091c8a34ef2d8c6c42b133948d892efa66567d66003ca6da807	-
+sqlite3	3.45.1-1ubuntu2.11	3.45.1-1ubuntu2.11	s/sqlite3	84ec6e5cddabfe82bc8bb7d7014162a3c604669cf45105fd2846d22279f31bfe	CVE-2026-119373.patch
+harfbuzz	8.3.0-2build2	8.3.0-2build2	h/harfbuzz	ed14238fb748b9c822ebc80618df9e6018c3f5b919e4c11d6c4b965b90c9d6cb	CVE-2026-22693.patch
