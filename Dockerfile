@@ -35,7 +35,7 @@ RUN rm -rf /usr/local/lib/node_modules/npm \
  && tar -xzf /tmp/omni-minimatch.tgz --strip-components=1 -C minimatch \
  && tar -xzf /tmp/omni-nonrecursive-glob-match.tgz --strip-components=1 -C @isaacs/nonrecursive-glob-match \
  && rm /tmp/omni-npm.tgz /tmp/omni-minimatch.tgz /tmp/omni-nonrecursive-glob-match.tgz \
- && node -e "const a=require('node:assert/strict'); a.equal(require('minimatch/package.json').version,'11.0.9'); a.ok(require('minimatch').minimatch('src/app.js','src/*.js'))" \
+ && node -e "const a=require('node:assert/strict'); a.equal(require('./brace-expansion/package.json').version,'5.0.12'); a.equal(require('minimatch/package.json').version,'11.0.9'); a.ok(require('minimatch').minimatch('src/app.js','src/*.js'))" \
  && test "$(npm --version)" = 12.2.3
 
 WORKDIR /app/frontend

@@ -52,6 +52,10 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
+      - name: Install reviewed npm for frontend builds
+        working-directory: ${{ github.workspace }}
+        run: node scripts/setup-ci-npm.mjs
+
       - name: Build frontend assets
         working-directory: frontend
         run: |
