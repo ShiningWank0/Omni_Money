@@ -2,7 +2,7 @@ name: Capture immutable build environments
 
 on:
   push:
-    branches: [fix/capture-native-environments]
+    branches: [fix/capture-native-environments, fix/noble-binutils-official]
     paths:
       - .github/workflows/capture-build-environments.yml
       - build/environments/**
@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: ${{ fromJSON(inputs.buildkit_only && '["buildkit"]' || '["ubuntu","alpine-builder","alpine-runtime"]') }}
+        environment: ${{ fromJSON(github.ref_name == 'fix/noble-binutils-official' && '["ubuntu"]' || inputs.buildkit_only && '["buildkit"]' || '["ubuntu","alpine-builder","alpine-runtime"]') }}
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -70,7 +70,7 @@ jobs:
 
   windows:
     name: Capture complete MSYS2 UCRT64 environment
-    if: github.repository == 'ShiningWank0/Omni_Money' && !inputs.buildkit_only
+    if: github.repository == 'ShiningWank0/Omni_Money' && !inputs.buildkit_only && github.ref_name != 'fix/noble-binutils-official'
     permissions:
       contents: read
     runs-on: windows-2025
@@ -138,7 +138,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: ${{ fromJSON(inputs.buildkit_only && '["buildkit"]' || '["ubuntu","alpine-builder","alpine-runtime"]') }}
+        environment: ${{ fromJSON(github.ref_name == 'fix/noble-binutils-official' && '["ubuntu"]' || inputs.buildkit_only && '["buildkit"]' || '["ubuntu","alpine-builder","alpine-runtime"]') }}
         arch: [amd64, arm64]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -190,7 +190,7 @@ jobs:
           path: candidates
       - name: Assemble indexes from the saved architecture digests
         env:
-          ENVIRONMENTS: ${{ inputs.buildkit_only && 'buildkit' || 'ubuntu alpine-builder alpine-runtime' }}
+          ENVIRONMENTS: ${{ github.ref_name == 'fix/noble-binutils-official' && 'ubuntu' || inputs.buildkit_only && 'buildkit' || 'ubuntu alpine-builder alpine-runtime' }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail

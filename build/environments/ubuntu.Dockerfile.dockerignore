@@ -10,4 +10,3 @@
 !build/environments/noble-backports/CVE-2026-120749.patch
 !build/environments/noble-backports/CVE-2026-76642.patch
 !build/environments/noble-backports/git-sideband.patch
-!build/environments/noble-backports/binutils-dwarf.patch
