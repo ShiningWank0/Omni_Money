@@ -1,11 +1,9 @@
 """Build pinned Ubuntu source packages with the native Noble toolchain."""
-import hashlib
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-from urllib.request import urlopen
 
 from debian.deb822 import Dsc
 
@@ -20,12 +18,10 @@ def fetch(pool, name, expected):
     if Path(name).name != name:
         raise ValueError(name)
     dest = Path(name)
-    with urlopen(f"https://archive.ubuntu.com/ubuntu/pool/main/{pool}/{name}", timeout=120) as response:
-        with dest.open("wb") as file:
-            shutil.copyfileobj(response, file)
-    with dest.open("rb") as file:
-        if hashlib.file_digest(file, "sha256").hexdigest() != expected:
-            raise ValueError(f"SHA-256 mismatch for {name}")
+    url = f"https://archive.ubuntu.com/ubuntu/pool/main/{pool}/{name}"
+    subprocess.run(["/usr/lib/apt/apt-helper", "-o", "Acquire::Retries=4",
+                    "-o", "Acquire::https::Timeout=120", "download-file",
+                    url, str(dest.resolve()), f"SHA256:{expected}"], check=True)
     return dest
 
 
