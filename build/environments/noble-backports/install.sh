@@ -28,7 +28,10 @@ while read -r source baseline version pool digest patch; do
     done < <(awk -v src="$source" '$1 == "installed" && $2 == src {print $3, $4, $5}' /tmp/noble-installed.tsv)
     "$found" || { echo "No installed packages from $source" >&2; exit 1; }
 done < "$inputs/sources.tsv"
-dpkg -i "${target_debs[@]}"
+# Resolve versioned Breaks (ICU) and the rebuilt Python extension dependencies
+# together, preserving newly required Noble archives alongside the local debs.
+apt-get -y --no-remove --no-install-recommends -o Dir::Cache::archives="$inventory/debs" \
+    install "${target_debs[@]}"
 apt-get check
 audit=$(dpkg --audit)
 [[ -z "$audit" ]] || { echo "$audit" >&2; exit 1; }

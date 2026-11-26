@@ -6,22 +6,22 @@
   },
   {
     "name": "@vue/reactivity",
-    "version": "3.5.45",
+    "version": "3.5.46",
     "directory": "node_modules/@vue/reactivity"
   },
   {
     "name": "@vue/runtime-core",
-    "version": "3.5.45",
+    "version": "3.5.46",
     "directory": "node_modules/@vue/runtime-core"
   },
   {
     "name": "@vue/runtime-dom",
-    "version": "3.5.45",
+    "version": "3.5.46",
     "directory": "node_modules/@vue/runtime-dom"
   },
   {
     "name": "@vue/shared",
-    "version": "3.5.45",
+    "version": "3.5.46",
     "directory": "node_modules/@vue/shared"
   },
   {
@@ -41,7 +41,7 @@
   },
   {
     "name": "vue-chartjs",
-    "version": "5.3.4",
+    "version": "5.3.7",
     "directory": "node_modules/vue-chartjs"
   }
 ]
