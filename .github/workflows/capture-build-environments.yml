@@ -76,7 +76,7 @@ jobs:
           msystem: UCRT64
           update: true
           cache: false
-          install: curl diffutils make tcl perl mingw-w64-ucrt-x86_64-gcc
+          install: curl diffutils make tcl perl mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-tcl
       - name: Preserve the coherent package set and metadata
         shell: msys2 {0}
         run: |
@@ -91,6 +91,15 @@ jobs:
             pacman -R --noconfirm "${remove[@]}"
           fi
           pacman -Dk
+          # SQLCipher configure uses Tcl to resolve the native compiler paths
+          # that restore-fixed-msys2 exports for C and C++.
+          UCRT_BIN="$(cygpath -m /ucrt64/bin)" tclsh <<'TCL'
+          foreach compiler {gcc.exe g++.exe} {
+            if {![file executable [file join $::env(UCRT_BIN) $compiler]]} {
+              error "Native Tcl cannot resolve $compiler in $::env(UCRT_BIN)"
+            }
+          }
+          TCL
           for unused in wget mingw-w64-ucrt-x86_64-python; do
             if pacman -Q "$unused" >/dev/null 2>&1; then exit 1; fi
           done
