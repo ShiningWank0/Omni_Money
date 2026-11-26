@@ -1,0 +1,9 @@
+**
+!build/
+!build/environments/
+!build/environments/noble-backports/
+!build/environments/noble-backports/sources.tsv
+!build/environments/noble-backports/build.py
+!build/environments/noble-backports/install.sh
+!build/environments/noble-backports/CVE-2026-119373.patch
+!build/environments/noble-backports/CVE-2026-22693.patch
