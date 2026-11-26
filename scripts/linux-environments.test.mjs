@@ -35,6 +35,20 @@ test('moving OS package resolution cannot return to an ordinary Docker build', t
   assert.throws(() => checkLinuxEnvironments(root), /must not resolve OS packages again/)
 })
 
+test('the fixed APK install requires signature verification and no network', t => {
+  const root = fixture(t), path = join(root, 'Dockerfile')
+  const dockerfile = readFileSync(path, 'utf8')
+  for (const [before, after] of [
+    ['--network=none --mount=type=bind,from=', '--network=default --mount=type=bind,from='],
+    ['apk verify "$@"', 'true'],
+    ['apk add --no-network --no-cache', 'apk add --no-cache'],
+  ]) {
+    assert.ok(dockerfile.includes(before))
+    writeFileSync(path, dockerfile.replace(before, after))
+    assert.throws(() => checkLinuxEnvironments(root), /must not resolve OS packages again/)
+  }
+})
+
 test('job containers cannot silently lose orphan reaping', t => {
   const root = fixture(t), path = join(root, '.github/workflows/release-desktop.yml')
   writeFileSync(path, readFileSync(path, 'utf8').replace('--init ', ''))
