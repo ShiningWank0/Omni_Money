@@ -22,3 +22,9 @@ publisherが出力する`candidate-lock-*`には実際のimage/artifact digest�
 切替PRでは、Alpine builder/runtimeのlibcrypto ABI・package版整合、SQLCipher実probe、OSS package一覧、WindowsのPE/native probeとDLL同梱制限、Linux native UIとserver/browser E2EをCIで確認する。macOS Tcl/XcodeとWindows Fixed Version WebView2はそれぞれ別の取得物として扱う。
 
 更新時はこの生成処理を再実行し、候補digestと差分を別PRでレビューする。GHCRのbuild用packageを自動削除するretention設定は設けない。通常buildのcacheを消しても同じdigestから復元できるようにする。
+
+## Ubuntu 24.04 のセキュリティ修正
+
+環境採取時に libXi、libXtst、SQLite、HarfBuzz を各 CPU の Noble ツールチェーンでビルドする。前二者は Ubuntu アーカイブの修正済みソースリリース、後二者は Noble のソースに上流の修正を適用する。入力の版とソース記述子の SHA-256 は `build/environments/noble-backports/sources.tsv`、パッチの出典は各ファイルの `Origin` に記録する。ビルド用ステージだけがソースを展開し、最終イメージには既存環境で使うバイナリパッケージだけを導入する。
+
+採取では対象ソース由来の全導入パッケージの版、CPU、依存の整合、共有ライブラリのロード、SQLite のインメモリ全文検索を確認する。ソース記述子とパッチはイメージ内の `/opt/omni-environment/backport-sources/` に保存する。Noble の配布版が変わると採取が停止する。公式修正を確認したら対応する行と不要になったパッチを削除し、両 CPU の候補を取り直して固定先を更新する。

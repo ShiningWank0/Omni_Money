@@ -1,10 +1,21 @@
-FROM ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b
+FROM ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b AS noble
+
+FROM noble AS backports
+ENV DEBIAN_FRONTEND=noninteractive
+COPY build/environments/noble-backports /usr/local/share/omni-backports
+RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
+ && apt-get update \
+ && apt-get -y --no-install-recommends install build-essential dpkg-dev fakeroot python3-debian ca-certificates quilt \
+ && python3 /usr/local/share/omni-backports/build.py
+
+FROM noble
+COPY build/environments/noble-backports /usr/local/share/omni-backports
 ENV DEBIAN_FRONTEND=noninteractive
 # This workflow creates a candidate once. Normal builds consume its digest.
 # Preserve signed repository metadata and every downloaded deb, including the
 # dependency closure. The immutable image also preserves all base packages.
 # The CI desktop does not use SASL DIGEST-MD5, genrb, RTP media or MP4 playback.
-RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+RUN --mount=type=bind,from=backports,source=/out,target=/backports rm -f /etc/apt/apt.conf.d/docker-clean \
  && mkdir -p /opt/omni-environment/debs \
  && printf '%s\n' \
     'path-exclude=/usr/lib/*/sasl2/libdigestmd5.so*' \
@@ -28,6 +39,7 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \
  && ! command -v genrb >/dev/null 2>&1 \
  && media_plugins="$(find /usr/lib \( -name libgstrtp.so -o -name libgstisomp4.so \) -print -quit)" \
  && test -z "$media_plugins" \
+ && bash /usr/local/share/omni-backports/install.sh \
  && dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' > /opt/omni-environment/packages.tsv \
  && cp -a /var/lib/apt/lists /opt/omni-environment/apt-lists \
  && find /opt/omni-environment/debs -type f -name '*.deb' -exec sha256sum {} + > /opt/omni-environment/debs.sha256 \
