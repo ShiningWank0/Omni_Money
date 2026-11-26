@@ -5,3 +5,8 @@ sqlite3	3.45.1-1ubuntu2.11	3.45.1-1ubuntu2.11	s/sqlite3	84ec6e5cddabfe82bc8bb7d7
 harfbuzz	8.3.0-2build2	8.3.0-2build2	h/harfbuzz	ed14238fb748b9c822ebc80618df9e6018c3f5b919e4c11d6c4b965b90c9d6cb	CVE-2026-22693.patch
 dbus	1.14.10-4ubuntu4.1	1.14.10-4ubuntu4.1	d/dbus	3d9037176550657a3584f7640027a6d970c85b0cd158a2be7e8051aab1349edb	CVE-2026-120749.patch
 util-linux	2.39.3-9ubuntu6.6	2.39.3-9ubuntu6.6	u/util-linux	b30cb22e05473810a48e14db8b5ea7786bb38aed7617dc89ad4f81cd7c6c3397	CVE-2026-76642.patch
+icu	74.2-1ubuntu3.1	74.2-1ubuntu3.1	i/icu	6cbf2e7018b5d16d634994e32af96f4d60f4468c36674c57f897b68812bbd883	CVE-2025-5222.patch
+cyrus-sasl2	2.1.28+dfsg1-5ubuntu3.1	2.1.28+dfsg1-5ubuntu3.1	c/cyrus-sasl2	6ede2d7122c4ea1e807f45b647edbdf9fb1521ad09b0ca0b9b48f220ef33f23f	CVE-2026-107161.patch
+libxslt	1.1.39-0exp1ubuntu0.24.04.3	1.1.39-0exp1ubuntu0.24.04.3	libx/libxslt	25e60a82ccec471407248c0725eb51e85464b6e87fa032bca685c55d42ab8722	CVE-2025-10911.patch
+gst-plugins-base1.0	1.24.2-1ubuntu0.7	1.24.2-1ubuntu0.7	g/gst-plugins-base1.0	fd76f4f773826868490fda76c5ba8374a25b41092896355bb254d41051d0e8c7	gstreamer-security.patch
+python3.12	3.12.3-1ubuntu0.17	3.12.3-1ubuntu0.17	p/python3.12	941700b999737d869b80c3b5a0adc0996a0fd760b982e18551bd2104da779384	CVE-2026-7210.patch

@@ -25,6 +25,8 @@ publisherが出力する`candidate-lock-*`には実際のimage/artifact digest�
 
 ## Ubuntu 24.04 のセキュリティ修正
 
-環境採取時に libXi、libXtst、SQLite、HarfBuzz、D-Bus、util-linux を各 CPU の Noble ツールチェーンでビルドする。前二者は Ubuntu アーカイブの修正済みソースリリース、残りは Noble のソースに上流の修正を適用する。入力の版とソース記述子の SHA-256 は `build/environments/noble-backports/sources.tsv`、パッチの出典は各ファイルの `Origin` に記録する。ビルド用ステージだけがソースを展開し、最終イメージには既存環境で使うバイナリパッケージだけを導入する。
+環境採取時に libXi、libXtst、SQLite、HarfBuzz、D-Bus、util-linux、ICU、Cyrus SASL、libxslt、GStreamer base、Python 3.12 を各 CPU の Noble ツールチェーンでビルドする。前二者は Ubuntu アーカイブの修正済みソースリリース、残りは Noble のソースに上流の修正を適用する。入力の版とソース記述子の SHA-256 は `build/environments/noble-backports/sources.tsv`、パッチの出典は各ファイルの `Origin` に記録する。ビルド用ステージだけがソースを展開し、最終イメージには既存環境で使うバイナリパッケージだけを導入する。
 
 採取では対象ソース由来の全導入パッケージの版、CPU、依存の整合、共有ライブラリのロード、SQLite のインメモリ全文検索、D-Bus セッションへの問い合わせ、マウント情報の取得を確認する。ソース記述子とパッチはイメージ内の `/opt/omni-environment/backport-sources/` に保存する。Noble の配布版が変わると採取が停止する。公式修正を確認したら対応する行と不要になったパッチを削除し、両 CPU の候補を取り直して固定先を更新する。
+
+libxslt の CVE-2025-7425 に対する Ubuntu の緩和策は libxml2 の更新で提供される。Python の XML パーサーには Noble の libexpat に移植済みの 16 バイトのソルト API を使用する。採取時に両ライブラリの最低版、pyexpat の参照シンボル、通常の XML の読み取りも検証する。

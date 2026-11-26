@@ -58,3 +58,25 @@ PY
 dbus-run-session -- dbus-send --session --print-reply --dest=org.freedesktop.DBus \
     /org/freedesktop/DBus org.freedesktop.DBus.ListNames > "$inventory/backport-sources/dbus-session.txt"
 findmnt --list --noheadings --target / > "$inventory/backport-sources/root-mount.txt"
+# These Noble updates provide the companion fixes for libxslt and pyexpat.
+dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libxml2)" ge '2.9.14+dfsg-1.3ubuntu3.6'
+dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libexpat1)" ge '2.6.1-2ubuntu0.5'
+pyexpat=$(python3.12 -c 'import pyexpat; print(pyexpat.__file__)')
+readelf --wide --dyn-syms "$pyexpat" > /tmp/pyexpat-symbols
+grep -E 'UND +XML_SetHashSalt16Bytes(@|$)' /tmp/pyexpat-symbols > "$inventory/backport-sources/pyexpat-salt-symbol.txt"
+rm /tmp/pyexpat-symbols
+python3.12 - <<'PY'
+import ctypes
+import xml.etree.ElementTree as ET
+import xml.parsers.expat
+
+parser = xml.parsers.expat.ParserCreate()
+parser.Parse("<entries><entry>rent</entry></entries>", True)
+assert ET.fromstring("<entries><entry>rent</entry></entries>").findtext("entry") == "rent"
+for library, symbol in (("libxslt.so.1", "xsltApplyStylesheet"),
+                        ("libsasl2.so.2", "sasl_client_init"),
+                        ("libgstrtp-1.0.so.0", "gst_rtcp_buffer_map")):
+    getattr(ctypes.CDLL(library), symbol)
+PY
+test ! -e /usr/bin/genrb
+test -z "$(find /usr/lib -path '*/sasl2/libdigestmd5.so*' -print -quit)"
