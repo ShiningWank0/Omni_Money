@@ -10,7 +10,7 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \
     'path-exclude=/usr/lib/*/sasl2/libdigestmd5.so*' \
     'path-exclude=/usr/bin/genrb' > /etc/dpkg/dpkg.cfg.d/95-omni-ci-security \
  && apt-get update \
- && apt-get -y -o Dir::Cache::archives=/opt/omni-environment/debs install \
+ && apt-get -y --no-install-recommends -o Dir::Cache::archives=/opt/omni-environment/debs install \
     build-essential curl ca-certificates git tcl libssl-dev binutils file \
     libgtk-3-dev libwebkit2gtk-4.1-dev xvfb xauth dbus-x11 openbox wmctrl \
     xdotool python3 python3-gi gir1.2-atspi-2.0 at-spi2-core libatk-adaptor \
