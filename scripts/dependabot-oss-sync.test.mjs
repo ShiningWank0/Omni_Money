@@ -264,6 +264,17 @@ test('npm scripts and external dependency sources cannot be overlaid', () => {
   assert.throws(() => validateDependencyInputs(state.before, { ...state.inputs, 'go.mod': state.inputs['go.mod'].replace('toolchain go', 'toolchain go0') }), /toolchain/)
 })
 
+test('Go exclusions must remain identical to the reviewed base', () => {
+  const { before, inputs } = fixture()
+  const exclusion = '\nexclude example.org/module v1.0.0\n'
+  const baseline = { ...before, 'go.mod': before['go.mod'] + exclusion }
+  const approved = { ...inputs, 'go.mod': inputs['go.mod'] + exclusion }
+  assert.doesNotThrow(() => validateDependencyInputs(baseline, approved))
+  assert.throws(() => validateDependencyInputs(before, approved), /other settings changed/)
+  assert.throws(() => validateDependencyInputs(baseline, inputs), /other settings changed/)
+  assert.throws(() => validateDependencyInputs(baseline, { ...inputs, 'go.mod': inputs['go.mod'] + exclusion.replace('v1.0.0', 'v1.1.0') }), /other settings changed/)
+})
+
 test('existing Go checksums cannot be replaced', () => {
   const state = fixture()
   const modified = state.inputs['go.sum'].replace(/h1:[A-Za-z0-9+/]+=\n/, `h1:${'A'.repeat(43)}=\n`)

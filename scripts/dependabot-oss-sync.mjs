@@ -40,7 +40,8 @@ export function goRequirements(text) {
     if (!match || requirements.has(match[1])) throw new Error('Unsupported or duplicate Go requirement')
     requirements.set(match[1], { version: match[2], indirect: Boolean(match[3]) })
   }
-  if (block || !requirements.size || /^\s*(replace|exclude)\b/m.test(text)) throw new Error('Go replacements or unsupported directives require review')
+  // Exclusions stay in the skeleton and must match the trusted base verbatim.
+  if (block || !requirements.size || /^\s*replace\b/m.test(text)) throw new Error('Go replacements or unsupported directives require review')
   return { requirements, skeleton: skeleton.join('\n') }
 }
 
