@@ -76,11 +76,25 @@ jobs:
           msystem: UCRT64
           update: true
           cache: false
-          install: base-devel curl tcl perl mingw-w64-ucrt-x86_64-toolchain
+          install: curl diffutils make tcl perl mingw-w64-ucrt-x86_64-gcc
       - name: Preserve the coherent package set and metadata
         shell: msys2 {0}
         run: |
           set -euo pipefail
+          # Native builds use curl. The bootstrap base metapackage requires
+          # wget, but has no binaries of its own. Keep all other base tools.
+          if pacman -Q wget >/dev/null 2>&1; then
+            remove=(wget)
+            for meta in base base-devel; do
+              if pacman -Q "$meta" >/dev/null 2>&1; then remove+=("$meta"); fi
+            done
+            pacman -R --noconfirm "${remove[@]}"
+          fi
+          pacman -Dk
+          for unused in wget mingw-w64-ucrt-x86_64-python; do
+            if pacman -Q "$unused" >/dev/null 2>&1; then exit 1; fi
+          done
+          rm -f /var/cache/pacman/pkg/wget-*.pkg.tar.* /var/cache/pacman/pkg/mingw-w64-ucrt-x86_64-python-*.pkg.tar.*
           mkdir -p /opt/omni-environment
           pacman -Q > /opt/omni-environment/packages.txt
           # Keep the exact installed payloads, not just a list of package names.
