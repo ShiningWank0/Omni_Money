@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { appendFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { collect, entries, githubClient, publish, render } from './security-issues.mjs';
+import { collect, confirmedFindings, entries, githubClient, publish, render } from './security-issues.mjs';
 import { hash } from './security-reports.mjs';
 
 const repository = 'ShiningWank0/Omni_Money';
@@ -210,7 +210,7 @@ export async function main(env = process.env, options = {}) {
   const publication = await publish(api, findings, runURL, renderMonitor,
     { respectClosed: true, deferOverflow: true, scope: 'ci-monitor', pullRequests });
   const summary = { schema: 1, status: 'reported',
-    scansWithFindings: reports.filter(report => report.status === 'findings').length,
+    scansWithFindings: reports.filter(report => confirmedFindings(report).length > 0).length,
     incompleteScans: reports.filter(report => report.status === 'error').length,
     diagnosticProblems: diagnostics.length, publication };
   mkdirSync(directory, { recursive: true });

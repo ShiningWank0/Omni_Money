@@ -30,17 +30,20 @@ export function collect(directory, downloadSucceeded = true) {
   });
 }
 
+// Each ledger contract is solved independently. Confirmed violations in one
+// contract remain valid if another contract could not be checked.
+export function confirmedFindings(report) {
+  return report.status === 'error' && report.scan !== 'formal-ledger' ? [] : report.findings;
+}
+
 export function entries(reports) {
   const grouped = new Map();
   for (const report of reports) {
     if (report.status === 'error') {
       const data = { kind: 'scan-error', tool: report.scan };
       grouped.set(hash(data), [data]);
-      // Each ledger contract is solved independently. Confirmed violations of
-      // other contracts remain valid if one contract could not be checked.
-      if (report.scan !== 'formal-ledger') continue;
     }
-    for (const f of report.findings) {
+    for (const f of confirmedFindings(report)) {
       // Vulnerabilities group per scanner and package so every advisory for
       // the same dependency shares one issue. Static analysis stays per rule
       // and location because the rule identifies the defect.
