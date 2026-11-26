@@ -26,10 +26,12 @@ for (const [name, packageName, target] of [
   assert.ok(url.startsWith('https://registry.npmjs.org/' + packageName + '/-/'))
   const file = join(directory, name + '.tgz')
   execFileSync('curl', ['--fail', '--silent', '--show-error', '--retry', '3', '--output', file, url])
-  assert.equal(createHash('sha256').update(readFileSync(file)).digest('hex'), digest)
+  const contents = readFileSync(file)
+  assert.equal(createHash('sha256').update(contents).digest('hex'), digest)
   rmSync(target, { recursive: true, force: true })
   mkdirSync(target, { recursive: true })
-  execFileSync('tar', ['-xzf', file, '--strip-components=1', '-C', target])
+  // A Windows drive letter in an archive path is a remote host to GNU tar.
+  execFileSync('tar', ['-xzf', '-', '--strip-components=1'], { cwd: target, input: contents })
   assert.equal(JSON.parse(readFileSync(join(target, 'package.json'))).name, packageName)
   rmSync(file)
 }
