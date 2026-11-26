@@ -478,7 +478,20 @@ jobs:
           env -u DISPLAY -u WAYLAND_DISPLAY "$destination/omni_money" --self-test-sqlcipher
           # Issue #299: production and development have separate runtime gates.
           # This packaged UI check does not establish development IPC compatibility.
-          timeout --signal=TERM --kill-after=20s 300s xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" node scripts/wails-native-integration.mjs "$destination/omni_money"
+          # Keep the WebKit renderer and its D-Bus services on loopback while Noble is awaiting updates.
+          # The container grants namespace setup to root. Drop back to the runner before starting Xvfb.
+          timeout --signal=TERM --kill-after=20s 300s sudo -E /usr/bin/unshare --net -- /bin/sh -ec '
+            /usr/bin/python3 -I -c "
+          import fcntl, socket, struct
+          with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+              request = struct.pack(\"16sH14x\", b\"lo\", 0)
+              flags = struct.unpack_from(\"H\", fcntl.ioctl(sock, 0x8913, request), 16)[0]
+              fcntl.ioctl(sock, 0x8914, struct.pack(\"16sH14x\", b\"lo\", flags | 1))
+          "
+            exec /usr/bin/setpriv --reuid="$SUDO_UID" --regid="$SUDO_GID" --init-groups -- "$@"
+          ' sh /usr/bin/env "PATH=$PATH" "HOME=$HOME" \
+            xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" \
+            node scripts/wails-native-integration.mjs "$destination/omni_money"
           git diff --exit-code -- go.mod go.sum
 
       - name: Save native WebView integration evidence
