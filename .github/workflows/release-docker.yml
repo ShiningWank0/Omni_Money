@@ -30,7 +30,7 @@ jobs:
             platform: linux/arm64
     runs-on: ${{ matrix.runner }}
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:ef9ab5c0436c8f4edd2784f2146d8919d9368269d2faf94ffc3532a4c8793191
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -89,7 +89,7 @@ jobs:
       contents: read
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:ef9ab5c0436c8f4edd2784f2146d8919d9368269d2faf94ffc3532a4c8793191
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -150,6 +150,10 @@ jobs:
         with:
           node-version-file: .node-version
 
+      - name: Install reviewed npm for frontend builds
+        working-directory: ${{ github.workspace }}
+        run: node scripts/setup-ci-npm.mjs
+
       - name: Install and audit frontend dependencies
         working-directory: frontend
         run: |
@@ -197,7 +201,7 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:ef9ab5c0436c8f4edd2784f2146d8919d9368269d2faf94ffc3532a4c8793191
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -290,7 +294,7 @@ jobs:
       APP_VERSION: ${{ needs.prepare.outputs.version }}
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:ef9ab5c0436c8f4edd2784f2146d8919d9368269d2faf94ffc3532a4c8793191
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

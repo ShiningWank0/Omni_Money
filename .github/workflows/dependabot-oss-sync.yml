@@ -75,6 +75,11 @@ jobs:
         run: node scripts/dependabot-oss-sync.mjs prepare
       # Dependencies can execute here, but this job has read-only permissions,
       # no App credentials, no shared caches and no persistent checkout token.
+      - name: Install reviewed npm for frontend builds
+        if: steps.plan.outputs.eligible == 'true'
+        working-directory: ${{ github.workspace }}
+        run: node scripts/setup-ci-npm.mjs
+
       - name: Generate production frontend inventory
         if: steps.prepare.outputs.eligible == 'true'
         working-directory: oss-sync-source/frontend

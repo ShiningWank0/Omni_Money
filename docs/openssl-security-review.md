@@ -37,3 +37,7 @@ Windows SQLCipher回帰、macOS Intel/ARM64・Windows本体のビルド、配布
 
 4.x以降への移行は別PRで行う。SQLCipherとのAPI/ABI互換性、各OSの静的リンク、
 既存の暗号化DBを使う回帰テスト、配布物検証、OSSの対象版・表示・原文をまとめてレビューする。
+
+## 2026年11月26日の暫定対策
+
+macOS と Windows の SQLCipher 用ビルドでは、未使用の CMS、AES-GCM-SIV、QUIC を OpenSSL の設定で無効にする。静的ライブラリを配布する前に、必要な AES-256-CBC のシンボルがあり、CMS 暗号化と AES-GCM-SIV の実装シンボルが含まれないことを確認する。MSYS2 のシステム OpenSSL は別の配布物として追跡する。公式修正版の版とハッシュを取り込んだ後、各対象を再検査する。

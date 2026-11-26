@@ -21,7 +21,7 @@ jobs:
       contents: read # required to inspect the release-triggering source
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:ef9ab5c0436c8f4edd2784f2146d8919d9368269d2faf94ffc3532a4c8793191
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -77,6 +77,11 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
+
+      - name: Install reviewed npm for frontend builds
+        if: github.event_name == 'push'
+        working-directory: ${{ github.workspace }}
+        run: node scripts/setup-ci-npm.mjs
 
       - name: Install and audit frontend dependencies
         if: github.event_name == 'push'
@@ -167,7 +172,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     container:
-      image: ${{ matrix.os == 'ubuntu-24.04' && 'ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:ef9ab5c0436c8f4edd2784f2146d8919d9368269d2faf94ffc3532a4c8793191' || '' }}
+      image: ${{ matrix.os == 'ubuntu-24.04' && 'ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc' || '' }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -206,6 +211,10 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
+
+      - name: Install reviewed npm for frontend builds
+        working-directory: ${{ github.workspace }}
+        run: node scripts/setup-ci-npm.mjs
 
       - name: Set up checksum-pinned Fixed Version WebView2
         if: runner.os == 'Windows'
@@ -469,7 +478,20 @@ jobs:
           env -u DISPLAY -u WAYLAND_DISPLAY "$destination/omni_money" --self-test-sqlcipher
           # Issue #299: production and development have separate runtime gates.
           # This packaged UI check does not establish development IPC compatibility.
-          timeout --signal=TERM --kill-after=20s 300s xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" node scripts/wails-native-integration.mjs "$destination/omni_money"
+          # Keep the WebKit renderer and its D-Bus services on loopback while Noble is awaiting updates.
+          # The container grants namespace setup to root. Drop back to the runner before starting Xvfb.
+          timeout --signal=TERM --kill-after=20s 300s sudo -E /usr/bin/unshare --net -- /bin/sh -ec '
+            /usr/bin/python3 -I -c "
+          import fcntl, socket, struct
+          with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+              request = struct.pack(\"16sH14x\", b\"lo\", 0)
+              flags = struct.unpack_from(\"H\", fcntl.ioctl(sock, 0x8913, request), 16)[0]
+              fcntl.ioctl(sock, 0x8914, struct.pack(\"16sH14x\", b\"lo\", flags | 1))
+          "
+            exec /usr/bin/setpriv --reuid="$SUDO_UID" --regid="$SUDO_GID" --init-groups -- "$@"
+          ' sh /usr/bin/env "PATH=$PATH" "HOME=$HOME" \
+            xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" \
+            node scripts/wails-native-integration.mjs "$destination/omni_money"
           git diff --exit-code -- go.mod go.sum
 
       - name: Save native WebView integration evidence
@@ -541,7 +563,7 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:ef9ab5c0436c8f4edd2784f2146d8919d9368269d2faf94ffc3532a4c8793191
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -583,7 +605,7 @@ jobs:
     needs: [prepare, build, attest]
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:ef9ab5c0436c8f4edd2784f2146d8919d9368269d2faf94ffc3532a4c8793191
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

@@ -98,7 +98,7 @@ common_flags="-arch $native_arch -isysroot $sdk_root -mmacosx-version-min=$MACOS
   cd "$source_dir"
   CC="$clang" CFLAGS="$common_flags" LDFLAGS="$common_flags" \
     ./Configure "$configure_target" \
-      no-shared no-tests no-apps no-docs no-module no-legacy \
+      no-shared no-tests no-apps no-docs no-module no-legacy no-cms no-siv no-quic \
       --prefix="$destination_path" \
       --openssldir="$destination_path/ssl"
   make -s -j"$build_jobs" build_libs
@@ -112,6 +112,10 @@ symbols_file="$temporary_root/libcrypto.symbols"
 "$nm_tool" -g "$archive_path" > "$symbols_file"
 grep -Eq '[[:space:]]_EVP_aes_256_cbc$' "$symbols_file" || \
   fail "libcrypto.a lacks the required EVP provider symbols"
+
+if grep -Eq '[[:space:]]_?(CMS_encrypt(_ex)?|ossl_aes(128|192|256)gcm_siv_functions)$' "$symbols_file"; then
+  fail "libcrypto.a contains an excluded CMS or AES-GCM-SIV entry point"
+fi
 
 mkdir -p "$staging_prefix/include" "$staging_prefix/lib"
 cp -R "$source_dir/include/openssl" "$staging_prefix/include/openssl"

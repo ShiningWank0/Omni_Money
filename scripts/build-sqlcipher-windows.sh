@@ -75,7 +75,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 archive="$work_dir/sqlcipher.tar.gz"
-curl --fail --location --silent --show-error --retry 5 \
+curl --disable --proto '=https' --proto-redir '=https' --fail --location --silent --show-error --retry 5 \
   "https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v${SQLCIPHER_VERSION}.tar.gz" \
   --output "$archive"
 printf '%s  %s\n' "$SQLCIPHER_SHA256" "$archive" | sha256sum -c -
