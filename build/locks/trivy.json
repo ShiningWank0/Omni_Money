@@ -1,14 +1,20 @@
 {
-  "schema": 1,
+  "schema": 2,
   "version": "0.76.2",
+  "goVersion": "1.27.4",
+  "sourceRevision": "3f6334d223b52188324af3b9923b4249cd206652",
+  "sourceCommit": "9ebbe8804d41983b90e8726b3e21b40d9c60154d",
+  "runId": "45780362188",
   "platforms": {
     "x86_64": {
-      "url": "https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz",
-      "sha256": "bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf"
+      "url": "https://ghcr.io/v2/shiningwank0/omni_money-ci-trivy/blobs/sha256:048ac2f040eb221547d429a03e36b2f86670ce37bd31979c79e489af1a509a36",
+      "sha256": "048ac2f040eb221547d429a03e36b2f86670ce37bd31979c79e489af1a509a36",
+      "artifact": "ghcr.io/shiningwank0/omni_money-ci-trivy@sha256:ce7aa2cc8981b3c6498dda2903e0eb3cb22d39625ce4d8a047de0e3ec66fd7bc"
     },
     "aarch64": {
-      "url": "https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-ARM64.tar.gz",
-      "sha256": "ab9d51f86e6a5fb936f605faff6b593ac51bc378fff4d3e8b9d58358b9c367c3"
+      "url": "https://ghcr.io/v2/shiningwank0/omni_money-ci-trivy/blobs/sha256:f86f40d7ddea52c918fe5da310f0f912c6530923344042b5646a7e20b48e60dd",
+      "sha256": "f86f40d7ddea52c918fe5da310f0f912c6530923344042b5646a7e20b48e60dd",
+      "artifact": "ghcr.io/shiningwank0/omni_money-ci-trivy@sha256:c9eadd3016cd9cb6032b79453e45ef7d922a83850e3aedc708f44f32355b2882"
     }
   }
 }
