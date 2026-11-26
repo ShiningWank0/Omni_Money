@@ -1,0 +1,126 @@
+name: Preserve fixed Trivy binaries
+on:
+  push:
+    branches: [fix/trivy-go-security]
+    paths:
+      - .github/workflows/preserve-trivy.yml
+      - build/locks/trivy-source.json
+      - .go-version
+  workflow_dispatch:
+permissions: {}
+jobs:
+  build:
+    if: github.repository == 'ShiningWank0/Omni_Money'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: .go-version
+          cache: false
+      - name: Build and check the Linux release binary on its native architecture
+        env:
+          ARCH: ${{ matrix.arch }}
+          GOTOOLCHAIN: local
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          version=$(jq -er .version build/locks/trivy-source.json)
+          revision=$(jq -er .revision build/locks/trivy-source.json)
+          checksum=$(jq -er .sha256 build/locks/trivy-source.json)
+          [[ "$revision" =~ ^[a-f0-9]{40}$ && "$checksum" =~ ^[a-f0-9]{64}$ && "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(go env GOARCH)" = "$ARCH"
+          test "$(go env GOVERSION)" = "go$(cat .go-version)"
+          mkdir source candidate
+          curl --fail --location --retry 3 --proto '=https' "https://codeload.github.com/aquasecurity/trivy/tar.gz/$revision" -o source.tgz
+          printf '%s  source.tgz\n' "$checksum" | sha256sum --check --strict
+          tar -xzf source.tgz -C source --strip-components=1
+          cd source
+          go build -mod=readonly -p 2 -trimpath -buildvcs=false \
+            -ldflags "-s -w -extldflags '-static' -X github.com/aquasecurity/trivy/pkg/version/app.ver=$version" \
+            -o ../candidate/trivy ./cmd/trivy
+          go mod verify
+          cd ../candidate
+          go version -m trivy > go-build.txt
+          test "$(head -1 go-build.txt)" = "trivy: $(go env GOVERSION)"
+          test "$(./trivy --version | head -1)" = "Version: $version"
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+            -czf trivy.tar.gz trivy -C ../source LICENSE NOTICE README.md
+          sha256sum trivy.tar.gz > SHA256SUMS
+          cp ../build/locks/trivy-source.json source.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-build-${{ matrix.arch }}
+          path: |
+            candidate/trivy.tar.gz
+            candidate/SHA256SUMS
+            candidate/go-build.txt
+            candidate/source.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: trivy-build-${{ matrix.arch }}
+          path: candidate
+      - name: Preserve the verified archive and build metadata
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          oras_url=$(jq -er .oras.url build/locks/security-monitor.json)
+          oras_sha=$(jq -er .oras.sha256 build/locks/security-monitor.json)
+          curl --fail --location --retry 3 --proto '=https' "$oras_url" -o oras.tar.gz
+          printf '%s  oras.tar.gz\n' "$oras_sha" | sha256sum --check --strict
+          tar -xzf oras.tar.gz oras
+          cd candidate
+          sha256sum --check --strict SHA256SUMS
+          cmp source.json ../build/locks/trivy-source.json
+          version=$(jq -er .version source.json)
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-ci-trivy"
+          tag="$version-$ARCH-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf '%s' "$REGISTRY_TOKEN" | ../oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          ../oras push --artifact-type application/vnd.omni-money.trivy.v1 \
+            --annotation "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            "$image:$tag" trivy.tar.gz:application/gzip source.json:application/json go-build.txt:text/plain
+          digest=$(../oras manifest fetch --descriptor "$image:$tag" | jq -er .digest)
+          sha=$(sha256sum trivy.tar.gz | cut -d' ' -f1)
+          jq -n --arg artifact "$image@$digest" --arg sha256 "$sha" --arg arch "$ARCH" \
+            --arg url "https://ghcr.io/v2/${image#ghcr.io/}/blobs/sha256:$sha" \
+            --arg goVersion "$(cat ../.go-version)" --arg sourceCommit "$GITHUB_SHA" --arg runId "$GITHUB_RUN_ID" \
+            '{artifact:$artifact,url:$url,sha256:$sha256,arch:$arch,goVersion:$goVersion,sourceCommit:$sourceCommit,runId:$runId}' > lock.json
+          cat lock.json >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: candidate-lock-trivy-${{ matrix.arch }}
+          path: candidate/lock.json
+          if-no-files-found: error
