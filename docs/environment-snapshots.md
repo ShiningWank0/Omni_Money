@@ -25,9 +25,11 @@ publisherが出力する`candidate-lock-*`には実際のimage/artifact digest�
 
 ## Ubuntu 24.04 のセキュリティ修正
 
-環境採取時に libXi、libXtst、SQLite、HarfBuzz、D-Bus、util-linux を各 CPU の Noble ツールチェーンでビルドする。前二者は Ubuntu アーカイブの修正済みソースリリース、残りは Noble のソースに上流の修正を適用する。入力の版とソース記述子の SHA-256 は `build/environments/noble-backports/sources.tsv`、パッチの出典は各ファイルの `Origin` に記録する。ビルド用ステージだけがソースを展開し、最終イメージには既存環境で使うバイナリパッケージだけを導入する。
+環境採取時に libXi、libXtst、SQLite、HarfBuzz、D-Bus、util-linux、Git、binutils を各 CPU の Noble ツールチェーンでビルドする。前二者は Ubuntu アーカイブの修正済みソースリリース、残りは Noble のソースに上流の修正を適用する。入力の版とソース記述子の SHA-256 は `build/environments/noble-backports/sources.tsv`、パッチの出典は各ファイルの `Origin` に記録する。ビルド用ステージだけがソースを展開し、最終イメージには既存環境で使うバイナリパッケージだけを導入する。
 
 採取では対象ソース由来の全導入パッケージの版、CPU、依存の整合、共有ライブラリのロード、SQLite のインメモリ全文検索、D-Bus セッションへの問い合わせ、マウント情報の取得を確認する。ソース記述子とパッチはイメージ内の `/opt/omni-environment/backport-sources/` に保存する。Noble の配布版が変わると採取が停止する。公式修正を確認したら対応する行と不要になったパッチを削除し、両 CPU の候補を取り直して固定先を更新する。
+
+Git の側帯メッセージは通常のローカル push で表示を確認する。binutils は通常の C ソースから生成した DWARF 4 と 5 の型情報を readelf と objdump で確認する。両 CPU の自主ビルドは暫定対策として扱い、Ubuntu 公式版を固定するまで各 Issue で追跡する。
 
 ## Docker ビルドで使用する BuildKit
 
