@@ -3,7 +3,7 @@
   "engineVersion": "29.10.1",
   "buildxVersion": "0.39.1",
   "composeVersion": "5.8.0",
-  "buildkitImage": "moby/buildkit:v0.35.1@sha256:baf6138eb8c37644800c7c913fba051e840ebb9ba13eaf92d92ef9a1712d0b4c",
+  "buildkitImage": "ghcr.io/shiningwank0/omni_money-build-buildkit@sha256:d4eab6c7f22c6b5679373150853b839ab3828674900294dbe42c4095c2ce763b",
   "sbomImage": "docker/buildkit-syft-scanner:1.13.0@sha256:a190379321cf51fba8c284a1834555b55e7bf58d577d574db23370461defc430",
   "platforms": {
     "x86_64": {
@@ -34,5 +34,13 @@
         "sha256": "1a9c918b2fb49b9c87f0018c64b5abd0d30715155e98dc939779fbaee6c414d3"
       }
     }
+  },
+  "buildkitCapture": {
+    "sourceCommit": "2037e17163f01d2844dbd26082d4542c37a94cd4",
+    "runId": "45783144217",
+    "platforms": [
+      "linux/amd64",
+      "linux/arm64"
+    ]
   }
 }

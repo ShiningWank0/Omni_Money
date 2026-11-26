@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 export const root = fileURLToPath(new URL('../', import.meta.url))
 export const groups = ['images', 'tools', 'native', 'modules']
-export const inputFiles = ['Dockerfile', '.go-version', '.node-version', 'build/locks/docker.json', 'build/locks/linux-environments.json',
+export const inputFiles = ['Dockerfile', 'build/environments/buildkit.Dockerfile', '.go-version', '.node-version', 'build/locks/docker.json', 'build/locks/linux-environments.json',
   'build/locks/msys2.json', 'build/locks/macos.json', 'build/locks/trivy.json', 'build/locks/trivy-source.json', 'build/locks/gh.json',
   'build/locks/webview2.json', 'build/locks/security-monitor.json',
   ...['windows', 'darwin'].map(os => `scripts/build-openssl-${os}.sh`),
@@ -119,7 +119,7 @@ export function inventory(directory = root) {
   for (const [name, repo, version] of [['buildx', 'docker/buildx', docker.buildxVersion], ['compose', 'docker/compose', docker.composeVersion],
     ['grype', 'anchore/grype', monitor.grype.version], ['oras', 'oras-project/oras', monitor.oras.version]]) watch(name, repo, version, '^v([0-9]+\\.[0-9]+\\.[0-9]+)$')
   watch('engine', 'moby/moby', docker.engineVersion, '^v([0-9]+\\.[0-9]+\\.[0-9]+)$')
-  const buildkit = docker.buildkitImage.match(/:v([0-9]+\.[0-9]+\.[0-9]+)@/)
+  const buildkit = content.get('build/environments/buildkit.Dockerfile').match(/^FROM moby\/buildkit:v([0-9]+\.[0-9]+\.[0-9]+)@sha256:[a-f0-9]{64}$/m)
   assert.ok(buildkit); watch('buildkit', 'moby/buildkit', buildkit[1], '^v([0-9]+\\.[0-9]+\\.[0-9]+)$')
   const msys = json('msys2'); assert.match(msys.artifact, /^ghcr\.io\/shiningwank0\/omni_money-build-msys2@sha256:[a-f0-9]{64}$/)
   const remoteModules = []
