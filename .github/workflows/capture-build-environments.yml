@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [alpine-builder, alpine-runtime]
+        environment: [ubuntu]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -72,7 +72,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [alpine-builder, alpine-runtime]
+        environment: [ubuntu]
         arch: [amd64, arm64]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -129,7 +129,7 @@ jobs:
           set -euo pipefail
           printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           mkdir result
-          for kind in alpine-builder alpine-runtime; do
+          for kind in ubuntu; do
             image="ghcr.io/${GITHUB_REPOSITORY,,}-build-$kind"
             tag="$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
             sources=()

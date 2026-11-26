@@ -31,7 +31,7 @@ RUN node /app/scripts/oss-notices.mjs package "server-linux-${TARGETARCH}"
 
 # ===== Stage 2: バックエンドのビルド =====
 FROM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS go-toolchain
-FROM ghcr.io/shiningwank0/omni_money-build-alpine-builder@sha256:d377e73c51954b514e3cefa41b688b15f8f753e2a7aea68d85474c90d6828379 AS backend-builder
+FROM ghcr.io/shiningwank0/omni_money-build-alpine-builder@sha256:70276ebfaf61eddb9ee26087c6ac63854018b9ae81c8ce325dae9dee3672b3ea AS backend-builder
 
 # Go updates remain independent of the frozen OS/package environment.
 RUN rm -rf /usr/local/go
@@ -72,7 +72,7 @@ RUN CGO_ENABLED=1 \
     LD_LIBRARY_PATH=/usr/local/lib /omni_money_server 2>&1 | grep -q "CONTROL_DB_PATH is required"
 
 # ===== Stage 3: 軽量ランタイム =====
-FROM ghcr.io/shiningwank0/omni_money-build-alpine-runtime@sha256:87111362c801d41c984a7658dacc15d34e714a662a199e273c0694564c4d617e
+FROM ghcr.io/shiningwank0/omni_money-build-alpine-runtime@sha256:c45578f9b9545479fd61458c3c888ec34b57f39aa777d86c2ba7189f44af2bd4
 
 # バージョン情報を実行時環境変数として参照可能にする（§8.3準拠）
 ARG VERSION

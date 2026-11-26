@@ -12,3 +12,6 @@ require (
 )
 
 tool golang.org/x/vuln/cmd/govulncheck
+
+// Exclude the unused x/tools documentation dependency affected by GO-2026-5320.
+exclude github.com/yuin/goldmark v1.4.13
