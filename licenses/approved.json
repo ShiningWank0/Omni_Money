@@ -112,22 +112,22 @@
       "sha256": "ecf9c1549f38a0e690250d56ff67040cf0694e1382ced0efb93ba740c33d6856"
     },
     "npm:@vue/reactivity": {
-      "version": "3.5.45",
+      "version": "3.5.46",
       "license": "MIT",
       "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
     },
     "npm:@vue/runtime-core": {
-      "version": "3.5.45",
+      "version": "3.5.46",
       "license": "MIT",
       "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
     },
     "npm:@vue/runtime-dom": {
-      "version": "3.5.45",
+      "version": "3.5.46",
       "license": "MIT",
       "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
     },
     "npm:@vue/shared": {
-      "version": "3.5.45",
+      "version": "3.5.46",
       "license": "MIT",
       "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
     },
