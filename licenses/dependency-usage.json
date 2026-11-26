@@ -1045,7 +1045,7 @@
     {
       "id": "go:github.com/labstack/echo/v4",
       "name": "github.com/labstack/echo/v4",
-      "version": "v4.16.5",
+      "version": "v4.16.6",
       "dependencyType": "direct",
       "distribution": "excluded",
       "targets": [],
@@ -2772,7 +2772,7 @@
     {
       "id": "npm:@vue/compiler-core",
       "name": "@vue/compiler-core",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -2784,7 +2784,7 @@
     {
       "id": "npm:@vue/compiler-dom",
       "name": "@vue/compiler-dom",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -2796,7 +2796,7 @@
     {
       "id": "npm:@vue/compiler-sfc",
       "name": "@vue/compiler-sfc",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -2808,7 +2808,7 @@
     {
       "id": "npm:@vue/compiler-ssr",
       "name": "@vue/compiler-ssr",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -2856,7 +2856,7 @@
     {
       "id": "npm:@vue/reactivity",
       "name": "@vue/reactivity",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "dependencyType": "runtime",
       "distribution": "included",
       "targets": [
@@ -2882,7 +2882,7 @@
     {
       "id": "npm:@vue/runtime-core",
       "name": "@vue/runtime-core",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "dependencyType": "runtime",
       "distribution": "included",
       "targets": [
@@ -2908,7 +2908,7 @@
     {
       "id": "npm:@vue/runtime-dom",
       "name": "@vue/runtime-dom",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "dependencyType": "runtime",
       "distribution": "included",
       "targets": [
@@ -2934,7 +2934,7 @@
     {
       "id": "npm:@vue/server-renderer",
       "name": "@vue/server-renderer",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -2946,7 +2946,7 @@
     {
       "id": "npm:@vue/shared",
       "name": "@vue/shared",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "dependencyType": "runtime",
       "distribution": "included",
       "targets": [
@@ -3130,7 +3130,7 @@
     {
       "id": "npm:csstype",
       "name": "csstype",
-      "version": "3.2.3",
+      "version": "3.2.4",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -3901,7 +3901,7 @@
     {
       "id": "npm:source-map-js",
       "name": "source-map-js",
-      "version": "1.2.2",
+      "version": "1.2.4",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
@@ -4083,7 +4083,7 @@
     {
       "id": "npm:vue",
       "name": "vue",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "dependencyType": "runtime",
       "distribution": "excluded",
       "targets": [],
