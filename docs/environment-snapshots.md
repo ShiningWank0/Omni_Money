@@ -34,3 +34,5 @@ libxslt の CVE-2025-7425 に対する Ubuntu の緩和策は libxml2 の更新�
 TIFF は修正済みの Ubuntu ソース 4.7.2 を Noble でビルドする。dash は libc の fnmatch を使用し、S-Lang は端末の書式で未定義となる除算を検出するとその出力を破棄する。Duktape はコンパイル済みバイトコードの入出力を無効にする。libproxy が PAC に使用する JavaScript ソースの評価、通常のシェルパターン、端末書式、TIFF の共有ライブラリは採取時に確認する。
 
 Noble の binutils 2.42 では DWARF リーダーに上流の4件の修正を適用する。採取時に通常の C ソースを DWARF 4/5 それぞれの形式でコンパイルし、readelf と objdump が型情報を読めることを検証する。
+
+Git にはリモート側の sideband 出力を表示用に変換する上流修正を適用し、通常の push でサーバーフックの進捗を確認する。GLib ではローカルファイル置換のフォールバックに排他的な新規作成を要求し、通常の作成・上書きを GIO で検証する。

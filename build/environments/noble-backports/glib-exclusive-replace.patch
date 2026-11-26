@@ -1,0 +1,17 @@
+Description: Require exclusive creation after unlinking a G_FILE_CREATE_REPLACE_DESTINATION target.
+ An intervening directory entry must cause the existing error path to run.
+Origin: Omni Money downstream fix for CVE-2026-86469; https://gitlab.gnome.org/GNOME/glib/-/issues/4044
+--- a/gio/glocalfileoutputstream.c
++++ b/gio/glocalfileoutputstream.c
+@@ -1208,9 +1208,9 @@
+ 	}
+ 
+       if (readable)
+-	open_flags = O_RDWR | O_CREAT | O_BINARY | O_CLOEXEC;
++	open_flags = O_RDWR | O_CREAT | O_EXCL | O_BINARY | O_CLOEXEC;
+       else
+-	open_flags = O_WRONLY | O_CREAT | O_BINARY | O_CLOEXEC;
++	open_flags = O_WRONLY | O_CREAT | O_EXCL | O_BINARY | O_CLOEXEC;
+       fd = g_open (filename, open_flags, mode);
+       if (fd == -1)
+ 	{

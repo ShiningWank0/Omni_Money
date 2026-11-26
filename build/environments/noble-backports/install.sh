@@ -126,3 +126,25 @@ for dwarf in 4 5; do
     objdump --dwarf=info "$probe_dir/item.o" > /dev/null
 done
 rm -rf "$probe_dir"
+# A normal local push should retain the server hook's readable progress text.
+git_probe=$(mktemp -d)
+git init --bare -q "$git_probe/server"
+git init -q -b main "$git_probe/client"
+printf '%s\n' '#!/bin/sh' 'echo "reference accepted"' > "$git_probe/server/hooks/post-receive"
+chmod +x "$git_probe/server/hooks/post-receive"
+git -C "$git_probe/client" -c user.name=probe -c user.email=probe@example.invalid commit -qm initial --allow-empty
+git -C "$git_probe/client" push "$git_probe/server" HEAD:refs/heads/main 2>"$git_probe/stderr"
+grep -F 'remote: reference accepted' "$git_probe/stderr" > "$inventory/backport-sources/git-sideband.txt"
+rm -rf "$git_probe"
+python3 - <<'PY'
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from gi.repository import Gio
+
+with TemporaryDirectory() as temp:
+    path = Path(temp) / "record"
+    dest = Gio.File.new_for_path(str(path))
+    for content in (b"first", b"updated"):
+        ok, _ = dest.replace_contents(content, None, False, Gio.FileCreateFlags.REPLACE_DESTINATION, None)
+        assert ok and path.read_bytes() == content
+PY

@@ -15,3 +15,5 @@ dash	0.5.12-6ubuntu5	0.5.12-6ubuntu5	d/dash	be4a5ba81756b24d0d22f30cd9e609f5b84f
 duktape	2.7.0+tests-0ubuntu3	2.7.0+tests-0ubuntu3	d/duktape	cb5f1815b6d8ff6dd80200fc86998dbb833183ac46dff23ec7f2a829e180a397	duktape-source-only.patch
 slang2	2.3.3-3build2	2.3.3-3build2	s/slang2	eeb26a45369be6c791af065ef27998045d9f56a749f6d6f0dd2a1e4edffb296e	slang-terminfo.patch
 binutils	2.42-4ubuntu2.10	2.42-4ubuntu2.10	b/binutils	a14a8e2efdb3566955476bccd2248cebed5cf2a2f5d28e223d08200ec1a18d75	binutils-dwarf.patch
+git	1:2.43.0-1ubuntu7.4	1:2.43.0-1ubuntu7.4	g/git	b00b55dcce31a063b783cd0e34fce02c24167fc9f32e2eb7bb2ff4a31652f7a5	git-sideband.patch
+glib2.0	2.80.0-6ubuntu3.10	2.80.0-6ubuntu3.10	g/glib2.0	0ee18e055f5fba9a33763f94823b44ab38e4f677f625ba7540486fe03b436136	glib-exclusive-replace.patch

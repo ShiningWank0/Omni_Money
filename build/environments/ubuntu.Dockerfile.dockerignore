@@ -18,3 +18,5 @@
 !build/environments/noble-backports/duktape-source-only.patch
 !build/environments/noble-backports/slang-terminfo.patch
 !build/environments/noble-backports/binutils-dwarf.patch
+!build/environments/noble-backports/git-sideband.patch
+!build/environments/noble-backports/glib-exclusive-replace.patch
