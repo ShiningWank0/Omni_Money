@@ -66,9 +66,20 @@ export function inventory(directory = root) {
     assert.match(item.sha256, /^[a-f0-9]{64}$/)
     tools.push({ name, url: item.url, sha256: item.sha256 })
   }
+  const fixedArchive = (tool, arch, item) => {
+    assert.match(item.sha256, /^[a-f0-9]{64}$/)
+    const repository = 'shiningwank0/omni_money-ci-' + tool
+    assert.equal(item.url, `https://ghcr.io/v2/${repository}/blobs/sha256:${item.sha256}`)
+    const prefix = 'ghcr.io/' + repository + '@'
+    assert.ok(item.artifact.startsWith(prefix))
+    assert.match(item.artifact.slice(prefix.length), /^sha256:[a-f0-9]{64}$/)
+    tools.push({ name: `${tool}/${arch}`, url: item.url, sha256: item.sha256 })
+  }
   for (const [arch, set] of Object.entries(docker.platforms)) {
     assert.deepEqual(Object.keys(set).sort(), ['buildx', 'compose', 'engine'], 'new Docker tools need vulnerability coverage')
-    for (const name of ['engine', 'buildx', 'compose']) archive(`${name}/${arch}`, set[name])
+    for (const name of ['buildx', 'compose']) archive(`${name}/${arch}`, set[name])
+    if (set.engine.artifact) fixedArchive('engine', arch, set.engine)
+    else archive(`engine/${arch}`, set.engine)
   }
   for (const [arch, item] of Object.entries(json('gh').platforms)) archive(`gh/${arch}`, item)
   const trivy = json('trivy', 2), trivySource = json('trivy-source')
@@ -76,12 +87,7 @@ export function inventory(directory = root) {
   assert.equal(trivy.sourceRevision, trivySource.revision)
   assert.match(trivySource.sha256, /^[a-f0-9]{64}$/)
   assert.deepEqual(Object.keys(trivy.platforms).sort(), ['aarch64', 'x86_64'])
-  for (const [arch, item] of Object.entries(trivy.platforms)) {
-    assert.match(item.sha256, /^[a-f0-9]{64}$/)
-    assert.equal(item.url, 'https://ghcr.io/v2/shiningwank0/omni_money-ci-trivy/blobs/sha256:' + item.sha256)
-    assert.match(item.artifact, /^ghcr\.io\/shiningwank0\/omni_money-ci-trivy@sha256:[a-f0-9]{64}$/)
-    tools.push({ name: `trivy/${arch}`, url: item.url, sha256: item.sha256 })
-  }
+  for (const [arch, item] of Object.entries(trivy.platforms)) fixedArchive('trivy', arch, item)
   const monitor = json('security-monitor')
   archive('grype/amd64', monitor.grype); archive('oras/amd64', monitor.oras)
   const scriptVersion = (name, platforms) => {

@@ -55,7 +55,7 @@ async function payload(item, work) {
   const folder = join(work, item.name.replaceAll('/', '-'))
   const archive = folder + '.tar.gz'
   if (item.url.startsWith('https://ghcr.io/')) {
-    command('python3', [join(root, 'scripts/fetch-trivy-archive.py'), item.url, item.sha256, archive])
+    command('python3', [join(root, 'scripts/fetch-fixed-tool-archive.py'), item.name.split('/')[0], item.url, item.sha256, archive])
   } else {
     const data = await get(item.url)
     assert.equal(sha256(data), item.sha256, 'download checksum mismatch')

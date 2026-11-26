@@ -15,7 +15,7 @@ PY
 dest="$RUNNER_TEMP/omni-trivy"
 mkdir "$dest"
 mkdir "$dest/bin" "$dest/cache" "$dest/identity"
-python3 "$root/scripts/fetch-trivy-archive.py" "$url" "$checksum" "$dest/trivy.tar.gz"
+python3 "$root/scripts/fetch-fixed-tool-archive.py" trivy "$url" "$checksum" "$dest/trivy.tar.gz"
 tar -xzf "$dest/trivy.tar.gz" -C "$dest/bin" trivy
 test "$("$dest/bin/trivy" --version | head -1)" = "Version: $version"
 sha256sum "$dest/bin/trivy" > "$dest/identity/binary.sha256"
