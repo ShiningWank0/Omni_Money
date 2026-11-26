@@ -30,3 +30,7 @@ publisherが出力する`candidate-lock-*`には実際のimage/artifact digest�
 採取では対象ソース由来の全導入パッケージの版、CPU、依存の整合、共有ライブラリのロード、SQLite のインメモリ全文検索、D-Bus セッションへの問い合わせ、マウント情報の取得を確認する。ソース記述子とパッチはイメージ内の `/opt/omni-environment/backport-sources/` に保存する。Noble の配布版が変わると採取が停止する。公式修正を確認したら対応する行と不要になったパッチを削除し、両 CPU の候補を取り直して固定先を更新する。
 
 libxslt の CVE-2025-7425 に対する Ubuntu の緩和策は libxml2 の更新で提供される。Python の XML パーサーには Noble の libexpat に移植済みの 16 バイトのソルト API を使用する。採取時に両ライブラリの最低版、pyexpat の参照シンボル、通常の XML の読み取りも検証する。
+
+## Docker ビルドで使用する BuildKit
+
+`capture-build-environments.yml` の `buildkit_only` を有効にすると、amd64・arm64 のネイティブ環境でデーモンと4つの CNI プラグインを再構築する。上流イメージ、ソースのコミットとチェックサム、Go の版、依存の修正は `build/environments/buildkit.Dockerfile` に固定する。各 CPU でバージョン応答と依存情報を確認し、別ジョブでマルチアーキテクチャのインデックスを保存する。Docker の固定ビルダーと脆弱性検査は `build/locks/docker.json` の同じダイジェストを使用する。採取ログは同ファイルの `buildkitCapture.runId` から確認できる。

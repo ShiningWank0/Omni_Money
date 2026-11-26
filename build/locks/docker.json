@@ -3,13 +3,18 @@
   "engineVersion": "29.10.1",
   "buildxVersion": "0.39.1",
   "composeVersion": "5.8.0",
-  "buildkitImage": "moby/buildkit:v0.35.1@sha256:baf6138eb8c37644800c7c913fba051e840ebb9ba13eaf92d92ef9a1712d0b4c",
+  "buildkitImage": "ghcr.io/shiningwank0/omni_money-build-buildkit@sha256:d4eab6c7f22c6b5679373150853b839ab3828674900294dbe42c4095c2ce763b",
   "sbomImage": "docker/buildkit-syft-scanner:1.13.0@sha256:a190379321cf51fba8c284a1834555b55e7bf58d577d574db23370461defc430",
   "platforms": {
     "x86_64": {
       "engine": {
-        "url": "https://download.docker.com/linux/static/stable/x86_64/docker-29.10.1.tgz",
-        "sha256": "061642059fa7f2ed9b2f04a327a951cff4249585cf04b2661c2a6539197c9962"
+        "artifact": "ghcr.io/shiningwank0/omni_money-ci-engine@sha256:48190d5fe9620753f12ae44d729ed9b92391ef097cfdb61430a008c3d7aa0127",
+        "url": "https://ghcr.io/v2/shiningwank0/omni_money-ci-engine/blobs/sha256:f3ca94dffda10824436c2543bcd7ebbb743a94518c385e288db409d71ae23c4c",
+        "sha256": "f3ca94dffda10824436c2543bcd7ebbb743a94518c385e288db409d71ae23c4c",
+        "arch": "amd64",
+        "goVersion": "1.27.4",
+        "sourceCommit": "dd1b1dbef9513ad1519a8bf1246443e658bf176c",
+        "runId": "45787235282"
       },
       "buildx": {
         "url": "https://github.com/docker/buildx/releases/download/v0.39.1/buildx-v0.39.1.linux-amd64",
@@ -22,8 +27,13 @@
     },
     "aarch64": {
       "engine": {
-        "url": "https://download.docker.com/linux/static/stable/aarch64/docker-29.10.1.tgz",
-        "sha256": "a38c8a9ef6d17bce07499bfd3a3688542274769dc3b4f75c06ea2705fe65053e"
+        "artifact": "ghcr.io/shiningwank0/omni_money-ci-engine@sha256:d4faa52e9151f0eb0480c958e6c99a04255aaef5fa9108be0fe0b48b777dee36",
+        "url": "https://ghcr.io/v2/shiningwank0/omni_money-ci-engine/blobs/sha256:8704099aa2c8123abcf59e283c4d945baec8dc76715efc73d9d3e42d3dd8ae86",
+        "sha256": "8704099aa2c8123abcf59e283c4d945baec8dc76715efc73d9d3e42d3dd8ae86",
+        "arch": "arm64",
+        "goVersion": "1.27.4",
+        "sourceCommit": "dd1b1dbef9513ad1519a8bf1246443e658bf176c",
+        "runId": "45787235282"
       },
       "buildx": {
         "url": "https://github.com/docker/buildx/releases/download/v0.39.1/buildx-v0.39.1.linux-arm64",
@@ -34,5 +44,13 @@
         "sha256": "1a9c918b2fb49b9c87f0018c64b5abd0d30715155e98dc939779fbaee6c414d3"
       }
     }
+  },
+  "buildkitCapture": {
+    "sourceCommit": "2037e17163f01d2844dbd26082d4542c37a94cd4",
+    "runId": "45783144217",
+    "platforms": [
+      "linux/amd64",
+      "linux/arm64"
+    ]
   }
 }

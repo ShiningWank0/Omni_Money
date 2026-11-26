@@ -6,8 +6,8 @@ import { fileURLToPath } from 'node:url'
 
 export const root = fileURLToPath(new URL('../', import.meta.url))
 export const groups = ['images', 'tools', 'native', 'modules']
-export const inputFiles = ['Dockerfile', '.go-version', '.node-version', 'build/locks/docker.json', 'build/locks/linux-environments.json',
-  'build/locks/msys2.json', 'build/locks/macos.json', 'build/locks/trivy.json', 'build/locks/gh.json',
+export const inputFiles = ['Dockerfile', 'build/environments/buildkit.Dockerfile', '.go-version', '.node-version', 'build/locks/docker.json', 'build/locks/linux-environments.json',
+  'build/locks/msys2.json', 'build/locks/macos.json', 'build/locks/trivy.json', 'build/locks/trivy-source.json', 'build/locks/gh.json',
   'build/locks/webview2.json', 'build/locks/security-monitor.json',
   ...['windows', 'darwin'].map(os => `scripts/build-openssl-${os}.sh`),
   ...['linux', 'windows', 'darwin'].map(os => `scripts/build-sqlcipher-${os}.sh`)]
@@ -46,7 +46,7 @@ export function inventory(directory = root) {
     return [path, readFileSync(join(directory, path), 'utf8')]
   }))
   const identity = sha256(JSON.stringify([...content]))
-  const json = path => { const v = JSON.parse(content.get(`build/locks/${path}.json`)); assert.equal(v.schema, 1); return v }
+  const json = (path, schema = 1) => { const v = JSON.parse(content.get(`build/locks/${path}.json`)); assert.equal(v.schema, schema); return v }
   const images = [], tools = [], sources = []
   const image = (name, ref) => {
     assert.match(ref, /^[a-z0-9/._:-]+@sha256:[a-f0-9]{64}$/)
@@ -66,11 +66,28 @@ export function inventory(directory = root) {
     assert.match(item.sha256, /^[a-f0-9]{64}$/)
     tools.push({ name, url: item.url, sha256: item.sha256 })
   }
+  const fixedArchive = (tool, arch, item) => {
+    assert.match(item.sha256, /^[a-f0-9]{64}$/)
+    const repository = 'shiningwank0/omni_money-ci-' + tool
+    assert.equal(item.url, `https://ghcr.io/v2/${repository}/blobs/sha256:${item.sha256}`)
+    const prefix = 'ghcr.io/' + repository + '@'
+    assert.ok(item.artifact.startsWith(prefix))
+    assert.match(item.artifact.slice(prefix.length), /^sha256:[a-f0-9]{64}$/)
+    tools.push({ name: `${tool}/${arch}`, url: item.url, sha256: item.sha256 })
+  }
   for (const [arch, set] of Object.entries(docker.platforms)) {
     assert.deepEqual(Object.keys(set).sort(), ['buildx', 'compose', 'engine'], 'new Docker tools need vulnerability coverage')
-    for (const name of ['engine', 'buildx', 'compose']) archive(`${name}/${arch}`, set[name])
+    for (const name of ['buildx', 'compose']) archive(`${name}/${arch}`, set[name])
+    if (set.engine.artifact) fixedArchive('engine', arch, set.engine)
+    else archive(`engine/${arch}`, set.engine)
   }
-  for (const name of ['trivy', 'gh']) for (const [arch, item] of Object.entries(json(name).platforms)) archive(`${name}/${arch}`, item)
+  for (const [arch, item] of Object.entries(json('gh').platforms)) archive(`gh/${arch}`, item)
+  const trivy = json('trivy', 2), trivySource = json('trivy-source')
+  assert.equal(trivy.version, trivySource.version)
+  assert.equal(trivy.sourceRevision, trivySource.revision)
+  assert.match(trivySource.sha256, /^[a-f0-9]{64}$/)
+  assert.deepEqual(Object.keys(trivy.platforms).sort(), ['aarch64', 'x86_64'])
+  for (const [arch, item] of Object.entries(trivy.platforms)) fixedArchive('trivy', arch, item)
   const monitor = json('security-monitor')
   archive('grype/amd64', monitor.grype); archive('oras/amd64', monitor.oras)
   const scriptVersion = (name, platforms) => {
@@ -83,7 +100,7 @@ export function inventory(directory = root) {
     properties: [{ name: 'syft:location:0:path', value: `native/${name}` }] })
   const openssl = scriptVersion('openssl', ['darwin', 'windows'])
   const sqlcipher = scriptVersion('sqlcipher', ['linux', 'darwin', 'windows'])
-  const mac = json('macos'), trivy = json('trivy'), gh = json('gh')
+  const mac = json('macos'), gh = json('gh')
   const native = [component('openssl', openssl, 'openssl:openssl'),
     component('node', content.get('.node-version').trim().replace(/^v/, ''), 'nodejs:node.js'),
     component('tcl', mac.tcl.version, 'tcl:tcl\\/tk'), component('xcode', mac.xcode.version, 'apple:xcode')]
@@ -108,7 +125,7 @@ export function inventory(directory = root) {
   for (const [name, repo, version] of [['buildx', 'docker/buildx', docker.buildxVersion], ['compose', 'docker/compose', docker.composeVersion],
     ['grype', 'anchore/grype', monitor.grype.version], ['oras', 'oras-project/oras', monitor.oras.version]]) watch(name, repo, version, '^v([0-9]+\\.[0-9]+\\.[0-9]+)$')
   watch('engine', 'moby/moby', docker.engineVersion, '^v([0-9]+\\.[0-9]+\\.[0-9]+)$')
-  const buildkit = docker.buildkitImage.match(/:v([0-9]+\.[0-9]+\.[0-9]+)@/)
+  const buildkit = content.get('build/environments/buildkit.Dockerfile').match(/^FROM moby\/buildkit:v([0-9]+\.[0-9]+\.[0-9]+)@sha256:[a-f0-9]{64}$/m)
   assert.ok(buildkit); watch('buildkit', 'moby/buildkit', buildkit[1], '^v([0-9]+\\.[0-9]+\\.[0-9]+)$')
   const msys = json('msys2'); assert.match(msys.artifact, /^ghcr\.io\/shiningwank0\/omni_money-build-msys2@sha256:[a-f0-9]{64}$/)
   const remoteModules = []
