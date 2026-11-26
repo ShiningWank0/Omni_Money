@@ -35,8 +35,8 @@ jobs:
           curl --fail --location --retry 3 --proto '=https' "$url" -o runtime.cab
           printf '%s  runtime.cab\n' "$checksum" | sha256sum --check --strict
           curl --fail --location --retry 3 --proto '=https' \
-            https://github.com/oras-project/oras/releases/download/v1.3.6/oras_1.3.6_linux_amd64.tar.gz -o oras.tar.gz
-          echo '66fb0ad7206f3f6fa77ed5b552049d364ccf4b50b1684554f731f76302b52ca0  oras.tar.gz' | sha256sum --check --strict
+            https://github.com/oras-project/oras/releases/download/v1.4.0/oras_1.4.0_linux_amd64.tar.gz -o oras.tar.gz
+          echo 'd8e1dce2fd8ce996f1d901845b688eb0cf505a6082897606f053825bb47935d1  oras.tar.gz' | sha256sum --check --strict
           tar -xzf oras.tar.gz oras
           printf '%s' "$REGISTRY_TOKEN" | ./oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           image="ghcr.io/${GITHUB_REPOSITORY,,}-ci-webview2"

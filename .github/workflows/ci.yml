@@ -353,7 +353,7 @@ jobs:
         id: verify-go-security-tool-locks
         continue-on-error: ${{ env.CI_MONITORING == 'true' }}
         run: |
-          for tool in gosec govulncheck; do
+          for tool in gosec govulncheck actionlint; do
             go -C "scripts/securitytools/$tool" mod tidy -diff
             go -C "scripts/securitytools/$tool" tool -n "$tool"
           done
@@ -371,7 +371,7 @@ jobs:
       - name: Lint GitHub Actions workflows
         id: lint-github-actions-workflows
         continue-on-error: ${{ env.CI_MONITORING == 'true' }}
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -no-color
+        run: go run -mod=readonly -modfile=scripts/securitytools/actionlint/go.mod github.com/rhysd/actionlint/cmd/actionlint -no-color
 
       - name: Assert documentation contracts
         id: assert-documentation-contracts

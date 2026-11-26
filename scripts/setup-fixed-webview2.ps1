@@ -6,8 +6,8 @@ if ($lock.schema -ne 1 -or $lock.artifact -notmatch '^ghcr.io/shiningwank0/omni_
 $work = Join-Path $env:RUNNER_TEMP 'omni-webview2'
 New-Item -ItemType Directory $work | Out-Null
 $zip = Join-Path $work 'oras.zip'
-Invoke-WebRequest 'https://github.com/oras-project/oras/releases/download/v1.3.6/oras_1.3.6_windows_amd64.zip' -OutFile $zip
-if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'ec3d19f386d5d2f0892288772d7b242475a05332aafa64b6773378ca771d76d3') { throw 'ORAS checksum mismatch' }
+Invoke-WebRequest 'https://github.com/oras-project/oras/releases/download/v1.4.0/oras_1.4.0_windows_amd64.zip' -OutFile $zip
+if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'c70d25e3463a161a5aeeddd9fe5ef882c811dde8115ab0883c0b87d3f0c50832') { throw 'ORAS checksum mismatch' }
 Expand-Archive $zip (Join-Path $work 'oras')
 $oras = Join-Path $work 'oras/oras.exe'
 $env:DOCKER_CONFIG = Join-Path $work 'registry-config'

@@ -173,9 +173,9 @@ main以外のブランチを選ぶとジョブをスキップする。既存の�
 
 ## Dependabotの検査ツールとグラフ描画ライブラリの更新
 
-`gosec` と `govulncheck` は専用のGoモジュールでCLIを `tool` 宣言に登録する。
+`gosec`、`govulncheck`、`actionlint` はそれぞれ専用のGoモジュールでCLIを `tool` 宣言に登録する。
 Dependabotは同じ専用モジュール内のminor/patch更新をまとめて提案する。
-通常CIは `go mod tidy -diff` と固定CLIの解決を確認し、通常のセキュリティ検査では両CLIを実行する。
+通常CIは `go mod tidy -diff` と固定CLIの解決を確認し、セキュリティ検査では前者2つを、ワークフロー検査では `actionlint` を実行する。
 
 `vue-chartjs` は単独の更新PRで扱い、通常の本番ビルドで配布物のimportを検証する。
 他のフロントエンド依存の更新は、従来どおりDependabotのグループで扱う。
