@@ -1,0 +1,14 @@
+Origin: Omni Money build configuration
+Description: Disable optional loading and dumping of precompiled bytecode for CVE-2026-12216. libproxy evaluates PAC source.
+
+--- a/src/duk_config.h
++++ b/src/duk_config.h
+@@ -2910,7 +2910,7 @@
+ #define DUK_USE_BOOLEAN_BUILTIN
+ #define DUK_USE_BUFFEROBJECT_SUPPORT
+ #undef DUK_USE_BUFLEN16
+-#define DUK_USE_BYTECODE_DUMP_SUPPORT
++#undef DUK_USE_BYTECODE_DUMP_SUPPORT
+ #define DUK_USE_CACHE_ACTIVATION
+ #define DUK_USE_CACHE_CATCHER
+ #define DUK_USE_CALLSTACK_LIMIT 10000

@@ -10,3 +10,7 @@ cyrus-sasl2	2.1.28+dfsg1-5ubuntu3.1	2.1.28+dfsg1-5ubuntu3.1	c/cyrus-sasl2	6ede2d
 libxslt	1.1.39-0exp1ubuntu0.24.04.3	1.1.39-0exp1ubuntu0.24.04.3	libx/libxslt	25e60a82ccec471407248c0725eb51e85464b6e87fa032bca685c55d42ab8722	CVE-2025-10911.patch
 gst-plugins-base1.0	1.24.2-1ubuntu0.7	1.24.2-1ubuntu0.7	g/gst-plugins-base1.0	fd76f4f773826868490fda76c5ba8374a25b41092896355bb254d41051d0e8c7	gstreamer-security.patch
 python3.12	3.12.3-1ubuntu0.17	3.12.3-1ubuntu0.17	p/python3.12	941700b999737d869b80c3b5a0adc0996a0fd760b982e18551bd2104da779384	CVE-2026-7210.patch
+tiff	4.5.1+git230720-4ubuntu2.5	4.7.2-1ubuntu1	t/tiff	5603bebdba65d9455902ee4c56223b13c273f27f697015df23316c0c04124295	-
+dash	0.5.12-6ubuntu5	0.5.12-6ubuntu5	d/dash	be4a5ba81756b24d0d22f30cd9e609f5b84f8a8d685cb9825e9eae6201c52cf9	dash-fnmatch.patch
+duktape	2.7.0+tests-0ubuntu3	2.7.0+tests-0ubuntu3	d/duktape	cb5f1815b6d8ff6dd80200fc86998dbb833183ac46dff23ec7f2a829e180a397	duktape-source-only.patch
+slang2	2.3.3-3build2	2.3.3-3build2	s/slang2	eeb26a45369be6c791af065ef27998045d9f56a749f6d6f0dd2a1e4edffb296e	slang-terminfo.patch

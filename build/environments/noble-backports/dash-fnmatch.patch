@@ -1,0 +1,14 @@
+Origin: Omni Money build configuration
+Description: Select the libc fnmatch implementation provided by Noble for CVE-2026-102473.
+
+--- a/debian/rules
++++ b/debian/rules
+@@ -26,7 +26,7 @@
+ 
+ override_dh_auto_configure:
+ 	dh_auto_configure -- \
+-		--disable-fnmatch \
++		--enable-fnmatch \
+ 		--disable-lineno \
+ 		--disable-glob
+ 

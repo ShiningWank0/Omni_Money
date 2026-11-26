@@ -14,3 +14,6 @@
 !build/environments/noble-backports/CVE-2025-10911.patch
 !build/environments/noble-backports/CVE-2026-7210.patch
 !build/environments/noble-backports/gstreamer-security.patch
+!build/environments/noble-backports/dash-fnmatch.patch
+!build/environments/noble-backports/duktape-source-only.patch
+!build/environments/noble-backports/slang-terminfo.patch

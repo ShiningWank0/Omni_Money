@@ -30,3 +30,5 @@ publisherが出力する`candidate-lock-*`には実際のimage/artifact digest�
 採取では対象ソース由来の全導入パッケージの版、CPU、依存の整合、共有ライブラリのロード、SQLite のインメモリ全文検索、D-Bus セッションへの問い合わせ、マウント情報の取得を確認する。ソース記述子とパッチはイメージ内の `/opt/omni-environment/backport-sources/` に保存する。Noble の配布版が変わると採取が停止する。公式修正を確認したら対応する行と不要になったパッチを削除し、両 CPU の候補を取り直して固定先を更新する。
 
 libxslt の CVE-2025-7425 に対する Ubuntu の緩和策は libxml2 の更新で提供される。Python の XML パーサーには Noble の libexpat に移植済みの 16 バイトのソルト API を使用する。採取時に両ライブラリの最低版、pyexpat の参照シンボル、通常の XML の読み取りも検証する。
+
+TIFF は修正済みの Ubuntu ソース 4.7.2 を Noble でビルドする。dash は libc の fnmatch を使用し、S-Lang は端末の書式で未定義となる除算を検出するとその出力を破棄する。Duktape はコンパイル済みバイトコードの入出力を無効にする。libproxy が PAC に使用する JavaScript ソースの評価、通常のシェルパターン、端末書式、TIFF の共有ライブラリは採取時に確認する。

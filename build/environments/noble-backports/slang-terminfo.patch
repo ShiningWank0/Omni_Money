@@ -1,0 +1,27 @@
+Origin: Omni Money downstream patch
+Description: Fail closed on undefined division in terminal capability formatting for CVE-2023-45927.
+
+--- a/src/sldisply.c
++++ b/src/sldisply.c
+@@ -23,6 +23,7 @@
+ 
+ #include <time.h>
+ #include <ctype.h>
++#include <limits.h>
+ 
+ #if !defined(VMS) || (__VMS_VER >= 70000000)
+ # include <sys/time.h>
+@@ -697,6 +698,13 @@
+ 	   case 'O':
+ 	     z1 = STACK_POP;
+ 	     z = STACK_POP;
++	     /* Ignore a capability whose integer operation is undefined. */
++	     if (((ch == '/') || (ch == 'm'))
++		 && ((z1 == 0) || ((z == INT_MIN) && (z1 == -1))))
++	       {
++		  *buf = 0;
++		  return 0;
++	       }
+ 	     switch (ch)
+ 	       {
+ 		case '-': z = (z - z1); break;

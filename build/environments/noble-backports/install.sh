@@ -80,3 +80,36 @@ for library, symbol in (("libxslt.so.1", "xsltApplyStylesheet"),
 PY
 test ! -e /usr/bin/genrb
 test -z "$(find /usr/lib -path '*/sasl2/libdigestmd5.so*' -print -quit)"
+readelf --wide --dyn-syms /usr/bin/dash > /tmp/dash-symbols
+grep -E 'UND +fnmatch(@|$)' /tmp/dash-symbols > "$inventory/backport-sources/dash-fnmatch.txt"
+rm /tmp/dash-symbols
+dash -c 'case expense.csv in *.csv) exit 0;; *) exit 1;; esac'
+# The optional bytecode API is disabled while JavaScript source evaluation still works.
+probe_dir=$(mktemp -d)
+dpkg-deb -x /backports/duktape-dev_*.deb "$probe_dir"
+cc -I"$probe_dir/usr/include" -x c - -o "$probe_dir/probe" -l:libduktape.so.207 <<'C'
+#include <duktape.h>
+#ifdef DUK_USE_BYTECODE_DUMP_SUPPORT
+#error Precompiled bytecode must be disabled
+#endif
+int main(void) {
+    duk_context *ctx = duk_create_heap_default();
+    if (!ctx) return 1;
+    int ok = duk_peval_string(ctx, "6 * 7") == 0 && duk_get_int(ctx, -1) == 42;
+    duk_destroy_heap(ctx);
+    return !ok;
+}
+C
+"$probe_dir/probe"
+rm -r "$probe_dir"
+python3 - <<'PY'
+import ctypes
+
+slang = ctypes.CDLL("libslang.so.2")
+slang.SLtt_tgoto.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+slang.SLtt_tgoto.restype = ctypes.c_char_p
+assert slang.SLtt_tgoto(b"cursor", 4, 2) == b"cursor"
+tiff = ctypes.CDLL("libtiff.so.6")
+tiff.TIFFGetVersion.restype = ctypes.c_char_p
+assert b"4.7.2" in tiff.TIFFGetVersion()
+PY
