@@ -52,15 +52,24 @@ function command(program, args, options = {}) {
 }
 
 async function payload(item, work) {
-  const data = await get(item.url)
-  assert.equal(sha256(data), item.sha256, 'download checksum mismatch')
   const folder = join(work, item.name.replaceAll('/', '-'))
-  if (/\.(?:tar\.gz|tgz)$/.test(item.url)) {
-    const archive = folder + '.tar.gz'; writeFileSync(archive, data, { mode: 0o600 })
-    command('python3', [join(root, 'scripts/pinned-security-extract.py'), archive, folder])
-    rmSync(archive)
+  const archive = folder + '.tar.gz'
+  if (item.url.startsWith('https://ghcr.io/')) {
+    command('python3', [join(root, 'scripts/fetch-trivy-archive.py'), item.url, item.sha256, archive])
   } else {
-    mkdirSync(folder, { mode: 0o700 }); writeFileSync(join(folder, 'binary'), data, { mode: 0o700 })
+    const data = await get(item.url)
+    assert.equal(sha256(data), item.sha256, 'download checksum mismatch')
+    if (!/\.(?:tar\.gz|tgz)$/.test(item.url)) {
+      mkdirSync(folder, { mode: 0o700 })
+      writeFileSync(join(folder, 'binary'), data, { mode: 0o700 })
+      return folder
+    }
+    writeFileSync(archive, data, { mode: 0o600 })
+  }
+  try {
+    command('python3', [join(root, 'scripts/pinned-security-extract.py'), archive, folder])
+  } finally {
+    rmSync(archive)
   }
   return folder
 }
