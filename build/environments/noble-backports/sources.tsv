@@ -18,3 +18,4 @@ git	1:2.43.0-1ubuntu7.4	1:2.43.0-1ubuntu7.4	g/git	b00b55dcce31a063b783cd0e34fce0
 glib2.0	2.80.0-6ubuntu3.10	2.80.0-6ubuntu3.10	g/glib2.0	0ee18e055f5fba9a33763f94823b44ab38e4f677f625ba7540486fe03b436136	glib-exclusive-replace.patch
 gdk-pixbuf	2.42.10+dfsg-3ubuntu3.3	2.42.10+dfsg-3ubuntu3.3	g/gdk-pixbuf	b86025ff9d9ff4e39ec4b1773f23648f18556d154867e28b2f8fc1e589be80d0	gdk-pixbuf-image-bounds.patch
 libsndfile	1.2.2-1ubuntu5.24.04.1	1.2.2-1ubuntu5.24.04.1	libs/libsndfile	b59d6b10344043e7c1382627966449992c2f65911443e71a854298d2f5061ca8	libsndfile-format-validation.patch
+cairo	1.18.0-3build1	1.18.0-3build1	c/cairo	873d57c66682a2bd419a696c4d47df5f27888c6fab022ce88e885c3b394d5b75	cairo-fonts-and-spans.patch

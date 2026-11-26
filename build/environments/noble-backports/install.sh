@@ -192,3 +192,7 @@ with TemporaryDirectory() as temp:
     assert lib.sf_readf_short(handle, (C.c_short * 80)(), 80) == 80
     assert lib.sf_close(handle) == 0
 PY
+cairo_probe=$(mktemp -d)
+cc -O2 -Wall -Werror "$inputs/cairo-probe.c" -o "$cairo_probe/render" $(pkg-config --cflags --libs cairo-ft freetype2)
+"$cairo_probe/render" "$(fc-match --format='%{file}' sans)"
+rm -rf "$cairo_probe"

@@ -1,0 +1,141 @@
+Description: Propagate FreeType errors, detach borrowed faces, and bound writes to image spans.
+Origin: Omni Money downstream fixes for CVE-2017-7475, CVE-2018-18064 and CVE-2025-50422
+--- a/src/cairo-image-compositor.c
++++ b/src/cairo-image-compositor.c
+@@ -1640,6 +1640,29 @@
+ } cairo_image_span_renderer_t;
+ COMPILE_TIME_ASSERT (sizeof (cairo_image_span_renderer_t) <= sizeof (cairo_abstract_span_renderer_t));
+ 
++/* The mask extents store the exclusive bottom after initialization. For
++ * the stack mask, extents.y advances as rows are cleared. */
++static cairo_bool_t
++mask_spans_fit (const cairo_image_span_renderer_t *r, int y, int height,
++                const cairo_half_open_span_t *spans, unsigned count)
++{
++    const cairo_rectangle_int_t *extents = &r->u.mask.extents;
++
++    if (y < extents->y || height < 0 ||
++        (int64_t)y + height > extents->height)
++        return FALSE;
++    if (count == 0)
++        return TRUE;
++    if (count < 2 || spans[0].x < extents->x ||
++        spans[count - 1].x > (int64_t)extents->x + extents->width)
++        return FALSE;
++    for (unsigned i = 1; i < count; i++) {
++        if (spans[i].x < spans[i - 1].x)
++            return FALSE;
++    }
++    return TRUE;
++}
++
+ static cairo_status_t
+ _cairo_image_spans (void *abstract_renderer,
+ 		    int y, int height,
+@@ -1649,6 +1672,11 @@
+     cairo_image_span_renderer_t *r = abstract_renderer;
+     uint8_t *mask, *row;
+     int len;
++    if (!mask_spans_fit (r, y, height, spans, num_spans))
++        return _cairo_error (CAIRO_STATUS_INVALID_SIZE);
++    if (height == 0)
++        return CAIRO_STATUS_SUCCESS;
++
+ 
+     if (num_spans == 0)
+ 	return CAIRO_STATUS_SUCCESS;
+@@ -1659,7 +1687,7 @@
+ 
+     do {
+ 	len = spans[1].x - spans[0].x;
+-	if (spans[0].coverage) {
++	if (len && spans[0].coverage) {
+ 	    *row++ = r->opacity * spans[0].coverage;
+ 	    if (--len)
+ 		memset (row, row[-1], len);
+@@ -1687,12 +1715,17 @@
+     cairo_image_span_renderer_t *r = abstract_renderer;
+     uint8_t *mask;
+     int len;
++    if (!mask_spans_fit (r, y, height, spans, num_spans))
++        return _cairo_error (CAIRO_STATUS_INVALID_SIZE);
++    if (height == 0)
++        return CAIRO_STATUS_SUCCESS;
++
+ 
+     mask = r->u.mask.data;
+     if (y > r->u.mask.extents.y) {
+-	len = (y - r->u.mask.extents.y) * r->u.mask.stride;
+-	memset (mask, 0, len);
+-	mask += len;
++	ptrdiff_t gap = (y - r->u.mask.extents.y) * r->u.mask.stride;
++	memset (mask, 0, gap);
++	mask += gap;
+     }
+ 
+     r->u.mask.extents.y = y + height;
+@@ -1710,6 +1743,10 @@
+ 
+ 	do {
+ 	    len = spans[1].x - spans[0].x;
++	    if (len == 0) {
++	        spans++;
++	        continue;
++	    }
+ 	    *row++ = r->opacity * spans[0].coverage;
+ 	    if (len > 1) {
+ 		memset (row, row[-1], --len);
+@@ -3082,8 +3119,13 @@
+     }
+ 
+     r->u.mask.extents = composite->unbounded;
++    if (r->u.mask.extents.width < 0 || r->u.mask.extents.width > INT_MAX - 3 ||
++        r->u.mask.extents.height < 0 ||
++        (int64_t)r->u.mask.extents.x + r->u.mask.extents.width > INT_MAX ||
++        (int64_t)r->u.mask.extents.y + r->u.mask.extents.height > INT_MAX)
++        return _cairo_error (CAIRO_STATUS_INVALID_SIZE);
+     r->u.mask.stride = (r->u.mask.extents.width + 3) & ~3;
+-    if (r->u.mask.extents.height * r->u.mask.stride > SZ_BUF) {
++    if ((int64_t)r->u.mask.extents.height * r->u.mask.stride > SZ_BUF) {
+ 	r->mask = pixman_image_create_bits (PIXMAN_a8,
+ 					    r->u.mask.extents.width,
+ 					    r->u.mask.extents.height,
+--- a/src/cairo-ft-font.c
++++ b/src/cairo-ft-font.c
+@@ -522,6 +522,10 @@
+ static void
+ _cairo_ft_unscaled_font_fini (cairo_ft_unscaled_font_t *unscaled)
+ {
++    /* Caller-provided faces are borrowed, including on hash insertion
++     * failure and when the map is cleared. Only the caller may release them. */
++    if (unscaled->from_face)
++	unscaled->face = NULL;
+     assert (unscaled->face == NULL);
+ 
+     free (unscaled->filename);
+@@ -1620,10 +1624,8 @@
+      * we avoid the FT_LOAD_NO_RECURSE flag.
+      */
+     error = FT_Render_Glyph (glyphslot, FT_RENDER_MODE_NORMAL);
+-    /* XXX ignoring all other errors for now.  They are not fatal, typically
+-     * just a glyph-not-found. */
+-    if (error == FT_Err_Out_Of_Memory)
+-	return _cairo_error (CAIRO_STATUS_NO_MEMORY);
++    if (unlikely (error))
++	return _cairo_error (_cairo_ft_to_cairo_error (error));
+ 
+     status = _get_bitmap_surface (&glyphslot->bitmap,
+ 				  glyphslot->library,
+@@ -2462,10 +2464,8 @@
+     error = FT_Load_Glyph (face,
+ 			   _cairo_scaled_glyph_index(scaled_glyph),
+ 			   load_flags);
+-    /* XXX ignoring all other errors for now.  They are not fatal, typically
+-     * just a glyph-not-found. */
+-    if (error == FT_Err_Out_Of_Memory)
+-	return  _cairo_error (CAIRO_STATUS_NO_MEMORY);
++    if (unlikely (error))
++	return _cairo_error (_cairo_ft_to_cairo_error (error));
+ 
+     /*
+      * synthesize glyphs if requested
