@@ -112,22 +112,22 @@
       "sha256": "ecf9c1549f38a0e690250d56ff67040cf0694e1382ced0efb93ba740c33d6856"
     },
     "npm:@vue/reactivity": {
-      "version": "3.5.45",
+      "version": "3.5.46",
       "license": "MIT",
       "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
     },
     "npm:@vue/runtime-core": {
-      "version": "3.5.45",
+      "version": "3.5.46",
       "license": "MIT",
       "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
     },
     "npm:@vue/runtime-dom": {
-      "version": "3.5.45",
+      "version": "3.5.46",
       "license": "MIT",
       "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
     },
     "npm:@vue/shared": {
-      "version": "3.5.45",
+      "version": "3.5.46",
       "license": "MIT",
       "sha256": "28514ee18ef16f866ddc0c869aaef1dc39e3d37b92c94df606858b23dc856c8c"
     },
@@ -147,7 +147,7 @@
       "sha256": "614c975ac994720a48b213a04d4aa19e1913122e9c89f83d5c9f2a29429b1cfe"
     },
     "npm:vue-chartjs": {
-      "version": "5.3.4",
+      "version": "5.3.7",
       "license": "MIT",
       "sha256": "ea01d6073dfa559e2e4fb50bb28d35c1b7577201cd51e94c023b7c06f635c16d"
     }
