@@ -38,8 +38,10 @@ try {
   assert.deepEqual(walk(committed), paths, 'Generated binding file list is stale')
   for (const path of paths) assert.deepEqual(readFileSync(join(generated, path)), readFileSync(join(committed, path)), 'Stale binding: ' + path)
 } finally { rmSync(generated, { recursive: true, force: true }) }
-const npm = join(dirname(process.execPath), os === 'windows' ? 'node_modules/npm/bin/npm-cli.js' : '../lib/node_modules/npm/bin/npm-cli.js')
-assert.ok(existsSync(npm), 'Use the official pinned Node distribution')
+const npm = process.env.GITHUB_ACTIONS === 'true'
+  ? join(process.env.RUNNER_TEMP, 'omni-ci-npm/npm/bin/npm-cli.js')
+  : join(dirname(process.execPath), os === 'windows' ? 'node_modules/npm/bin/npm-cli.js' : '../lib/node_modules/npm/bin/npm-cli.js')
+assert.ok(existsSync(npm), 'The reviewed npm CLI is required for this build')
 run(process.execPath, [npm, 'ci', '--ignore-scripts'], join(root, 'frontend'))
 run(process.execPath, ['build/desktop.mjs', 'build'], join(root, 'frontend'))
 const bin = join(root, 'build/bin')
