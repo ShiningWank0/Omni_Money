@@ -18,7 +18,7 @@ jobs:
     name: Development runtime (${{ matrix.mode }})
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:c2bdd64ca494a130d74527443104a9003dc9215ac510191ae4c4f270293e1151
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:fb9eeb2d764919e1693a2c108304d0845a955f83b707789b6cb94e3fda4a7d88
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
