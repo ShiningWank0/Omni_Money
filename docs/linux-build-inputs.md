@@ -8,6 +8,8 @@ LinuxのCI、配布build・quality gate、Wailsの開発診断は同じ保存ima
 
 jobはuid 1001の専用一般ユーザーで実行する。Docker daemonを扱うjobとnative WebKit sandboxを起動するjobだけ、隔離したGitHub-hosted VM内のjob containerに必要な権限を与える。WebKit試験をroot起動へ変えたり、WebKit sandboxを無効化したりしない。GitHubがjob containerを開始するhost側のDocker/kernelはrunner基盤として扱い、アプリをbuildするDocker Engine/Buildx/BuildKitとは分ける。
 
+Ubuntu の WebKitGTK の更新を待つ間、配布用 Linux アプリの WebView 試験では、Xvfb・D-Bus・WebKit の子プロセスをループバック専用のネットワーク名前空間で起動する。試験は一般ユーザーで動作し、ネットワークインターフェースの一覧を CI 成果物に保存する。[追跡 Issue #461](https://github.com/ShiningWank0/Omni_Money/issues/461)
+
 ## Alpine
 
 Dockerfileのbuilder/runtimeは保存imageを直接使用し、通常buildではpackageを更新しない。builder/runtimeのAlpine系列とlibcrypto3 package版の一致を確認する。SQLCipherのsource/checksum、既存の実link probeとruntime/暗号化E2Eを維持する。OpenSSLは保存したvendor packageのままであり、vendorのbackportを失うsource版への切替はこの固定と混在させない。
