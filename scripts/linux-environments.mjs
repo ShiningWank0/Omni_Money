@@ -9,6 +9,17 @@ export const workflowPaths = ['ci.yml', 'release-desktop.yml', 'release-docker.y
 export const capturePaths = ['.github/workflows/capture-build-environments.yml', 'docs/environment-snapshots.md',
   ...['ubuntu', 'alpine-builder', 'alpine-runtime'].map(name => `build/environments/${name}.Dockerfile`)]
 
+function withoutVerifiedOfflineApkInstall(dockerfile, image) {
+  const mount = `RUN --network=none --mount=type=bind,from=${image},source=/opt/omni-environment/apks,target=/run/omni-apks,ro`
+  const verify = ' && apk verify "$@" \\'
+  const install = ' && apk add --no-network --no-cache --repositories-file /dev/null "$@" \\'
+  return dockerfile.split(/\n(?=[A-Z]+\s)/).map(instruction =>
+    instruction.split('\n', 1)[0] === `${mount} \\`
+      ? instruction.replace(`${verify}\n${install}`, verify)
+      : instruction
+  ).join('\n')
+}
+
 export function checkLinuxEnvironments(directory = root) {
   for (const path of capturePaths) assert.ok(readFileSync(join(directory, path), 'utf8').trim(), `${path}: environment capture input is empty`)
   const lock = JSON.parse(readFileSync(join(directory, 'build/locks/linux-environments.json'), 'utf8'))
@@ -37,7 +48,10 @@ export function checkLinuxEnvironments(directory = root) {
         assert.match(options, /(?:^|\s)--init(?:\s|$)/, `${path}: job containers must reap orphaned child processes`)
       }
     }
-    assert.doesNotMatch(text, /\bapt-get\s+(?:update|install)|\bapk\s+(?:add|upgrade|update)|playwright install --with-deps/,
+    const packageResolution = path === 'Dockerfile'
+      ? withoutVerifiedOfflineApkInstall(text, lock.environments['alpine-runtime'].image)
+      : text
+    assert.doesNotMatch(packageResolution, /\bapt-get\s+(?:update|install)|\bapk\s+(?:add|upgrade|update)|playwright install --with-deps/,
       `${path}: ordinary builds must not resolve OS packages again`)
   }
   assert.equal(used.size, 3)

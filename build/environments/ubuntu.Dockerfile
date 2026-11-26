@@ -3,8 +3,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 # This workflow creates a candidate once. Normal builds consume its digest.
 # Preserve signed repository metadata and every downloaded deb, including the
 # dependency closure. The immutable image also preserves all base packages.
+# Temporarily omit unused CI payloads until Noble ships fixes for #454 and #363.
 RUN rm -f /etc/apt/apt.conf.d/docker-clean \
  && mkdir -p /opt/omni-environment/debs \
+ && printf '%s\n' \
+    'path-exclude=/usr/lib/*/sasl2/libdigestmd5.so*' \
+    'path-exclude=/usr/bin/genrb' > /etc/dpkg/dpkg.cfg.d/95-omni-ci-security \
  && apt-get update \
  && apt-get -y -o Dir::Cache::archives=/opt/omni-environment/debs install \
     build-essential curl ca-certificates git tcl libssl-dev binutils file \
@@ -16,6 +20,10 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \
     libxrandr2 fonts-noto-color-emoji fonts-unifont fonts-liberation \
     fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf fonts-freefont-ttf gnupg-utils- \
  && ! command -v gpgtar >/dev/null 2>&1 \
+ && digest_md5="$(find /usr/lib -path '*/sasl2/libdigestmd5.so*' -print -quit)" \
+ && test -z "$digest_md5" \
+ && test ! -e /usr/bin/genrb && test ! -L /usr/bin/genrb \
+ && ! command -v genrb >/dev/null 2>&1 \
  && dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' > /opt/omni-environment/packages.tsv \
  && cp -a /var/lib/apt/lists /opt/omni-environment/apt-lists \
  && find /opt/omni-environment/debs -type f -name '*.deb' -exec sha256sum {} + > /opt/omni-environment/debs.sha256 \
