@@ -36,7 +36,9 @@ export function entries(reports) {
     if (report.status === 'error') {
       const data = { kind: 'scan-error', tool: report.scan };
       grouped.set(hash(data), [data]);
-      continue;
+      // Each ledger contract is solved independently. Confirmed violations of
+      // other contracts remain valid if one contract could not be checked.
+      if (report.scan !== 'formal-ledger') continue;
     }
     for (const f of report.findings) {
       // Vulnerabilities group per scanner and package so every advisory for

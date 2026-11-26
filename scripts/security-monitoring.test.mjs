@@ -558,4 +558,7 @@ test('formal contract violations are separate static-analysis issues for each fu
   assert.ok(violations.every(v => v.data.kind === 'static-analysis'));
   const incomplete = entries([{ schema: 1, scan: 'formal-ledger', status: 'error', findings: [] }]);
   assert.equal(incomplete[0].data.kind, 'scan-error');
+  const mixed = entries([{ schema: 1, scan: 'formal-ledger', status: 'error', findings }]);
+  assert.deepEqual(mixed.filter(e => e.data.kind === 'static-analysis'), violations);
+  assert.deepEqual(mixed.filter(e => e.data.kind === 'scan-error'), incomplete);
 });
