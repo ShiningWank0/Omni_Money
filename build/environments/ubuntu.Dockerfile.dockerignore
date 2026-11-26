@@ -7,3 +7,5 @@
 !build/environments/noble-backports/install.sh
 !build/environments/noble-backports/CVE-2026-119373.patch
 !build/environments/noble-backports/CVE-2026-22693.patch
+!build/environments/noble-backports/CVE-2026-120749.patch
+!build/environments/noble-backports/CVE-2026-76642.patch

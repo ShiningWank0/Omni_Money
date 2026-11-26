@@ -5,24 +5,27 @@ inputs=/usr/local/share/omni-backports
 inventory=/opt/omni-environment
 target_debs=()
 arch=$(dpkg --print-architecture)
-dpkg-query -W -f='${db:Status-Status}\t${source:Package}\t${Package}\t${Version}\n' > /tmp/noble-installed.tsv
+dpkg-query -W -f='${db:Status-Status}\t${source:Package}\t${Package}\t${Version}\t${source:Version}\n' > /tmp/noble-installed.tsv
 while read -r source baseline version pool digest patch; do
     [[ -n "$source" && "$source" != \#* ]] || continue
     found=false
-    while read -r name current; do
-        [[ "$current" == "$baseline" ]] || { echo "Review updated Noble package $name $current" >&2; exit 1; }
+    while read -r name current source_version; do
+        [[ "$source_version" == "$baseline" && "$current" == *"$baseline" ]] || { echo "Review updated Noble package $name $current" >&2; exit 1; }
+        # bsdutils adds its own epoch to the util-linux source version.
+        binary_prefix=${current%"$baseline"}
+        [[ -z "$binary_prefix" || "$binary_prefix" =~ ^[0-9]+:$ ]]
         matches=(/backports/"${name}"_*.deb)
         [[ ${#matches[@]} == 1 && -f "${matches[0]}" ]]
         deb=${matches[0]}
         [[ "$(dpkg-deb -f "$deb" Package)" == "$name" ]]
-        [[ "$(dpkg-deb -f "$deb" Version)" == "${version}+omni1" ]]
+        [[ "$(dpkg-deb -f "$deb" Version)" == "${binary_prefix}${version}+omni1" ]]
         deb_arch=$(dpkg-deb -f "$deb" Architecture)
         [[ "$deb_arch" == "$arch" || "$deb_arch" == all ]]
         rm -f "$inventory/debs/${name}_"*.deb
         cp "$deb" "$inventory/debs/"
         target_debs+=("$deb")
         found=true
-    done < <(awk -v src="$source" '$1 == "installed" && $2 == src {print $3, $4}' /tmp/noble-installed.tsv)
+    done < <(awk -v src="$source" '$1 == "installed" && $2 == src {print $3, $4, $5}' /tmp/noble-installed.tsv)
     "$found" || { echo "No installed packages from $source" >&2; exit 1; }
 done < "$inputs/sources.tsv"
 dpkg -i "${target_debs[@]}"
@@ -52,3 +55,6 @@ with sqlite3.connect(":memory:") as db:
     db.executemany("INSERT INTO items VALUES (?)", [("rent",), ("book",)])
     assert db.execute("SELECT count(*) FROM items WHERE items MATCH 'rent'").fetchone() == (1,)
 PY
+dbus-run-session -- dbus-send --session --print-reply --dest=org.freedesktop.DBus \
+    /org/freedesktop/DBus org.freedesktop.DBus.ListNames > "$inventory/backport-sources/dbus-session.txt"
+findmnt --list --noheadings --target / > "$inventory/backport-sources/root-mount.txt"
