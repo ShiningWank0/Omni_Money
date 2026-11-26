@@ -447,9 +447,9 @@
     {
       "id": "npm:@vue/reactivity",
       "name": "@vue/reactivity",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "license": "MIT",
-      "url": "https://www.npmjs.com/package/@vue/reactivity/v/3.5.45",
+      "url": "https://www.npmjs.com/package/@vue/reactivity/v/3.5.46",
       "targets": [
         "desktop-darwin-amd64",
         "desktop-darwin-arm64",
@@ -468,9 +468,9 @@
     {
       "id": "npm:@vue/runtime-core",
       "name": "@vue/runtime-core",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "license": "MIT",
-      "url": "https://www.npmjs.com/package/@vue/runtime-core/v/3.5.45",
+      "url": "https://www.npmjs.com/package/@vue/runtime-core/v/3.5.46",
       "targets": [
         "desktop-darwin-amd64",
         "desktop-darwin-arm64",
@@ -489,9 +489,9 @@
     {
       "id": "npm:@vue/runtime-dom",
       "name": "@vue/runtime-dom",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "license": "MIT",
-      "url": "https://www.npmjs.com/package/@vue/runtime-dom/v/3.5.45",
+      "url": "https://www.npmjs.com/package/@vue/runtime-dom/v/3.5.46",
       "targets": [
         "desktop-darwin-amd64",
         "desktop-darwin-arm64",
@@ -510,9 +510,9 @@
     {
       "id": "npm:@vue/shared",
       "name": "@vue/shared",
-      "version": "3.5.45",
+      "version": "3.5.46",
       "license": "MIT",
-      "url": "https://www.npmjs.com/package/@vue/shared/v/3.5.45",
+      "url": "https://www.npmjs.com/package/@vue/shared/v/3.5.46",
       "targets": [
         "desktop-darwin-amd64",
         "desktop-darwin-arm64",
@@ -594,9 +594,9 @@
     {
       "id": "npm:vue-chartjs",
       "name": "vue-chartjs",
-      "version": "5.3.4",
+      "version": "5.3.7",
       "license": "MIT",
-      "url": "https://www.npmjs.com/package/vue-chartjs/v/5.3.4",
+      "url": "https://www.npmjs.com/package/vue-chartjs/v/5.3.7",
       "targets": [
         "desktop-darwin-amd64",
         "desktop-darwin-arm64",

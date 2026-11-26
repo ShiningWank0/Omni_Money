@@ -10,7 +10,7 @@ toolchain go1.27.4
 require (
 	github.com/fxamacker/cbor/v2 v2.10.0
 	github.com/go-webauthn/webauthn v0.18.2
-	github.com/labstack/echo/v4 v4.16.5
+	github.com/labstack/echo/v4 v4.16.6
 	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/wailsapp/wails/v3 v3.1.0
 	golang.org/x/crypto v0.59.0
