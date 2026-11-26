@@ -16,7 +16,7 @@ unpack() {
   url="$(jq -er "$selector.url" "$source_lock")"
   checksum="$(jq -er "$selector.sha256" "$source_lock")"
   [[ "$checksum" =~ ^[a-f0-9]{64}$ ]]
-  curl --fail --silent --show-error --location --retry 3 --proto '=https' --proto-redir '=https' "$url" -o source.tgz
+  curl --connect-timeout 20 --fail --silent --show-error --location --retry 3 --proto '=https' --proto-redir '=https' "$url" -o source.tgz
   printf '%s  source.tgz\n' "$checksum" | sha256sum --check --strict
   mkdir -p "$directory"
   tar -xzf source.tgz --strip-components=1 -C "$directory"
