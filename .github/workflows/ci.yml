@@ -38,7 +38,7 @@ jobs:
     continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -200,7 +200,7 @@ jobs:
     if: ${{ !cancelled() && !(github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal))) && needs.oss.result == 'success' }}
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -268,7 +268,7 @@ jobs:
     continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -608,7 +608,7 @@ jobs:
     continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -750,7 +750,7 @@ jobs:
     continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -935,7 +935,7 @@ jobs:
     continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -1167,7 +1167,7 @@ jobs:
     continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -1239,7 +1239,7 @@ jobs:
     continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -1334,7 +1334,7 @@ jobs:
     continue-on-error: ${{ github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal)) }}
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -1439,7 +1439,7 @@ jobs:
     if: ${{ always() && !(github.repository == 'ShiningWank0/Omni_Money' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.release_rehearsal))) }}
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:2446dd9f1ff1b06e0fe7974373dc808601461aa31a59b1a15099ade52fa1ddbc
+      image: ghcr.io/shiningwank0/omni_money-build-ubuntu@sha256:f56afdd9172331f557e8d57cb5857b771d245d12d56b99098d943fc060bacb8b
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
