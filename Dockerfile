@@ -7,6 +7,19 @@ FROM node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43dd
 ARG VERSION
 ARG TARGETARCH
 
+# Temporary until the pinned Node image ships fixed Alpine packages (Issues #384, #407).
+RUN --network=none --mount=type=bind,from=ghcr.io/shiningwank0/omni_money-build-alpine-runtime@sha256:c45578f9b9545479fd61458c3c888ec34b57f39aa777d86c2ba7189f44af2bd4,source=/opt/omni-environment/apks,target=/run/omni-apks,ro \
+    set -- /run/omni-apks/libcrypto3-3.5.9-r1.*.apk \
+           /run/omni-apks/libssl3-3.5.9-r1.*.apk \
+           /run/omni-apks/zlib-1.4-r0.*.apk \
+ && test "$#" -eq 3 \
+ && apk verify "$@" \
+ && apk add --no-network --no-cache --repositories-file /dev/null "$@" \
+ && installed_apks="$(apk info --no-network --repositories-file /dev/null -v)" \
+ && printf '%s\n' "$installed_apks" | grep -Fxq libcrypto3-3.5.9-r1 \
+ && printf '%s\n' "$installed_apks" | grep -Fxq libssl3-3.5.9-r1 \
+ && printf '%s\n' "$installed_apks" | grep -Fxq zlib-1.4-r0
+
 # Temporary until the pinned Node image ships the fixed npm bundle (Issues #399, #441).
 ADD --checksum=sha256:fa0711dd513fa1386bbad3962a292cb813461cb57dedf07d6eb7efe76dffe897 https://registry.npmjs.org/npm/-/npm-12.2.3.tgz /tmp/omni-npm.tgz
 # npm 12.2.3 still bundles minimatch 10.2.5. Install the fixed matcher and
