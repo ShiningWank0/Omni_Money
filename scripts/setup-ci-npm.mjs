@@ -19,6 +19,7 @@ mkdirSync(directory)
 const npm = join(directory, 'npm')
 for (const [name, packageName, target] of [
   ['npm', 'npm', npm],
+  ['glob', 'glob', join(npm, 'node_modules/glob')],
   ['minimatch', 'minimatch', join(npm, 'node_modules/minimatch')],
   ['nonrecursive-glob-match', '@isaacs/nonrecursive-glob-match', join(npm, 'node_modules/@isaacs/nonrecursive-glob-match')],
 ]) {
@@ -38,6 +39,8 @@ for (const [name, packageName, target] of [
 
 const fromNpm = createRequire(join(npm, 'package.json'))
 assert.equal(JSON.parse(readFileSync(join(npm, 'node_modules/brace-expansion/package.json'))).version, '5.0.12')
+assert.equal(fromNpm('glob/package.json').version, '13.0.7')
+assert.deepEqual(fromNpm('glob').globSync('package.json', { cwd: npm }), ['package.json'])
 assert.equal(fromNpm('minimatch/package.json').version, '11.0.9')
 assert.ok(fromNpm('minimatch').minimatch('src/index.js', 'src/{index,app}.js'))
 assert.equal(execFileSync(process.execPath, [join(npm, 'bin/npm-cli.js'), '--version'], { encoding: 'utf8' }).trim(), '12.2.3')
@@ -52,4 +55,4 @@ for (const name of ['npm', 'npx']) {
   }
 }
 appendFileSync(process.env.GITHUB_PATH, bin + '\n')
-console.log('Using reviewed npm 12.2.3 with brace-expansion 5.0.12 and minimatch 11.0.9')
+console.log('Using reviewed npm 12.2.3 with brace-expansion 5.0.12, glob 13.0.7 and minimatch 11.0.9')
