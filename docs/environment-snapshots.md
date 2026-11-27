@@ -33,4 +33,4 @@ Git の側帯メッセージは通常のローカル push で表示を確認す�
 
 ## Docker ビルドで使用する BuildKit
 
-`capture-build-environments.yml` の `buildkit_only` を有効にすると、amd64・arm64 のネイティブ環境でデーモンと4つの CNI プラグインを再構築する。上流イメージ、ソースのコミットとチェックサム、Go の版、依存の修正は `build/environments/buildkit.Dockerfile` に固定する。各 CPU でバージョン応答と依存情報を確認し、別ジョブでマルチアーキテクチャのインデックスを保存する。Docker の固定ビルダーと脆弱性検査は `build/locks/docker.json` の同じダイジェストを使用する。採取ログは同ファイルの `buildkitCapture.runId` から確認できる。
+`capture-build-environments.yml` の `buildkit_only` を有効にすると、amd64・arm64 のネイティブ環境でデーモン、buildctl、buildkit-runc、4つの CNI プラグインを再構築する。上流イメージ、ソースのコミットとチェックサム、Go の版、依存の修正は `build/environments/buildkit.Dockerfile` に固定する。各 CPU でバージョン応答と依存情報を確認し、別ジョブでマルチアーキテクチャのインデックスを保存する。Docker の固定ビルダーと脆弱性検査は `build/locks/docker.json` の同じダイジェストを使用する。採取ログは同ファイルの `buildkitCapture.runId` から確認できる。
