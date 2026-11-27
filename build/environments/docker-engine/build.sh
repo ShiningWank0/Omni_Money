@@ -78,6 +78,7 @@ done
 awk '$1 == "dep" && $2 == "github.com/moby/sys/user" && $3 == "v0.5.1" {found=1} END {exit !found}' "$output/runc.txt"
 if grep -Fq 'github.com/cilium/ebpf' "$output/runc.txt"; then exit 1; fi
 for command in containerd ctr; do
+  awk '$1 == "dep" && $2 == "github.com/moby/sys/user" && $3 == "v0.5.1" {found=1} END {exit !found}' "$output/$command.txt"
   awk '$1 == "dep" && $2 == "go.opentelemetry.io/otel/trace" && $3 == "v1.47.0" {found=1} END {exit !found}' "$output/$command.txt"
 done
 awk '$1 == "dep" && $2 == "github.com/go-jose/go-jose/v4" && $3 == "v4.1.6" {found=1} END {exit !found}' "$output/containerd.txt"
