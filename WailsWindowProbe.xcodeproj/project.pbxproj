@@ -1,0 +1,144 @@
+// !$*UTF8*$!
+// This target builds the macOS startup-test helper for CodeQL Swift autobuild.
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A247D9300000000000000001 /* wails-macos-windows.swift in Sources */ = {isa = PBXBuildFile; fileRef = A247D9300000000000000002 /* wails-macos-windows.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A247D9300000000000000002 /* wails-macos-windows.swift */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = "scripts/wails-macos-windows.swift";
+			sourceTree = "<group>";
+		};
+		A247D9300000000000000003 /* inspect-owned-windows */ = {
+			isa = PBXFileReference;
+			explicitFileType = "compiled.mach-o.executable";
+			includeInIndex = 0;
+			path = "inspect-owned-windows";
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		A247D9300000000000000004 = {
+			isa = PBXGroup;
+			children = (
+				A247D9300000000000000002 /* wails-macos-windows.swift */,
+				A247D9300000000000000005 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A247D9300000000000000005 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A247D9300000000000000003 /* inspect-owned-windows */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A247D9300000000000000006 /* WailsWindowProbe */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A247D930000000000000000B /* Build configuration list for PBXNativeTarget "WailsWindowProbe" */;
+			buildPhases = (
+				A247D9300000000000000007 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = WailsWindowProbe;
+			productName = "inspect-owned-windows";
+			productReference = A247D9300000000000000003 /* inspect-owned-windows */;
+			productType = "com.apple.product-type.tool";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A247D9300000000000000008 /* Project object */ = {
+			isa = PBXProject;
+			buildConfigurationList = A247D930000000000000000A /* Build configuration list for PBXProject "WailsWindowProbe" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A247D9300000000000000004;
+			productRefGroup = A247D9300000000000000005 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A247D9300000000000000006 /* WailsWindowProbe */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A247D9300000000000000007 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A247D9300000000000000001 /* wails-macos-windows.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A247D9300000000000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		A247D930000000000000000C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				COMPILATION_CACHE_ENABLE_CACHING = NO;
+				PRODUCT_NAME = "inspect-owned-windows";
+				SWIFT_ENABLE_COMPILE_CACHE = NO;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_USE_INTEGRATED_DRIVER = NO;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A247D930000000000000000A /* Build configuration list for PBXProject "WailsWindowProbe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A247D9300000000000000009 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A247D930000000000000000B /* Build configuration list for PBXNativeTarget "WailsWindowProbe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A247D930000000000000000C /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A247D9300000000000000008 /* Project object */;
+}
