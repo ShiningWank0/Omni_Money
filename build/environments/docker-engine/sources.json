@@ -18,10 +18,10 @@
     "sha256": "e38df0eeb40d2304f3450edb148aee838cb0a57f3976a47c78870f92c80f1796"
   },
   "runc": {
-    "version": "1.5.3",
-    "revision": "46365c62967c76a765a5e347f48f0c7b3b571fe9",
-    "url": "https://codeload.github.com/opencontainers/runc/tar.gz/46365c62967c76a765a5e347f48f0c7b3b571fe9",
-    "sha256": "ce378072179f55547e944e4c54fb7f6085ec496b23a76882aeaed105a37095a3"
+    "version": "1.6.0",
+    "revision": "8445dfbfd07c1253fbe1264277655037e62bb1d6",
+    "url": "https://codeload.github.com/opencontainers/runc/tar.gz/8445dfbfd07c1253fbe1264277655037e62bb1d6",
+    "sha256": "b13f1b2c123afd826e9e9f22da531d2288a2a832516fc69e3ac664122f6a64bb"
   },
   "libseccomp": {
     "version": "2.6.0",

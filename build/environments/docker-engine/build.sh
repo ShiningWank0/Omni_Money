@@ -23,9 +23,7 @@ unpack() {
 }
 unpack ".upstreamArchives.$arch" payload/docker
 for package in containerd runc libseccomp gperf; do unpack ".$package" "$package"; done
-for package in containerd runc; do
-  (cd "$package" && patch --fuzz=0 -p1 < "$recipe/$package.patch")
-done
+(cd containerd && patch --fuzz=0 -p1 < "$recipe/containerd.patch")
 
 # Same static seccomp version as the Docker release. Keep its generator fixed too.
 export PATH="$work/prefix/bin:$PATH" PKG_CONFIG_PATH="$work/prefix/lib/pkgconfig"
@@ -60,20 +58,25 @@ test "$go_version" = "go$(cat "$recipe/../../../.go-version")"
   version="$(jq -er .runc.version "$source_lock")"
   revision="$(jq -er .runc.revision "$source_lock")"
   CGO_ENABLED=1 go build -p 2 -buildvcs=false -mod=readonly -trimpath -buildmode=pie \
-    -tags 'seccomp urfave_cli_no_docs netgo osusergo' \
+    -tags 'seccomp urfave_cli_no_template godbus_no_tcp netgo osusergo' \
     -ldflags "-s -w -X main.gitCommit=v$version-0-g${revision:0:7} -linkmode external -extldflags '-static-pie'" \
     -o "$bin/runc" .
   go mod verify
+  "$bin/runc" --version | grep -Fx "runc version $version"
   "$bin/runc" --version | grep -F "libseccomp: $(jq -er .libseccomp.version "$source_lock")"
-  "$bin/runc" features | jq -e '.linux.seccomp.enabled == true' >/dev/null
+  "$bin/runc" features | jq -e '.linux.seccomp.enabled == true and .linux.apparmor.enabled == true' >/dev/null
 )
 for command in containerd ctr containerd-shim-runc-v2 runc; do
   readelf -l "$bin/$command" > "$work/elf.txt"
   if grep -q 'INTERP' "$work/elf.txt"; then exit 1; fi
   go version -m "$bin/$command" > "$output/$command.txt"
   grep -Fq "$go_version" "$output/$command.txt"
+done
+for command in containerd ctr containerd-shim-runc-v2; do
   awk '$1 == "dep" && $2 == "github.com/cilium/ebpf" && $3 == "v0.22.0" {found=1} END {exit !found}' "$output/$command.txt"
 done
+awk '$1 == "dep" && $2 == "github.com/moby/sys/user" && $3 == "v0.5.1" {found=1} END {exit !found}' "$output/runc.txt"
+if grep -Fq 'github.com/cilium/ebpf' "$output/runc.txt"; then exit 1; fi
 for command in containerd ctr; do
   awk '$1 == "dep" && $2 == "go.opentelemetry.io/otel/trace" && $3 == "v1.47.0" {found=1} END {exit !found}' "$output/$command.txt"
 done
