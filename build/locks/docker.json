@@ -8,13 +8,13 @@
   "platforms": {
     "x86_64": {
       "engine": {
-        "artifact": "ghcr.io/shiningwank0/omni_money-ci-engine@sha256:48190d5fe9620753f12ae44d729ed9b92391ef097cfdb61430a008c3d7aa0127",
-        "url": "https://ghcr.io/v2/shiningwank0/omni_money-ci-engine/blobs/sha256:f3ca94dffda10824436c2543bcd7ebbb743a94518c385e288db409d71ae23c4c",
-        "sha256": "f3ca94dffda10824436c2543bcd7ebbb743a94518c385e288db409d71ae23c4c",
+        "artifact": "ghcr.io/shiningwank0/omni_money-ci-engine@sha256:5b57ba20456df70cd99575ddea3c04cd0c5067b30fc71e396f79a30017ca4083",
+        "url": "https://ghcr.io/v2/shiningwank0/omni_money-ci-engine/blobs/sha256:8e83251f38894dede3d05e1a9514c895c57014a90087ff0fe43b2ee462cf1f97",
+        "sha256": "8e83251f38894dede3d05e1a9514c895c57014a90087ff0fe43b2ee462cf1f97",
         "arch": "amd64",
         "goVersion": "1.27.4",
-        "sourceCommit": "dd1b1dbef9513ad1519a8bf1246443e658bf176c",
-        "runId": "45787235282"
+        "sourceCommit": "e89644a04c689f061bb8035c075a0e3538facbf3",
+        "runId": "46075142175"
       },
       "buildx": {
         "url": "https://github.com/docker/buildx/releases/download/v0.39.1/buildx-v0.39.1.linux-amd64",
@@ -27,13 +27,13 @@
     },
     "aarch64": {
       "engine": {
-        "artifact": "ghcr.io/shiningwank0/omni_money-ci-engine@sha256:d4faa52e9151f0eb0480c958e6c99a04255aaef5fa9108be0fe0b48b777dee36",
-        "url": "https://ghcr.io/v2/shiningwank0/omni_money-ci-engine/blobs/sha256:8704099aa2c8123abcf59e283c4d945baec8dc76715efc73d9d3e42d3dd8ae86",
-        "sha256": "8704099aa2c8123abcf59e283c4d945baec8dc76715efc73d9d3e42d3dd8ae86",
+        "artifact": "ghcr.io/shiningwank0/omni_money-ci-engine@sha256:522c031a93fa9578717b16b584d1c46de2ad78448dcade9176caca0305dc7130",
+        "url": "https://ghcr.io/v2/shiningwank0/omni_money-ci-engine/blobs/sha256:e60e77969a8c42b3dba0e39514382d29b8eefd1e758e21f463fb93ea81ad4235",
+        "sha256": "e60e77969a8c42b3dba0e39514382d29b8eefd1e758e21f463fb93ea81ad4235",
         "arch": "arm64",
         "goVersion": "1.27.4",
-        "sourceCommit": "dd1b1dbef9513ad1519a8bf1246443e658bf176c",
-        "runId": "45787235282"
+        "sourceCommit": "e89644a04c689f061bb8035c075a0e3538facbf3",
+        "runId": "46075142175"
       },
       "buildx": {
         "url": "https://github.com/docker/buildx/releases/download/v0.39.1/buildx-v0.39.1.linux-arm64",
