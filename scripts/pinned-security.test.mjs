@@ -28,6 +28,10 @@ test('inventory includes OS images, both architectures, Go tools and reviewed na
   assert.ok(input.images.some(x => x.name === 'ubuntu/amd64') && input.images.some(x => x.name === 'ubuntu/arm64'))
   assert.ok(input.tools.some(x => x.name === 'engine/x86_64') && input.tools.some(x => x.name === 'engine/aarch64'))
   assert.ok(input.native.some(x => x.name === 'openssl'))
+  const mac = JSON.parse(readFileSync(new URL('../build/locks/macos.json', import.meta.url), 'utf8')).xcode
+  for (const [name, pin] of [['xcode', mac.amd64], ['xcode-arm64', mac.arm64]]) {
+    assert.equal(input.native.find(x => x.name === name)?.cpe, `cpe:2.3:a:apple:xcode:${pin.version}:*:*:*:*:*:*:*`)
+  }
   assert.ok(input.advisories.some(x => x.name === 'webview2'))
   assert.ok(input.modules.some(x => /gosec/.test(x.path)))
   assert.ok(input.remoteModules.some(x => x.module === 'golang.org/x/vuln') || input.modules.some(x => /govulncheck/.test(x.path)))

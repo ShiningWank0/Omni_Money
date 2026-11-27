@@ -4,12 +4,15 @@ set -euo pipefail
   echo 'This setup requires a GitHub Actions macOS runner' >&2; exit 1;
 }
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-eval "$(node --input-type=module - "$root/build/locks/macos.json" <<'JS'
+eval "$(node --input-type=module - "$root/build/locks/macos.json" "$(uname -m)" <<'JS'
 import { readFileSync } from 'node:fs';
 const lock=JSON.parse(readFileSync(process.argv[2], 'utf8'));
-if(lock.schema!==1) throw Error('Unsupported lock schema');
-const values={DEVELOPER_DIR:lock.xcode.developerDirectory, XCODE_VERSION:lock.xcode.version,
-  XCODE_BUILD:lock.xcode.build, SDK_VERSION:lock.xcode.macosSDK,
+if(lock.schema!==2) throw Error('Unsupported lock schema');
+const arch = { x86_64: 'amd64', arm64: 'arm64' }[process.argv[3]];
+const xcode = lock.xcode[arch];
+if (!xcode) throw Error('No Xcode lock for this CPU');
+const values={DEVELOPER_DIR:xcode.developerDirectory, XCODE_VERSION:xcode.version,
+  XCODE_BUILD:xcode.build, SDK_VERSION:xcode.macosSDK,
   TCL_VERSION:lock.tcl.version, TCL_URL:lock.tcl.url, TCL_SHA256:lock.tcl.sha256,
   TCL_ARCHIVE_ROOT:lock.tcl.archiveRoot, TCL_SHELL:lock.tcl.shell};
 for(const [key,value] of Object.entries(values)) {
@@ -20,10 +23,16 @@ JS
 )"
 export DEVELOPER_DIR
 test -d "$DEVELOPER_DIR"
-test "$(xcodebuild -version)" = "$(printf 'Xcode %s\nBuild version %s' "$XCODE_VERSION" "$XCODE_BUILD")"
+xcodebuild_binary="$DEVELOPER_DIR/usr/bin/xcodebuild"
+clang_binary="$(xcrun --find clang)"
+for tool in "$xcodebuild_binary" "$clang_binary"; do
+  codesign --verify -R='anchor apple' "$tool"
+  shasum -a 256 "$tool"
+done
+test "$("$xcodebuild_binary" -version)" = "$(printf 'Xcode %s\nBuild version %s' "$XCODE_VERSION" "$XCODE_BUILD")"
 test "$(xcrun --sdk macosx --show-sdk-version)" = "$SDK_VERSION"
 export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
-export CC="$(xcrun --find clang)" CXX="$(xcrun --find clang++)"
+export CC="$clang_binary" CXX="$(xcrun --find clang++)"
 printf 'DEVELOPER_DIR=%s\nSDKROOT=%s\nCC=%s\nCXX=%s\n' "$DEVELOPER_DIR" "$SDKROOT" "$CC" "$CXX" >> "$GITHUB_ENV"
 
 prefix="$RUNNER_TEMP/omni-tcl-$TCL_VERSION"

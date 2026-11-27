@@ -156,7 +156,7 @@ jobs:
             oss_target: desktop-darwin-amd64
             artifact_name: omni-money-macos-amd64
             deployment_target: '13.0'
-          - os: macos-26
+          - os: xcode-27
             platform: darwin/arm64
             oss_target: desktop-darwin-arm64
             artifact_name: omni-money-macos-arm64
