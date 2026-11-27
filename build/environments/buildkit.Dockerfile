@@ -1,3 +1,4 @@
+ARG TARGETARCH
 FROM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS compiler
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local
 RUN mkdir -p /out/bin /out/inventory
@@ -44,8 +45,31 @@ done
 cp LICENSE /out/inventory/cni.LICENSE
 SH
 
+# Pin the official security updates for each native worker.
+FROM scratch AS apks-amd64
+ADD --checksum=sha256:3779d8b0dfac33f82fd4ca0749318066e6beabe77cd788aa2d9f502e74a87b07 https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libexpat-2.11.0-r0.apk /libexpat-2.11.0-r0.apk
+ADD --checksum=sha256:7b05bc778b8b25cd880835b40114182bd4d1581717504d0129c810c0a14291cb https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/zlib-1.4-r0.apk /zlib-1.4-r0.apk
+
+FROM scratch AS apks-arm64
+ADD --checksum=sha256:cf19455af9c5c9dcd3915294d299f743553855519431bba38577b8c4a23c4373 https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libexpat-2.11.0-r0.apk /libexpat-2.11.0-r0.apk
+ADD --checksum=sha256:d3e30d012a3445222b0b4a28f1d4d97ce67387f8b48561921111696da174f0de https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/zlib-1.4-r0.apk /zlib-1.4-r0.apk
+
+FROM apks-${TARGETARCH} AS worker-apks
+
 FROM moby/buildkit:v0.35.1@sha256:baf6138eb8c37644800c7c913fba051e840ebb9ba13eaf92d92ef9a1712d0b4c
 COPY --from=daemon /out/bin/ /usr/bin/
 COPY --from=plugins /out/bin/ /usr/bin/
 COPY --from=daemon /out/inventory/ /opt/omni-environment/
 COPY --from=plugins /out/inventory/ /opt/omni-environment/
+
+RUN --network=none --mount=type=bind,from=worker-apks,target=/run/omni-apks,ro <<'SH'
+set -eu
+test "$(cut -d. -f1,2 /etc/alpine-release)" = 3.24
+set -- /run/omni-apks/libexpat-2.11.0-r0.apk /run/omni-apks/zlib-1.4-r0.apk
+apk verify "$@"
+apk add --no-network --no-cache --repositories-file /dev/null "$@"
+apk info --no-network --repositories-file /dev/null -v > /opt/omni-environment/apk-packages.txt
+grep -Fx libexpat-2.11.0-r0 /opt/omni-environment/apk-packages.txt
+grep -Fx zlib-1.4-r0 /opt/omni-environment/apk-packages.txt
+sha256sum "$@" > /opt/omni-environment/security-apks.sha256
+SH
