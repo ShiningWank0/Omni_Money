@@ -1,0 +1,5 @@
+# GitHub-hosted Apple Silicon image added after actionlint v1.7.12.
+# https://github.com/actions/runner-images#available-images
+self-hosted-runner:
+  labels:
+    - xcode-27

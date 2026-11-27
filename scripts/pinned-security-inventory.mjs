@@ -100,10 +100,11 @@ export function inventory(directory = root) {
     properties: [{ name: 'syft:location:0:path', value: `native/${name}` }] })
   const openssl = scriptVersion('openssl', ['darwin', 'windows'])
   const sqlcipher = scriptVersion('sqlcipher', ['linux', 'darwin', 'windows'])
-  const mac = json('macos'), gh = json('gh')
+  const mac = json('macos', 2), gh = json('gh')
   const native = [component('openssl', openssl, 'openssl:openssl'),
     component('node', content.get('.node-version').trim().replace(/^v/, ''), 'nodejs:node.js'),
-    component('tcl', mac.tcl.version, 'tcl:tcl\\/tk'), component('xcode', mac.xcode.version, 'apple:xcode')]
+    component('tcl', mac.tcl.version, 'tcl:tcl\\/tk'), component('xcode', mac.xcode.amd64.version, 'apple:xcode'),
+    component('xcode-arm64', mac.xcode.arm64.version, 'apple:xcode')]
   // SQLCipher and WebView2 are explicitly tracked by release/advisory review;
   // do not silently guess a CPE or treat absence from NVD as a clean scan.
   const advisories = [

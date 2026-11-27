@@ -22,20 +22,22 @@ RUN --network=none --mount=type=bind,from=ghcr.io/shiningwank0/omni_money-build-
 
 # Temporary until the pinned Node image ships the fixed npm bundle (Issues #399, #441).
 ADD --checksum=sha256:fa0711dd513fa1386bbad3962a292cb813461cb57dedf07d6eb7efe76dffe897 https://registry.npmjs.org/npm/-/npm-12.2.3.tgz /tmp/omni-npm.tgz
-# npm 12.2.3 still bundles minimatch 10.2.5. Install the fixed matcher and
-# its additional dependency before invoking npm on either architecture.
+# Update the npm matchers before the first invocation on either architecture.
 ADD --checksum=sha256:fc8a4ba8a9ad37a4c8163fc170336bb22514597d247663d148d5435dda60c661 https://registry.npmjs.org/minimatch/-/minimatch-11.0.9.tgz /tmp/omni-minimatch.tgz
 ADD --checksum=sha256:d8eab172188bcaa83b950160fcd7c0b9dc68f44f7c470660e5d7f4c8a437d658 https://registry.npmjs.org/@isaacs/nonrecursive-glob-match/-/nonrecursive-glob-match-1.1.0.tgz /tmp/omni-nonrecursive-glob-match.tgz
+ADD --checksum=sha256:58342994ba61c09d9c27365d0930195c5583fe31e80c1683544805cebc065fd4 https://registry.npmjs.org/glob/-/glob-13.0.7.tgz /tmp/omni-glob.tgz
 RUN rm -rf /usr/local/lib/node_modules/npm \
  && mkdir /usr/local/lib/node_modules/npm \
  && tar -xzf /tmp/omni-npm.tgz --strip-components=1 -C /usr/local/lib/node_modules/npm \
  && cd /usr/local/lib/node_modules/npm/node_modules \
- && rm -rf minimatch \
- && mkdir -p minimatch @isaacs/nonrecursive-glob-match \
+ && rm -rf minimatch glob \
+ && mkdir -p minimatch glob @isaacs/nonrecursive-glob-match \
  && tar -xzf /tmp/omni-minimatch.tgz --strip-components=1 -C minimatch \
  && tar -xzf /tmp/omni-nonrecursive-glob-match.tgz --strip-components=1 -C @isaacs/nonrecursive-glob-match \
- && rm /tmp/omni-npm.tgz /tmp/omni-minimatch.tgz /tmp/omni-nonrecursive-glob-match.tgz \
+ && tar -xzf /tmp/omni-glob.tgz --strip-components=1 -C glob \
+ && rm /tmp/omni-glob.tgz /tmp/omni-npm.tgz /tmp/omni-minimatch.tgz /tmp/omni-nonrecursive-glob-match.tgz \
  && node -e "const a=require('node:assert/strict'); a.equal(require('./brace-expansion/package.json').version,'5.0.12'); a.equal(require('minimatch/package.json').version,'11.0.9'); a.ok(require('minimatch').minimatch('src/app.js','src/*.js'))" \
+ && node -e "const assert=require('node:assert/strict'); assert.equal(require('glob/package.json').version,'13.0.7'); assert.deepEqual(require('glob').globSync('glob/package.json'),['glob/package.json'])" \
  && test "$(npm --version)" = 12.2.3
 
 WORKDIR /app/frontend

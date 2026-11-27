@@ -1,10 +1,18 @@
 {
-  "schema": 1,
+  "schema": 2,
   "xcode": {
-    "version": "26.6",
-    "build": "17F113",
-    "developerDirectory": "/Applications/Xcode_26.6.app/Contents/Developer",
-    "macosSDK": "26.5"
+    "amd64": {
+      "version": "26.6",
+      "build": "17F113",
+      "developerDirectory": "/Applications/Xcode_26.6.app/Contents/Developer",
+      "macosSDK": "26.5"
+    },
+    "arm64": {
+      "version": "27.2",
+      "build": "27B52",
+      "developerDirectory": "/Applications/Xcode_27.2.app/Contents/Developer",
+      "macosSDK": "27.2"
+    }
   },
   "tcl": {
     "version": "9.1.0",
