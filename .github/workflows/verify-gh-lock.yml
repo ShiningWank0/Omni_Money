@@ -1,0 +1,34 @@
+name: Verify fixed GitHub CLI
+
+on:
+  pull_request:
+    paths:
+      - build/locks/gh.json
+      - scripts/setup-fixed-gh.sh
+      - .github/workflows/verify-gh-lock.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install and verify the locked release on the native CPU
+        run: bash scripts/setup-fixed-gh.sh
+      - name: Record embedded Go dependency versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$(command -v gh)"
+          [[ "$binary" == "$RUNNER_TEMP/omni-gh/"*/bin/gh ]]
+          go version -m "$binary" | tee "$RUNNER_TEMP/gh-buildinfo.txt"
+          awk '$1 == "dep" && $2 == "golang.org/x/net" { found=1 } END { exit !found }' "$RUNNER_TEMP/gh-buildinfo.txt"
