@@ -23,10 +23,16 @@ JS
 )"
 export DEVELOPER_DIR
 test -d "$DEVELOPER_DIR"
-test "$(xcodebuild -version)" = "$(printf 'Xcode %s\nBuild version %s' "$XCODE_VERSION" "$XCODE_BUILD")"
+xcodebuild_binary="$DEVELOPER_DIR/usr/bin/xcodebuild"
+clang_binary="$(xcrun --find clang)"
+for tool in "$xcodebuild_binary" "$clang_binary"; do
+  codesign --verify -R='anchor apple' "$tool"
+  shasum -a 256 "$tool"
+done
+test "$("$xcodebuild_binary" -version)" = "$(printf 'Xcode %s\nBuild version %s' "$XCODE_VERSION" "$XCODE_BUILD")"
 test "$(xcrun --sdk macosx --show-sdk-version)" = "$SDK_VERSION"
 export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
-export CC="$(xcrun --find clang)" CXX="$(xcrun --find clang++)"
+export CC="$clang_binary" CXX="$(xcrun --find clang++)"
 printf 'DEVELOPER_DIR=%s\nSDKROOT=%s\nCC=%s\nCXX=%s\n' "$DEVELOPER_DIR" "$SDKROOT" "$CC" "$CXX" >> "$GITHUB_ENV"
 
 prefix="$RUNNER_TEMP/omni-tcl-$TCL_VERSION"

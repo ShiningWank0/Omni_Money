@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -11,7 +11,7 @@ const source = readFileSync(new URL('./setup-fixed-macos.sh', import.meta.url), 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'omni-macos-fixture-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
-  for (const path of ['scripts', 'bin', 'build/locks', 'Developer', 'source/tcl9.1.0/unix', 'temp']) mkdirSync(join(root, path), { recursive: true })
+  for (const path of ['scripts', 'bin', 'build/locks', 'Developer/usr/bin', 'source/tcl9.1.0/unix', 'temp']) mkdirSync(join(root, path), { recursive: true })
   const executable = (name, body) => {
     const path = join(root, 'bin', name)
     writeFileSync(path, `#!${process.execPath}\n${body}\n`)
@@ -32,7 +32,11 @@ function fixture(t) {
     tcl: { version: '9.1.0', url: 'https://fixture.invalid/tcl.tar.gz', sha256: digest, archiveRoot: 'tcl9.1.0', shell: 'tclsh9.1' } }))
   executable('uname', `console.log(process.argv[2] === '-m' ? (process.env.FIXTURE_ARCH || 'x86_64') : 'Darwin')`)
   executable('xcodebuild', `console.log(process.env.FIXTURE_XCODE || 'Xcode 16.4\\nBuild version 16F6')`)
-  executable('xcrun', `console.log(process.argv.includes('--show-sdk-version') ? (process.env.FIXTURE_SDK || '15.5') : '/fixture/sdk')`)
+  copyFileSync(join(root, 'bin/xcodebuild'), join(root, 'Developer/usr/bin/xcodebuild'))
+  executable('clang', '')
+  executable('codesign', `process.exit(process.argv.includes('-R=anchor apple') && !process.env.FIXTURE_INVALID_SIGNATURE ? 0 : 1)`)
+  executable('xcrun', `console.log(process.argv.includes('--show-sdk-version') ? (process.env.FIXTURE_SDK || '15.5') :
+    process.argv.includes('--find') ? process.env.FIXTURE_ROOT + '/bin/clang' : '/fixture/sdk')`)
   executable('curl', `const fs=require('node:fs'); fs.copyFileSync(process.env.FIXTURE_ROOT+'/source.tar.gz',process.argv[process.argv.indexOf('-o')+1]);`)
   executable('make', `if(process.argv.includes('install-binaries')) { const fs=require('node:fs'); const bin=process.env.RUNNER_TEMP+'/omni-tcl-9.1.0/bin'; fs.mkdirSync(bin,{recursive:true}); const p=bin+'/tclsh9.1'; fs.writeFileSync(p,'#!'+process.execPath+'\\nconsole.log("9.1.0")\\n'); fs.chmodSync(p,0o755); }`)
   executable('otool', `console.log('/usr/lib/libSystem.B.dylib')`)
@@ -62,7 +66,7 @@ test('Apple Silicon requires its own native Xcode and SDK', t => {
 
 test('unavailable Xcode build or SDK never falls back or builds Tcl', t => {
   const f = fixture(t)
-  for (const env of [{ FIXTURE_XCODE: 'Xcode 16.4\nBuild version wrong' }, { FIXTURE_SDK: '26.2' }]) {
+  for (const env of [{ FIXTURE_XCODE: 'Xcode 16.4\nBuild version wrong' }, { FIXTURE_SDK: '26.2' }, { FIXTURE_INVALID_SIGNATURE: '1' }]) {
     assert.notEqual(f.run(env).status, 0)
     assert.equal(existsSync(join(f.root, 'configured')), false)
     assert.equal(existsSync(f.prefix), false)
