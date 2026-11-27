@@ -24,10 +24,13 @@ function fixture(t) {
   const archive = join(root, 'source.tar.gz')
   assert.equal(spawnSync('tar', ['-czf', archive, '-C', join(root, 'source'), 'tcl9.1.0']).status, 0)
   const digest = createHash('sha256').update(readFileSync(archive)).digest('hex')
-  writeFileSync(join(root, 'build/locks/macos.json'), JSON.stringify({ schema: 1,
-    xcode: { developerDirectory: join(root, 'Developer'), version: '16.4', build: '16F6', macosSDK: '15.5' },
+  writeFileSync(join(root, 'build/locks/macos.json'), JSON.stringify({ schema: 2,
+    xcode: {
+      amd64: { developerDirectory: join(root, 'Developer'), version: '16.4', build: '16F6', macosSDK: '15.5' },
+      arm64: { developerDirectory: join(root, 'Developer'), version: '27.2', build: '27B52', macosSDK: '27.2' },
+    },
     tcl: { version: '9.1.0', url: 'https://fixture.invalid/tcl.tar.gz', sha256: digest, archiveRoot: 'tcl9.1.0', shell: 'tclsh9.1' } }))
-  executable('uname', `console.log('Darwin')`)
+  executable('uname', `console.log(process.argv[2] === '-m' ? (process.env.FIXTURE_ARCH || 'x86_64') : 'Darwin')`)
   executable('xcodebuild', `console.log(process.env.FIXTURE_XCODE || 'Xcode 16.4\\nBuild version 16F6')`)
   executable('xcrun', `console.log(process.argv.includes('--show-sdk-version') ? (process.env.FIXTURE_SDK || '15.5') : '/fixture/sdk')`)
   executable('curl', `const fs=require('node:fs'); fs.copyFileSync(process.env.FIXTURE_ROOT+'/source.tar.gz',process.argv[process.argv.indexOf('-o')+1]);`)
@@ -48,6 +51,13 @@ test('macOS setup verifies Xcode/SDK and checksum before installing the explicit
   assert.match(readFileSync(join(f.root, 'env'), 'utf8'), /DEVELOPER_DIR=.*Developer\n/)
   assert.match(readFileSync(join(f.root, 'env'), 'utf8'), /TCLSH_CMD=.*omni-tcl-9\.1\.0\/bin\/tclsh\n/)
   assert.ok(existsSync(join(f.prefix, 'bin/tclsh')))
+})
+
+test('Apple Silicon requires its own native Xcode and SDK', t => {
+  const f = fixture(t)
+  assert.notEqual(f.run({ FIXTURE_ARCH: 'arm64' }).status, 0)
+  const result = f.run({ FIXTURE_ARCH: 'arm64', FIXTURE_XCODE: 'Xcode 27.2\nBuild version 27B52', FIXTURE_SDK: '27.2' })
+  assert.equal(result.status, 0, result.stderr + result.stdout)
 })
 
 test('unavailable Xcode build or SDK never falls back or builds Tcl', t => {

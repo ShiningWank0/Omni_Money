@@ -68,7 +68,7 @@ try {
   if (os === 'darwin') {
     const lock = JSON.parse(readFileSync(join(root, 'build/locks/macos.json'), 'utf8'))
     assert.equal(process.env.MACOSX_DEPLOYMENT_TARGET, '13.0')
-    flags.push('-macos=13.0.0', '-macsdk=' + lock.xcode.macosSDK + '.0')
+    flags.push('-macos=13.0.0', '-macsdk=' + lock.xcode[arch].macosSDK + '.0')
   }
   run('go', ['build', '-mod=readonly', '-trimpath', '-buildvcs=false', '-tags', [...tags].join(','),
     '-ldflags', flags.join(' '), '-o', join(bin, 'omni_money' + (os === 'windows' ? '.exe' : '')), '.'])
