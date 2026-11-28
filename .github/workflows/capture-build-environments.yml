@@ -2,7 +2,7 @@ name: Capture immutable build environments
 
 on:
   push:
-    branches: [fix/capture-native-environments, fix/capture-msys2-expat]
+    branches: [fix/capture-native-environments]
     paths:
       - .github/workflows/capture-build-environments.yml
       - build/environments/**
@@ -22,7 +22,7 @@ concurrency:
 jobs:
   linux:
     name: Capture ${{ matrix.environment }} / ${{ matrix.arch }}
-    if: github.repository == 'ShiningWank0/Omni_Money' && github.ref_name != 'fix/capture-msys2-expat'
+    if: github.repository == 'ShiningWank0/Omni_Money'
     permissions:
       contents: read
     strategy:
@@ -81,7 +81,7 @@ jobs:
           msystem: UCRT64
           update: true
           cache: false
-          install: curl diffutils make tcl perl mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-tcl libexpat
+          install: curl diffutils make tcl perl mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-tcl
       - name: Preserve the coherent package set and metadata
         shell: msys2 {0}
         run: |
@@ -110,11 +110,6 @@ jobs:
           done
           rm -f /var/cache/pacman/pkg/wget-*.pkg.tar.* /var/cache/pacman/pkg/mingw-w64-ucrt-x86_64-python-*.pkg.tar.*
           mkdir -p /opt/omni-environment
-          if [[ "${GITHUB_REF_NAME}" == 'fix/capture-msys2-expat' ]]; then
-            expat_version="$(pacman -Q libexpat | awk '{print $2}')"
-            test "$(vercmp "$expat_version" 2.11.0-1)" -ge 0
-            printf 'Verified MSYS2 libexpat %s\n' "$expat_version"
-          fi
           pacman -Q > /opt/omni-environment/packages.txt
           # Keep the exact installed payloads, not just a list of package names.
           mapfile -t packages < <(pacman -Q | awk '{print $1 "=" $2}')
